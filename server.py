@@ -170,6 +170,128 @@ async def healthz() -> dict[str, str]:
     return {"status": "ok"}
 
 
+_HOMEPAGE_HTML = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>agent-tools.cloud — x402 + MCP relay for Qwen3.6-35B-A3B</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+:root { color-scheme: light dark; }
+body { font: 15px/1.55 -apple-system, "Segoe UI", system-ui, sans-serif; max-width: 760px; margin: 2.5rem auto; padding: 0 1.2rem; }
+h1 { margin: 0 0 .2em; font-size: 1.6rem; }
+h2 { margin-top: 2rem; font-size: 1.15rem; border-bottom: 1px solid #8884; padding-bottom: .25em; }
+.tag { display: inline-block; padding: 2px 8px; border-radius: 4px; background: #2c7be522; color: #2c7be5; font-size: 12px; margin-right: 6px; }
+code, pre { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 13px; }
+pre { background: #8881; padding: .8em 1em; border-radius: 6px; overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; margin: .6em 0; }
+th, td { border-bottom: 1px solid #8884; padding: .35em .6em; text-align: left; }
+th { font-weight: 600; }
+a { color: #2c7be5; }
+.muted { color: #888; font-size: 13px; }
+</style>
+</head>
+<body>
+<h1>agent-tools.cloud</h1>
+<p>
+  <span class="tag">x402</span><span class="tag">MCP</span><span class="tag">Base Sepolia</span>
+  Pay-per-call inference API for <b>Qwen/Qwen3.6-35B-A3B</b>, settled in USDC on Base via the
+  <a href="https://x402.org" target="_blank" rel="noopener">x402</a> protocol.
+  Agent-native — no signup, no human UI.
+</p>
+
+<h2>Endpoints</h2>
+<table>
+<tr><th>Path</th><th>Method</th><th>Price</th><th>Transport</th></tr>
+<tr><td><code>/v1/chat/completions</code></td><td>POST</td><td>$0.001</td><td>OpenAI-compatible REST</td></tr>
+<tr><td><code>/mcp</code></td><td>POST</td><td>$0.001</td><td>MCP streamable-http (tool: <code>qwen36_chat</code>)</td></tr>
+<tr><td><code>/v1/models</code></td><td>GET</td><td>free</td><td>list available models</td></tr>
+<tr><td><code>/healthz</code></td><td>GET</td><td>free</td><td>liveness probe</td></tr>
+<tr><td><code>/.well-known/x402</code></td><td>GET</td><td>free</td><td>service discovery (JSON)</td></tr>
+</table>
+
+<h2>Payment</h2>
+<table>
+<tr><td>Network</td><td><code>eip155:84532</code> (Base Sepolia)</td></tr>
+<tr><td>Asset</td><td>USDC <code>0x036CbD53842c5426634e7929541eC2318f3dCF7e</code></td></tr>
+<tr><td>Pay to</td><td><code>0xC445aa2AA0FA68db67Cd22fc04867773941f9CdF</code></td></tr>
+<tr><td>Per call</td><td>$0.001 USDC (1000 atomic units)</td></tr>
+</table>
+<p class="muted">Testnet during pilot — agents pay with Sepolia USDC (free from Circle faucet). Mainnet Base coming once we onboard a Coinbase CDP facilitator.</p>
+
+<h2>Quick start — REST + x402-fetch (Node)</h2>
+<pre>import { wrapFetchWithPayment } from "x402-fetch";
+import { privateKeyToAccount } from "viem/accounts";
+
+const fetchPaid = wrapFetchWithPayment(
+  fetch,
+  privateKeyToAccount(process.env.PRIVATE_KEY),
+);
+
+const r = await fetchPaid("https://agent-tools.cloud/v1/chat/completions", {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify({
+    model: "Qwen/Qwen3.6-35B-A3B",
+    messages: [{ role: "user", content: "Say hi." }],
+  }),
+});
+console.log(await r.json());</pre>
+
+<h2>Quick start — MCP client config</h2>
+<pre>{
+  "mcpServers": {
+    "agent-tools": {
+      "transport": "streamable-http",
+      "url": "https://agent-tools.cloud/mcp",
+      "x402": {
+        "privateKeyEnv": "PRIVATE_KEY",
+        "network": "eip155:84532"
+      }
+    }
+  }
+}</pre>
+
+<h2>Source</h2>
+<p>
+  <a href="https://github.com/JoursBleu/mcpserver" target="_blank" rel="noopener">github.com/JoursBleu/mcpserver</a>
+  &middot; upstream inference: 天枢 llm-gateway &rarr; W7900D vLLM
+</p>
+</body>
+</html>
+"""
+
+
+@app.get("/", response_class=HTMLResponse)
+async def homepage() -> str:
+    return _HOMEPAGE_HTML
+
+
+@app.get("/.well-known/x402")
+async def well_known_x402() -> dict[str, Any]:
+    return {
+        "name": "agent-tools.cloud",
+        "description": "Pay-per-call relay for Qwen3.6-35B-A3B (x402 + MCP).",
+        "version": "0.2",
+        "endpoints": [
+            {"path": "/v1/chat/completions", "method": "POST", "kind": "rest-openai", "gated": True},
+            {"path": "/mcp", "method": "POST", "kind": "mcp-streamable-http", "gated": True},
+            {"path": "/v1/models", "method": "GET", "kind": "info", "gated": False},
+            {"path": "/healthz", "method": "GET", "kind": "info", "gated": False},
+        ],
+        "x402": {
+            "version": 2,
+            "scheme": "exact",
+            "network": X402_NETWORK,
+            "pay_to": X402_PAY_TO,
+            "price_usd": X402_PRICE_USD,
+            "facilitator": X402_FACILITATOR_URL,
+        },
+        "models": sorted(ALLOWED_MODELS),
+        "source": "https://github.com/JoursBleu/mcpserver",
+    }
+
+
 @app.get("/v1/models")
 async def models() -> dict[str, Any]:
     r = await _client().get("/v1/models")
