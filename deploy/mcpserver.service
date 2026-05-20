@@ -1,0 +1,19 @@
+[Unit]
+Description=mcpserver — x402-gated LLM relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/mcpserver
+EnvironmentFile=/opt/mcpserver/.env
+ExecStart=/opt/mcpserver/.venv/bin/python -m uvicorn server:app --host 0.0.0.0 --port 9100 --log-level info
+Restart=on-failure
+RestartSec=3
+MemoryMax=256M
+StandardOutput=journal
+StandardError=journal
+User=root
+
+[Install]
+WantedBy=multi-user.target
