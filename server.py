@@ -194,7 +194,7 @@ a { color: #2c7be5; }
 <body>
 <h1>agent-tools.cloud</h1>
 <p>
-  <span class="tag">x402</span><span class="tag">MCP</span><span class="tag">Base Sepolia</span>
+  <span class="tag">x402</span><span class="tag">MCP</span><span class="tag">Base mainnet</span>
   Pay-per-call inference API for <b>Qwen/Qwen3.6-35B-A3B</b>, settled in USDC on Base via the
   <a href="https://x402.org" target="_blank" rel="noopener">x402</a> protocol.
   Agent-native — no signup, no human UI.
