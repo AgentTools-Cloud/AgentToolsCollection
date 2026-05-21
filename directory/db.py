@@ -10,9 +10,10 @@ import json
 import os
 import sqlite3
 import time
+import random
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterable, Iterator
+from typing import Any, Iterable, Iterator, Callable
 
 DEFAULT_DB_PATH = os.environ.get(
     "AGENT_TOOLS_DB_PATH", "/opt/mcpserver/data/agent-tools.db"
@@ -99,16 +100,45 @@ def _ensure_dir(path: str) -> None:
 
 def connect(db_path: str = DEFAULT_DB_PATH, read_only: bool = False) -> sqlite3.Connection:
     _ensure_dir(db_path)
-    if read_only:
-        uri = f"file:{db_path}?mode=ro"
-        conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
-    else:
-        conn = sqlite3.connect(db_path, check_same_thread=False)
+    # sqlite timeout handles ordinary writer contention; busy_timeout is kept for
+    # older sqlite builds and PRAGMA visibility. 30s is intentionally longer
+    # than one service batch commit, but short enough for systemd to fail loudly.
+    uri = f"file:{db_path}?mode=ro" if read_only else db_path
+    conn = sqlite3.connect(
+        uri,
+        uri=read_only,
+        check_same_thread=False,
+        timeout=30.0,
+        isolation_level=None if read_only else "DEFERRED",
+    )
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
+    if not read_only:
+        conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA busy_timeout=30000")
     return conn
+
+
+def is_locked_error(exc: BaseException) -> bool:
+    return isinstance(exc, sqlite3.OperationalError) and "locked" in str(exc).lower()
+
+
+def with_retry(fn: Callable[[], Any], *, attempts: int = 6, base_delay: float = 0.2) -> Any:
+    """Retry short write transactions when sqlite briefly has a lock.
+
+    Callers should keep fn small and idempotent enough for a full retry.
+    """
+    last = None
+    for i in range(attempts):
+        try:
+            return fn()
+        except sqlite3.OperationalError as e:
+            if not is_locked_error(e) or i == attempts - 1:
+                raise
+            last = e
+            time.sleep(base_delay * (2 ** i) + random.uniform(0, base_delay))
+    if last:
+        raise last
 
 
 def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
@@ -150,12 +180,12 @@ def upsert_service(conn: sqlite3.Connection, row: dict) -> tuple:
     existing = None
     if row.get("source") and row.get("source_id"):
         existing = cur.execute(
-            "SELECT id, created_at FROM services WHERE source=? AND source_id=?",
+            "SELECT id, created_at, health, health_checked FROM services WHERE source=? AND source_id=?",
             (row["source"], row["source_id"]),
         ).fetchone()
     if existing is None:
         existing = cur.execute(
-            "SELECT id, created_at FROM services WHERE slug=?", (row["slug"],)
+            "SELECT id, created_at, health, health_checked FROM services WHERE slug=?", (row["slug"],)
         ).fetchone()
 
     cols = [
@@ -175,6 +205,13 @@ def upsert_service(conn: sqlite3.Connection, row: dict) -> tuple:
         return True, cur.lastrowid
     else:
         row["created_at"] = existing["created_at"]
+        # Crawlers refresh discovery metadata; health probes own health fields.
+        # Preserve health on metadata-only upserts so a crawl does not reset
+        # hundreds of previously checked services back to unknown.
+        if "health" not in row or row.get("health") is None:
+            row["health"] = existing["health"]
+        if "health_checked" not in row or row.get("health_checked") is None:
+            row["health_checked"] = existing["health_checked"]
         set_clause = ",".join(f"{c}=?" for c in cols if c != "created_at")
         params = [row.get(c) for c in cols if c != "created_at"]
         params.append(existing["id"])
