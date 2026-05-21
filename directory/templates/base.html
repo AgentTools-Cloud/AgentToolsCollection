@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}agent-tools.cloud — x402 服务目录{% endblock %}</title>
+  <meta name="description" content="{% block desc %}面向中文 / 亚太开发者的 x402 付费 API 与 MCP 服务目录。Agent 友好,open data。{% endblock %}">
+  <link rel="alternate" type="application/json" title="agent-tools discovery" href="/.well-known/agent-tools.json">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/htmx.org@2.0.3"></script>
+  <style>
+    :root { color-scheme: light; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif; }
+    .badge { display:inline-block; padding:2px 8px; font-size:11px; border-radius:9999px; font-weight:500; }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-900 min-h-screen">
+  <header class="border-b border-slate-200 bg-white">
+    <div class="max-w-6xl mx-auto px-4 py-4 flex items-center justify-between">
+      <a href="/" class="flex items-center gap-2">
+        <span class="text-2xl">🔌</span>
+        <span class="text-lg font-semibold tracking-tight">agent-tools<span class="text-slate-400">.cloud</span></span>
+      </a>
+      <nav class="flex items-center gap-5 text-sm">
+        <a href="/" class="hover:text-blue-600">目录</a>
+        <a href="/categories" class="hover:text-blue-600">分类</a>
+        <a href="/submit" class="hover:text-blue-600">提交服务</a>
+        <a href="/about" class="hover:text-blue-600">关于</a>
+        <a href="/openapi.json" class="text-slate-500 hover:text-blue-600">API</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="max-w-6xl mx-auto px-4 py-8">
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="max-w-6xl mx-auto px-4 py-10 text-sm text-slate-500">
+    <div class="border-t border-slate-200 pt-6 flex flex-wrap gap-4 justify-between">
+      <div>
+        <div>agent-tools.cloud · x402 服务目录</div>
+        <div class="text-xs">Agent-friendly discovery · Open data</div>
+      </div>
+      <div class="text-right space-x-3">
+        <a href="/.well-known/agent-tools.json" class="hover:text-blue-600">/.well-known/agent-tools.json</a>
+        <a href="/openapi.json" class="hover:text-blue-600">OpenAPI</a>
+      </div>
+    </div>
+  </footer>
+</body>
+</html>

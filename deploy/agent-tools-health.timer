@@ -1,0 +1,11 @@
+[Unit]
+Description=agent-tools directory health probe (every 6h)
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=6h
+Persistent=true
+Unit=agent-tools-health.service
+
+[Install]
+WantedBy=timers.target

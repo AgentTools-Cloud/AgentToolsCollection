@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}关于 — agent-tools.cloud{% endblock %}
+{% block content %}
+<h1 class="text-2xl font-semibold mb-4">关于 agent-tools.cloud</h1>
+<div class="prose max-w-2xl text-slate-800 space-y-4">
+  <p><strong>agent-tools.cloud</strong> 是一个 x402 付费 API 与 MCP 服务的目录站,
+    面向中文 / 亚太开发者,强调 agent 友好的发现接口。</p>
+  <p><strong>x402</strong> 是 Coinbase 主推的 HTTP 402 微支付协议,允许 AI agent 用 USDC 在链上自动结算 API 调用费。
+    本站收录全网公开的 x402 服务,每 6 小时刷新一次健康状态。</p>
+  <h2 class="text-lg font-semibold mt-6">数据来源</h2>
+  <ul class="list-disc pl-6 space-y-1">
+    <li><a class="text-blue-600 hover:underline" href="https://github.com/Merit-Systems/awesome-x402">awesome-x402</a></li>
+    <li><a class="text-blue-600 hover:underline" href="https://www.x402scan.com/">x402scan</a></li>
+    <li>Coinbase CDP Bazaar</li>
+    <li>人工提交(<a class="text-blue-600 hover:underline" href="/submit">/submit</a>)</li>
+  </ul>
+  <h2 class="text-lg font-semibold mt-6">给 Agent 用</h2>
+  <p>每个 agent 可以直接 GET <code class="bg-slate-100 px-1 rounded">/api/v1/search?q=&lt;query&gt;</code>
+    来发现合适的 x402 服务,并使用 <code class="bg-slate-100 px-1 rounded">x402-fetch</code> 或
+    <code class="bg-slate-100 px-1 rounded">x402-axios</code> 自动处理 402 支付流程。</p>
+  <p>Agent 发现入口:<a class="text-blue-600 hover:underline" href="/.well-known/agent-tools.json">/.well-known/agent-tools.json</a></p>
+</div>
+{% endblock %}
