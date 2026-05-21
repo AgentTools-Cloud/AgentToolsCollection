@@ -64,8 +64,8 @@ DEFAULT_MODEL = next(iter(ALLOWED_MODELS))
 # Per-call price for the new verticals. Each is gated independently by the
 # x402 middleware so an agent only pays for the endpoint it actually
 # invokes; see `_routes` below.
-X402_SIGNAL_PRICE_USD = os.getenv("X402_SIGNAL_PRICE_USD", "0.0005")
-X402_ONCHAIN_PRICE_USD = os.getenv("X402_ONCHAIN_PRICE_USD", "0.005")
+X402_SIGNAL_PRICE_USD = os.getenv("X402_SIGNAL_PRICE_USD", "0.01")
+X402_ONCHAIN_PRICE_USD = os.getenv("X402_ONCHAIN_PRICE_USD", "0.02")
 X402_DEFI_PRICE_USD = os.getenv("X402_DEFI_PRICE_USD", "0.05")
 
 # --- upstream HTTP client -------------------------------------------------
@@ -306,8 +306,8 @@ a { color: #2c7be5; }
 <tr><th>Path</th><th>Method</th><th>Price</th><th>Transport</th></tr>
 <tr><td><code>/v1/chat/completions</code></td><td>POST</td><td>$0.001</td><td>OpenAI-compatible REST</td></tr>
 <tr><td><code>/mcp</code></td><td>POST</td><td>$0.001</td><td>MCP streamable-http (tool: <code>qwen36_chat</code>)</td></tr>
-<tr><td><code>/v1/signal/token</code></td><td>POST</td><td>$0.0005</td><td>token momentum signal (DexScreener + Qwen)</td></tr>
-<tr><td><code>/v1/onchain/ask</code></td><td>POST</td><td>$0.005</td><td>on-chain analytics NL Q&amp;A (Defillama + Qwen)</td></tr>
+<tr><td><code>/v1/signal/token</code></td><td>POST</td><td>$0.01</td><td>token momentum signal (DexScreener + Qwen)</td></tr>
+<tr><td><code>/v1/onchain/ask</code></td><td>POST</td><td>$0.02</td><td>on-chain analytics NL Q&amp;A (Defillama + Qwen)</td></tr>
 <tr><td><code>/v1/defi/plan</code></td><td>POST</td><td>$0.05</td><td>DeFi action planner (lend/swap/stake, advisory)</td></tr>
 <tr><td><code>/v1/models</code></td><td>GET</td><td>free</td><td>list available models</td></tr>
 <tr><td><code>/healthz</code></td><td>GET</td><td>free</td><td>liveness probe</td></tr>
