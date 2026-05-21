@@ -281,8 +281,8 @@ async def relay_page() -> str:
 async def well_known_x402() -> dict[str, Any]:
     return {
         "name": "agent-tools.cloud",
-        "description": "Pay-per-call relay for Qwen3.6-35B-A3B (x402 + MCP).",
-        "version": "0.2",
+        "description": "Global x402 service directory (470+ endpoints) + pay-per-call Qwen3.6-35B-A3B inference relay at flat $0.001 USDC / call on Base (x402 v2).",
+        "version": "0.3",
         "endpoints": [
             {"path": "/v1/chat/completions", "method": "POST", "kind": "rest-openai", "gated": True},
             {"path": "/mcp", "method": "POST", "kind": "mcp-streamable-http", "gated": True},
