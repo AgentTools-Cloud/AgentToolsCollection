@@ -1,7 +1,7 @@
 # mcpserver — agent-native LLM relay with x402 payment
 
 A thin **REST + MCP** relay that exposes **Qwen/Qwen3.6-35B-A3B** (served by
-天枢 llm-gateway behind the scenes) to overseas agents, gated by the
+OpenAI-compatible llm-gateway behind the scenes) to overseas agents, gated by the
 [x402](https://www.x402.org/) micropayment protocol on Base L2 (USDC).
 
 No accounts. No website. No human UI. An autonomous agent discovers the
@@ -12,7 +12,7 @@ the `PAYMENT-SIGNATURE` header, and retries — that's it.
 
 | | |
 |---|---|
-| Model | `Qwen/Qwen3.6-35B-A3B` (AWQ on W7900D, via 天枢) |
+| Model | `Qwen/Qwen3.6-35B-A3B` (AWQ on W7900D) |
 | Price | `$0.001` USDC per call (flat) |
 | Chain | Base Sepolia testnet (`eip155:84532`) — switch to `eip155:8453` after setting up Coinbase CDP facilitator |
 | Asset | USDC (`0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`) |

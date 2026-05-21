@@ -1,5 +1,5 @@
 """
-mcpserver — x402-gated relay in front of 天枢 llm-gateway.
+mcpserver — x402-gated relay in front of an OpenAI-compatible inference backend.
 
 Two parallel interfaces, same backend, same per-call price:
 
@@ -19,7 +19,7 @@ Flow:
        │  ← retry with PAYMENT-SIGNATURE header (EIP-3009 USDC on Base)
        │  verify + settle via facilitator
        ▼
-    upstream 天枢 (127.0.0.1:8080) → W7900D vLLM (Qwen3.6-35B-A3B)
+    upstream gateway (127.0.0.1:8080) -> W7900D vLLM (Qwen3.6-35B-A3B)
 """
 
 from __future__ import annotations
@@ -255,7 +255,7 @@ console.log(await r.json());</pre>
 <h2>Source</h2>
 <p>
   <a href="https://github.com/JoursBleu/mcpserver" target="_blank" rel="noopener">github.com/JoursBleu/mcpserver</a>
-  &middot; upstream inference: 天枢 llm-gateway &rarr; W7900D vLLM
+  &middot; upstream inference: W7900D vLLM
 </p>
 </body>
 </html>
