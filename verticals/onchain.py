@@ -255,3 +255,98 @@ async def handle(body: dict, llm_call: Callable[..., Awaitable[str]]) -> dict:
     confidence = "high" if has_data and parsed else ("medium" if has_data else "low")
     return {"answer": answer, "structured": structured, "data_snapshot": snapshot,
             "sources": sources, "as_of_ts": int(time.time()), "confidence": confidence}
+
+
+# ===================== PRO TIER: multi-source report =====================
+
+INPUT_SCHEMA_REPORT: dict[str, Any] = {
+    "type": "object",
+    "required": ["topic"],
+    "properties": {
+        "topic": {
+            "type": "string",
+            "description": "Free-form report topic (e.g. 'is wstETH safe', "
+                           "'best stablecoin yields on Base').",
+        },
+        "chain": {"type": "string"},
+        "token": {"type": "string"},
+        "protocol": {"type": "string"},
+    },
+}
+
+OUTPUT_SCHEMA_REPORT: dict[str, Any] = {
+    "type": "object",
+    "required": ["report", "as_of_ts", "sources"],
+    "properties": {
+        "report": {"type": "string"},
+        "key_findings": {"type": "array", "items": {"type": "string"}},
+        "risks": {"type": "array", "items": {"type": "string"}},
+        "data_snapshots": {"type": "object"},
+        "sources": {"type": "array", "items": {"type": "string"}},
+        "as_of_ts": {"type": "integer"},
+    },
+}
+
+
+async def handle_report(
+    body: dict,
+    llm_call: Callable[..., Awaitable[str]],
+) -> dict:
+    """Pro tier: fetch token + yields + tvl + stables snapshots in parallel
+    and ask Qwen for a longer synthesized report."""
+    topic = (body or {}).get("topic") or ""
+    chain = (body or {}).get("chain")
+    token = (body or {}).get("token")
+    protocol = (body or {}).get("protocol")
+    if not topic or not isinstance(topic, str):
+        return {
+            "report": "missing or invalid 'topic' field",
+            "key_findings": [], "risks": [], "data_snapshots": {},
+            "sources": [], "as_of_ts": int(time.time()),
+        }
+
+    snapshots: dict = {}
+    sources: list = []
+    try:
+        if token:
+            snapshots["token"] = await _fetch_token(token, chain)
+            sources.append("dexscreener")
+        snapshots["yields"] = await _fetch_yields(token, chain)
+        sources.append("defillama-yields")
+        snapshots["tvl"] = await _fetch_tvl(protocol, chain)
+        sources.append("defillama-tvl")
+        snapshots["stables"] = await _fetch_stables()
+        sources.append("defillama-stablecoins")
+    except httpx.HTTPError as e:
+        return {
+            "report": f"upstream data fetch failed: {e}",
+            "key_findings": [], "risks": [], "data_snapshots": snapshots,
+            "sources": sources, "as_of_ts": int(time.time()),
+        }
+
+    prompt = (
+        "You are a senior on-chain analyst. Write a structured report on the "
+        "topic below, grounded STRICTLY in the JSON snapshots. Respond with a "
+        "single JSON object: {\"report\": \"<5-10 sentence narrative report>\", "
+        "\"key_findings\": [\"<bullet1>\", ...], "
+        "\"risks\": [\"<risk1>\", ...]}. If the snapshots don't support a "
+        "claim, omit it.\n\n"
+        f"Topic: {topic}\n"
+        f"Context: chain={chain}, token={token}, protocol={protocol}\n"
+        f"Snapshots: {json.dumps(snapshots, ensure_ascii=False)[:10000]}\n\n"
+        "Return only the JSON object."
+    )
+    try:
+        raw = await llm_call(prompt, max_tokens=1200, temperature=0.2)
+    except Exception:
+        raw = ""
+    parsed = _extract_json(raw)
+    report = parsed.get("report") or (raw.strip() if raw else "no report")
+    return {
+        "report": report,
+        "key_findings": parsed.get("key_findings") or [],
+        "risks": parsed.get("risks") or [],
+        "data_snapshots": snapshots,
+        "sources": sources,
+        "as_of_ts": int(time.time()),
+    }
