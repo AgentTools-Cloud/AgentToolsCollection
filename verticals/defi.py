@@ -266,3 +266,137 @@ async def handle(body: dict, llm_call: Callable[..., Awaitable[str]]) -> dict:
     return {"action": action, "best_candidate_idx": best, "candidates": candidates,
             "execution_hint": hint, "risk_review": risk_review,
             "disclaimer": _DISCLAIMER, "as_of_ts": int(time.time())}
+
+
+# ===================== PRO TIER: portfolio plan ==========================
+
+INPUT_SCHEMA_PORTFOLIO: dict[str, Any] = {
+    "type": "object",
+    "required": ["budget_usd"],
+    "properties": {
+        "budget_usd": {"type": "number", "minimum": 1,
+                       "description": "Total notional in USD to allocate."},
+        "chain": {"type": "string"},
+        "risk_tolerance": {"type": "string",
+                           "enum": ["conservative", "balanced", "aggressive"],
+                           "default": "balanced"},
+        "mix": {
+            "type": "object",
+            "description": "Optional allocation mix (fractions summing to ~1).",
+            "properties": {
+                "lend": {"type": "number", "minimum": 0, "maximum": 1},
+                "stake": {"type": "number", "minimum": 0, "maximum": 1},
+                "swap": {"type": "number", "minimum": 0, "maximum": 1},
+            },
+        },
+        "token_in": {"type": "string", "description": "Default asset for lend/stake/swap legs."},
+        "token_out": {"type": "string", "description": "Target asset for the swap leg."},
+    },
+}
+
+OUTPUT_SCHEMA_PORTFOLIO: dict[str, Any] = {
+    "type": "object",
+    "required": ["legs", "disclaimer", "as_of_ts"],
+    "properties": {
+        "budget_usd": {"type": "number"},
+        "risk_tolerance": {"type": "string"},
+        "mix": {"type": "object"},
+        "legs": {"type": "array", "items": {"type": "object"}},
+        "blended_apy": {"type": "number"},
+        "risk_review": {"type": "string"},
+        "disclaimer": {"type": "string"},
+        "as_of_ts": {"type": "integer"},
+    },
+}
+
+_DEFAULT_MIX = {"lend": 0.5, "stake": 0.3, "swap": 0.2}
+
+
+async def handle_portfolio(
+    body: dict,
+    llm_call: Callable[..., Awaitable[str]],
+) -> dict:
+    """Pro tier: produce a multi-leg DeFi portfolio plan in one call."""
+    body = body or {}
+    budget = float(body.get("budget_usd") or 0)
+    if budget <= 0:
+        return {"legs": [], "disclaimer": _DISCLAIMER, "as_of_ts": int(time.time()),
+                "risk_review": "missing or invalid 'budget_usd'"}
+    chain = body.get("chain")
+    tol = body.get("risk_tolerance") or "balanced"
+    mix = body.get("mix") or _DEFAULT_MIX
+    # Normalise mix.
+    total = sum(float(mix.get(k) or 0) for k in ("lend", "stake", "swap")) or 1.0
+    mix_norm = {k: float(mix.get(k) or 0) / total for k in ("lend", "stake", "swap")}
+    token_in = body.get("token_in")
+    token_out = body.get("token_out")
+
+    legs = []
+    blended_apy_num = 0.0
+    blended_apy_den = 0.0
+
+    for action, frac in mix_norm.items():
+        if frac <= 0:
+            continue
+        alloc = round(budget * frac, 2)
+        if action == "swap":
+            sub_body = {"action": "swap", "chain": chain, "token_in": token_in,
+                        "token_out": token_out, "amount_usd": alloc,
+                        "risk_tolerance": tol}
+        else:
+            sub_body = {"action": action, "chain": chain, "token_in": token_in,
+                        "amount_usd": alloc, "risk_tolerance": tol}
+        # Re-use the single-action planner but skip its inner LLM call by
+        # passing a no-op llm_call; we run a single combined Qwen review at
+        # the end.
+        async def _noop(*a, **kw):
+            return ""
+        plan = await handle(sub_body, _noop)
+        best_idx = plan.get("best_candidate_idx", -1)
+        best = None
+        if best_idx is not None and best_idx >= 0:
+            cands = plan.get("candidates") or []
+            if cands:
+                best = cands[best_idx]
+        legs.append({
+            "action": action,
+            "allocation_usd": alloc,
+            "fraction": round(frac, 3),
+            "best": best,
+            "candidate_count": len(plan.get("candidates") or []),
+            "execution_hint": plan.get("execution_hint", ""),
+        })
+        if best and action in ("lend", "stake"):
+            apy = float(best.get("apy") or 0)
+            blended_apy_num += apy * alloc
+            blended_apy_den += alloc
+
+    blended_apy = (blended_apy_num / blended_apy_den) if blended_apy_den else 0.0
+
+    risk_review = ""
+    if legs:
+        prompt = (
+            "You are a cautious DeFi portfolio reviewer. Review the multi-leg "
+            "allocation below in 4-6 short sentences (<=180 words). Flag "
+            "correlation risk, depeg risk, smart-contract risk, sufficient "
+            "liquidity, and whether the mix matches the stated risk tolerance.\n\n"
+            f"Budget USD: {budget}\nRisk tolerance: {tol}\n"
+            f"Mix: {json.dumps(mix_norm)}\n"
+            f"Legs: {json.dumps(legs, ensure_ascii=False)[:5000]}\n\n"
+            "Return plain text, no preamble."
+        )
+        try:
+            risk_review = await llm_call(prompt, max_tokens=450, temperature=0.3)
+        except Exception:
+            risk_review = ""
+
+    return {
+        "budget_usd": budget,
+        "risk_tolerance": tol,
+        "mix": mix_norm,
+        "legs": legs,
+        "blended_apy": round(blended_apy, 4),
+        "risk_review": risk_review,
+        "disclaimer": _DISCLAIMER,
+        "as_of_ts": int(time.time()),
+    }

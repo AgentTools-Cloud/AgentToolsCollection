@@ -203,3 +203,98 @@ async def handle(body: dict[str, Any], llm_call: Callable[..., Awaitable[str]]) 
         if commentary:
             out["commentary"] = commentary
     return out
+
+
+# ===================== PRO TIER: bulk signal ============================
+
+INPUT_SCHEMA_BULK: dict[str, Any] = {
+    "type": "object",
+    "required": ["tokens"],
+    "properties": {
+        "tokens": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 10,
+            "items": {"type": "string"},
+            "description": "Up to 10 token symbols or addresses.",
+        },
+        "chain": {"type": "string"},
+        "commentary": {
+            "type": "boolean",
+            "default": True,
+            "description": "Default true for the bulk tier; per-token short note.",
+        },
+    },
+}
+
+OUTPUT_SCHEMA_BULK: dict[str, Any] = {
+    "type": "object",
+    "required": ["results", "as_of_ts", "disclaimer"],
+    "properties": {
+        "results": {"type": "array", "items": {"type": "object"}},
+        "summary": {
+            "type": "object",
+            "properties": {
+                "buy": {"type": "integer"},
+                "hold": {"type": "integer"},
+                "sell": {"type": "integer"},
+                "top_pick": {"type": "string"},
+                "top_score": {"type": "number"},
+            },
+        },
+        "as_of_ts": {"type": "integer"},
+        "disclaimer": {"type": "string"},
+    },
+}
+
+
+async def handle_bulk(
+    body: dict[str, Any],
+    llm_call: Callable[..., Awaitable[str]],
+) -> dict[str, Any]:
+    """Pro tier: bulk-score up to 10 tokens at once."""
+    tokens = (body or {}).get("tokens") or []
+    chain = (body or {}).get("chain")
+    want_commentary = (body or {}).get("commentary")
+    if want_commentary is None:
+        want_commentary = True
+    if not isinstance(tokens, list) or not tokens:
+        return {
+            "results": [],
+            "as_of_ts": int(time.time()),
+            "error": "missing or empty 'tokens' array",
+            "disclaimer": _DISCLAIMER,
+        }
+    tokens = tokens[:10]
+
+    results: list[dict[str, Any]] = []
+    counts = {"buy": 0, "hold": 0, "sell": 0}
+    top_pick = ""
+    top_score = -2.0
+
+    for tok in tokens:
+        sub = await handle(
+            {"token": tok, "chain": chain, "commentary": bool(want_commentary)},
+            llm_call,
+        )
+        sub["token"] = tok
+        results.append(sub)
+        if sub.get("found"):
+            d = sub.get("direction") or "hold"
+            if d in counts:
+                counts[d] += 1
+            sc = float(sub.get("score") or 0)
+            if sc > top_score:
+                top_score = sc
+                top_pick = (sub.get("snapshot") or {}).get("symbol") or tok
+
+    return {
+        "results": results,
+        "summary": {
+            **counts,
+            "top_pick": top_pick,
+            "top_score": round(top_score, 3) if top_score > -2 else 0,
+        },
+        "as_of_ts": int(time.time()),
+        "disclaimer": _DISCLAIMER,
+    }

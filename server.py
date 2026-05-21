@@ -67,6 +67,11 @@ DEFAULT_MODEL = next(iter(ALLOWED_MODELS))
 X402_SIGNAL_PRICE_USD = os.getenv("X402_SIGNAL_PRICE_USD", "0.01")
 X402_ONCHAIN_PRICE_USD = os.getenv("X402_ONCHAIN_PRICE_USD", "0.02")
 X402_DEFI_PRICE_USD = os.getenv("X402_DEFI_PRICE_USD", "0.05")
+# Pro tiers (bulk / report / portfolio) — higher unit price for the
+# heavier work and to lift the bazaar avg-USDC.
+X402_SIGNAL_BULK_PRICE_USD = os.getenv("X402_SIGNAL_BULK_PRICE_USD", "0.05")
+X402_ONCHAIN_REPORT_PRICE_USD = os.getenv("X402_ONCHAIN_REPORT_PRICE_USD", "0.20")
+X402_DEFI_PORTFOLIO_PRICE_USD = os.getenv("X402_DEFI_PORTFOLIO_PRICE_USD", "0.50")
 
 # --- upstream HTTP client -------------------------------------------------
 
@@ -251,6 +256,33 @@ _routes = {
         mime_type="application/json",
         description=f"DeFi action planner — lend/swap/stake comparison + Qwen risk review (${X402_DEFI_PRICE_USD} / call)",
     ),
+    # --- Pro tier: bulk signal (up to 10 tokens / call) ------------------
+    "POST /v1/signal/bulk": RouteConfig(
+        accepts=[PaymentOption(
+            scheme="exact", pay_to=X402_PAY_TO,
+            price=f"${X402_SIGNAL_BULK_PRICE_USD}", network=X402_NETWORK,
+        )],
+        mime_type="application/json",
+        description=f"Bulk token signal — up to 10 tokens / call (${X402_SIGNAL_BULK_PRICE_USD} / call)",
+    ),
+    # --- Pro tier: multi-source on-chain report --------------------------
+    "POST /v1/onchain/report": RouteConfig(
+        accepts=[PaymentOption(
+            scheme="exact", pay_to=X402_PAY_TO,
+            price=f"${X402_ONCHAIN_REPORT_PRICE_USD}", network=X402_NETWORK,
+        )],
+        mime_type="application/json",
+        description=f"Multi-source on-chain analyst report (${X402_ONCHAIN_REPORT_PRICE_USD} / call)",
+    ),
+    # --- Pro tier: multi-leg DeFi portfolio plan -------------------------
+    "POST /v1/defi/portfolio": RouteConfig(
+        accepts=[PaymentOption(
+            scheme="exact", pay_to=X402_PAY_TO,
+            price=f"${X402_DEFI_PORTFOLIO_PRICE_USD}", network=X402_NETWORK,
+        )],
+        mime_type="application/json",
+        description=f"Multi-leg DeFi portfolio planner — lend/stake/swap allocation + Qwen review (${X402_DEFI_PORTFOLIO_PRICE_USD} / call)",
+    ),
 }
 
 app.add_middleware(PaymentMiddlewareASGI, routes=_routes, server=_x402_server)
@@ -309,6 +341,10 @@ a { color: #2c7be5; }
 <tr><td><code>/v1/signal/token</code></td><td>POST</td><td>$0.01</td><td>token momentum signal (DexScreener + Qwen)</td></tr>
 <tr><td><code>/v1/onchain/ask</code></td><td>POST</td><td>$0.02</td><td>on-chain analytics NL Q&amp;A (Defillama + Qwen)</td></tr>
 <tr><td><code>/v1/defi/plan</code></td><td>POST</td><td>$0.05</td><td>DeFi action planner (lend/swap/stake, advisory)</td></tr>
+<tr><td colspan="4" style="padding-top:.8em;font-size:12px;color:#888"><b>Pro tier</b> — heavier work, higher value per call</td></tr>
+<tr><td><code>/v1/signal/bulk</code></td><td>POST</td><td>$0.05</td><td>bulk signal — up to 10 tokens / call</td></tr>
+<tr><td><code>/v1/onchain/report</code></td><td>POST</td><td>$0.20</td><td>multi-source on-chain analyst report</td></tr>
+<tr><td><code>/v1/defi/portfolio</code></td><td>POST</td><td>$0.50</td><td>multi-leg DeFi portfolio plan</td></tr>
 <tr><td><code>/v1/models</code></td><td>GET</td><td>free</td><td>list available models</td></tr>
 <tr><td><code>/healthz</code></td><td>GET</td><td>free</td><td>liveness probe</td></tr>
 <tr><td><code>/.well-known/x402</code></td><td>GET</td><td>free</td><td>service discovery (JSON)</td></tr>
@@ -397,6 +433,9 @@ async def well_known_x402(request: Request) -> dict[str, Any]:
             {"path": "/v1/signal/token", "method": "POST", "kind": "rest-json", "gated": True, "price_usd": X402_SIGNAL_PRICE_USD, "category": "signal"},
             {"path": "/v1/onchain/ask", "method": "POST", "kind": "rest-json", "gated": True, "price_usd": X402_ONCHAIN_PRICE_USD, "category": "onchain-analytics"},
             {"path": "/v1/defi/plan", "method": "POST", "kind": "rest-json", "gated": True, "price_usd": X402_DEFI_PRICE_USD, "category": "defi-planner"},
+            {"path": "/v1/signal/bulk", "method": "POST", "kind": "rest-json", "gated": True, "price_usd": X402_SIGNAL_BULK_PRICE_USD, "category": "signal", "tier": "pro"},
+            {"path": "/v1/onchain/report", "method": "POST", "kind": "rest-json", "gated": True, "price_usd": X402_ONCHAIN_REPORT_PRICE_USD, "category": "onchain-analytics", "tier": "pro"},
+            {"path": "/v1/defi/portfolio", "method": "POST", "kind": "rest-json", "gated": True, "price_usd": X402_DEFI_PORTFOLIO_PRICE_USD, "category": "defi-planner", "tier": "pro"},
             {"path": "/v1/models", "method": "GET", "kind": "info", "gated": False},
             {"path": "/healthz", "method": "GET", "kind": "info", "gated": False},
         ],
@@ -485,6 +524,30 @@ async def defi_plan(request: Request) -> Any:
     """DeFi action planner — lend/swap/stake comparison with Qwen risk review."""
     body = await request.json()
     result = await defi_vertical.handle(body, _llm_short)
+    return JSONResponse(content=result)
+
+
+@app.post("/v1/signal/bulk")
+async def signal_bulk(request: Request) -> Any:
+    """Pro tier: bulk token signal — up to 10 tokens / call."""
+    body = await request.json()
+    result = await signals_vertical.handle_bulk(body, _llm_short)
+    return JSONResponse(content=result)
+
+
+@app.post("/v1/onchain/report")
+async def onchain_report(request: Request) -> Any:
+    """Pro tier: multi-source on-chain analyst report."""
+    body = await request.json()
+    result = await onchain_vertical.handle_report(body, _llm_short)
+    return JSONResponse(content=result)
+
+
+@app.post("/v1/defi/portfolio")
+async def defi_portfolio(request: Request) -> Any:
+    """Pro tier: multi-leg DeFi portfolio plan."""
+    body = await request.json()
+    result = await defi_vertical.handle_portfolio(body, _llm_short)
     return JSONResponse(content=result)
 
 
@@ -754,6 +817,47 @@ def _build_openapi(*, relay_only: bool = False) -> dict[str, Any]:
             ["defi-planner"],
             defi_vertical.INPUT_SCHEMA,
             defi_vertical.OUTPUT_SCHEMA,
+        ),
+        (
+            "/v1/signal/bulk",
+            X402_SIGNAL_BULK_PRICE_USD,
+            "Bulk token momentum signal — up to 10 tokens (paid via x402, pro tier)",
+            (
+                "Scores up to 10 tokens in a single call using the same "
+                "DexScreener-derived heuristic as /v1/signal/token plus a "
+                "rollup summary (buy/hold/sell counts, top pick)."
+            ),
+            ["signal", "pro"],
+            signals_vertical.INPUT_SCHEMA_BULK,
+            signals_vertical.OUTPUT_SCHEMA_BULK,
+        ),
+        (
+            "/v1/onchain/report",
+            X402_ONCHAIN_REPORT_PRICE_USD,
+            "Multi-source on-chain analyst report (paid via x402, pro tier)",
+            (
+                "Pulls token, yield, TVL and stablecoin snapshots in "
+                "parallel and asks Qwen for a synthesised 5-10 sentence "
+                "report with key findings + risks. Grounded strictly in "
+                "the fetched data."
+            ),
+            ["onchain-analytics", "pro"],
+            onchain_vertical.INPUT_SCHEMA_REPORT,
+            onchain_vertical.OUTPUT_SCHEMA_REPORT,
+        ),
+        (
+            "/v1/defi/portfolio",
+            X402_DEFI_PORTFOLIO_PRICE_USD,
+            "Multi-leg DeFi portfolio planner (paid via x402, pro tier)",
+            (
+                "Allocates a USD budget across lend / stake / swap legs "
+                "according to an explicit mix and risk tolerance, ranks "
+                "candidates per leg, returns blended APY and a Qwen "
+                "portfolio risk review. Advisory only — never signs."
+            ),
+            ["defi-planner", "pro"],
+            defi_vertical.INPUT_SCHEMA_PORTFOLIO,
+            defi_vertical.OUTPUT_SCHEMA_PORTFOLIO,
         ),
     ]
 
