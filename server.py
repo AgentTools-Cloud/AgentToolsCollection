@@ -207,6 +207,13 @@ _HOMEPAGE_HTML = """<!doctype html>
 <meta charset="utf-8">
 <title>agent-tools.cloud — x402 + MCP relay for Qwen3.6-35B-A3B</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="description" content="Pay-per-call Qwen3.6-35B-A3B inference relay on Base mainnet via x402 (v2). $0.001 USDC / call. OpenAI-compatible REST and MCP streamable-http transports. No signup, no API key.">
+<link rel="alternate" type="application/json" title="x402 discovery" href="/.well-known/x402">
+<link rel="service" type="application/openapi+json" title="OpenAPI 3.1 spec" href="/openapi.json">
+<meta name="x402:discovery" content="/.well-known/x402">
+<meta name="x402:openapi" content="/openapi.json">
+<meta name="x402:network" content="eip155:8453">
+<meta name="x402:pay-to" content="0xC445aa2AA0FA68db67Cd22fc04867773941f9CdF">
 <style>
 :root { color-scheme: light dark; }
 body { font: 15px/1.55 -apple-system, "Segoe UI", system-ui, sans-serif; max-width: 760px; margin: 2.5rem auto; padding: 0 1.2rem; }
