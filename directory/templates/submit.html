@@ -1,28 +1,46 @@
 {% extends "base.html" %}
-{% block title %}提交服务 — agent-tools.cloud{% endblock %}
+{% block title %}Submit — agent-tools.cloud{% endblock %}
 {% block content %}
-<h1 class="text-2xl font-semibold mb-4">提交一个 x402 服务</h1>
-<p class="text-slate-600 mb-6">收录前会人工审核。也可以直接 POST 到 <code class="bg-slate-100 px-1 rounded">/api/v1/submit</code>。</p>
+<section class="mb-8 max-w-2xl">
+  <h1 class="text-3xl md:text-4xl font-extrabold tracking-tight">Submit a service</h1>
+  <p class="text-slate-500 mt-2">Lightweight review before listing. You can also <span class="mono">POST</span> directly to <code class="mono bg-slate-100 px-1 rounded">/api/v1/submit</code>.</p>
+</section>
 
-<form id="submit-form" class="bg-white border border-slate-200 rounded-lg p-5 space-y-4 max-w-xl" onsubmit="return submitForm(event)">
-  <div><label class="block text-sm font-medium mb-1">名称 *</label>
-    <input name="name" required class="w-full px-3 py-2 border border-slate-300 rounded"></div>
-  <div><label class="block text-sm font-medium mb-1">URL *</label>
-    <input name="url" type="url" required placeholder="https://..." class="w-full px-3 py-2 border border-slate-300 rounded"></div>
-  <div><label class="block text-sm font-medium mb-1">简介</label>
-    <textarea name="description" rows="3" class="w-full px-3 py-2 border border-slate-300 rounded"></textarea></div>
-  <div class="grid grid-cols-2 gap-3">
-    <div><label class="block text-sm font-medium mb-1">分类</label>
-      <input name="category" placeholder="weather / data / inference / ..." class="w-full px-3 py-2 border border-slate-300 rounded"></div>
-    <div><label class="block text-sm font-medium mb-1">单价 (USDC)</label>
-      <input name="price_usdc" type="number" step="0.0001" min="0" class="w-full px-3 py-2 border border-slate-300 rounded"></div>
+<form id="submit-form" class="svc-card p-6 space-y-4 max-w-2xl" onsubmit="return submitForm(event)">
+  <div>
+    <label class="block text-sm font-medium mb-1">Name <span class="text-rose-500">*</span></label>
+    <input name="name" required class="w-full px-3 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:border-slate-400">
   </div>
-  <div><label class="block text-sm font-medium mb-1">链(逗号分隔)</label>
-    <input name="chains" placeholder="base, solana" class="w-full px-3 py-2 border border-slate-300 rounded"></div>
-  <div><label class="block text-sm font-medium mb-1">联系方式(邮箱 / Twitter / TG,可选)</label>
-    <input name="contact" class="w-full px-3 py-2 border border-slate-300 rounded"></div>
-  <button type="submit" class="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700">提交</button>
-  <div id="submit-result" class="text-sm"></div>
+  <div>
+    <label class="block text-sm font-medium mb-1">URL <span class="text-rose-500">*</span></label>
+    <input name="url" type="url" required placeholder="https://..." class="w-full px-3 py-2.5 border border-slate-200 rounded-xl mono text-sm focus:outline-none focus:border-slate-400">
+  </div>
+  <div>
+    <label class="block text-sm font-medium mb-1">Description</label>
+    <textarea name="description" rows="3" class="w-full px-3 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:border-slate-400"></textarea>
+  </div>
+  <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+    <div>
+      <label class="block text-sm font-medium mb-1">Category</label>
+      <input name="category" placeholder="weather / data / inference / …" class="w-full px-3 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:border-slate-400">
+    </div>
+    <div>
+      <label class="block text-sm font-medium mb-1">Price (USDC / call)</label>
+      <input name="price_usdc" type="number" step="0.0001" min="0" class="w-full px-3 py-2.5 border border-slate-200 rounded-xl mono focus:outline-none focus:border-slate-400">
+    </div>
+  </div>
+  <div>
+    <label class="block text-sm font-medium mb-1">Chains (comma-separated)</label>
+    <input name="chains" placeholder="base, solana" class="w-full px-3 py-2.5 border border-slate-200 rounded-xl mono text-sm focus:outline-none focus:border-slate-400">
+  </div>
+  <div>
+    <label class="block text-sm font-medium mb-1">Contact (email / X / TG · optional)</label>
+    <input name="contact" class="w-full px-3 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:border-slate-400">
+  </div>
+  <div class="flex items-center gap-3">
+    <button type="submit" class="btn-primary">Submit</button>
+    <div id="submit-result" class="text-sm"></div>
+  </div>
 </form>
 
 <script>
@@ -39,15 +57,15 @@ async function submitForm(e) {
     contact: f.get("contact") || null,
   };
   const out = document.getElementById("submit-result");
-  out.textContent = "提交中…";
+  out.textContent = "Submitting…"; out.className = "text-sm text-slate-500";
   try {
     const r = await fetch("/api/v1/submit", {
       method: "POST", headers: {"Content-Type": "application/json"},
       body: JSON.stringify(body),
     });
-    if (r.ok) { out.textContent = "已提交,等待审核。"; out.className = "text-sm text-green-600"; e.target.reset(); }
-    else { out.textContent = "提交失败:" + await r.text(); out.className = "text-sm text-red-600"; }
-  } catch (err) { out.textContent = "提交失败:" + err; out.className = "text-sm text-red-600"; }
+    if (r.ok) { out.textContent = "Submitted · pending review."; out.className = "text-sm text-emerald-600"; e.target.reset(); }
+    else { out.textContent = "Failed: " + await r.text(); out.className = "text-sm text-rose-600"; }
+  } catch (err) { out.textContent = "Failed: " + err; out.className = "text-sm text-rose-600"; }
   return false;
 }
 </script>
