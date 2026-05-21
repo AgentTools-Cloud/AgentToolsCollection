@@ -46,7 +46,7 @@ cd /opt
 git clone https://github.com/JoursBleu/mcpserver.git
 cd mcpserver
 cp .env.example .env
-$EDITOR .env                          # set TIANSHU_API_KEY
+$EDITOR .env                          # set UPSTREAM_API_KEY
 sudo bash deploy/install.sh
 sudo systemctl status mcpserver
 ```
@@ -60,8 +60,8 @@ Listens on `0.0.0.0:9100`. Public:
 
 See `.env.example`. Required env:
 
-- `TIANSHU_BASE_URL` — upstream OpenAI-compatible endpoint
-- `TIANSHU_API_KEY`  — `sk-...` for the upstream
+- `UPSTREAM_BASE_URL` — upstream OpenAI-compatible endpoint
+- `UPSTREAM_API_KEY`  — `sk-...` for the upstream
 - `X402_PAY_TO`      — EVM address to receive USDC
 - `X402_PRICE_USD`   — price string like `"0.001"`
 

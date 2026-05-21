@@ -45,8 +45,8 @@ load_dotenv()
 
 # --- config ---------------------------------------------------------------
 
-TIANSHU_BASE_URL = os.environ["TIANSHU_BASE_URL"].rstrip("/")
-TIANSHU_API_KEY = os.environ["TIANSHU_API_KEY"]
+UPSTREAM_BASE_URL = os.environ["UPSTREAM_BASE_URL"].rstrip("/")
+UPSTREAM_API_KEY = os.environ["UPSTREAM_API_KEY"]
 X402_PAY_TO = os.environ["X402_PAY_TO"]
 X402_NETWORK = os.getenv("X402_NETWORK", "eip155:8453")  # Base mainnet
 X402_PRICE_USD = os.getenv("X402_PRICE_USD", "0.001")
@@ -116,8 +116,8 @@ async def qwen36_chat(
 async def lifespan(app: FastAPI):
     global _http
     _http = httpx.AsyncClient(
-        base_url=TIANSHU_BASE_URL,
-        headers={"Authorization": f"Bearer {TIANSHU_API_KEY}"},
+        base_url=UPSTREAM_BASE_URL,
+        headers={"Authorization": f"Bearer {UPSTREAM_API_KEY}"},
         timeout=httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=30.0),
     )
     # FastMCP streamable-http needs its own session-manager lifespan.
