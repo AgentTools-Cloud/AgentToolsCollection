@@ -44,6 +44,10 @@ from x402.server import x402ResourceServer
 from directory import db as directory_db
 from directory.routes import router as directory_router
 
+from verticals import signals as signals_vertical
+from verticals import onchain as onchain_vertical
+from verticals import defi as defi_vertical
+
 load_dotenv()
 
 # --- config ---------------------------------------------------------------
