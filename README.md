@@ -1,7 +1,7 @@
 # mcpserver — agent-native LLM relay with x402 payment
 
 A thin **REST + MCP** relay that exposes **Qwen/Qwen3.6-35B-A3B** (served by
-an upstream LLM gateway behind the scenes) to overseas agents, gated by the
+OpenAI-compatible llm-gateway behind the scenes) to overseas agents, gated by the
 [x402](https://www.x402.org/) micropayment protocol on Base L2 (USDC).
 
 No accounts. No website. No human UI. An autonomous agent discovers the
