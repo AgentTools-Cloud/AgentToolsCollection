@@ -1,25 +1,40 @@
 {% extends "base.html" %}
-{% block title %}关于 — agent-tools.cloud{% endblock %}
+{% block title %}About — agent-tools.cloud{% endblock %}
 {% block content %}
-<h1 class="text-2xl font-semibold mb-4">关于 agent-tools.cloud</h1>
-<div class="prose max-w-2xl text-slate-800 space-y-4">
-  <p><strong>agent-tools.cloud</strong> 是一个面向全球 AI agent 的 x402 服务平台:
-    (1) 公开收录 470+ 个 x402 付费 API 与 MCP 服务的目录;
-    (2) 自营一条 Qwen3.6-35B-A3B 推理 relay,按调用付费 $0.001 USDC / call (Base, x402 v2)。
-    强调 agent 友好的发现接口,无需注册、无需 API key。</p>
-  <p><strong>x402</strong> 是 Coinbase 主推的 HTTP 402 微支付协议,允许 AI agent 用 USDC 在链上自动结算 API 调用费。
-    本站收录全网公开的 x402 服务,每 6 小时刷新一次健康状态。</p>
-  <h2 class="text-lg font-semibold mt-6">数据来源</h2>
-  <ul class="list-disc pl-6 space-y-1">
-    <li><a class="text-blue-600 hover:underline" href="https://github.com/Merit-Systems/awesome-x402">awesome-x402</a></li>
-    <li><a class="text-blue-600 hover:underline" href="https://www.x402scan.com/">x402scan</a></li>
-    <li>Coinbase CDP Bazaar</li>
-    <li>人工提交(<a class="text-blue-600 hover:underline" href="/submit">/submit</a>)</li>
-  </ul>
-  <h2 class="text-lg font-semibold mt-6">给 Agent 用</h2>
-  <p>每个 agent 可以直接 GET <code class="bg-slate-100 px-1 rounded">/api/v1/search?q=&lt;query&gt;</code>
-    来发现合适的 x402 服务,并使用 <code class="bg-slate-100 px-1 rounded">x402-fetch</code> 或
-    <code class="bg-slate-100 px-1 rounded">x402-axios</code> 自动处理 402 支付流程。</p>
-  <p>Agent 发现入口:<a class="text-blue-600 hover:underline" href="/.well-known/agent-tools.json">/.well-known/agent-tools.json</a></p>
+<section class="mb-8 max-w-3xl">
+  <h1 class="text-3xl md:text-4xl font-extrabold tracking-tight">About</h1>
+  <p class="text-slate-500 mt-2">The open directory + agent-native crypto stack for x402.</p>
+</section>
+
+<div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
+  <div class="svc-card p-6">
+    <h2 class="text-lg font-semibold mb-2">Directory</h2>
+    <p class="text-sm text-slate-600">A public, agent-readable index of 470+ x402 paid APIs and MCP services worldwide. Crawled from awesome-x402, CDP Bazaar, x402scan and manual submissions; health-checked every 6 h. No signup, no API key, open data.</p>
+  </div>
+  <div class="svc-card p-6">
+    <h2 class="text-lg font-semibold mb-2">Relay + verticals</h2>
+    <p class="text-sm text-slate-600">A self-hosted Qwen3.6-35B-A3B inference relay at <span class="mono">$0.001 / call</span>, plus four data-grounded crypto verticals (signals, on-chain Q&amp;A, DeFi planner, multi-leg portfolio) from <span class="mono">$0.01</span>. Eight pay-per-call endpoints. Settled atomically in USDC on Base via x402 v2.</p>
+  </div>
 </div>
+
+<section class="max-w-3xl space-y-6 text-slate-700">
+  <div>
+    <h2 class="text-lg font-semibold mb-2">What is x402?</h2>
+    <p class="text-sm">x402 is Coinbase's HTTP 402 micropayment protocol. AI agents settle each API call in USDC on-chain — no API keys, no rate limits, no human in the loop. We index every public x402 endpoint we can find.</p>
+  </div>
+  <div>
+    <h2 class="text-lg font-semibold mb-2">Agent-friendly discovery</h2>
+    <p class="text-sm">Agents can <code class="mono bg-slate-100 px-1 rounded">GET /api/v1/search?q=&lt;query&gt;</code> to find services, then call them via <code class="mono bg-slate-100 px-1 rounded">x402-fetch</code> / <code class="mono bg-slate-100 px-1 rounded">x402-axios</code> with automatic 402 settlement.</p>
+    <p class="text-sm mt-2">Discovery entry-point: <a class="text-blue-600 hover:underline mono" href="/.well-known/agent-tools.json">/.well-known/agent-tools.json</a></p>
+  </div>
+  <div>
+    <h2 class="text-lg font-semibold mb-2">Sources</h2>
+    <ul class="text-sm space-y-1">
+      <li>· <a class="text-blue-600 hover:underline" href="https://github.com/Merit-Systems/awesome-x402">awesome-x402</a></li>
+      <li>· <a class="text-blue-600 hover:underline" href="https://www.x402scan.com/">x402scan</a></li>
+      <li>· Coinbase CDP Bazaar</li>
+      <li>· Manual submissions (<a class="text-blue-600 hover:underline" href="/submit">/submit</a>)</li>
+    </ul>
+  </div>
+</section>
 {% endblock %}

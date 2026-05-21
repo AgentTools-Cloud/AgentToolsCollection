@@ -1,49 +1,84 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" class="h-full">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}agent-tools.cloud — x402 service directory + Qwen3.6-35B-A3B relay{% endblock %}</title>
   <meta name="description" content="{% block desc %}Global agent-readable directory of 470+ x402 paid APIs and MCP services worldwide, plus a pay-per-call Qwen3.6-35B-A3B inference relay at flat $0.001 USDC per call on Base (x402 v2). No signup, no API key, open data.{% endblock %}">
   <link rel="alternate" type="application/json" title="agent-tools discovery" href="/.well-known/agent-tools.json">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/htmx.org@2.0.3"></script>
   <style>
     :root { color-scheme: light; }
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif; }
-    .badge { display:inline-block; padding:2px 8px; font-size:11px; border-radius:9999px; font-weight:500; }
+    html, body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; -webkit-font-smoothing: antialiased; }
+    code, pre, .mono { font-family: 'JetBrains Mono', ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+    .badge { display:inline-flex; align-items:center; padding:2px 8px; font-size:11px; border-radius:9999px; font-weight:500; }
+    .tab-active { color:#0f172a; font-weight:600; border-bottom:2px solid #0f172a; }
+    .tab-link:hover { color:#0f172a; }
+    .stat-card { background:#fff; border:1px solid #e2e8f0; border-radius:14px; padding:20px 22px; }
+    .svc-card { background:#fff; border:1px solid #e2e8f0; border-radius:14px; transition: border-color .15s ease, box-shadow .15s ease; }
+    .svc-card:hover { border-color:#2563eb; box-shadow: 0 4px 18px -6px rgba(37,99,235,.18); }
+    .pill { display:inline-flex; align-items:center; gap:6px; padding:6px 12px; border:1px solid #e2e8f0; background:#fff; border-radius:10px; font-size:13px; color:#0f172a; }
+    .pill:hover { border-color:#cbd5e1; }
+    .btn-primary { display:inline-flex; align-items:center; gap:6px; background:#2563eb; color:#fff; font-weight:600; padding:9px 16px; border-radius:10px; font-size:14px; box-shadow: 0 1px 0 rgba(0,0,0,.04); }
+    .btn-primary:hover { background:#1d4ed8; }
+    .search-shell { display:flex; align-items:center; gap:10px; background:#fff; border:1px solid #e2e8f0; border-radius:14px; padding:14px 18px; }
+    .search-shell:focus-within { border-color:#94a3b8; box-shadow:0 0 0 4px rgba(148,163,184,.15); }
   </style>
 </head>
-<body class="bg-slate-50 text-slate-900 min-h-screen">
+<body class="bg-slate-50 text-slate-900 min-h-screen flex flex-col">
   <header class="border-b border-slate-200 bg-white">
-    <div class="max-w-6xl mx-auto px-4 py-4 flex items-center justify-between">
+    <div class="max-w-6xl mx-auto px-5 h-14 flex items-center justify-between gap-4">
       <a href="/" class="flex items-center gap-2">
-        <span class="text-2xl">🔌</span>
-        <span class="text-lg font-semibold tracking-tight">agent-tools<span class="text-slate-400">.cloud</span></span>
+        <svg viewBox="0 0 32 32" class="w-7 h-7" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M5 5 L18 5 L27 16 L18 27 L5 27 Z" fill="#2563eb"/>
+          <path d="M11 11 L21 21 M21 11 L11 21" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/>
+        </svg>
+        <span class="text-[15px] font-semibold tracking-tight">agent-tools<span class="text-slate-400">.cloud</span></span>
       </a>
-      <nav class="flex items-center gap-5 text-sm">
-        <a href="/" class="hover:text-blue-600">目录</a>
-        <a href="/categories" class="hover:text-blue-600">分类</a>
-        <a href="/submit" class="hover:text-blue-600">提交服务</a>
-        <a href="/about" class="hover:text-blue-600">关于</a>
-        <a href="/openapi.json" class="text-slate-500 hover:text-blue-600">API</a>
+      <div class="flex items-center gap-2">
+        <a href="/categories" class="pill hidden md:inline-flex">
+          <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg>
+          所有分类
+        </a>
+        <a href="/openapi.json" class="pill hidden md:inline-flex">
+          <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 21l-1-1-7-7 7-7 1-1M13 3l1 1 7 7-7 7-1 1"/></svg>
+          OpenAPI
+        </a>
+        <a href="https://github.com/JoursBleu/mcpserver" target="_blank" rel="noopener" class="pill" title="GitHub">
+          <svg class="w-4 h-4" viewBox="0 0 24 24" fill="currentColor"><path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.11.79-.25.79-.55v-1.92c-3.19.7-3.87-1.54-3.87-1.54-.52-1.33-1.27-1.68-1.27-1.68-1.04-.71.08-.7.08-.7 1.15.08 1.75 1.18 1.75 1.18 1.02 1.75 2.69 1.24 3.35.95.1-.74.4-1.24.72-1.53-2.55-.29-5.23-1.27-5.23-5.66 0-1.25.45-2.27 1.18-3.07-.12-.29-.51-1.46.11-3.04 0 0 .96-.31 3.15 1.17a10.96 10.96 0 0 1 5.74 0c2.18-1.48 3.14-1.17 3.14-1.17.63 1.58.23 2.75.11 3.04.74.8 1.18 1.82 1.18 3.07 0 4.4-2.68 5.37-5.24 5.65.41.36.78 1.06.78 2.14v3.17c0 .3.21.66.79.55 4.56-1.52 7.85-5.83 7.85-10.91C23.5 5.65 18.35.5 12 .5Z"/></svg>
+        </a>
+      </div>
+    </div>
+    <div class="max-w-6xl mx-auto px-5">
+      <nav class="flex items-center gap-7 text-sm text-slate-500">
+        {% set p = request.url.path %}
+        <a href="/" class="py-3 -mb-px {% if p == '/' %}tab-active{% else %}tab-link{% endif %}">Directory</a>
+        <a href="/categories" class="py-3 -mb-px {% if p == '/categories' %}tab-active{% else %}tab-link{% endif %}">Categories</a>
+        <a href="/submit" class="py-3 -mb-px {% if p == '/submit' %}tab-active{% else %}tab-link{% endif %}">Submit</a>
+        <a href="/about" class="py-3 -mb-px {% if p == '/about' %}tab-active{% else %}tab-link{% endif %}">About</a>
+        <a href="/openapi.json" class="py-3 -mb-px tab-link">API</a>
       </nav>
     </div>
   </header>
 
-  <main class="max-w-6xl mx-auto px-4 py-8">
+  <main class="flex-1 max-w-6xl w-full mx-auto px-5 py-10">
     {% block content %}{% endblock %}
   </main>
 
-  <footer class="max-w-6xl mx-auto px-4 py-10 text-sm text-slate-500">
-    <div class="border-t border-slate-200 pt-6 flex flex-wrap gap-4 justify-between">
+  <footer class="border-t border-slate-200 bg-white mt-12">
+    <div class="max-w-6xl mx-auto px-5 py-8 flex flex-wrap gap-4 justify-between text-sm text-slate-500">
       <div>
-        <div>agent-tools.cloud · x402 服务目录</div>
-        <div class="text-xs">Agent-friendly discovery · Open data</div>
+        <div class="font-medium text-slate-700">agent-tools.cloud</div>
+        <div class="text-xs mt-1">x402 service directory · agent-native crypto stack · open data, agent-friendly discovery</div>
       </div>
-      <div class="text-right space-x-3">
-        <a href="/.well-known/agent-tools.json" class="hover:text-blue-600">/.well-known/agent-tools.json</a>
+      <div class="text-right space-x-4">
+        <a href="/.well-known/agent-tools.json" class="hover:text-blue-600 mono">/.well-known/agent-tools.json</a>
         <a href="/openapi.json" class="hover:text-blue-600">OpenAPI</a>
+        <a href="https://github.com/JoursBleu/mcpserver" target="_blank" rel="noopener" class="hover:text-blue-600">GitHub</a>
       </div>
     </div>
   </footer>
