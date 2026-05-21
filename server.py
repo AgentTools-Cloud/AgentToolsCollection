@@ -212,12 +212,13 @@ a { color: #2c7be5; }
 
 <h2>Payment</h2>
 <table>
-<tr><td>Network</td><td><code>eip155:84532</code> (Base Sepolia)</td></tr>
-<tr><td>Asset</td><td>USDC <code>0x036CbD53842c5426634e7929541eC2318f3dCF7e</code></td></tr>
+<tr><td>Network</td><td><code>eip155:8453</code> (Base mainnet)</td></tr>
+<tr><td>Asset</td><td>USDC <code>0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913</code></td></tr>
 <tr><td>Pay to</td><td><code>0xC445aa2AA0FA68db67Cd22fc04867773941f9CdF</code></td></tr>
 <tr><td>Per call</td><td>$0.001 USDC (1000 atomic units)</td></tr>
+<tr><td>Facilitator</td><td><code>facilitator.fluxapay.xyz</code> (non-custodial, gas covered)</td></tr>
 </table>
-<p class="muted">Testnet during pilot — agents pay with Sepolia USDC (free from Circle faucet). Mainnet Base coming once we onboard a Coinbase CDP facilitator.</p>
+<p class="muted">Live on Base mainnet. Settlement via the FluxA x402 facilitator — funds flow payer → payee directly, the facilitator covers gas. No KYC, no signup, just sign EIP-3009 and go.</p>
 
 <h2>Quick start — REST + x402-fetch (Node)</h2>
 <pre>import { wrapFetchWithPayment } from "x402-fetch";
@@ -246,7 +247,7 @@ console.log(await r.json());</pre>
       "url": "https://agent-tools.cloud/mcp",
       "x402": {
         "privateKeyEnv": "PRIVATE_KEY",
-        "network": "eip155:84532"
+        "network": "eip155:8453"
       }
     }
   }
