@@ -337,6 +337,160 @@ async def chat_completions(request: Request) -> Any:
     return JSONResponse(content=r.json(), status_code=r.status_code)
 
 
+# --- OpenAPI customization for x402scan discovery ------------------------
+#
+# x402scan resolves payable services via /openapi.json. To be reliably
+# discovered & invocable, each paid operation needs:
+#   * x-payment-info with price (mode/currency/amount) + protocols (x402)
+#   * responses.402 declaration
+#   * requestBody schema (input contract)
+# We also publish top-level info.x-guidance so agents can self-route.
+# Spec: https://www.x402scan.com/discovery/spec
+
+from fastapi.openapi.utils import get_openapi  # noqa: E402
+
+
+def _build_openapi() -> dict[str, Any]:
+    if app.openapi_schema:
+        return app.openapi_schema
+
+    schema = get_openapi(
+        title="agent-tools.cloud — x402 + MCP relay for Qwen3.6-35B-A3B",
+        version="0.2.0",
+        description=(
+            "Pay-per-call inference API for Qwen/Qwen3.6-35B-A3B settled in "
+            "USDC on Base mainnet via the x402 protocol. Agent-native — "
+            "no signup, no API key, no human UI."
+        ),
+        routes=app.routes,
+    )
+
+    schema["info"]["x-guidance"] = (
+        "POST /v1/chat/completions is an OpenAI-compatible chat completions "
+        "endpoint gated by x402. Send a JSON body with 'model' "
+        "(Qwen/Qwen3.6-35B-A3B) and 'messages' (array of {role, content}). "
+        "First request returns HTTP 402 with paymentRequirements; resubmit "
+        "with an X-PAYMENT header (EIP-3009 USDC TransferWithAuthorization on "
+        "Base mainnet, chain 8453, asset "
+        "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913) to receive the model "
+        "response. Flat $0.001 USDC per call. The MCP streamable-http "
+        "transport at POST /mcp accepts the same payment and exposes a "
+        "'qwen36_chat' tool. Facilitator: facilitator.fluxapay.xyz "
+        "(non-custodial, gas covered). PayTo: "
+        "0xC445aa2AA0FA68db67Cd22fc04867773941f9CdF."
+    )
+
+    chat_input_schema = {
+        "type": "object",
+        "required": ["model", "messages"],
+        "properties": {
+            "model": {
+                "type": "string",
+                "enum": sorted(ALLOWED_MODELS),
+                "description": (
+                    "Model identifier. Currently only Qwen/Qwen3.6-35B-A3B."
+                ),
+            },
+            "messages": {
+                "type": "array",
+                "minItems": 1,
+                "description": "OpenAI-style chat messages.",
+                "items": {
+                    "type": "object",
+                    "required": ["role", "content"],
+                    "properties": {
+                        "role": {
+                            "type": "string",
+                            "enum": ["system", "user", "assistant", "tool"],
+                        },
+                        "content": {"type": "string"},
+                    },
+                },
+            },
+            "temperature": {"type": "number", "minimum": 0, "maximum": 2},
+            "top_p": {"type": "number", "minimum": 0, "maximum": 1},
+            "max_tokens": {"type": "integer", "minimum": 1},
+            "stream": {"type": "boolean", "default": False},
+        },
+    }
+
+    chat_output_schema = {
+        "type": "object",
+        "description": "OpenAI-compatible chat.completion response.",
+        "properties": {
+            "id": {"type": "string"},
+            "object": {"type": "string"},
+            "created": {"type": "integer"},
+            "model": {"type": "string"},
+            "choices": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "index": {"type": "integer"},
+                        "message": {
+                            "type": "object",
+                            "properties": {
+                                "role": {"type": "string"},
+                                "content": {"type": "string"},
+                            },
+                        },
+                        "finish_reason": {"type": "string"},
+                    },
+                },
+            },
+            "usage": {
+                "type": "object",
+                "properties": {
+                    "prompt_tokens": {"type": "integer"},
+                    "completion_tokens": {"type": "integer"},
+                    "total_tokens": {"type": "integer"},
+                },
+            },
+        },
+        "required": ["id", "object", "choices"],
+    }
+
+    chat_op = schema["paths"]["/v1/chat/completions"]["post"]
+    chat_op["summary"] = "Chat completions (Qwen3.6-35B-A3B, paid via x402)"
+    chat_op["description"] = (
+        "OpenAI-compatible chat completions. Gated by x402: first call "
+        "returns 402 with paymentRequirements, retry with X-PAYMENT header."
+    )
+    chat_op["tags"] = ["inference"]
+    chat_op["requestBody"] = {
+        "required": True,
+        "content": {"application/json": {"schema": chat_input_schema}},
+    }
+    chat_op["responses"] = {
+        "200": {
+            "description": "Successful inference response.",
+            "content": {"application/json": {"schema": chat_output_schema}},
+        },
+        "402": {
+            "description": (
+                "Payment Required. Body contains x402 paymentRequirements; "
+                "resubmit with X-PAYMENT header."
+            ),
+        },
+        "400": {"description": "Bad request (e.g. model not allowed)."},
+    }
+    chat_op["x-payment-info"] = {
+        "price": {
+            "mode": "fixed",
+            "currency": "USD",
+            "amount": f"{float(X402_PRICE_USD):.6f}",
+        },
+        "protocols": [{"x402": {}}],
+    }
+
+    app.openapi_schema = schema
+    return schema
+
+
+app.openapi = _build_openapi  # type: ignore[assignment]
+
+
 if __name__ == "__main__":
     import uvicorn
 
