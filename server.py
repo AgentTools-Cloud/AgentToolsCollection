@@ -122,17 +122,18 @@ async def _llm_short(
 # --- MCP layer ------------------------------------------------------------
 
 mcp_app = FastMCP("mcpserver", instructions=(
-    "Paid inference relay (x402 + USDC on Base). One tool: qwen36_chat. "
-    "Each tool call costs $" + X402_PRICE_USD + " USDC, settled on Base mainnet."
+    "Frontier 35B-A3B chat at $" + X402_PRICE_USD + " per call — the cheapest credible "
+    "inference endpoint on the x402 bazaar. One tool: qwen36_chat. Pay-per-call USDC on Base, "
+    "no signup, no API key, no rate limits per identity. Settles in one block."
 ))
 
 
 @mcp_app.tool(
     name="qwen36_chat",
     description=(
-        "Run a chat completion against Qwen/Qwen3.6-35B-A3B. "
-        "Each invocation costs $" + X402_PRICE_USD + " USDC on Base mainnet. "
-        "Returns the assistant text content."
+        "Frontier-grade chat completion against Qwen3.6-35B-A3B (open-weight MoE, 35B total / 3B active). "
+        "$" + X402_PRICE_USD + " USDC per call on Base — orders of magnitude cheaper than hosted Claude/GPT, "
+        "settled atomically per request with no monthly minimum. Returns assistant text."
     ),
 )
 async def qwen36_chat(
@@ -217,7 +218,7 @@ _routes = {
             price=f"${X402_PRICE_USD}", network=X402_NETWORK,
         )],
         mime_type="application/json",
-        description=f"Qwen3.6-35B-A3B inference (flat ${X402_PRICE_USD} / call)",
+        description=f"Qwen3.6-35B-A3B chat — frontier 35B MoE at flat ${X402_PRICE_USD} USDC / call. OpenAI wire format, no key, no signup.",
     ),
     # Whole MCP transport (initialize/tools-list/tools-call all share the
     # same POST endpoint). One payment buys one streamable-http roundtrip.
@@ -227,7 +228,7 @@ _routes = {
             price=f"${X402_PRICE_USD}", network=X402_NETWORK,
         )],
         mime_type="application/json",
-        description=f"MCP tool call against Qwen3.6-35B-A3B (${X402_PRICE_USD} / call)",
+        description=f"MCP streamable-http transport for Qwen3.6-35B-A3B — same model, agent-native protocol, ${X402_PRICE_USD} USDC / call.",
     ),
     # --- Vertical 1: token momentum signal -------------------------------
     "POST /v1/signal/token": RouteConfig(
@@ -236,7 +237,7 @@ _routes = {
             price=f"${X402_SIGNAL_PRICE_USD}", network=X402_NETWORK,
         )],
         mime_type="application/json",
-        description=f"Live token momentum signal (DexScreener + Qwen) — ${X402_SIGNAL_PRICE_USD} / call",
+        description=f"Live token momentum signal — buy/hold/sell + score, confidence and wash-trade penalty. DexScreener + Qwen, ${X402_SIGNAL_PRICE_USD} USDC / call.",
     ),
     # --- Vertical 2: on-chain analytics NL Q&A ---------------------------
     "POST /v1/onchain/ask": RouteConfig(
@@ -245,7 +246,7 @@ _routes = {
             price=f"${X402_ONCHAIN_PRICE_USD}", network=X402_NETWORK,
         )],
         mime_type="application/json",
-        description=f"On-chain analytics QA (Defillama + DexScreener + Qwen) — ${X402_ONCHAIN_PRICE_USD} / call",
+        description=f"On-chain Q&A — free-form questions about tokens, yields, stablecoins, TVL. Grounded in live Defillama+DexScreener data. ${X402_ONCHAIN_PRICE_USD} USDC / call.",
     ),
     # --- Vertical 3: DeFi action planner (advisory only, no signing) -----
     "POST /v1/defi/plan": RouteConfig(
@@ -254,7 +255,7 @@ _routes = {
             price=f"${X402_DEFI_PRICE_USD}", network=X402_NETWORK,
         )],
         mime_type="application/json",
-        description=f"DeFi action planner — lend/swap/stake comparison + Qwen risk review (${X402_DEFI_PRICE_USD} / call)",
+        description=f"DeFi action planner — best lend/swap/stake route by risk tolerance, with Qwen risk review. Advisory only, never signs. ${X402_DEFI_PRICE_USD} USDC / call.",
     ),
     # --- Pro tier: bulk signal (up to 10 tokens / call) ------------------
     "POST /v1/signal/bulk": RouteConfig(
@@ -263,7 +264,7 @@ _routes = {
             price=f"${X402_SIGNAL_BULK_PRICE_USD}", network=X402_NETWORK,
         )],
         mime_type="application/json",
-        description=f"Bulk token signal — up to 10 tokens / call (${X402_SIGNAL_BULK_PRICE_USD} / call)",
+        description=f"Bulk momentum scan — score up to 10 tokens in one shot, with portfolio rollup (top pick, buy/hold/sell counts). ${X402_SIGNAL_BULK_PRICE_USD} USDC / call.",
     ),
     # --- Pro tier: multi-source on-chain report --------------------------
     "POST /v1/onchain/report": RouteConfig(
@@ -272,7 +273,7 @@ _routes = {
             price=f"${X402_ONCHAIN_REPORT_PRICE_USD}", network=X402_NETWORK,
         )],
         mime_type="application/json",
-        description=f"Multi-source on-chain analyst report (${X402_ONCHAIN_REPORT_PRICE_USD} / call)",
+        description=f"Synthesised on-chain analyst report — token+yields+TVL+stables fused into a 5-10 sentence brief with key findings & risks. ${X402_ONCHAIN_REPORT_PRICE_USD} USDC / call.",
     ),
     # --- Pro tier: multi-leg DeFi portfolio plan -------------------------
     "POST /v1/defi/portfolio": RouteConfig(
@@ -281,7 +282,7 @@ _routes = {
             price=f"${X402_DEFI_PORTFOLIO_PRICE_USD}", network=X402_NETWORK,
         )],
         mime_type="application/json",
-        description=f"Multi-leg DeFi portfolio planner — lend/stake/swap allocation + Qwen review (${X402_DEFI_PORTFOLIO_PRICE_USD} / call)",
+        description=f"Multi-leg DeFi portfolio — allocates a USD budget across lend/stake/swap, returns blended APY + Qwen portfolio review. Advisory only, never signs. ${X402_DEFI_PORTFOLIO_PRICE_USD} USDC / call.",
     ),
 }
 
@@ -300,9 +301,9 @@ _HOMEPAGE_HTML = """<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>agent-tools.cloud — x402 + MCP relay for Qwen3.6-35B-A3B</title>
+<title>agent-tools.cloud — agent-native crypto stack on x402 (Qwen + signals + on-chain + DeFi)</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="description" content="Pay-per-call Qwen3.6-35B-A3B inference relay on Base mainnet via x402 (v2). $0.001 USDC / call. OpenAI-compatible REST and MCP streamable-http transports. No signup, no API key.">
+<meta name="description" content="Agent-native crypto stack on x402: Qwen3.6-35B-A3B chat at $0.001/call + token signals, on-chain Q&A and DeFi planner from $0.01. Eight pay-per-call endpoints, USDC on Base, no signup, no API key, no rate limits.">
 <link rel="alternate" type="application/json" title="x402 discovery" href="/.well-known/x402">
 <link rel="service" type="application/openapi+json" title="OpenAPI 3.1 spec" href="/openapi.json">
 <meta name="x402:discovery" content="/.well-known/x402">
@@ -327,24 +328,30 @@ a { color: #2c7be5; }
 <body>
 <h1>agent-tools.cloud</h1>
 <p>
-  <span class="tag">x402</span><span class="tag">MCP</span><span class="tag">Base mainnet</span>
-  Pay-per-call inference API for <b>Qwen/Qwen3.6-35B-A3B</b>, settled in USDC on Base via the
-  <a href="https://x402.org" target="_blank" rel="noopener">x402</a> protocol.
-  Agent-native — no signup, no human UI.
+  <span class="tag">x402</span><span class="tag">MCP</span><span class="tag">Base mainnet</span><span class="tag">USDC</span>
+  <b>Agent-native crypto stack on <a href="https://x402.org" target="_blank" rel="noopener">x402</a>.</b>
+  Frontier <b>Qwen3.6-35B-A3B</b> chat from <b>$0.001/call</b>, plus four data-grounded verticals —
+  token momentum signals, on-chain Q&amp;A, DeFi action planner and multi-leg portfolio.
+  Eight endpoints, one wallet, one chain. <b>No signup. No API key. No human UI.</b>
+  Settles atomically in USDC on Base, per call.
+</p>
+<p class="muted">
+  Cheapest credible price across all four categories on the x402 bazaar — built for agents that
+  iterate fast, batch wide and don't want to babysit a billing dashboard.
 </p>
 
 <h2>Endpoints</h2>
 <table>
 <tr><th>Path</th><th>Method</th><th>Price</th><th>Transport</th></tr>
-<tr><td><code>/v1/chat/completions</code></td><td>POST</td><td>$0.001</td><td>OpenAI-compatible REST</td></tr>
-<tr><td><code>/mcp</code></td><td>POST</td><td>$0.001</td><td>MCP streamable-http (tool: <code>qwen36_chat</code>)</td></tr>
-<tr><td><code>/v1/signal/token</code></td><td>POST</td><td>$0.01</td><td>token momentum signal (DexScreener + Qwen)</td></tr>
-<tr><td><code>/v1/onchain/ask</code></td><td>POST</td><td>$0.02</td><td>on-chain analytics NL Q&amp;A (Defillama + Qwen)</td></tr>
-<tr><td><code>/v1/defi/plan</code></td><td>POST</td><td>$0.05</td><td>DeFi action planner (lend/swap/stake, advisory)</td></tr>
-<tr><td colspan="4" style="padding-top:.8em;font-size:12px;color:#888"><b>Pro tier</b> — heavier work, higher value per call</td></tr>
-<tr><td><code>/v1/signal/bulk</code></td><td>POST</td><td>$0.05</td><td>bulk signal — up to 10 tokens / call</td></tr>
-<tr><td><code>/v1/onchain/report</code></td><td>POST</td><td>$0.20</td><td>multi-source on-chain analyst report</td></tr>
-<tr><td><code>/v1/defi/portfolio</code></td><td>POST</td><td>$0.50</td><td>multi-leg DeFi portfolio plan</td></tr>
+<tr><td><code>/v1/chat/completions</code></td><td>POST</td><td>$0.001</td><td>Frontier <b>Qwen3.6-35B-A3B</b> chat — OpenAI-compatible REST, drop-in for any SDK</td></tr>
+<tr><td><code>/mcp</code></td><td>POST</td><td>$0.001</td><td>Same model over <b>MCP</b> streamable-http (tool: <code>qwen36_chat</code>)</td></tr>
+<tr><td><code>/v1/signal/token</code></td><td>POST</td><td>$0.01</td><td>Token momentum — buy/hold/sell + score, wash-trade & pump penalties (live DexScreener + Qwen)</td></tr>
+<tr><td><code>/v1/onchain/ask</code></td><td>POST</td><td>$0.02</td><td>On-chain NL Q&amp;A — yields, stablecoins, TVL, tokens (grounded in live Defillama + DexScreener)</td></tr>
+<tr><td><code>/v1/defi/plan</code></td><td>POST</td><td>$0.05</td><td>DeFi planner — best lend/swap/stake by risk tolerance + Qwen risk review (advisory, never signs)</td></tr>
+<tr><td colspan="4" style="padding-top:.8em;font-size:12px;color:#888"><b>Pro tier</b> — wider scan, deeper synthesis, one call</td></tr>
+<tr><td><code>/v1/signal/bulk</code></td><td>POST</td><td>$0.05</td><td>Bulk momentum — score up to <b>10 tokens / call</b> with portfolio rollup & top pick</td></tr>
+<tr><td><code>/v1/onchain/report</code></td><td>POST</td><td>$0.20</td><td>Analyst report — token+yields+TVL+stables fused into a 5-10 sentence brief with key findings &amp; risks</td></tr>
+<tr><td><code>/v1/defi/portfolio</code></td><td>POST</td><td>$0.50</td><td>Multi-leg allocation — lend/stake/swap budget split with blended APY + Qwen portfolio review</td></tr>
 <tr><td><code>/v1/models</code></td><td>GET</td><td>free</td><td>list available models</td></tr>
 <tr><td><code>/healthz</code></td><td>GET</td><td>free</td><td>liveness probe</td></tr>
 <tr><td><code>/.well-known/x402</code></td><td>GET</td><td>free</td><td>service discovery (JSON)</td></tr>
@@ -355,7 +362,7 @@ a { color: #2c7be5; }
 <tr><td>Network</td><td><code>eip155:8453</code> (Base mainnet)</td></tr>
 <tr><td>Asset</td><td>USDC <code>0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913</code></td></tr>
 <tr><td>Pay to</td><td><code>0xC445aa2AA0FA68db67Cd22fc04867773941f9CdF</code></td></tr>
-<tr><td>Per call</td><td>$0.001 USDC (1000 atomic units)</td></tr>
+<tr><td>Per call</td><td>$0.001 – $0.50 USDC (see endpoints above; settled atomically per request)</td></tr>
 <tr><td>Facilitator</td><td><code>facilitator.fluxapay.xyz</code> (non-custodial, gas covered)</td></tr>
 </table>
 <p class="muted">Live on Base mainnet. Settlement via the FluxA x402 facilitator — funds flow payer → payee directly, the facilitator covers gas. No KYC, no signup, just sign EIP-3009 and go.</p>
@@ -415,13 +422,16 @@ async def well_known_x402(request: Request) -> dict[str, Any]:
         "relay.agent-tools.cloud" if relay else "agent-tools.cloud"
     )
     description = (
-        "Pay-per-call Qwen3.6-35B-A3B inference relay at flat $0.001 USDC / "
-        "call on Base mainnet via the x402 protocol (v2). Agent-native — "
-        "no signup, no API key."
+        "Agent-native crypto stack on x402: frontier Qwen3.6-35B-A3B chat from "
+        "$0.001/call plus four data-grounded verticals — token momentum signals, "
+        "on-chain Q&A, DeFi planner and multi-leg portfolio. Eight endpoints, USDC "
+        "on Base, no signup, no API key, no rate limits."
         if relay
-        else "Global x402 service directory (470+ endpoints) + pay-per-call "
-             "Qwen3.6-35B-A3B inference relay at flat $0.001 USDC / call on "
-             "Base (x402 v2)."
+        else "Two-in-one x402 service: (1) the largest open directory of x402 "
+             "endpoints (470+ services, free JSON API + agents.json manifest); "
+             "(2) agent-native paid stack — Qwen3.6-35B-A3B chat from $0.001/call "
+             "plus token signals, on-chain Q&A and DeFi planner from $0.01. "
+             "USDC on Base, no signup, no API key."
     )
     return {
         "name": host,
@@ -583,15 +593,16 @@ def _build_openapi(*, relay_only: bool = False) -> dict[str, Any]:
         return _SCHEMA_CACHE[cache_key]
 
     if relay_only:
-        title = "relay.agent-tools.cloud — Qwen3.6-35B-A3B paid relay (x402)"
+        title = "relay.agent-tools.cloud — agent-native crypto stack on x402"
         description = (
-            "Pay-per-call inference relay for Qwen/Qwen3.6-35B-A3B settled in "
-            "USDC on Base mainnet via the x402 protocol (v2) at a flat "
-            "$0.001 / call. Agent-native — no signup, no API key, no human "
-            "UI. Two equivalent transports: OpenAI-compatible REST at "
-            "POST /v1/chat/completions and MCP streamable-http at POST /mcp "
-            "(tool name: qwen36_chat). Both routes are gated by the same "
-            "x402 payment middleware and share the same per-call price."
+            "Agent-native crypto stack on x402, settled in USDC on Base mainnet (chain 8453). "
+            "Eight pay-per-call endpoints: (1) frontier Qwen3.6-35B-A3B chat at $0.001/call over "
+            "OpenAI-compatible REST (POST /v1/chat/completions) and MCP streamable-http (POST /mcp, "
+            "tool qwen36_chat); (2) four data-grounded verticals — token momentum signal "
+            "($0.01) / bulk scan ($0.05), on-chain Q&A ($0.02) / analyst report ($0.20), "
+            "DeFi action planner ($0.05) / multi-leg portfolio ($0.50). All routes share the same "
+            "x402 v2 middleware and pay-to address, so a single wallet pays for the entire stack. "
+            "No signup, no API key, no human UI, no rate limits per identity — built for autonomous agents."
         )
         guidance = (
             "POST /v1/chat/completions is an OpenAI-compatible chat "
@@ -608,20 +619,18 @@ def _build_openapi(*, relay_only: bool = False) -> dict[str, Any]:
             "0xC445aa2AA0FA68db67Cd22fc04867773941f9CdF."
         )
     else:
-        title = "agent-tools.cloud — x402 directory + Qwen3.6-35B-A3B relay"
+        title = "agent-tools.cloud — x402 directory + agent-native crypto stack"
         description = (
-            "Hybrid x402 service for autonomous agents. (1) Public, "
-            "agent-readable directory of 470+ x402 endpoints across the "
-            "ecosystem — browsable at https://agent-tools.cloud, with a "
-            "JSON API at /api/v1/search, /api/v1/services/{slug}, "
-            "/api/v1/categories, /api/v1/stats and an agents.json manifest "
-            "at /.well-known/agent-tools.json (all free, no payment "
-            "required). (2) Pay-per-call inference relay for "
-            "Qwen/Qwen3.6-35B-A3B settled in USDC on Base mainnet via the "
-            "x402 protocol at flat $0.001/call — no signup, no API key, "
-            "no human UI. The paid relay is also reachable on its own "
-            "hostname https://relay.agent-tools.cloud for clients that "
-            "want a relay-only entry."
+            "Two-in-one x402 service for autonomous agents. "
+            "(1) The largest open directory of x402 endpoints in the ecosystem — 470+ services "
+            "across inference, payments, data and DeFi, browsable at https://agent-tools.cloud "
+            "with a free JSON API (/api/v1/search, /api/v1/services/{slug}, /api/v1/categories, "
+            "/api/v1/stats) and an agents.json manifest at /.well-known/agent-tools.json. "
+            "(2) An agent-native paid stack on the same host: frontier Qwen3.6-35B-A3B chat at "
+            "$0.001/call (OpenAI-REST + MCP) plus four data-grounded crypto verticals — token "
+            "momentum signal/bulk scan, on-chain Q&A/analyst report, DeFi planner/portfolio — "
+            "from $0.01/call. USDC on Base, no signup, no API key, no rate limits per identity. "
+            "The paid stack is also reachable relay-only at https://relay.agent-tools.cloud."
         )
         guidance = (
             "Two capabilities on one host. (A) Directory API (free, no "
@@ -732,10 +741,13 @@ def _build_openapi(*, relay_only: bool = False) -> dict[str, Any]:
     }
 
     chat_op = schema["paths"]["/v1/chat/completions"]["post"]
-    chat_op["summary"] = "Chat completions (Qwen3.6-35B-A3B, paid via x402)"
+    chat_op["summary"] = "Frontier Qwen3.6-35B-A3B chat at $0.001/call (x402)"
     chat_op["description"] = (
-        "OpenAI-compatible chat completions. Gated by x402: first call "
-        "returns 402 with paymentRequirements, retry with X-PAYMENT header."
+        "OpenAI-compatible chat completions against Qwen3.6-35B-A3B — open-weight 35B MoE "
+        "(3B active), strong reasoning, drop-in for any OpenAI SDK. $0.001 USDC per call, "
+        "orders of magnitude cheaper than hosted Claude/GPT, with no monthly minimum and "
+        "no per-identity rate limit. First call returns 402 with paymentRequirements; "
+        "resubmit with X-PAYMENT header to get the completion."
     )
     chat_op["tags"] = ["inference"]
     chat_op["requestBody"] = {
@@ -781,11 +793,12 @@ def _build_openapi(*, relay_only: bool = False) -> dict[str, Any]:
         (
             "/v1/signal/token",
             X402_SIGNAL_PRICE_USD,
-            "Token momentum signal (paid via x402)",
+            "Token momentum signal — buy/hold/sell + score at $0.01/call",
             (
-                "Returns a directional momentum signal (buy/hold/sell) plus "
-                "score, confidence and a market snapshot for any token. "
-                "Free data from DexScreener; optional Qwen commentary."
+                "Live directional signal (buy/hold/sell) with score and confidence for any "
+                "token across 100+ chains. Penalises wash trading, pump-and-dump spikes and "
+                "low-TVL traps so the score reflects real momentum. Grounded in DexScreener "
+                "(price, volume, txns, liquidity) + a one-sentence Qwen rationale."
             ),
             ["signal"],
             signals_vertical.INPUT_SCHEMA,
@@ -794,11 +807,12 @@ def _build_openapi(*, relay_only: bool = False) -> dict[str, Any]:
         (
             "/v1/onchain/ask",
             X402_ONCHAIN_PRICE_USD,
-            "On-chain analytics natural-language Q&A (paid via x402)",
+            "On-chain NL Q&A — tokens, yields, stables, TVL at $0.02/call",
             (
-                "Answers free-form on-chain questions about tokens, yields, "
-                "stablecoins and protocol TVL. Free data from DexScreener "
-                "and Defillama; Qwen-grounded answer plus structured fields."
+                "Ask any free-form on-chain question and get a Qwen answer grounded strictly "
+                "in live Defillama + DexScreener data, plus structured fields the agent can "
+                "consume directly (data snapshot, sources, as_of_ts, confidence). No hallucinated "
+                "numbers — if the data isn't there, the response says so."
             ),
             ["onchain-analytics"],
             onchain_vertical.INPUT_SCHEMA,
@@ -807,12 +821,13 @@ def _build_openapi(*, relay_only: bool = False) -> dict[str, Any]:
         (
             "/v1/defi/plan",
             X402_DEFI_PRICE_USD,
-            "DeFi action planner — lend/swap/stake (paid via x402)",
+            "DeFi action planner — best lend/swap/stake at $0.05/call",
             (
-                "Compares lending pools, swap routes or stake/restake "
-                "candidates across chains using free Defillama + "
-                "DexScreener data, filters by risk tolerance and returns a "
-                "Qwen risk review. Advisory only — never signs."
+                "Picks the best lending pool, swap route or stake/restake candidate across "
+                "chains and filters by risk tolerance (conservative/balanced/aggressive). "
+                "Live Defillama + DexScreener data, plus a Qwen risk review flagging APY traps, "
+                "micro-TVL, impermanent-loss and unaudited-protocol signals. Advisory only — "
+                "never holds keys, never signs."
             ),
             ["defi-planner"],
             defi_vertical.INPUT_SCHEMA,
@@ -821,11 +836,12 @@ def _build_openapi(*, relay_only: bool = False) -> dict[str, Any]:
         (
             "/v1/signal/bulk",
             X402_SIGNAL_BULK_PRICE_USD,
-            "Bulk token momentum signal — up to 10 tokens (paid via x402, pro tier)",
+            "Bulk momentum scan — up to 10 tokens / call at $0.05 (pro)",
             (
-                "Scores up to 10 tokens in a single call using the same "
-                "DexScreener-derived heuristic as /v1/signal/token plus a "
-                "rollup summary (buy/hold/sell counts, top pick)."
+                "Score a whole watchlist in one payment. Up to 10 tokens per call with the "
+                "same wash-trade-aware heuristic as /v1/signal/token, plus a portfolio rollup "
+                "(buy/hold/sell counts, top pick, top score). Half the cost of 10 individual "
+                "signals — built for agents that rotate fast."
             ),
             ["signal", "pro"],
             signals_vertical.INPUT_SCHEMA_BULK,
@@ -834,12 +850,12 @@ def _build_openapi(*, relay_only: bool = False) -> dict[str, Any]:
         (
             "/v1/onchain/report",
             X402_ONCHAIN_REPORT_PRICE_USD,
-            "Multi-source on-chain analyst report (paid via x402, pro tier)",
+            "On-chain analyst report — 5-10 sentence brief at $0.20 (pro)",
             (
-                "Pulls token, yield, TVL and stablecoin snapshots in "
-                "parallel and asks Qwen for a synthesised 5-10 sentence "
-                "report with key findings + risks. Grounded strictly in "
-                "the fetched data."
+                "An analyst brief in one call. Pulls token, yield, TVL and stablecoin snapshots "
+                "in parallel and asks Qwen for a 5-10 sentence synthesis with explicit "
+                "key_findings[] and risks[]. Strictly grounded in the fetched data — no model "
+                "hallucinated numbers, full data_snapshots + sources returned for audit."
             ),
             ["onchain-analytics", "pro"],
             onchain_vertical.INPUT_SCHEMA_REPORT,
@@ -848,12 +864,13 @@ def _build_openapi(*, relay_only: bool = False) -> dict[str, Any]:
         (
             "/v1/defi/portfolio",
             X402_DEFI_PORTFOLIO_PRICE_USD,
-            "Multi-leg DeFi portfolio planner (paid via x402, pro tier)",
+            "Multi-leg DeFi portfolio — blended APY at $0.50/call (pro)",
             (
-                "Allocates a USD budget across lend / stake / swap legs "
-                "according to an explicit mix and risk tolerance, ranks "
-                "candidates per leg, returns blended APY and a Qwen "
-                "portfolio risk review. Advisory only — never signs."
+                "Allocates a USD budget across lend / stake / swap legs according to an "
+                "explicit mix and risk tolerance (conservative/balanced/aggressive), ranks "
+                "the best candidate per leg, returns blended portfolio APY and a single Qwen "
+                "portfolio risk review covering chain concentration, IL exposure and audit "
+                "signals. Advisory only — never holds keys, never signs."
             ),
             ["defi-planner", "pro"],
             defi_vertical.INPUT_SCHEMA_PORTFOLIO,
