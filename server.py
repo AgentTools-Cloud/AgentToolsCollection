@@ -19,7 +19,7 @@ Flow:
        │  ← retry with PAYMENT-SIGNATURE header (EIP-3009 USDC on Base)
        │  verify + settle via facilitator
        ▼
-    upstream gateway (127.0.0.1:8080) -> W7900D vLLM (Qwen3.6-35B-A3B)
+    upstream OpenAI-compatible inference (Qwen3.6-35B-A3B)
 """
 
 from __future__ import annotations
@@ -86,7 +86,7 @@ mcp_app = FastMCP("mcpserver", instructions=(
 @mcp_app.tool(
     name="qwen36_chat",
     description=(
-        "Run a chat completion against Qwen/Qwen3.6-35B-A3B (AWQ on W7900D). "
+        "Run a chat completion against Qwen/Qwen3.6-35B-A3B. "
         "Each invocation costs $" + X402_PRICE_USD + " USDC on Base mainnet. "
         "Returns the assistant text content."
     ),
@@ -255,7 +255,7 @@ console.log(await r.json());</pre>
 <h2>Source</h2>
 <p>
   <a href="https://github.com/JoursBleu/mcpserver" target="_blank" rel="noopener">github.com/JoursBleu/mcpserver</a>
-  &middot; upstream inference: W7900D vLLM
+
 </p>
 </body>
 </html>
