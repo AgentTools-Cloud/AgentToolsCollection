@@ -19,7 +19,7 @@ router = APIRouter()
 
 
 def _conn():
-    return db.connect(read_only=False)
+    return db.connect(read_only=True)
 
 
 @router.get("/", response_class=HTMLResponse, include_in_schema=False)
