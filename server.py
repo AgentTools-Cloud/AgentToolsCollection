@@ -364,23 +364,36 @@ def _build_openapi() -> dict[str, Any]:
         return app.openapi_schema
 
     schema = get_openapi(
-        title="agent-tools.cloud — x402 + MCP relay for Qwen3.6-35B-A3B",
-        version="0.2.0",
+        title="agent-tools.cloud — x402 directory + Qwen3.6-35B-A3B relay",
+        version="0.3.0",
         description=(
-            "Pay-per-call inference API for Qwen/Qwen3.6-35B-A3B settled in "
-            "USDC on Base mainnet via the x402 protocol. Agent-native — "
-            "no signup, no API key, no human UI."
+            "Hybrid x402 service for autonomous agents. (1) Public, "
+            "agent-readable directory of 470+ x402 endpoints across the "
+            "ecosystem — browsable at https://agent-tools.cloud, with a "
+            "JSON API at /api/v1/search, /api/v1/services/{slug}, "
+            "/api/v1/categories, /api/v1/stats and an agents.json manifest "
+            "at /.well-known/agent-tools.json (all free, no payment "
+            "required). (2) Pay-per-call inference relay for "
+            "Qwen/Qwen3.6-35B-A3B settled in USDC on Base mainnet via the "
+            "x402 protocol at flat $0.001/call — no signup, no API key, "
+            "no human UI."
         ),
         routes=app.routes,
     )
 
     schema["info"]["x-guidance"] = (
-        "POST /v1/chat/completions is an OpenAI-compatible chat completions "
+        "Two capabilities on one host. (A) Directory API (free, no x402 "
+        "challenge): GET /api/v1/search?q=&category=&chain= returns "
+        "indexed x402 services; GET /api/v1/services/{slug} returns a "
+        "single service; GET /api/v1/categories and /api/v1/stats expose "
+        "facets; GET /.well-known/agent-tools.json is the discoverable "
+        "agents.json manifest. (B) Paid inference relay: POST "
+        "/v1/chat/completions is an OpenAI-compatible chat completions "
         "endpoint gated by x402. Send a JSON body with 'model' "
         "(Qwen/Qwen3.6-35B-A3B) and 'messages' (array of {role, content}). "
         "First request returns HTTP 402 with paymentRequirements; resubmit "
-        "with an X-PAYMENT header (EIP-3009 USDC TransferWithAuthorization on "
-        "Base mainnet, chain 8453, asset "
+        "with an X-PAYMENT header (EIP-3009 USDC TransferWithAuthorization "
+        "on Base mainnet, chain 8453, asset "
         "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913) to receive the model "
         "response. Flat $0.001 USDC per call. The MCP streamable-http "
         "transport at POST /mcp accepts the same payment and exposes a "
