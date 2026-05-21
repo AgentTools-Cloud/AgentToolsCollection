@@ -483,6 +483,18 @@ def _build_openapi() -> dict[str, Any]:
         },
         "protocols": [{"x402": {}}],
     }
+    # agentcash/discovery's "bazaar" validator wants input/output schemas
+    # mirrored under x-bazaar.schema as well (in addition to OpenAPI standard
+    # requestBody / responses). Without this, registration emits
+    # SCHEMA_INPUT_MISSING / SCHEMA_OUTPUT_MISSING errors.
+    chat_op["x-bazaar"] = {
+        "schema": {
+            "properties": {
+                "input": chat_input_schema,
+                "output": chat_output_schema,
+            },
+        },
+    }
 
     app.openapi_schema = schema
     return schema
