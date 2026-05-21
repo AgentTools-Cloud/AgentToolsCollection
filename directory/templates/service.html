@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+{% block title %}{{ svc.name_zh or svc.name }} — agent-tools.cloud{% endblock %}
+{% block desc %}{{ (svc.description_zh or svc.description or svc.name)|truncate(140) }}{% endblock %}
+{% block content %}
+<a href="/" class="text-sm text-slate-500 hover:text-blue-600">← 返回目录</a>
+
+<header class="mt-3 mb-6 flex items-start justify-between gap-4">
+  <div>
+    <h1 class="text-3xl font-semibold tracking-tight">{{ svc.name_zh or svc.name }}</h1>
+    {% if svc.name_zh and svc.name != svc.name_zh %}
+      <div class="text-slate-500 text-sm mt-1">{{ svc.name }}</div>
+    {% endif %}
+    <a href="{{ svc.url }}" target="_blank" rel="noopener" class="text-blue-600 hover:underline text-sm break-all">{{ svc.url }}</a>
+  </div>
+  <div>
+    {% if svc.health == 'ok' %}
+      <span class="badge bg-green-100 text-green-700">正常</span>
+    {% elif svc.health == 'degraded' %}
+      <span class="badge bg-yellow-100 text-yellow-700">异常</span>
+    {% elif svc.health == 'down' %}
+      <span class="badge bg-red-100 text-red-700">离线</span>
+    {% else %}
+      <span class="badge bg-slate-100 text-slate-500">未知</span>
+    {% endif %}
+  </div>
+</header>
+
+{% if svc.description_zh or svc.description %}
+<section class="bg-white border border-slate-200 rounded-lg p-5 mb-6">
+  <p class="text-slate-800 whitespace-pre-line">{{ svc.description_zh or svc.description }}</p>
+</section>
+{% endif %}
+
+<section class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+  <div class="bg-white border border-slate-200 rounded-lg p-4">
+    <div class="text-xs text-slate-500 mb-1">分类</div>
+    <div class="font-medium">{{ svc.category or "—" }}</div>
+  </div>
+  <div class="bg-white border border-slate-200 rounded-lg p-4">
+    <div class="text-xs text-slate-500 mb-1">支持的链</div>
+    <div class="font-medium">{{ (svc.chains or [])|join(", ") or "—" }}</div>
+  </div>
+  <div class="bg-white border border-slate-200 rounded-lg p-4">
+    <div class="text-xs text-slate-500 mb-1">单价</div>
+    <div class="font-medium">
+      {% if svc.price_min is not none %}
+        {% if svc.price_max and svc.price_max != svc.price_min %}
+          ${{ "%.4f"|format(svc.price_min) }}–${{ "%.4f"|format(svc.price_max) }} {{ svc.currency or "USDC" }}
+        {% else %}
+          ${{ "%.4f"|format(svc.price_min) }} {{ svc.currency or "USDC" }} / call
+        {% endif %}
+      {% else %}—{% endif %}
+    </div>
+  </div>
+</section>
+
+<section class="bg-white border border-slate-200 rounded-lg p-5 mb-6">
+  <h2 class="text-base font-semibold mb-3">调用方式</h2>
+  <div class="space-y-4">
+    <div>
+      <div class="text-xs text-slate-500 mb-1">curl(x402-fetch / x402-axios 也支持自动处理 402)</div>
+      <pre class="bg-slate-900 text-slate-100 text-xs p-3 rounded overflow-x-auto"><code>curl -X POST {{ svc.url }}</code></pre>
+    </div>
+    {% if svc.mcp_url %}
+    <div>
+      <div class="text-xs text-slate-500 mb-1">MCP endpoint</div>
+      <pre class="bg-slate-900 text-slate-100 text-xs p-3 rounded overflow-x-auto"><code>{{ svc.mcp_url }}</code></pre>
+    </div>
+    {% endif %}
+    {% if svc.openapi_url %}
+    <div>
+      <div class="text-xs text-slate-500 mb-1">OpenAPI</div>
+      <a href="{{ svc.openapi_url }}" target="_blank" rel="noopener" class="text-blue-600 hover:underline text-sm break-all">{{ svc.openapi_url }}</a>
+    </div>
+    {% endif %}
+    {% if svc.well_known_url %}
+    <div>
+      <div class="text-xs text-slate-500 mb-1">/.well-known/x402.json</div>
+      <a href="{{ svc.well_known_url }}" target="_blank" rel="noopener" class="text-blue-600 hover:underline text-sm break-all">{{ svc.well_known_url }}</a>
+    </div>
+    {% endif %}
+  </div>
+</section>
+
+<section class="text-xs text-slate-500">
+  数据来源:<span class="font-medium">{{ svc.source }}</span>
+</section>
+{% endblock %}

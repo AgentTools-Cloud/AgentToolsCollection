@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}分类 — agent-tools.cloud{% endblock %}
+{% block content %}
+<h1 class="text-2xl font-semibold mb-4">分类</h1>
+<p class="text-slate-600 mb-6">共 {{ stats.total }} 条服务,按分类聚合。</p>
+<ul class="grid grid-cols-2 md:grid-cols-3 gap-3">
+  {% for c in categories %}
+  <li>
+    <a href="/?category={{ c.category }}"
+       class="block bg-white border border-slate-200 rounded-lg p-4 hover:border-blue-400">
+      <div class="font-medium">{{ c.category }}</div>
+      <div class="text-sm text-slate-500">{{ c.count }} 个服务</div>
+    </a>
+  </li>
+  {% endfor %}
+</ul>
+{% endblock %}

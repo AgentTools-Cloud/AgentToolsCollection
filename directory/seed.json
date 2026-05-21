@@ -1,0 +1,49 @@
+[
+  {
+    "slug": "agent-tools-cloud-relay",
+    "name": "agent-tools.cloud Qwen3.6 Relay",
+    "name_zh": "agent-tools.cloud Qwen3.6 中转",
+    "url": "https://agent-tools.cloud/v1/chat/completions",
+    "description": "Pay-per-call Qwen3.6-35B-A3B inference via x402 on Base. OpenAI-compatible.",
+    "description_zh": "Qwen3.6-35B-A3B 推理 API,OpenAI 兼容,$0.001/次 USDC on Base 自动结算。",
+    "category": "ai-inference",
+    "chains": ["base"],
+    "price_min": 0.001,
+    "price_max": 0.001,
+    "facilitator": "facilitator.fluxapay.xyz",
+    "openapi_url": "https://agent-tools.cloud/openapi.json",
+    "mcp_url": "https://agent-tools.cloud/mcp",
+    "source_id": "agent-tools-cloud-self",
+    "tags": ["llm", "qwen", "chinese-llm"],
+    "region": "global",
+    "health": "ok"
+  },
+  {
+    "slug": "weather-hugen-tokyo",
+    "name": "weather.hugen.tokyo",
+    "name_zh": "Hugen 天气 API",
+    "url": "https://weather.hugen.tokyo/",
+    "description": "Per-request weather data paid via x402.",
+    "description_zh": "按次付费的天气数据 API,x402 协议。",
+    "category": "weather",
+    "chains": ["base"],
+    "price_min": 0.01,
+    "price_max": 0.01,
+    "source_id": "weather-hugen-tokyo",
+    "tags": ["weather", "data"],
+    "region": "apac"
+  },
+  {
+    "slug": "x402-rs-facilitator",
+    "name": "x402-rs facilitator",
+    "name_zh": "x402-rs 开源 facilitator",
+    "url": "https://github.com/x402-rs/x402-rs",
+    "description": "Open-source Rust facilitator for x402 with multi-chain support.",
+    "description_zh": "Rust 写的开源 x402 facilitator,多链支持,可自托管。",
+    "category": "facilitator",
+    "chains": ["base", "polygon", "arbitrum"],
+    "source_id": "x402-rs/x402-rs",
+    "tags": ["facilitator", "open-source"],
+    "region": "global"
+  }
+]

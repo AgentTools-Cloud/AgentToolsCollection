@@ -41,6 +41,9 @@ from x402.http.types import RouteConfig
 from x402.mechanisms.evm.exact import ExactEvmServerScheme
 from x402.server import x402ResourceServer
 
+from directory import db as directory_db
+from directory.routes import router as directory_router
+
 load_dotenv()
 
 # --- config ---------------------------------------------------------------
@@ -114,6 +117,12 @@ async def qwen36_chat(
 
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Ensure the directory site DB exists. Safe to run repeatedly.
+    try:
+        directory_db.init_db()
+    except Exception:
+        import logging
+        logging.getLogger("mcpserver").exception("directory db init failed")
     global _http
     _http = httpx.AsyncClient(
         base_url=UPSTREAM_BASE_URL,
@@ -263,8 +272,8 @@ console.log(await r.json());</pre>
 """
 
 
-@app.get("/", response_class=HTMLResponse)
-async def homepage() -> str:
+@app.get("/relay", response_class=HTMLResponse)
+async def relay_page() -> str:
     return _HOMEPAGE_HTML
 
 
@@ -499,6 +508,8 @@ def _build_openapi() -> dict[str, Any]:
     app.openapi_schema = schema
     return schema
 
+
+app.include_router(directory_router)
 
 app.openapi = _build_openapi  # type: ignore[assignment]
 

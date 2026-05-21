@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="mb-8">
+  <h1 class="text-3xl font-semibold tracking-tight mb-2">x402 服务目录</h1>
+  <p class="text-slate-600 max-w-2xl">
+    收录全网公开的 x402 付费 API、MCP 服务与 Agent 工具。共 <span class="font-semibold text-slate-900">{{ stats.total }}</span> 条;
+    其中 <span class="text-green-600 font-semibold">{{ stats.healthy }}</span> 条状态正常。
+    数据来自 awesome-x402、CDP Bazaar、x402scan 与人工录入,每 6 小时更新一次。
+  </p>
+</section>
+
+<form id="filter-form"
+      hx-get="/_partials/services"
+      hx-trigger="change from:select, input delay:300ms from:input[name=q], submit"
+      hx-target="#service-grid"
+      hx-swap="innerHTML"
+      hx-push-url="true"
+      class="bg-white border border-slate-200 rounded-lg p-4 mb-6 grid grid-cols-1 md:grid-cols-5 gap-3">
+  <input name="q" value="{{ q }}" placeholder="搜索:名称 / 描述 / 标签"
+         class="md:col-span-2 px-3 py-2 border border-slate-300 rounded focus:outline-none focus:border-blue-500">
+  <select name="category" class="px-3 py-2 border border-slate-300 rounded">
+    <option value="">所有分类</option>
+    {% for c in categories %}
+      <option value="{{ c.category }}" {% if c.category == active_category %}selected{% endif %}>{{ c.category }} ({{ c.count }})</option>
+    {% endfor %}
+  </select>
+  <select name="chain" class="px-3 py-2 border border-slate-300 rounded">
+    <option value="">所有链</option>
+    {% for chain in ["base","solana","arbitrum","polygon","ethereum"] %}
+      <option value="{{ chain }}" {% if chain == active_chain %}selected{% endif %}>{{ chain }}</option>
+    {% endfor %}
+  </select>
+  <select name="health" class="px-3 py-2 border border-slate-300 rounded">
+    <option value="">所有状态</option>
+    <option value="ok" {% if active_health == 'ok' %}selected{% endif %}>正常</option>
+    <option value="degraded" {% if active_health == 'degraded' %}selected{% endif %}>异常</option>
+    <option value="down" {% if active_health == 'down' %}selected{% endif %}>离线</option>
+    <option value="unknown" {% if active_health == 'unknown' %}selected{% endif %}>未知</option>
+  </select>
+</form>
+
+<div id="service-grid">
+  {% include "_service_grid.html" %}
+</div>
+{% endblock %}

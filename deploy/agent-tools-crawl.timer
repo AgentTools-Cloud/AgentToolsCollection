@@ -1,0 +1,11 @@
+[Unit]
+Description=agent-tools directory crawler (every 6h)
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=6h
+Persistent=true
+Unit=agent-tools-crawl.service
+
+[Install]
+WantedBy=timers.target
