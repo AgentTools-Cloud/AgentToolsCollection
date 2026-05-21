@@ -61,6 +61,13 @@ ALLOWED_MODELS = {
 }
 DEFAULT_MODEL = next(iter(ALLOWED_MODELS))
 
+# Per-call price for the new verticals. Each is gated independently by the
+# x402 middleware so an agent only pays for the endpoint it actually
+# invokes; see `_routes` below.
+X402_SIGNAL_PRICE_USD = os.getenv("X402_SIGNAL_PRICE_USD", "0.0005")
+X402_ONCHAIN_PRICE_USD = os.getenv("X402_ONCHAIN_PRICE_USD", "0.005")
+X402_DEFI_PRICE_USD = os.getenv("X402_DEFI_PRICE_USD", "0.05")
+
 # --- upstream HTTP client -------------------------------------------------
 
 _http: httpx.AsyncClient | None = None
@@ -76,6 +83,35 @@ async def _upstream_chat(body: dict[str, Any]) -> dict[str, Any]:
     r = await _client().post("/v1/chat/completions", json=body)
     r.raise_for_status()
     return r.json()
+
+
+async def _llm_short(
+    prompt: str,
+    *,
+    max_tokens: int = 256,
+    temperature: float = 0.4,
+) -> str:
+    """Vertical-internal one-shot Qwen call against the Tianshu upstream.
+
+    NEVER re-enters /v1/chat/completions; that route is itself gated by
+    x402 and would double-charge the agent on every vertical request.
+    Qwen3.6 thinking models may put final text under message.reasoning,
+    so fold both content+reasoning into a single string.
+    """
+    body = {
+        "model": DEFAULT_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+    }
+    result = await _upstream_chat(body)
+    choices = result.get("choices") or []
+    if not choices:
+        return ""
+    msg = choices[0].get("message") or {}
+    content = msg.get("content") or ""
+    reasoning = msg.get("reasoning") or ""
+    return (content or reasoning).strip()
 
 
 # --- MCP layer ------------------------------------------------------------
@@ -188,6 +224,33 @@ _routes = {
         mime_type="application/json",
         description=f"MCP tool call against Qwen3.6-35B-A3B (${X402_PRICE_USD} / call)",
     ),
+    # --- Vertical 1: token momentum signal -------------------------------
+    "POST /v1/signal/token": RouteConfig(
+        accepts=[PaymentOption(
+            scheme="exact", pay_to=X402_PAY_TO,
+            price=f"${X402_SIGNAL_PRICE_USD}", network=X402_NETWORK,
+        )],
+        mime_type="application/json",
+        description=f"Live token momentum signal (DexScreener + Qwen) — ${X402_SIGNAL_PRICE_USD} / call",
+    ),
+    # --- Vertical 2: on-chain analytics NL Q&A ---------------------------
+    "POST /v1/onchain/ask": RouteConfig(
+        accepts=[PaymentOption(
+            scheme="exact", pay_to=X402_PAY_TO,
+            price=f"${X402_ONCHAIN_PRICE_USD}", network=X402_NETWORK,
+        )],
+        mime_type="application/json",
+        description=f"On-chain analytics QA (Defillama + DexScreener + Qwen) — ${X402_ONCHAIN_PRICE_USD} / call",
+    ),
+    # --- Vertical 3: DeFi action planner (advisory only, no signing) -----
+    "POST /v1/defi/plan": RouteConfig(
+        accepts=[PaymentOption(
+            scheme="exact", pay_to=X402_PAY_TO,
+            price=f"${X402_DEFI_PRICE_USD}", network=X402_NETWORK,
+        )],
+        mime_type="application/json",
+        description=f"DeFi action planner — lend/swap/stake comparison + Qwen risk review (${X402_DEFI_PRICE_USD} / call)",
+    ),
 }
 
 app.add_middleware(PaymentMiddlewareASGI, routes=_routes, server=_x402_server)
@@ -243,6 +306,9 @@ a { color: #2c7be5; }
 <tr><th>Path</th><th>Method</th><th>Price</th><th>Transport</th></tr>
 <tr><td><code>/v1/chat/completions</code></td><td>POST</td><td>$0.001</td><td>OpenAI-compatible REST</td></tr>
 <tr><td><code>/mcp</code></td><td>POST</td><td>$0.001</td><td>MCP streamable-http (tool: <code>qwen36_chat</code>)</td></tr>
+<tr><td><code>/v1/signal/token</code></td><td>POST</td><td>$0.0005</td><td>token momentum signal (DexScreener + Qwen)</td></tr>
+<tr><td><code>/v1/onchain/ask</code></td><td>POST</td><td>$0.005</td><td>on-chain analytics NL Q&amp;A (Defillama + Qwen)</td></tr>
+<tr><td><code>/v1/defi/plan</code></td><td>POST</td><td>$0.05</td><td>DeFi action planner (lend/swap/stake, advisory)</td></tr>
 <tr><td><code>/v1/models</code></td><td>GET</td><td>free</td><td>list available models</td></tr>
 <tr><td><code>/healthz</code></td><td>GET</td><td>free</td><td>liveness probe</td></tr>
 <tr><td><code>/.well-known/x402</code></td><td>GET</td><td>free</td><td>service discovery (JSON)</td></tr>
@@ -326,8 +392,11 @@ async def well_known_x402(request: Request) -> dict[str, Any]:
         "description": description,
         "version": "0.3",
         "endpoints": [
-            {"path": "/v1/chat/completions", "method": "POST", "kind": "rest-openai", "gated": True},
-            {"path": "/mcp", "method": "POST", "kind": "mcp-streamable-http", "gated": True},
+            {"path": "/v1/chat/completions", "method": "POST", "kind": "rest-openai", "gated": True, "price_usd": X402_PRICE_USD},
+            {"path": "/mcp", "method": "POST", "kind": "mcp-streamable-http", "gated": True, "price_usd": X402_PRICE_USD},
+            {"path": "/v1/signal/token", "method": "POST", "kind": "rest-json", "gated": True, "price_usd": X402_SIGNAL_PRICE_USD, "category": "signal"},
+            {"path": "/v1/onchain/ask", "method": "POST", "kind": "rest-json", "gated": True, "price_usd": X402_ONCHAIN_PRICE_USD, "category": "onchain-analytics"},
+            {"path": "/v1/defi/plan", "method": "POST", "kind": "rest-json", "gated": True, "price_usd": X402_DEFI_PRICE_USD, "category": "defi-planner"},
             {"path": "/v1/models", "method": "GET", "kind": "info", "gated": False},
             {"path": "/healthz", "method": "GET", "kind": "info", "gated": False},
         ],
@@ -386,6 +455,37 @@ async def chat_completions(request: Request) -> Any:
 
     r = await _client().post("/v1/chat/completions", json=body)
     return JSONResponse(content=r.json(), status_code=r.status_code)
+
+
+# --- paid vertical endpoints ---------------------------------------------
+#
+# Each handler is gated by its own x402 route entry above. The vertical
+# modules call `_llm_short` (NOT the gated /v1/chat/completions route) so
+# the agent only pays once per outer request.
+
+
+@app.post("/v1/signal/token")
+async def signal_token(request: Request) -> Any:
+    """Token momentum signal — DexScreener data + Qwen optional commentary."""
+    body = await request.json()
+    result = await signals_vertical.handle(body, _llm_short)
+    return JSONResponse(content=result)
+
+
+@app.post("/v1/onchain/ask")
+async def onchain_ask(request: Request) -> Any:
+    """Natural-language Q&A over free on-chain data (Defillama + DexScreener)."""
+    body = await request.json()
+    result = await onchain_vertical.handle(body, _llm_short)
+    return JSONResponse(content=result)
+
+
+@app.post("/v1/defi/plan")
+async def defi_plan(request: Request) -> Any:
+    """DeFi action planner — lend/swap/stake comparison with Qwen risk review."""
+    body = await request.json()
+    result = await defi_vertical.handle(body, _llm_short)
+    return JSONResponse(content=result)
 
 
 # --- OpenAPI customization for x402scan discovery ------------------------
@@ -612,6 +712,91 @@ def _build_openapi(*, relay_only: bool = False) -> dict[str, Any]:
             },
         },
     }
+
+    # --- vertical endpoints (signal / onchain / defi) --------------------
+    _vertical_specs = [
+        (
+            "/v1/signal/token",
+            X402_SIGNAL_PRICE_USD,
+            "Token momentum signal (paid via x402)",
+            (
+                "Returns a directional momentum signal (buy/hold/sell) plus "
+                "score, confidence and a market snapshot for any token. "
+                "Free data from DexScreener; optional Qwen commentary."
+            ),
+            ["signal"],
+            signals_vertical.INPUT_SCHEMA,
+            signals_vertical.OUTPUT_SCHEMA,
+        ),
+        (
+            "/v1/onchain/ask",
+            X402_ONCHAIN_PRICE_USD,
+            "On-chain analytics natural-language Q&A (paid via x402)",
+            (
+                "Answers free-form on-chain questions about tokens, yields, "
+                "stablecoins and protocol TVL. Free data from DexScreener "
+                "and Defillama; Qwen-grounded answer plus structured fields."
+            ),
+            ["onchain-analytics"],
+            onchain_vertical.INPUT_SCHEMA,
+            onchain_vertical.OUTPUT_SCHEMA,
+        ),
+        (
+            "/v1/defi/plan",
+            X402_DEFI_PRICE_USD,
+            "DeFi action planner — lend/swap/stake (paid via x402)",
+            (
+                "Compares lending pools, swap routes or stake/restake "
+                "candidates across chains using free Defillama + "
+                "DexScreener data, filters by risk tolerance and returns a "
+                "Qwen risk review. Advisory only — never signs."
+            ),
+            ["defi-planner"],
+            defi_vertical.INPUT_SCHEMA,
+            defi_vertical.OUTPUT_SCHEMA,
+        ),
+    ]
+
+    for path, price, summary, desc, tags, in_schema, out_schema in _vertical_specs:
+        if path not in schema.get("paths", {}):
+            continue
+        op = schema["paths"][path]["post"]
+        op["summary"] = summary
+        op["description"] = desc
+        op["tags"] = tags
+        op["requestBody"] = {
+            "required": True,
+            "content": {"application/json": {"schema": in_schema}},
+        }
+        op["responses"] = {
+            "200": {
+                "description": "Successful response.",
+                "content": {"application/json": {"schema": out_schema}},
+            },
+            "402": {
+                "description": (
+                    "Payment Required. Body contains x402 paymentRequirements; "
+                    "resubmit with X-PAYMENT header."
+                ),
+            },
+            "400": {"description": "Bad request (validation failure)."},
+        }
+        op["x-payment-info"] = {
+            "price": {
+                "mode": "fixed",
+                "currency": "USD",
+                "amount": f"{float(price):.6f}",
+            },
+            "protocols": [{"x402": {}}],
+        }
+        op["x-bazaar"] = {
+            "schema": {
+                "properties": {
+                    "input": in_schema,
+                    "output": out_schema,
+                },
+            },
+        }
 
     _SCHEMA_CACHE[cache_key] = schema
     return schema
