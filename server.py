@@ -297,6 +297,7 @@ app.add_middleware(PaymentMiddlewareASGI, routes=_routes, server=_x402_server)
 
 
 @app.get("/healthz")
+@app.get("/health")
 async def healthz() -> dict[str, str]:
     return {"status": "ok"}
 
