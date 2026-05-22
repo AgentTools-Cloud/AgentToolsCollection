@@ -59,8 +59,21 @@ async def search(
     max_price_usd: float | None = None,
     category: str | None = None,
     chain: str | None = None,
+    min_confidence: float | None = None,
 ) -> dict[str, Any]:
     """Find x402 paid services matching a natural-language intent.
+
+    Results are ranked by: health → has-quality-signal → confidence
+    → 30-day transaction volume → last-updated. So the highest-quality
+    real-traffic services appear first.
+
+    Each item in the response includes (when available):
+      - confidence  : 0.0–1.0 quality score from x402scan (higher = more
+                      reliable / validated by the explorer).
+      - tx_30d      : x402 payments observed in the last 30 days
+                      (proxy for real usage; 0 or null for unproven services).
+    Agents should prefer items with non-null confidence and tx_30d > 0 unless
+    the user explicitly wants experimental endpoints.
 
     Args:
         intent: What the agent wants to do (English or Chinese), e.g.
@@ -69,6 +82,8 @@ async def search(
         max_price_usd: Hard upper bound on per-call price in USD.
         category: Optional category filter (see `list_categories`).
         chain: Optional chain filter ("base", "polygon", "arbitrum", ...).
+        min_confidence: Optional minimum confidence threshold (0.0–1.0).
+            E.g. 0.8 keeps only services x402scan rates as high-quality.
     """
     top_k = max(1, min(int(top_k), 25))
     with _open() as conn:
@@ -77,6 +92,7 @@ async def search(
             q=intent or None,
             category=category,
             chain=chain,
+            min_confidence=min_confidence,
             limit=top_k * 3,  # over-fetch for price filter
         )
     items = [directory_db.row_to_dict(r) for r in rows]
@@ -87,14 +103,20 @@ async def search(
         ]
     out = {"intent": intent, "count": len(items[:top_k]), "items": items[:top_k]}
     _log("search", args={"intent": intent, "top_k": top_k, "max_price_usd": max_price_usd,
-                          "category": category, "chain": chain},
+                          "category": category, "chain": chain,
+                          "min_confidence": min_confidence},
          result_n=out["count"])
     return out
 
 
 @discover_mcp.tool()
 async def get(slug: str) -> dict[str, Any]:
-    """Get full details (URL, price, schema, call template) of a service by slug."""
+    """Get full details (URL, price, schema, call template) of a service by slug.
+
+    Returned dict includes `confidence` (0–1, x402scan quality score) and
+    `tx_30d` (30-day x402 payment count) when available — use these to
+    judge whether a service is production-ready before calling it.
+    """
     with _open() as conn:
         row = directory_db.get_by_slug(conn, slug)
     if row is None:

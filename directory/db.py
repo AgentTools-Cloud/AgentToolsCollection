@@ -257,7 +257,8 @@ def row_to_dict(row) -> dict:
     return d
 
 
-def search(conn, q=None, category=None, chain=None, region=None, health=None, limit=50, offset=0):
+def search(conn, q=None, category=None, chain=None, region=None, health=None,
+           min_confidence=None, limit=50, offset=0):
     sql_parts = ["SELECT s.* FROM services s"]
     where = []
     params = []
@@ -276,9 +277,19 @@ def search(conn, q=None, category=None, chain=None, region=None, health=None, li
         where.append("s.region=?"); params.append(region)
     if health:
         where.append("s.health=?"); params.append(health)
+    if min_confidence is not None:
+        where.append("s.confidence >= ?"); params.append(float(min_confidence))
     if where:
         sql_parts.append("WHERE " + " AND ".join(where))
-    sql_parts.append("ORDER BY (s.health='ok') DESC, s.updated_at DESC")
+    # Quality-aware ordering: healthy first, then services with x402scan
+    # signals (confidence + tx volume), then most recently seen.
+    sql_parts.append(
+        "ORDER BY (s.health='ok') DESC, "
+        "(s.confidence IS NOT NULL) DESC, "
+        "s.confidence DESC, "
+        "COALESCE(s.tx_30d, 0) DESC, "
+        "s.updated_at DESC"
+    )
     sql_parts.append("LIMIT ? OFFSET ?")
     params.extend([limit, offset])
     rows = conn.execute(" ".join(sql_parts), params).fetchall()
