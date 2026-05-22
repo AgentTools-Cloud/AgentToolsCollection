@@ -43,6 +43,7 @@ from x402.server import x402ResourceServer
 
 from directory import db as directory_db
 from directory.routes import router as directory_router
+from directory.mcp_app import discover_mcp
 
 from verticals import signals as signals_vertical
 from verticals import onchain as onchain_vertical
@@ -176,7 +177,9 @@ async def lifespan(app: FastAPI):
         timeout=httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=30.0),
     )
     # FastMCP streamable-http needs its own session-manager lifespan.
-    async with mcp_app.session_manager.run():
+    # We run both the paid Qwen relay (/mcp) and the free directory
+    # discovery MCP (/mcp-discovery).
+    async with mcp_app.session_manager.run(), discover_mcp.session_manager.run():
         try:
             yield
         finally:
@@ -189,6 +192,8 @@ app = FastAPI(
 
 # Mount MCP streamable-http transport at /mcp.
 app.mount("/mcp", mcp_app.streamable_http_app())
+# Free directory-discovery MCP (search/get/list_categories/stats) — ungated.
+app.mount("/mcp-discovery", discover_mcp.streamable_http_app())
 
 # Hostname split: agent-tools.cloud serves directory + relay (full schema),
 # while the subdomain relay.agent-tools.cloud presents the Qwen3.6 paid
@@ -465,6 +470,51 @@ async def well_known_x402(request: Request) -> dict[str, Any]:
         "models": sorted(ALLOWED_MODELS),
         "source": "https://github.com/JoursBleu/mcpserver",
     }
+
+
+@app.get("/.well-known/mcp.json", tags=["discovery"])
+async def well_known_mcp(request: Request) -> dict[str, Any]:
+    """Lightweight MCP discovery doc — points clients to stdio + streamable-http."""
+    host = (request.headers.get("host") or "agent-tools.cloud").split(":", 1)[0].lower()
+    scheme = "https" if request.url.scheme == "https" else "http"
+    base = f"{scheme}://{host}"
+    return {
+        "name": "agent-tools",
+        "description": (
+            "Free MCP discovery server for x402 paid services. "
+            "Search 470+ services, get call details, browse categories. "
+            "Same tools also available as a stdio MCP via `uvx agent-tools-mcp`."
+        ),
+        "version": "0.1.0",
+        "homepage": "https://agent-tools.cloud",
+        "repository": "https://github.com/JoursBleu/agent-tools-mcp",
+        "license": "Apache-2.0",
+        "transports": {
+            "stdio": {
+                "command": "uvx",
+                "args": ["agent-tools-mcp"],
+                "package": "agent-tools-mcp",
+                "registry": "pypi",
+            },
+            "streamable_http": {
+                "url": f"{base}/mcp-discovery",
+            },
+        },
+        "tools": [
+            {"name": "search", "description": "Find services by natural-language intent (with optional max price, category, chain)."},
+            {"name": "get", "description": "Get full call details for a service by slug."},
+            {"name": "list_categories", "description": "List all directory categories."},
+            {"name": "stats", "description": "Directory size, healthy count, source breakdown."},
+        ],
+        "x402_paid_mcp": {
+            "url": f"{base}/mcp",
+            "tool": "qwen36_chat",
+            "price_usd": X402_PRICE_USD,
+            "network": X402_NETWORK,
+            "facilitator": X402_FACILITATOR_URL,
+        },
+    }
+
 
 
 @app.get("/v1/models")
