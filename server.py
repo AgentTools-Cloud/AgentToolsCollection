@@ -44,6 +44,7 @@ from x402.server import x402ResourceServer
 from directory import db as directory_db
 from directory.routes import router as directory_router
 from directory.mcp_app import discover_mcp
+from metrics import PrometheusMiddleware, metrics_endpoint
 
 from verticals import signals as signals_vertical
 from verticals import onchain as onchain_vertical
@@ -296,6 +297,8 @@ _routes = {
 }
 
 app.add_middleware(PaymentMiddlewareASGI, routes=_routes, server=_x402_server)
+# Outermost: instrument every request (incl. 402 challenges) for Prometheus.
+app.add_middleware(PrometheusMiddleware)
 
 
 # --- free endpoints -------------------------------------------------------
@@ -979,6 +982,7 @@ def _build_openapi(*, relay_only: bool = False) -> dict[str, Any]:
 
 
 app.include_router(directory_router)
+app.add_api_route("/metrics", metrics_endpoint, include_in_schema=False, methods=["GET"])
 
 
 @app.get("/openapi.json", include_in_schema=False)

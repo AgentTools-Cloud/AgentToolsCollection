@@ -6,3 +6,4 @@ python-dotenv>=1.0
 x402[fastapi,evm,httpx]>=2.10
 mcp>=1.2
 jinja2>=3.1
+prometheus-client>=0.20
