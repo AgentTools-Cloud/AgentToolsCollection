@@ -27,7 +27,7 @@ _INSTRUCTIONS = (
     "Use `list_categories` to browse and `stats` for directory size + health."
 )
 
-discover_mcp = FastMCP(name="agent-tools", instructions=_INSTRUCTIONS)
+discover_mcp = FastMCP(name="agent-tools", instructions=_INSTRUCTIONS, streamable_http_path="/")
 
 
 def _open():
