@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from typing import Any
@@ -144,49 +145,102 @@ def fetch_cdp_bazaar() -> list:
     return items
 
 
-X402SCAN_API_CANDIDATES = [
-    "https://www.x402scan.com/api/resources",
-    "https://x402scan.com/api/resources",
-]
+# x402scan exposes its data via a public tRPC API.
+# `public.origins.list.withResources` returns every origin (one row per
+# x402-enabled site) with its resources, accepts, response metadata and tags.
+# Same feed x402scan.com itself consumes; free + unauthenticated.
+# tRPC GET convention: ?input={"json":<payload>} URL-encoded.
+X402SCAN_TRPC_URL = (
+    "https://www.x402scan.com/api/trpc/public.origins.list.withResources"
+)
+
+# USDC and most x402 stablecoins have 6 decimals.
+_X402_TOKEN_DECIMALS = 6
+
+
+def _max_amount_to_usd(raw: Any) -> float | None:
+    if raw is None:
+        return None
+    try:
+        amount = float(str(raw))
+    except (TypeError, ValueError):
+        return None
+    return amount / (10**_X402_TOKEN_DECIMALS)
 
 
 def fetch_x402scan() -> list:
-    payload = None
-    with httpx.Client(timeout=TIMEOUT, headers={"User-Agent": UA, "Accept": "application/json"}) as c:
-        for url in X402SCAN_API_CANDIDATES:
-            try:
-                r = c.get(url)
-                if r.status_code // 100 == 2 and "json" in r.headers.get("content-type", ""):
-                    payload = r.json()
-                    break
-            except Exception:
-                continue
-    if payload is None:
-        log.info("x402scan: JSON endpoint not reachable; skipping")
+    """Fetch the full x402scan origin list via its public tRPC endpoint.
+
+    One service row per origin; resource accepts aggregated into the row.
+    """
+    params = {"input": json.dumps({"json": {}}, separators=(",", ":"))}
+    try:
+        with httpx.Client(timeout=TIMEOUT, headers={"User-Agent": UA, "Accept": "application/json"}) as c:
+            r = c.get(X402SCAN_TRPC_URL, params=params)
+            r.raise_for_status()
+            payload = r.json()
+    except Exception as e:
+        log.warning("x402scan: tRPC fetch failed: %r", e)
+        return []
+
+    origins = (
+        payload.get("result", {}).get("data", {}).get("json")
+        if isinstance(payload, dict) else None
+    )
+    if not isinstance(origins, list):
+        log.warning("x402scan: unexpected payload shape")
         return []
 
     rows = []
-    raw = payload.get("resources") if isinstance(payload, dict) else payload
-    if not isinstance(raw, list):
-        return []
-    for item in raw:
-        if not isinstance(item, dict):
+    for origin in origins:
+        if not isinstance(origin, dict):
             continue
-        url = item.get("url") or item.get("endpoint")
-        if not url:
+        origin_url = origin.get("origin")
+        if not origin_url:
             continue
-        name = item.get("name") or url
+        resources = origin.get("resources") or []
+        if not resources:
+            continue
+
+        chains: set = set()
+        prices: list = []
+        tag_set: set = set()
+        descriptions: list = []
+        for res in resources:
+            if not isinstance(res, dict):
+                continue
+            for accept in res.get("accepts") or []:
+                if not isinstance(accept, dict):
+                    continue
+                if accept.get("network"):
+                    chains.add(str(accept["network"]).lower())
+                price = _max_amount_to_usd(accept.get("maxAmountRequired"))
+                if price is not None and price > 0:
+                    prices.append(price)
+                if accept.get("description"):
+                    descriptions.append(str(accept["description"]).strip())
+            for tag_link in res.get("tags") or []:
+                tag = (tag_link or {}).get("tag") if isinstance(tag_link, dict) else None
+                if isinstance(tag, dict) and tag.get("name"):
+                    tag_set.add(str(tag["name"]))
+
+        name = origin.get("title") or urlparse(origin_url).hostname or origin_url
+        description = origin.get("description") or (descriptions[0] if descriptions else None)
+        if description and len(description) > 400:
+            description = description[:397] + "..."
+        category = _slugify(sorted(tag_set)[0]) if tag_set else "general"
+
         rows.append({
-            "slug": _host_slug(url) + "-scan",
-            "name": name, "url": url,
-            "description": item.get("description"),
-            "category": _slugify(item.get("category") or "general"),
-            "chains": _normalize_chains(item.get("chain") or item.get("chains")),
-            "price_min": item.get("priceMin") or item.get("price"),
-            "price_max": item.get("priceMax") or item.get("price"),
-            "facilitator": item.get("facilitator"),
-            "source": "x402scan", "source_id": str(item.get("id") or url),
-            "tags": item.get("tags") or [], "region": "global",
+            "slug": _host_slug(origin_url) + "-scan",
+            "name": name, "url": origin_url,
+            "description": description,
+            "category": category,
+            "chains": sorted(chains),
+            "price_min": min(prices) if prices else None,
+            "price_max": max(prices) if prices else None,
+            "well_known_url": origin_url.rstrip("/") + "/.well-known/x402",
+            "source": "x402scan", "source_id": str(origin.get("id") or origin_url),
+            "tags": sorted(tag_set), "region": "global",
         })
     return rows
 
