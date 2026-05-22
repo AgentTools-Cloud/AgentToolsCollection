@@ -438,7 +438,7 @@ async def well_known_x402(request: Request) -> dict[str, Any]:
         "on Base, no signup, no API key, no rate limits."
         if relay
         else "Two-in-one x402 service: (1) the largest open directory of x402 "
-             "endpoints (470+ services, free JSON API + agents.json manifest); "
+             "endpoints (the full x402 ecosystem, free JSON API + agents.json manifest); "
              "(2) agent-native paid stack — Qwen3.6-35B-A3B chat from $0.001/call "
              "plus token signals, on-chain Q&A and DeFi planner from $0.01. "
              "USDC on Base, no signup, no API key."
@@ -482,7 +482,7 @@ async def well_known_mcp(request: Request) -> dict[str, Any]:
         "name": "agent-tools",
         "description": (
             "Free MCP discovery server for x402 paid services. "
-            "Search 470+ services, get call details, browse categories. "
+            "Search the x402 ecosystem, get call details, browse categories. "
             "Same tools also available as a stdio MCP via `uvx agent-tools-mcp`."
         ),
         "version": "0.1.0",
@@ -677,7 +677,7 @@ def _build_openapi(*, relay_only: bool = False) -> dict[str, Any]:
         title = "agent-tools.cloud — x402 directory + agent-native crypto stack"
         description = (
             "Two-in-one x402 service for autonomous agents. "
-            "(1) The largest open directory of x402 endpoints in the ecosystem — 470+ services "
+            "(1) The largest open directory of x402 endpoints in the ecosystem — paid APIs "
             "across inference, payments, data and DeFi, browsable at https://agent-tools.cloud "
             "with a free JSON API (/api/v1/search, /api/v1/services/{slug}, /api/v1/categories, "
             "/api/v1/stats) and an agents.json manifest at /.well-known/agent-tools.json. "

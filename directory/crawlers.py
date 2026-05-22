@@ -206,6 +206,8 @@ def fetch_x402scan() -> list:
         prices: list = []
         tag_set: set = set()
         descriptions: list = []
+        confidences: list = []
+        tx_30d_total = 0
         for res in resources:
             if not isinstance(res, dict):
                 continue
@@ -219,6 +221,15 @@ def fetch_x402scan() -> list:
                     prices.append(price)
                 if accept.get("description"):
                     descriptions.append(str(accept["description"]).strip())
+            md = res.get("metadata") if isinstance(res.get("metadata"), dict) else None
+            if md:
+                conf = (md.get("confidence") or {}).get("overallScore")
+                if isinstance(conf, (int, float)):
+                    confidences.append(float(conf))
+                pa = md.get("paymentAnalytics") or {}
+                tx30 = pa.get("transactionsMonth")
+                if isinstance(tx30, int):
+                    tx_30d_total += tx30
             for tag_link in res.get("tags") or []:
                 tag = (tag_link or {}).get("tag") if isinstance(tag_link, dict) else None
                 if isinstance(tag, dict) and tag.get("name"):
@@ -239,6 +250,8 @@ def fetch_x402scan() -> list:
             "price_min": min(prices) if prices else None,
             "price_max": max(prices) if prices else None,
             "well_known_url": origin_url.rstrip("/") + "/.well-known/x402",
+            "confidence": max(confidences) if confidences else None,
+            "tx_30d": tx_30d_total if tx_30d_total > 0 else None,
             "source": "x402scan", "source_id": str(origin.get("id") or origin_url),
             "tags": sorted(tag_set), "region": "global",
         })
