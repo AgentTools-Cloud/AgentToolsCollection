@@ -44,6 +44,8 @@ CREATE TABLE IF NOT EXISTS services (
   health          TEXT DEFAULT 'unknown',
   health_checked  INTEGER,
   last_seen       INTEGER,
+  confidence      REAL,
+  tx_30d          INTEGER,
   created_at      INTEGER NOT NULL,
   updated_at      INTEGER NOT NULL
 );
@@ -91,6 +93,19 @@ CREATE TABLE IF NOT EXISTS crawl_runs (
   errors      TEXT,
   status      TEXT NOT NULL DEFAULT 'running'
 );
+
+CREATE TABLE IF NOT EXISTS tool_calls (
+  id          INTEGER PRIMARY KEY,
+  ts          INTEGER NOT NULL,
+  tool        TEXT NOT NULL,
+  args        TEXT,
+  result_n    INTEGER,
+  result_slug TEXT,
+  client_name TEXT,
+  client_ip   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_tool_calls_ts   ON tool_calls(ts);
+CREATE INDEX IF NOT EXISTS idx_tool_calls_tool ON tool_calls(tool);
 """
 
 
@@ -144,6 +159,16 @@ def with_retry(fn: Callable[[], Any], *, attempts: int = 6, base_delay: float = 
 def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
     with connect(db_path) as c:
         c.executescript(SCHEMA)
+        # idempotent migrations for older DBs that pre-date these columns
+        for ddl in (
+            "ALTER TABLE services ADD COLUMN confidence REAL",
+            "ALTER TABLE services ADD COLUMN tx_30d INTEGER",
+        ):
+            try:
+                c.execute(ddl)
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
         c.commit()
 
 
@@ -193,7 +218,9 @@ def upsert_service(conn: sqlite3.Connection, row: dict) -> tuple:
         "category", "chains", "price_min", "price_max", "currency",
         "facilitator", "mcp_url", "openapi_url", "well_known_url",
         "source", "source_id", "tags", "region",
-        "health", "health_checked", "last_seen", "created_at", "updated_at",
+        "health", "health_checked", "last_seen",
+        "confidence", "tx_30d",
+        "created_at", "updated_at",
     ]
 
     if existing is None:
@@ -300,6 +327,17 @@ def record_crawl_start(conn, source):
     )
     conn.commit()
     return int(cur.lastrowid)
+
+
+def log_tool_call(conn, tool, args=None, result_n=None, result_slug=None,
+                  client_name=None, client_ip=None):
+    conn.execute(
+        "INSERT INTO tool_calls (ts, tool, args, result_n, result_slug, "
+        "client_name, client_ip) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (int(time.time()), tool, _to_json(args) if args is not None else None,
+         result_n, result_slug, client_name, client_ip),
+    )
+    conn.commit()
 
 
 def record_crawl_finish(conn, run_id, added, updated, errors=(), status="ok"):

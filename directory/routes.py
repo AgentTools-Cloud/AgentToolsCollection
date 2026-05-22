@@ -150,7 +150,7 @@ async def api_submit(payload: SubmissionPayload):
 async def well_known():
     return {
         "name": "agent-tools.cloud",
-        "description": "Global directory of 470+ x402 paid APIs and MCP services, "
+        "description": "Global directory of x402 paid APIs and MCP services, "
                        "plus a pay-per-call Qwen3.6-35B-A3B inference relay at "
                        "flat $0.001 USDC / call on Base (x402 v2).",
         "endpoints": {

@@ -41,6 +41,17 @@ def _open():
     return directory_db.connect(DB_PATH, read_only=True)
 
 
+def _log(tool, args=None, result_n=None, result_slug=None):
+    """Best-effort usage log. Never raises."""
+    try:
+        with directory_db.writer(DB_PATH) as wc:
+            directory_db.log_tool_call(
+                wc, tool, args=args, result_n=result_n, result_slug=result_slug,
+            )
+    except Exception as e:
+        log.warning("tool_call log failed: %r", e)
+
+
 @discover_mcp.tool()
 async def search(
     intent: str,
@@ -74,7 +85,11 @@ async def search(
             s for s in items
             if (s.get("price_usd") is None) or float(s["price_usd"]) <= max_price_usd
         ]
-    return {"intent": intent, "count": len(items[:top_k]), "items": items[:top_k]}
+    out = {"intent": intent, "count": len(items[:top_k]), "items": items[:top_k]}
+    _log("search", args={"intent": intent, "top_k": top_k, "max_price_usd": max_price_usd,
+                          "category": category, "chain": chain},
+         result_n=out["count"])
+    return out
 
 
 @discover_mcp.tool()
@@ -83,8 +98,11 @@ async def get(slug: str) -> dict[str, Any]:
     with _open() as conn:
         row = directory_db.get_by_slug(conn, slug)
     if row is None:
+        _log("get", args={"slug": slug}, result_n=0)
         return {"error": "not_found", "slug": slug}
-    return directory_db.row_to_dict(row)
+    out = directory_db.row_to_dict(row)
+    _log("get", args={"slug": slug}, result_n=1, result_slug=slug)
+    return out
 
 
 @discover_mcp.tool()
@@ -92,14 +110,18 @@ async def list_categories() -> dict[str, Any]:
     """List all available service categories in the directory."""
     with _open() as conn:
         cats = directory_db.list_categories(conn)
-    return {"items": cats, "count": len(cats)}
+    out = {"items": cats, "count": len(cats)}
+    _log("list_categories", result_n=out["count"])
+    return out
 
 
 @discover_mcp.tool()
 async def stats() -> dict[str, Any]:
     """High-level stats about the directory: total services, healthy count, sources."""
     with _open() as conn:
-        return directory_db.stats(conn)
+        out = directory_db.stats(conn)
+    _log("stats", result_n=out.get("total"))
+    return out
 
 
 log.info("directory MCP app built (db=%s, tools=4)", DB_PATH)
