@@ -14,6 +14,7 @@ import os
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 from . import db as directory_db
 
@@ -27,7 +28,13 @@ _INSTRUCTIONS = (
     "Use `list_categories` to browse and `stats` for directory size + health."
 )
 
-discover_mcp = FastMCP(name="agent-tools", instructions=_INSTRUCTIONS, streamable_http_path="/")
+_TS = TransportSecuritySettings(enable_dns_rebinding_protection=False)
+discover_mcp = FastMCP(
+    name="agent-tools",
+    instructions=_INSTRUCTIONS,
+    streamable_http_path="/",
+    transport_security=_TS,
+)
 
 
 def _open():
