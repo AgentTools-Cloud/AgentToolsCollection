@@ -49,6 +49,7 @@ from metrics import PrometheusMiddleware, metrics_endpoint
 from verticals import signals as signals_vertical
 from verticals import onchain as onchain_vertical
 from verticals import defi as defi_vertical
+from verticals import portfolio as portfolio_vertical
 
 load_dotenv()
 
@@ -78,6 +79,10 @@ X402_DEFI_PRICE_USD = os.getenv("X402_DEFI_PRICE_USD", "0.05")
 X402_SIGNAL_BULK_PRICE_USD = os.getenv("X402_SIGNAL_BULK_PRICE_USD", "0.05")
 X402_ONCHAIN_REPORT_PRICE_USD = os.getenv("X402_ONCHAIN_REPORT_PRICE_USD", "0.20")
 X402_DEFI_PORTFOLIO_PRICE_USD = os.getenv("X402_DEFI_PORTFOLIO_PRICE_USD", "0.50")
+# Portfolio Loop Primitive (snapshot -> plan -> quote -> execute)
+X402_PORTFOLIO_SNAPSHOT_PRICE_USD = os.getenv("X402_PORTFOLIO_SNAPSHOT_PRICE_USD", "0.005")
+X402_PORTFOLIO_PLAN_PRICE_USD = os.getenv("X402_PORTFOLIO_PLAN_PRICE_USD", "0.05")
+X402_PORTFOLIO_QUOTE_PRICE_USD = os.getenv("X402_PORTFOLIO_QUOTE_PRICE_USD", "0.20")
 
 # --- upstream HTTP client -------------------------------------------------
 
@@ -216,6 +221,57 @@ async def _relay_host_root(request: Request, call_next):
         return HTMLResponse(_HOMEPAGE_HTML)
     return await call_next(request)
 
+# ---------------------------------------------------------------------------
+# Bazaar discovery extension — Coinbase Bazaar / AgentKit clients read this to
+# auto-construct request bodies for our paid endpoints. Without it, AI agents
+# receiving a 402 challenge don't know what JSON to POST to redeem payment.
+# Spec: x402.extensions.bazaar.types.BodyDiscoveryInfo
+# ---------------------------------------------------------------------------
+def _bazaar(method: str, body_example: dict, output_example: dict, body_props: dict, required: list[str]) -> dict:
+    return {
+        "bazaar": {
+            "info": {
+                "input": {
+                    "type": "http",
+                    "method": method,
+                    "bodyType": "json",
+                    "body": body_example,
+                },
+                "output": {"type": "json", "example": output_example},
+            },
+            "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                    "input": {
+                        "type": "object",
+                        "properties": {
+                            "type": {"type": "string", "const": "http"},
+                            "method": {"type": "string", "enum": [method]},
+                            "bodyType": {"type": "string", "enum": ["json"]},
+                            "body": {
+                                "type": "object",
+                                "properties": body_props,
+                                "required": required,
+                            },
+                        },
+                        "required": ["type", "method", "bodyType", "body"],
+                    },
+                    "output": {
+                        "type": "object",
+                        "properties": {
+                            "type": {"type": "string"},
+                            "example": {"type": "object"},
+                        },
+                        "required": ["type"],
+                    },
+                },
+                "required": ["input"],
+            },
+        }
+    }
+
+
 # x402 v2 middleware — gates both REST and MCP entrypoints.
 _facilitator = HTTPFacilitatorClient(FacilitatorConfig(url=X402_FACILITATOR_URL))
 _x402_server = x402ResourceServer(_facilitator)
@@ -229,7 +285,13 @@ _routes = {
         )],
         mime_type="application/json",
         description=f"Qwen3.6-35B-A3B chat — frontier 35B MoE at flat ${X402_PRICE_USD} USDC / call. OpenAI wire format, no key, no signup.",
-    ),
+        extensions=_bazaar(
+            method="POST",
+            body_example={"model": "qwen3.6-35b-a3b", "messages": [{"role": "user", "content": "Explain bonding curves in 2 sentences."}], "temperature": 0.7, "max_tokens": 256},
+            output_example={"id": "chatcmpl-xxx", "object": "chat.completion", "model": "qwen3.6-35b-a3b", "choices": [{"index": 0, "message": {"role": "assistant", "content": "..."}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 12, "completion_tokens": 48, "total_tokens": 60}},
+            body_props={"model": {"type": "string", "description": "Model id, e.g. qwen3.6-35b-a3b"}, "messages": {"type": "array", "items": {"type": "object"}, "description": "OpenAI chat messages"}, "temperature": {"type": "number", "minimum": 0, "maximum": 2}, "max_tokens": {"type": "integer", "minimum": 1, "maximum": 8192}, "top_p": {"type": "number"}, "stream": {"type": "boolean"}},
+            required=["messages"],
+        ),    ),
     # Whole MCP transport (initialize/tools-list/tools-call all share the
     # same POST endpoint). One payment buys one streamable-http roundtrip.
     "POST /mcp": RouteConfig(
@@ -248,7 +310,13 @@ _routes = {
         )],
         mime_type="application/json",
         description=f"Live token momentum signal — buy/hold/sell + score, confidence and wash-trade penalty. DexScreener + Qwen, ${X402_SIGNAL_PRICE_USD} USDC / call.",
-    ),
+        extensions=_bazaar(
+            method="POST",
+            body_example={"chain": "base", "token": "0x4200000000000000000000000000000000000006"},
+            output_example={"token": "0x4200...0006", "chain": "base", "score": 72, "action": "hold", "confidence": 0.78, "rationale": "Momentum positive but wash-trade penalty applied."},
+            body_props={"chain": {"type": "string", "enum": ["base", "ethereum", "solana", "arbitrum"]}, "token": {"type": "string", "description": "Token contract address or symbol"}},
+            required=["chain", "token"],
+        ),    ),
     # --- Vertical 2: on-chain analytics NL Q&A ---------------------------
     "POST /v1/onchain/ask": RouteConfig(
         accepts=[PaymentOption(
@@ -257,7 +325,13 @@ _routes = {
         )],
         mime_type="application/json",
         description=f"On-chain Q&A — free-form questions about tokens, yields, stablecoins, TVL. Grounded in live Defillama+DexScreener data. ${X402_ONCHAIN_PRICE_USD} USDC / call.",
-    ),
+        extensions=_bazaar(
+            method="POST",
+            body_example={"question": "What is the current TVL of Aave on Base and which stablecoins back it?"},
+            output_example={"answer": "Aave on Base has $X TVL backed primarily by USDC...", "sources": ["defillama", "dexscreener"]},
+            body_props={"question": {"type": "string", "minLength": 4, "maxLength": 500}},
+            required=["question"],
+        ),    ),
     # --- Vertical 3: DeFi action planner (advisory only, no signing) -----
     "POST /v1/defi/plan": RouteConfig(
         accepts=[PaymentOption(
@@ -266,7 +340,13 @@ _routes = {
         )],
         mime_type="application/json",
         description=f"DeFi action planner — best lend/swap/stake route by risk tolerance, with Qwen risk review. Advisory only, never signs. ${X402_DEFI_PRICE_USD} USDC / call.",
-    ),
+        extensions=_bazaar(
+            method="POST",
+            body_example={"budget_usd": 500, "risk": "balanced", "chain": "base"},
+            output_example={"plan": [{"action": "lend", "protocol": "Aave", "asset": "USDC", "alloc_usd": 300, "apy": 4.5}], "blended_apy": 4.2, "risk_review": "Low protocol risk; smart-contract risk concentrated in Aave..."},
+            body_props={"budget_usd": {"type": "number", "minimum": 10}, "risk": {"type": "string", "enum": ["conservative", "balanced", "aggressive"]}, "chain": {"type": "string"}},
+            required=["budget_usd", "risk"],
+        ),    ),
     # --- Pro tier: bulk signal (up to 10 tokens / call) ------------------
     "POST /v1/signal/bulk": RouteConfig(
         accepts=[PaymentOption(
@@ -275,7 +355,13 @@ _routes = {
         )],
         mime_type="application/json",
         description=f"Bulk momentum scan — score up to 10 tokens in one shot, with portfolio rollup (top pick, buy/hold/sell counts). ${X402_SIGNAL_BULK_PRICE_USD} USDC / call.",
-    ),
+        extensions=_bazaar(
+            method="POST",
+            body_example={"chain": "base", "tokens": ["0x4200000000000000000000000000000000000006", "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"]},
+            output_example={"results": [{"token": "0x4200...0006", "score": 72, "action": "hold"}, {"token": "0x8335...2913", "score": 88, "action": "buy"}], "rollup": {"top_pick": "0x8335...2913", "buy": 1, "hold": 1, "sell": 0}},
+            body_props={"chain": {"type": "string", "enum": ["base", "ethereum", "solana", "arbitrum"]}, "tokens": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 10}},
+            required=["chain", "tokens"],
+        ),    ),
     # --- Pro tier: multi-source on-chain report --------------------------
     "POST /v1/onchain/report": RouteConfig(
         accepts=[PaymentOption(
@@ -284,7 +370,13 @@ _routes = {
         )],
         mime_type="application/json",
         description=f"Synthesised on-chain analyst report — token+yields+TVL+stables fused into a 5-10 sentence brief with key findings & risks. ${X402_ONCHAIN_REPORT_PRICE_USD} USDC / call.",
-    ),
+        extensions=_bazaar(
+            method="POST",
+            body_example={"token": "0x4200000000000000000000000000000000000006", "chain": "base"},
+            output_example={"report": "WETH on Base shows steady inflow... key findings: 1) ... risks: ...", "findings": ["..."], "risks": ["..."]},
+            body_props={"token": {"type": "string"}, "chain": {"type": "string"}},
+            required=["token"],
+        ),    ),
     # --- Pro tier: multi-leg DeFi portfolio plan -------------------------
     "POST /v1/defi/portfolio": RouteConfig(
         accepts=[PaymentOption(
@@ -293,7 +385,58 @@ _routes = {
         )],
         mime_type="application/json",
         description=f"Multi-leg DeFi portfolio — allocates a USD budget across lend/stake/swap, returns blended APY + Qwen portfolio review. Advisory only, never signs. ${X402_DEFI_PORTFOLIO_PRICE_USD} USDC / call.",
-    ),
+        extensions=_bazaar(
+            method="POST",
+            body_example={"budget_usd": 5000, "risk": "balanced", "chain": "base", "legs": 3},
+            output_example={"allocations": [{"action": "lend", "protocol": "Aave", "asset": "USDC", "alloc_usd": 2500, "apy": 4.5}, {"action": "stake", "protocol": "Lido", "asset": "ETH", "alloc_usd": 1500, "apy": 3.1}, {"action": "swap", "from": "USDC", "to": "cbBTC", "alloc_usd": 1000}], "blended_apy": 3.4, "review": "Diversified across yield + directional exposure..."},
+            body_props={"budget_usd": {"type": "number", "minimum": 100}, "risk": {"type": "string", "enum": ["conservative", "balanced", "aggressive"]}, "chain": {"type": "string"}, "legs": {"type": "integer", "minimum": 1, "maximum": 5}},
+            required=["budget_usd", "risk"],
+        ),    ),
+    # --- Portfolio primitive: snapshot ($0.005) -----------------------
+    "POST /v1/portfolio/snapshot": RouteConfig(
+        accepts=[PaymentOption(
+            scheme="exact", pay_to=X402_PAY_TO,
+            price=f"${X402_PORTFOLIO_SNAPSHOT_PRICE_USD}", network=X402_NETWORK,
+        )],
+        mime_type="application/json",
+        description=f"Portfolio snapshot — signed cross-chain holdings + risk score + health factor. Required as input to /v1/portfolio/plan and /v1/portfolio/quote. ${X402_PORTFOLIO_SNAPSHOT_PRICE_USD} USDC / call.",
+        extensions=_bazaar(
+            method="POST",
+            body_example={"wallet": "0xC445aa2AA0FA68db67Cd22fc04867773941f9CdF", "chains": ["base"]},
+            output_example={"snapshot_id": "snap_x7k2...", "positions": [{"symbol": "USDC", "balance": 1000, "value_usd": 1000}], "total_value_usd": 1000, "risk_score": 0.05, "health_factor": 2.95, "expires_at": 1779545260, "signature": "0xabc..."},
+            body_props={"wallet": {"type": "string"}, "chains": {"type": "array", "items": {"type": "string"}}},
+            required=["wallet"],
+        ),    ),
+    # --- Portfolio primitive: plan ($0.05) ----------------------------
+    "POST /v1/portfolio/plan": RouteConfig(
+        accepts=[PaymentOption(
+            scheme="exact", pay_to=X402_PAY_TO,
+            price=f"${X402_PORTFOLIO_PLAN_PRICE_USD}", network=X402_NETWORK,
+        )],
+        mime_type="application/json",
+        description=f"Portfolio plan — given a snapshot_id and a strategy goal (yield_max / risk_off / dca_btc / exit_50pct), returns a signed action list with health-budget enforcement. ${X402_PORTFOLIO_PLAN_PRICE_USD} USDC / call.",
+        extensions=_bazaar(
+            method="POST",
+            body_example={"snapshot_id": "snap_x7k2...", "goal": "yield_max"},
+            output_example={"plan_id": "plan_q3m9...", "actions": [{"step": 1, "type": "deposit", "protocol": "aave-v3", "amount_usd": 700, "expected_apy": 0.045}], "total_expected_apy": 0.085, "signature": "0xdef..."},
+            body_props={"snapshot_id": {"type": "string"}, "goal": {"type": "string", "enum": ["yield_max", "risk_off", "dca_btc", "exit_50pct"]}},
+            required=["snapshot_id", "goal"],
+        ),    ),
+    # --- Portfolio primitive: quote ($0.20) ---------------------------
+    "POST /v1/portfolio/quote": RouteConfig(
+        accepts=[PaymentOption(
+            scheme="exact", pay_to=X402_PAY_TO,
+            price=f"${X402_PORTFOLIO_QUOTE_PRICE_USD}", network=X402_NETWORK,
+        )],
+        mime_type="application/json",
+        description=f"Portfolio quote — given a plan_id and step number, returns a signed tx with attestation. v0 returns simulated=true; production routing (1inch/Odos + Flashbots) on roadmap. ${X402_PORTFOLIO_QUOTE_PRICE_USD} USDC / call.",
+        extensions=_bazaar(
+            method="POST",
+            body_example={"plan_id": "plan_q3m9...", "step": 1},
+            output_example={"quote_id": "quote_a1b2...", "chain": "base", "tx": {"to": "0x...", "data": "0x...", "value": "0x0"}, "simulated": True, "valid_until": 1779545320, "attestation": "0x..."},
+            body_props={"plan_id": {"type": "string"}, "step": {"type": "integer", "minimum": 1}},
+            required=["plan_id", "step"],
+        ),    ),
 }
 
 app.add_middleware(PaymentMiddlewareASGI, routes=_routes, server=_x402_server)
@@ -616,6 +759,40 @@ async def defi_portfolio(request: Request) -> Any:
     """Pro tier: multi-leg DeFi portfolio plan."""
     body = await request.json()
     result = await defi_vertical.handle_portfolio(body, _llm_short)
+    return JSONResponse(content=result)
+
+
+# --- Portfolio Loop Primitive (snapshot/plan/quote/execute) -------------
+
+@app.post("/v1/portfolio/snapshot")
+async def portfolio_snapshot(request: Request) -> Any:
+    """Stage 1: signed cross-chain holdings snapshot (60s TTL)."""
+    body = await request.json()
+    result = await portfolio_vertical.handle_snapshot(body, _llm_short)
+    return JSONResponse(content=result)
+
+
+@app.post("/v1/portfolio/plan")
+async def portfolio_plan(request: Request) -> Any:
+    """Stage 2: strategy-driven action list bound to a snapshot."""
+    body = await request.json()
+    result = await portfolio_vertical.handle_plan(body, _llm_short)
+    return JSONResponse(content=result)
+
+
+@app.post("/v1/portfolio/quote")
+async def portfolio_quote(request: Request) -> Any:
+    """Stage 3: signed tx + attestation for a single plan step."""
+    body = await request.json()
+    result = await portfolio_vertical.handle_quote(body, _llm_short)
+    return JSONResponse(content=result)
+
+
+@app.post("/v1/portfolio/execute")
+async def portfolio_execute(request: Request) -> Any:
+    """Stage 4: free confirm — record a broadcast tx_hash for a quote."""
+    body = await request.json()
+    result = await portfolio_vertical.handle_execute(body, _llm_short)
     return JSONResponse(content=result)
 
 
