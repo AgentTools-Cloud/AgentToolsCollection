@@ -505,3 +505,108 @@ def record_crawl_finish(conn, run_id, added, updated, errors=(), status="ok"):
         (int(time.time()), added, updated, err_text, status, run_id),
     )
     conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Submissions (P3-3): self-service service registration via MCP `register`.
+# The HTTP /api/v1/submit endpoint also lands here. payload is opaque JSON.
+# ---------------------------------------------------------------------------
+
+def _canonical_origin(url: str) -> str | None:
+    """Return scheme://host (lowercased) — used to dedup near-identical URLs."""
+    if not url:
+        return None
+    try:
+        from urllib.parse import urlparse
+        p = urlparse(url)
+        if not p.scheme or not p.netloc:
+            return None
+        return f"{p.scheme.lower()}://{p.netloc.lower()}"
+    except Exception:
+        return None
+
+
+def find_service_by_url(conn, url: str) -> dict | None:
+    """Best-effort lookup: any services row whose url or mcp_url shares the
+    same canonical origin as `url`. Returns the first match or None.
+    """
+    origin = _canonical_origin(url)
+    if not origin:
+        return None
+    like = origin + "%"
+    row = conn.execute(
+        "SELECT * FROM services WHERE url LIKE ? OR mcp_url LIKE ? LIMIT 1",
+        (like, like),
+    ).fetchone()
+    return row_to_dict(row) if row else None
+
+
+def count_recent_submissions(conn, client_ip: str | None,
+                             since_seconds: int = 86400) -> int:
+    """Count pending submissions from `client_ip` in the last N seconds.
+
+    Uses json_extract on the payload — we store client_ip inside the payload
+    JSON so we don't need a schema change.
+    """
+    if not client_ip:
+        return 0
+    cutoff = int(time.time()) - since_seconds
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM submissions "
+        "WHERE created_at >= ? AND status = 'pending' "
+        "AND json_extract(payload, '$._client_ip') = ?",
+        (cutoff, client_ip),
+    ).fetchone()
+    return int(row["n"] if row else 0)
+
+
+def find_pending_submission(conn, url: str) -> dict | None:
+    """Return a pending submission with the same canonical origin, if any."""
+    origin = _canonical_origin(url)
+    if not origin:
+        return None
+    row = conn.execute(
+        "SELECT id, payload, created_at FROM submissions "
+        "WHERE status = 'pending' "
+        "AND json_extract(payload, '$.url') LIKE ? "
+        "ORDER BY id DESC LIMIT 1",
+        (origin + "%",),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def create_submission(conn, payload: dict) -> int:
+    """Insert a submission row. payload is stored verbatim as JSON."""
+    cur = conn.execute(
+        "INSERT INTO submissions (payload, status, created_at) "
+        "VALUES (?, 'pending', ?)",
+        (json.dumps(payload, ensure_ascii=False), int(time.time())),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def list_submissions(conn, status: str = "pending", limit: int = 50) -> list[dict]:
+    rows = conn.execute(
+        "SELECT id, payload, status, note, created_at, reviewed_at "
+        "FROM submissions WHERE status = ? "
+        "ORDER BY id DESC LIMIT ?",
+        (status, limit),
+    ).fetchall()
+    out: list[dict] = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d["payload"] = json.loads(d["payload"])
+        except Exception:
+            pass
+        out.append(d)
+    return out
+
+
+def mark_submission(conn, sub_id: int, status: str, note: str | None = None):
+    conn.execute(
+        "UPDATE submissions SET status=?, note=?, reviewed_at=? WHERE id=?",
+        (status, note, int(time.time()), sub_id),
+    )
+    conn.commit()

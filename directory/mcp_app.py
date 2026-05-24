@@ -339,4 +339,150 @@ async def stats(ctx: Context | None = None) -> dict[str, Any]:
     return out
 
 
-log.info("directory MCP app built (db=%s, tools=4)", DB_PATH)
+_REGISTER_RATE_LIMIT_PER_IP_PER_DAY = 5
+
+
+@discover_mcp.tool()
+async def register(
+    url: str,
+    name: str | None = None,
+    description: str | None = None,
+    mcp_url: str | None = None,
+    category: str | None = None,
+    chains: list[str] | None = None,
+    price_min_usdc: float | None = None,
+    price_max_usdc: float | None = None,
+    contact: str | None = None,
+    ctx: Context | None = None,
+) -> dict[str, Any]:
+    """Self-register an x402 / MCP service in the agent-tools directory.
+
+    Service owners and agents may submit new services here. Submissions
+    land in a pending queue and are reviewed by a human before they show
+    up in `search` results. Listing is FREE.
+
+    Dedup: if a service with the same canonical origin (scheme://host)
+    already exists in the directory we return its slug instead of
+    creating a duplicate submission. Same goes for a still-pending
+    submission with the same origin.
+
+    Rate limit: at most 5 pending submissions per client IP per 24h.
+    Hits beyond that get `{error: rate_limited}` — try again later or
+    email contact@agent-tools.cloud for bulk imports.
+
+    Args:
+        url: Public HTTPS URL of the service (the x402-payable endpoint
+            or its homepage). Required.
+        name: Human-friendly name. Defaults to the URL hostname.
+        description: One-paragraph description (max ~2000 chars).
+        mcp_url: If the service speaks MCP, its streamable-http endpoint.
+        category: Free-form (e.g. "defi", "search", "social"). Use
+            `list_categories` to align with existing taxonomy.
+        chains: Networks the service accepts payment on
+            (e.g. ["base", "solana"]).
+        price_min_usdc: Lower bound of per-call price in USDC.
+        price_max_usdc: Upper bound of per-call price in USDC.
+        contact: Optional email / handle the directory team can reach
+            you on for clarifications.
+    """
+    # ---- 1. Validation -------------------------------------------------
+    if not url or not isinstance(url, str):
+        return {"error": "invalid_url", "message": "url is required"}
+    url = url.strip()
+    if not (url.startswith("http://") or url.startswith("https://")):
+        return {"error": "invalid_url", "message": "url must start with http:// or https://"}
+    if len(url) > 500:
+        return {"error": "invalid_url", "message": "url too long (max 500)"}
+    if mcp_url:
+        mcp_url = mcp_url.strip()
+        if not (mcp_url.startswith("http://") or mcp_url.startswith("https://")):
+            return {"error": "invalid_mcp_url",
+                    "message": "mcp_url must start with http:// or https://"}
+    if description and len(description) > 2000:
+        description = description[:2000]
+
+    client_name = _client_name_from_ctx(ctx)
+    client_ip = _current_client_ip.get()
+
+    # ---- 2. Dedup ------------------------------------------------------
+    with _open() as conn:
+        existing = directory_db.find_service_by_url(conn, url)
+        if not existing and mcp_url:
+            existing = directory_db.find_service_by_url(conn, mcp_url)
+        pending = directory_db.find_pending_submission(conn, url)
+        if not pending and mcp_url:
+            pending = directory_db.find_pending_submission(conn, mcp_url)
+
+    if existing:
+        _log_call("register", ctx=ctx,
+                  args={"url": url, "outcome": "already_listed"},
+                  result_n=0, result_slug=existing.get("slug"))
+        return {
+            "status": "already_listed",
+            "message": "A service with this URL is already in the directory.",
+            "slug": existing.get("slug"),
+            "url": existing.get("url"),
+        }
+    if pending:
+        _log_call("register", ctx=ctx,
+                  args={"url": url, "outcome": "already_pending"}, result_n=0)
+        return {
+            "status": "already_pending",
+            "message": "A submission for this URL is already awaiting review.",
+            "submission_id": pending.get("id"),
+        }
+
+    # ---- 3. Rate limit -------------------------------------------------
+    if client_ip:
+        with _open() as conn:
+            recent = directory_db.count_recent_submissions(conn, client_ip)
+        if recent >= _REGISTER_RATE_LIMIT_PER_IP_PER_DAY:
+            _log_call("register", ctx=ctx,
+                      args={"url": url, "outcome": "rate_limited",
+                            "recent": recent}, result_n=0)
+            return {
+                "status": "rate_limited",
+                "message": (
+                    f"You have {recent} pending submissions in the last 24h "
+                    f"(limit {_REGISTER_RATE_LIMIT_PER_IP_PER_DAY}). "
+                    "Wait for review or email contact@agent-tools.cloud."
+                ),
+            }
+
+    # ---- 4. Insert -----------------------------------------------------
+    payload = {
+        "url": url,
+        "name": name,
+        "description": description,
+        "mcp_url": mcp_url,
+        "category": category,
+        "chains": chains,
+        "price_min_usdc": price_min_usdc,
+        "price_max_usdc": price_max_usdc,
+        "contact": contact,
+        "_client_name": client_name,
+        "_client_ip": client_ip,
+        "_source": "mcp-register",
+    }
+    try:
+        with directory_db.writer(DB_PATH) as wc:
+            sub_id = directory_db.create_submission(wc, payload)
+    except Exception as e:
+        log.exception("register failed: %r", e)
+        return {"status": "error", "message": "submission_failed"}
+
+    _log_call("register", ctx=ctx,
+              args={"url": url, "outcome": "pending"},
+              result_n=1, result_slug=str(sub_id))
+    return {
+        "status": "pending",
+        "submission_id": sub_id,
+        "message": (
+            "Submission received. A human will review and (if approved) "
+            "your service will appear in `search` within 1–2 days. "
+            "Listing is free."
+        ),
+    }
+
+
+log.info("directory MCP app built (db=%s, tools=5)", DB_PATH)
