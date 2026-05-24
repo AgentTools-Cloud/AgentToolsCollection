@@ -152,6 +152,90 @@ def cmd_stats() -> int:
     return 0
 
 
+def cmd_submissions(status: str = "pending", limit: int = 50) -> int:
+    """List submissions (pending by default) for human review."""
+    with db.connect(read_only=True) as c:
+        rows = db.list_submissions(c, status=status, limit=limit)
+    if not rows:
+        print(f"no submissions with status={status}")
+        return 0
+    for r in rows:
+        p = r.get("payload") or {}
+        if not isinstance(p, dict):
+            p = {}
+        ts = r.get("created_at")
+        print(f"--- submission #{r['id']} ({r['status']}) "
+              f"created={ts} ip={p.get('_client_ip')} client={p.get('_client_name')} ---")
+        for k in ("name", "url", "mcp_url", "category", "chains",
+                 "price_min_usdc", "price_max_usdc", "description", "contact"):
+            v = p.get(k)
+            if v not in (None, "", []):
+                print(f"  {k}: {v}")
+        if r.get("note"):
+            print(f"  note: {r['note']}")
+    return 0
+
+
+def cmd_approve(sub_id: int, note: str | None = None) -> int:
+    """Approve a pending submission: copy fields into services + mark reviewed."""
+    from urllib.parse import urlparse
+
+    def _slugify(text: str) -> str:
+        import re as _re
+        s = _re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+        return s or "unnamed"
+
+    with db.connect(read_only=True) as c:
+        rows = db.list_submissions(c, status="pending", limit=1000)
+    row = next((r for r in rows if r["id"] == sub_id), None)
+    if row is None:
+        print(f"submission #{sub_id} not found or not pending", file=sys.stderr)
+        return 1
+    p = row.get("payload") or {}
+    if not isinstance(p, dict):
+        print("submission payload not parseable", file=sys.stderr)
+        return 1
+    url = (p.get("url") or "").strip()
+    if not url:
+        print("submission has no url", file=sys.stderr)
+        return 1
+    host = urlparse(url).hostname or url
+    name = p.get("name") or host
+    service = {
+        "slug": _slugify(host) + "-sub" + str(sub_id),
+        "name": name,
+        "url": url,
+        "description": p.get("description"),
+        "category": _slugify(p.get("category") or "general"),
+        "chains": p.get("chains") or [],
+        "price_min": p.get("price_min_usdc"),
+        "price_max": p.get("price_max_usdc"),
+        "mcp_url": p.get("mcp_url"),
+        "source": "submission",
+        "source_id": f"sub:{sub_id}",
+        "tags": [p.get("category")] if p.get("category") else [],
+        "region": "global",
+    }
+    def op():
+        with db.writer() as wc:
+            created, _sid = db.upsert_service(wc, service)
+            db.mark_submission(wc, sub_id, "approved", note=note)
+            return created
+    created = db.with_retry(op)
+    print(f"approved submission #{sub_id} -> service slug={service['slug']} "
+          f"({'new' if created else 'updated'})")
+    return 0
+
+
+def cmd_reject(sub_id: int, note: str | None = None) -> int:
+    def op():
+        with db.writer() as wc:
+            db.mark_submission(wc, sub_id, "rejected", note=note)
+    db.with_retry(op)
+    print(f"rejected submission #{sub_id}")
+    return 0
+
+
 def main(argv=None) -> int:
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -162,6 +246,15 @@ def main(argv=None) -> int:
     p_crawl.add_argument("source", nargs="?", default=None)
     sub.add_parser("health")
     sub.add_parser("stats")
+    p_subs = sub.add_parser("submissions")
+    p_subs.add_argument("--status", default="pending")
+    p_subs.add_argument("--limit", type=int, default=50)
+    p_app = sub.add_parser("approve")
+    p_app.add_argument("id", type=int)
+    p_app.add_argument("--note", default=None)
+    p_rej = sub.add_parser("reject")
+    p_rej.add_argument("id", type=int)
+    p_rej.add_argument("--note", default=None)
     args = p.parse_args(argv)
 
     if args.cmd == "init":
@@ -172,6 +265,12 @@ def main(argv=None) -> int:
         return cmd_health()
     if args.cmd == "stats":
         return cmd_stats()
+    if args.cmd == "submissions":
+        return cmd_submissions(status=args.status, limit=args.limit)
+    if args.cmd == "approve":
+        return cmd_approve(args.id, note=args.note)
+    if args.cmd == "reject":
+        return cmd_reject(args.id, note=args.note)
     return 2
 
 
