@@ -332,7 +332,9 @@ def _expand_fts_query(q: str) -> str | None:
             groups.append(f"{t}*")
         else:
             groups.append(f'"{t}"')
-    return " ".join(groups)
+    # FTS5 only allows implicit AND between bare tokens; once any group is
+    # parenthesized or quoted, the parser requires explicit AND.
+    return " AND ".join(groups)
 
 
 def _match_reason(row: dict, q: str | None) -> list[str]:
