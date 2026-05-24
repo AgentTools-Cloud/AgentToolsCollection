@@ -221,9 +221,12 @@ def fetch_x402scan() -> list:
                 continue
             res_url = res.get("resource") or ""
             # Heuristic: any resource path ending with /mcp /sse /streamable
-            # is almost certainly an MCP transport endpoint.
-            if re.search(r"/(mcp|sse|streamable)(/|$)", res_url.lower()):
-                mcp_resource_urls.add(res_url)
+            # is almost certainly an MCP transport endpoint. Trim back to
+            # that segment so we keep the server root, not a tool-specific
+            # sub-path like /mcp/clean-context/__tool__/foo.
+            mm = re.search(r"^(.+?/(mcp|sse|streamable))(/|$)", res_url.lower())
+            if mm:
+                mcp_resource_urls.add(res_url[: mm.end(1)])
             for accept in res.get("accepts") or []:
                 if not isinstance(accept, dict):
                     continue
