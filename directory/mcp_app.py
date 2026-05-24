@@ -24,9 +24,18 @@ log = logging.getLogger("mcpserver.directory.mcp")
 DB_PATH = os.getenv("AGENT_TOOLS_DB_PATH", directory_db.DEFAULT_DB_PATH)
 
 _INSTRUCTIONS = (
-    "Search and inspect x402 paid services from the agent-tools.cloud directory.\n"
-    "Start with `search` (natural-language intent), then `get` for full call details.\n"
-    "Use `list_categories` to browse and `stats` for directory size + health."
+    "Directory of x402-paid + MCP services on agent-tools.cloud. Built for "
+    "AGENT consumers — humans use the website, agents use these tools.\n\n"
+    "Typical flow:\n"
+    "  1. `search(intent=..., has_mcp=True)` to find candidates by natural\n"
+    "     language; or `search(category=..., has_mcp=True)` to browse.\n"
+    "  2. Inspect `match_reason` + `confidence` + `tx_30d` on each item to\n"
+    "     judge quality. Prefer `popular+healthy` items.\n"
+    "  3. `get(slug)` to fetch full details including `call_template` —\n"
+    "     a ready-to-paste snippet showing how to invoke the service\n"
+    "     (MCP streamable-http and/or x402 HTTP).\n"
+    "  4. Use `list_categories` to discover the taxonomy and `stats` for\n"
+    "     directory size + health."
 )
 
 _TS = TransportSecuritySettings(enable_dns_rebinding_protection=False)
@@ -132,7 +141,7 @@ def _log_call(tool, ctx: Context | None = None, args=None,
 
 @discover_mcp.tool()
 async def search(
-    intent: str,
+    intent: str | None = None,
     top_k: int = 5,
     max_price_usd: float | None = None,
     category: str | None = None,
@@ -141,35 +150,54 @@ async def search(
     has_mcp: bool = False,
     ctx: Context | None = None,
 ) -> dict[str, Any]:
-    """Find x402 paid services matching a natural-language intent.
+    """Find x402 / MCP services matching an intent or filter set.
 
-    Results are ranked by: health → has-quality-signal → confidence
-    → 30-day transaction volume → last-updated. So the highest-quality
-    real-traffic services appear first.
+    Two usage modes (agents pick whichever fits):
+      A. Natural-language: `search(intent="fetch tweets for @user")`
+      B. Pure browse:      `search(has_mcp=True, category="defi", top_k=10)`
+         At least one of `intent`, `category`, `chain`, `has_mcp`,
+         `min_confidence` must be supplied — otherwise the call is
+         rejected (we won't dump 2300+ rows).
 
-    Each item in the response includes (when available):
-      - confidence    : 0.0–1.0 x402scan quality score (higher = more reliable).
+    Results are ranked by:
+        (health=ok AND tx_30d>0) → health=ok → has-quality-signal →
+        confidence → tx_30d → recency.
+    So the highest-quality real-traffic services appear first.
+
+    Each item includes (when available):
+      - confidence    : 0.0–1.0 x402scan quality score.
       - tx_30d        : 30-day x402 payment count (proxy for real usage).
-      - match_snippet : FTS snippet showing where your `intent` hit
-                        (matched tokens wrapped in [[ ]]).
-      - match_reason  : list[str] of human-readable ranking signals — agents
-                        can show these to users so they understand WHY a
-                        service was picked.
-    Agents should prefer items with non-null confidence and tx_30d > 0 unless
-    the user explicitly wants experimental endpoints.
+      - match_snippet : FTS snippet showing where `intent` hit ([[token]]).
+      - match_reason  : list[str] of human-readable ranking signals.
+      - mcp_url       : populated when the service exposes an MCP endpoint
+                        (you can call it directly via streamable-http).
+    Agents should prefer items with non-null confidence and tx_30d > 0
+    unless the user explicitly wants experimental endpoints.
 
     Args:
-        intent: What the agent wants to do (English or Chinese), e.g.
-            "fetch user tweets", "check on-chain whale activity".
-        top_k: Max number of services (default 5, max 25).
-        max_price_usd: Hard upper bound on per-call price in USD.
-        category: Optional category filter (see `list_categories`).
-        chain: Optional chain filter ("base", "polygon", "arbitrum", ...).
-        min_confidence: Optional minimum confidence threshold (0.0–1.0).
-            E.g. 0.8 keeps only services x402scan rates as high-quality.
-        has_mcp: When true, only return services that expose a callable
-            MCP endpoint (i.e. `mcp_url` is set).
+        intent: What the agent wants to do (English or Chinese). Optional
+            when at least one structured filter is set. Synonym expansion
+            covers twitter↔X↔推特, whale↔巨鲸, price↔价格 etc.
+        top_k: Max services to return (default 5, hard cap 25).
+        max_price_usd: Upper bound on per-call price in USD.
+        category: Filter (see `list_categories`).
+        chain: "base", "polygon", "solana", "arbitrum", ...
+        min_confidence: Minimum confidence (0.0–1.0). 0.8+ keeps only
+            services x402scan rates as high-quality.
+        has_mcp: When true, return only services with a callable MCP
+            endpoint. Use this when the agent wants to chain another MCP
+            server rather than perform raw HTTP+x402.
     """
+    if not any((intent, category, chain, has_mcp,
+                min_confidence is not None)):
+        return {
+            "error": "no_filter",
+            "message": (
+                "Provide at least one of: intent, category, chain, "
+                "has_mcp=true, min_confidence. The directory has 2000+ "
+                "services — pick a starting point."
+            ),
+        }
     top_k = max(1, min(int(top_k), 25))
     with _open() as conn:
         items = directory_db.search(
@@ -200,19 +228,94 @@ async def search(
     return out
 
 
+def _build_call_template(row: dict) -> dict[str, Any]:
+    """Return ready-to-paste call snippets for both MCP and x402 HTTP modes.
+
+    Agents typically need: (a) the exact endpoint URL, (b) which transport
+    (MCP streamable-http vs raw HTTP + 402 handshake), (c) a code skeleton
+    they can fill in. We hand them all three in one place.
+    """
+    out: dict[str, Any] = {}
+    mcp_url = (row.get("mcp_url") or "").strip()
+    if mcp_url:
+        out["mcp"] = {
+            "transport": "streamable-http",
+            "url": mcp_url,
+            "python": (
+                "from mcp import ClientSession\n"
+                "from mcp.client.streamable_http import streamablehttp_client\n"
+                "async with streamablehttp_client(\n"
+                f"    {mcp_url!r}\n"
+                ") as (r, w, _):\n"
+                "    async with ClientSession(r, w) as s:\n"
+                "        await s.initialize()\n"
+                "        tools = await s.list_tools()\n"
+                "        # await s.call_tool('<tool_name>', { ... })"
+            ),
+            "inspector_cli": (
+                f"npx @modelcontextprotocol/inspector --transport http {mcp_url}"
+            ),
+            "claude_desktop_config": {
+                row.get("slug") or "service": {
+                    "type": "streamable-http",
+                    "url": mcp_url,
+                }
+            },
+        }
+
+    url = (row.get("url") or "").strip()
+    if url:
+        chains = row.get("chains") or []
+        price_min = row.get("price_min")
+        price_hint = (
+            f"(≈${price_min}/call in USDC)" if price_min is not None
+            else "(price advertised in 402 response)"
+        )
+        out["http_x402"] = {
+            "url": url,
+            "flow": [
+                f"1. GET/POST {url}  →  receives HTTP 402 + accepts[] header",
+                "2. Pick a row from accepts[] (network + maxAmountRequired).",
+                "3. Sign an EIP-3009 USDC transferWithAuthorization payload.",
+                "4. Retry with header `X-PAYMENT: <base64 payload>`.",
+                "5. Service settles via facilitator and returns the result.",
+            ],
+            "curl_probe": (
+                f'curl -sS -i -X POST "{url}"  '
+                "# expect HTTP/1.1 402 Payment Required " + price_hint
+            ),
+            "well_known": row.get("well_known_url"),
+            "chains": chains,
+            "facilitator": row.get("facilitator"),
+        }
+
+    if not out:
+        out["note"] = "Service has no callable endpoint registered yet."
+    return out
+
+
 @discover_mcp.tool()
 async def get(slug: str, ctx: Context | None = None) -> dict[str, Any]:
-    """Get full details (URL, price, schema, call template) of a service by slug.
+    """Get full details + ready-to-paste call template for a service.
 
-    Returned dict includes `confidence` (0–1, x402scan quality score) and
-    `tx_30d` (30-day x402 payment count) when available — use these to
-    judge whether a service is production-ready before calling it.
+    Returns the service row plus a `call_template` field:
+      - call_template.mcp        : how to call via MCP streamable-http
+                                   (python snippet, inspector CLI line,
+                                   Claude Desktop config fragment).
+      - call_template.http_x402  : 5-step HTTP+402 payment flow with the
+                                   exact endpoint URL and a curl probe.
+    Use this AFTER `search` to grab the snippet — no need for the agent
+    to hand-craft an x402 client.
+
+    Args:
+        slug: Service slug as returned by `search` items.
     """
     with _open() as conn:
         row = directory_db.get_by_slug(conn, slug)
     if row is None:
         _log_call("get", ctx=ctx, args={"slug": slug}, result_n=0)
         return {"error": "not_found", "slug": slug}
+    row["call_template"] = _build_call_template(row)
     _log_call("get", ctx=ctx, args={"slug": slug}, result_n=1, result_slug=slug)
     return row
 
