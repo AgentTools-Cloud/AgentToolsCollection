@@ -76,11 +76,17 @@ def _parse_awesome_md(text, source_tag):
         desc = (m.group("desc") or "").strip()
         if not url.startswith("http"):
             continue
+        # MCP-aware mapping: any entry under a heading mentioning MCP /
+        # "model context protocol" is itself an MCP server URL.
+        cat_lower = current_cat.lower()
+        is_mcp_section = ("mcp" in cat_lower) or ("model context protocol" in cat_lower)
+        mcp_url = url if is_mcp_section else None
         out.append({
             "slug": _host_slug(url) + "-" + _slugify(name)[:32],
             "name": name, "url": url,
             "description": desc or None,
             "category": _slugify(current_cat),
+            "mcp_url": mcp_url,
             "source": "awesome-x402", "source_id": f"{source_tag}:{url}",
             "tags": [current_cat], "region": "global",
         })
@@ -208,9 +214,16 @@ def fetch_x402scan() -> list:
         descriptions: list = []
         confidences: list = []
         tx_30d_total = 0
+        mcp_server_urls: set = set()
+        mcp_resource_urls: set = set()
         for res in resources:
             if not isinstance(res, dict):
                 continue
+            res_url = res.get("resource") or ""
+            # Heuristic: any resource path ending with /mcp /sse /streamable
+            # is almost certainly an MCP transport endpoint.
+            if re.search(r"/(mcp|sse|streamable)(/|$)", res_url.lower()):
+                mcp_resource_urls.add(res_url)
             for accept in res.get("accepts") or []:
                 if not isinstance(accept, dict):
                     continue
@@ -221,6 +234,16 @@ def fetch_x402scan() -> list:
                     prices.append(price)
                 if accept.get("description"):
                     descriptions.append(str(accept["description"]).strip())
+            # Higher-fidelity MCP signal: x402scan's resolved response object
+            # at response.response.accepts[].extra.mcpServer (explicitly
+            # declared by the service in its .well-known).
+            rresp = (res.get("response") or {}).get("response") or {}
+            for a in rresp.get("accepts") or []:
+                if not isinstance(a, dict):
+                    continue
+                extra = a.get("extra")
+                if isinstance(extra, dict) and extra.get("mcpServer"):
+                    mcp_server_urls.add(str(extra["mcpServer"]))
             md = res.get("metadata") if isinstance(res.get("metadata"), dict) else None
             if md:
                 conf = (md.get("confidence") or {}).get("overallScore")
@@ -241,6 +264,20 @@ def fetch_x402scan() -> list:
             description = description[:397] + "..."
         category = _slugify(sorted(tag_set)[0]) if tag_set else "general"
 
+        # mcp_url priority:
+        #   1. explicit mcpServer from response.response.accepts.extra
+        #   2. a resource whose path ends in /mcp /sse /streamable
+        #   3. origin hostname contains 'mcp' (weak signal — but x402scan
+        #      shows this is the most reliable one for actually-callable
+        #      MCP services like mcp.cryptoiz.org, mcp.swissdeals.app)
+        mcp_url = None
+        if mcp_server_urls:
+            mcp_url = sorted(mcp_server_urls)[0]
+        elif mcp_resource_urls:
+            mcp_url = sorted(mcp_resource_urls)[0]
+        elif re.search(r"(^|[./_-])mcp[./_-]|//mcp\.", origin_url.lower()):
+            mcp_url = origin_url
+
         rows.append({
             "slug": _host_slug(origin_url) + "-scan",
             "name": name, "url": origin_url,
@@ -249,6 +286,7 @@ def fetch_x402scan() -> list:
             "chains": sorted(chains),
             "price_min": min(prices) if prices else None,
             "price_max": max(prices) if prices else None,
+            "mcp_url": mcp_url,
             "well_known_url": origin_url.rstrip("/") + "/.well-known/x402",
             "confidence": max(confidences) if confidences else None,
             "tx_30d": tx_30d_total if tx_30d_total > 0 else None,
