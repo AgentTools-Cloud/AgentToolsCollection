@@ -43,7 +43,7 @@ from x402.server import x402ResourceServer
 
 from directory import db as directory_db
 from directory.routes import router as directory_router
-from directory.mcp_app import discover_mcp
+from directory.mcp_app import discover_mcp, wrap_with_client_capture
 from metrics import PrometheusMiddleware, metrics_endpoint
 
 from verticals import signals as signals_vertical
@@ -199,7 +199,7 @@ app = FastAPI(
 # Mount MCP streamable-http transport at /mcp.
 app.mount("/mcp", mcp_app.streamable_http_app())
 # Free directory-discovery MCP (search/get/list_categories/stats) — ungated.
-app.mount("/mcp-discovery", discover_mcp.streamable_http_app())
+app.mount("/mcp-discovery", wrap_with_client_capture(discover_mcp.streamable_http_app()))
 
 # Hostname split: agent-tools.cloud serves directory + relay (full schema),
 # while the subdomain relay.agent-tools.cloud presents the Qwen3.6 paid
