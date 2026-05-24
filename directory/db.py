@@ -257,18 +257,66 @@ def row_to_dict(row) -> dict:
     return d
 
 
-def search(conn, q=None, category=None, chain=None, region=None, health=None,
-           min_confidence=None, limit=50, offset=0):
-    sql_parts = ["SELECT s.* FROM services s"]
-    where = []
-    params = []
+def _match_reason(row: dict, q: str | None) -> list[str]:
+    """Human-readable ranking signals so agents see WHY a row was returned."""
+    reasons: list[str] = []
+    if row.get("health") == "ok":
+        reasons.append("health=ok")
+    elif row.get("health"):
+        reasons.append(f"health={row['health']}")
+    tx = row.get("tx_30d")
+    if tx:
+        reasons.append(f"tx_30d={int(tx)}")
+    conf = row.get("confidence")
+    if conf is not None:
+        reasons.append(f"confidence={conf:.2f}")
+    if row.get("category"):
+        reasons.append(f"category={row['category']}")
+    snip = row.get("match_snippet")
+    if snip:
+        reasons.append(f"matched: {snip}")
+    elif q:
+        # No FTS hit (shouldn't happen when q is set & joined) — still show
+        # the user-issued query for debugging.
+        reasons.append(f"query={q!r}")
+    return reasons
 
+
+def search(conn, q=None, category=None, chain=None, region=None, health=None,
+           min_confidence=None, has_mcp: bool = False,
+           limit=50, offset=0):
+    """Search the directory.
+
+    Returns a list of dict rows. Each row gets two extra synthetic fields:
+      - match_snippet : FTS5 snippet of the matched text (only when q given)
+      - match_reason  : list[str] of human-readable ranking signals
+                        (e.g. ["health=ok", "tx_30d=7500", "matched: ..."])
+    """
+    # Select s.* plus an FTS snippet when we have a query. The snippet
+    # uses [[ and ]] as match markers (less likely to collide with code).
+    select_cols = ["s.*"]
+    sql_parts: list[str]
+    where: list[str] = []
+    params: list = []
+
+    fts_query = None
     if q:
         safe_q = q.replace('"', " ").strip()
         if safe_q:
-            sql_parts.append("JOIN services_fts f ON f.rowid = s.id")
-            where.append("services_fts MATCH ?")
-            params.append(f'"{safe_q}"*' if " " not in safe_q else safe_q)
+            fts_query = f'"{safe_q}"*' if " " not in safe_q else safe_q
+
+    if fts_query is not None:
+        # Use snippet() with a moderate token window — column -1 = any column.
+        select_cols.append(
+            "snippet(services_fts, -1, '[[', ']]', '…', 12) AS match_snippet"
+        )
+        sql_parts = ["SELECT " + ", ".join(select_cols) + " FROM services s"]
+        sql_parts.append("JOIN services_fts f ON f.rowid = s.id")
+        where.append("services_fts MATCH ?")
+        params.append(fts_query)
+    else:
+        sql_parts = ["SELECT " + ", ".join(select_cols) + " FROM services s"]
+
     if category:
         where.append("s.category=?"); params.append(category)
     if chain:
@@ -279,6 +327,8 @@ def search(conn, q=None, category=None, chain=None, region=None, health=None,
         where.append("s.health=?"); params.append(health)
     if min_confidence is not None:
         where.append("s.confidence >= ?"); params.append(float(min_confidence))
+    if has_mcp:
+        where.append("s.mcp_url IS NOT NULL AND s.mcp_url != ''")
     if where:
         sql_parts.append("WHERE " + " AND ".join(where))
     # Quality-aware ordering: healthy first, then services with x402scan
@@ -293,7 +343,15 @@ def search(conn, q=None, category=None, chain=None, region=None, health=None,
     sql_parts.append("LIMIT ? OFFSET ?")
     params.extend([limit, offset])
     rows = conn.execute(" ".join(sql_parts), params).fetchall()
-    return [row_to_dict(r) for r in rows]
+    out: list[dict] = []
+    for r in rows:
+        d = row_to_dict(r)
+        # Strip empty/None snippet so it doesn't pollute output
+        if d.get("match_snippet") in (None, "", "…"):
+            d.pop("match_snippet", None)
+        d["match_reason"] = _match_reason(d, q)
+        out.append(d)
+    return out
 
 
 def get_by_slug(conn, slug):
