@@ -257,14 +257,94 @@ def row_to_dict(row) -> dict:
     return d
 
 
+# ---------------------------------------------------------------------------
+# Query expansion (P1-3)
+#
+# Agents say "twitter" but services index "X" or "推特"; agents say "巨鲸"
+# but the listing reads "whale". Build a small, hand-curated synonym map and
+# OR-expand each token at query time. Keep it deliberately small — false
+# friends in a synonym set are worse than a missed recall.
+# ---------------------------------------------------------------------------
+_SYNONYM_GROUPS: list[list[str]] = [
+    # social / twitter
+    ["twitter", "x", "推特", "tweet", "tweets"],
+    # crypto market roles
+    ["whale", "whales", "巨鲸", "大户"],
+    ["airdrop", "空投"],
+    ["nft", "non-fungible", "藏品"],
+    ["wallet", "钱包"],
+    ["price", "quote", "报价", "价格"],
+    ["swap", "交换", "兑换"],
+    ["balance", "余额"],
+    ["transfer", "转账", "send"],
+    ["dex", "去中心化交易所"],
+    ["cex", "中心化交易所", "exchange", "交易所"],
+    ["onchain", "on-chain", "链上"],
+    # chains
+    ["solana", "sol"],
+    ["ethereum", "eth"],
+    ["base", "basechain"],
+    # search / discovery
+    ["search", "find", "查找", "搜索"],
+    ["news", "新闻", "资讯"],
+    ["weather", "天气"],
+    ["image", "picture", "图片", "图像"],
+    ["video", "视频"],
+    ["translate", "translation", "翻译"],
+    ["llm", "language model", "大模型"],
+]
+_SYNONYM_MAP: dict[str, list[str]] = {}
+for _g in _SYNONYM_GROUPS:
+    for _t in _g:
+        _SYNONYM_MAP[_t.lower()] = _g
+
+
+def _expand_fts_query(q: str) -> str | None:
+    """Turn a free-text query into an FTS5 MATCH expression with synonyms.
+
+    Strategy: lowercase, split on whitespace, drop FTS-special chars from
+    each token; per token look up the synonym group and emit `(a OR b OR c)`
+    (the group always contains the original token). Groups are joined with
+    space which is FTS5 AND. Single bare tokens get a trailing `*` for
+    prefix match. Returns None if nothing usable remains.
+    """
+    if not q:
+        return None
+    # Remove FTS operator chars and quoting; keep CJK + word chars + space.
+    cleaned = []
+    for ch in q.lower():
+        if ch.isalnum() or ch == " " or "\u4e00" <= ch <= "\u9fff":
+            cleaned.append(ch)
+        else:
+            cleaned.append(" ")
+    tokens = [t for t in "".join(cleaned).split() if t]
+    if not tokens:
+        return None
+    groups: list[str] = []
+    for t in tokens:
+        syns = _SYNONYM_MAP.get(t)
+        if syns:
+            # quote each synonym to keep CJK / multiword safe inside FTS5
+            quoted = [f'"{s}"' for s in syns]
+            groups.append("(" + " OR ".join(quoted) + ")")
+        elif len(tokens) == 1:
+            # single bare token → prefix match
+            groups.append(f"{t}*")
+        else:
+            groups.append(f'"{t}"')
+    return " ".join(groups)
+
+
 def _match_reason(row: dict, q: str | None) -> list[str]:
     """Human-readable ranking signals so agents see WHY a row was returned."""
     reasons: list[str] = []
+    tx = row.get("tx_30d") or 0
+    if row.get("health") == "ok" and tx > 0:
+        reasons.append("popular+healthy")
     if row.get("health") == "ok":
         reasons.append("health=ok")
     elif row.get("health"):
         reasons.append(f"health={row['health']}")
-    tx = row.get("tx_30d")
     if tx:
         reasons.append(f"tx_30d={int(tx)}")
     conf = row.get("confidence")
@@ -301,9 +381,7 @@ def search(conn, q=None, category=None, chain=None, region=None, health=None,
 
     fts_query = None
     if q:
-        safe_q = q.replace('"', " ").strip()
-        if safe_q:
-            fts_query = f'"{safe_q}"*' if " " not in safe_q else safe_q
+        fts_query = _expand_fts_query(q)
 
     if fts_query is not None:
         # Use snippet() with a moderate token window — column -1 = any column.
@@ -331,10 +409,19 @@ def search(conn, q=None, category=None, chain=None, region=None, health=None,
         where.append("s.mcp_url IS NOT NULL AND s.mcp_url != ''")
     if where:
         sql_parts.append("WHERE " + " AND ".join(where))
-    # Quality-aware ordering: healthy first, then services with x402scan
-    # signals (confidence + tx volume), then most recently seen.
+    # Quality-aware ordering (P1-4):
+    #   1. healthy AND has real 30-day traffic — the strongest "this thing
+    #      actually works" signal we have. Bumped above bare health=ok so
+    #      a popular service outranks an idle-but-up one.
+    #   2. healthy at all
+    #   3. has a confidence score (means x402scan saw it)
+    #   4. confidence value
+    #   5. tx_30d value
+    #   6. recency
     sql_parts.append(
-        "ORDER BY (s.health='ok') DESC, "
+        "ORDER BY "
+        "(s.health='ok' AND COALESCE(s.tx_30d,0) > 0) DESC, "
+        "(s.health='ok') DESC, "
         "(s.confidence IS NOT NULL) DESC, "
         "s.confidence DESC, "
         "COALESCE(s.tx_30d, 0) DESC, "
