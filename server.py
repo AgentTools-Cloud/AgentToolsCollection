@@ -183,9 +183,9 @@ async def lifespan(app: FastAPI):
         timeout=httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=30.0),
     )
     # FastMCP streamable-http needs its own session-manager lifespan.
-    # We run both the paid Qwen relay (/mcp) and the free directory
-    # discovery MCP (/mcp-discovery).
-    async with mcp_app.session_manager.run(), discover_mcp.session_manager.run():
+    # Only the free directory-discovery MCP at /mcp-discovery is mounted now
+    # (the paid /mcp mount was retired 2026-05-25).
+    async with discover_mcp.session_manager.run():
         try:
             yield
         finally:
