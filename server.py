@@ -196,8 +196,10 @@ app = FastAPI(
     title="mcpserver", version="0.2.0", lifespan=lifespan, openapi_url=None
 )
 
-# Mount MCP streamable-http transport at /mcp.
-app.mount("/mcp", mcp_app.streamable_http_app())
+# Paid x402 endpoints retired 2026-05-25 (0 conversions in 30d). The paid
+# MCP mount at /mcp and the REST verticals below are disabled. Only the free
+# directory-discovery MCP remains.
+# app.mount("/mcp", mcp_app.streamable_http_app())  # retired
 # Free directory-discovery MCP (search/get/list_categories/stats) — ungated.
 app.mount("/mcp-discovery", wrap_with_client_capture(discover_mcp.streamable_http_app()))
 
@@ -272,12 +274,15 @@ def _bazaar(method: str, body_example: dict, output_example: dict, body_props: d
     }
 
 
-# x402 v2 middleware — gates both REST and MCP entrypoints.
+# x402 v2 middleware — paid routes retired 2026-05-25. Middleware kept
+# registered with empty routes so any leftover crawler probe falls through
+# to a normal 404 rather than 402.
 _facilitator = HTTPFacilitatorClient(FacilitatorConfig(url=X402_FACILITATOR_URL))
 _x402_server = x402ResourceServer(_facilitator)
 _x402_server.register(X402_NETWORK, ExactEvmServerScheme())
 
-_routes = {
+_routes: dict = {}
+_RETIRED_ROUTES_FOR_REFERENCE_ONLY = {
     "POST /v1/chat/completions": RouteConfig(
         accepts=[PaymentOption(
             scheme="exact", pay_to=X402_PAY_TO,
@@ -578,41 +583,25 @@ async def well_known_x402(request: Request) -> dict[str, Any]:
         "relay.agent-tools.cloud" if relay else "agent-tools.cloud"
     )
     description = (
-        "Agent-native crypto stack on x402: frontier Qwen3.6-35B-A3B chat from "
-        "$0.001/call plus four data-grounded verticals — token momentum signals, "
-        "on-chain Q&A, DeFi planner and multi-leg portfolio. Eight endpoints, USDC "
-        "on Base, no signup, no API key, no rate limits."
-        if relay
-        else "Two-in-one x402 service: (1) the largest open directory of x402 "
-             "endpoints (the full x402 ecosystem, free JSON API + agents.json manifest); "
-             "(2) agent-native paid stack — Qwen3.6-35B-A3B chat from $0.001/call "
-             "plus token signals, on-chain Q&A and DeFi planner from $0.01. "
-             "USDC on Base, no signup, no API key."
+        "Free MCP discovery server for x402 paid services across the ecosystem. "
+        "Search 2000+ x402 endpoints, get call details, browse categories. "
+        "The paid relay previously hosted here has been retired; this host is "
+        "now directory + discovery only."
     )
     return {
         "name": host,
         "description": description,
-        "version": "0.3",
+        "version": "0.4",
         "endpoints": [
-            {"path": "/v1/chat/completions", "method": "POST", "kind": "rest-openai", "gated": True, "price_usd": X402_PRICE_USD},
-            {"path": "/mcp", "method": "POST", "kind": "mcp-streamable-http", "gated": True, "price_usd": X402_PRICE_USD},
-            {"path": "/v1/signal/token", "method": "POST", "kind": "rest-json", "gated": True, "price_usd": X402_SIGNAL_PRICE_USD, "category": "signal"},
-            {"path": "/v1/onchain/ask", "method": "POST", "kind": "rest-json", "gated": True, "price_usd": X402_ONCHAIN_PRICE_USD, "category": "onchain-analytics"},
-            {"path": "/v1/defi/plan", "method": "POST", "kind": "rest-json", "gated": True, "price_usd": X402_DEFI_PRICE_USD, "category": "defi-planner"},
-            {"path": "/v1/signal/bulk", "method": "POST", "kind": "rest-json", "gated": True, "price_usd": X402_SIGNAL_BULK_PRICE_USD, "category": "signal", "tier": "pro"},
-            {"path": "/v1/onchain/report", "method": "POST", "kind": "rest-json", "gated": True, "price_usd": X402_ONCHAIN_REPORT_PRICE_USD, "category": "onchain-analytics", "tier": "pro"},
-            {"path": "/v1/defi/portfolio", "method": "POST", "kind": "rest-json", "gated": True, "price_usd": X402_DEFI_PORTFOLIO_PRICE_USD, "category": "defi-planner", "tier": "pro"},
+            {"path": "/mcp-discovery", "method": "POST", "kind": "mcp-streamable-http", "gated": False},
+            {"path": "/api/v1/search", "method": "GET", "kind": "rest-json", "gated": False, "category": "directory"},
+            {"path": "/api/v1/services/{slug}", "method": "GET", "kind": "rest-json", "gated": False, "category": "directory"},
+            {"path": "/api/v1/categories", "method": "GET", "kind": "rest-json", "gated": False, "category": "directory"},
+            {"path": "/api/v1/stats", "method": "GET", "kind": "rest-json", "gated": False, "category": "directory"},
+            {"path": "/.well-known/agent-tools.json", "method": "GET", "kind": "agents.json", "gated": False},
             {"path": "/v1/models", "method": "GET", "kind": "info", "gated": False},
             {"path": "/healthz", "method": "GET", "kind": "info", "gated": False},
         ],
-        "x402": {
-            "version": 2,
-            "scheme": "exact",
-            "network": X402_NETWORK,
-            "pay_to": X402_PAY_TO,
-            "price_usd": X402_PRICE_USD,
-            "facilitator": X402_FACILITATOR_URL,
-        },
         "models": sorted(ALLOWED_MODELS),
         "source": "https://github.com/JoursBleu/mcpserver",
     }
@@ -652,13 +641,6 @@ async def well_known_mcp(request: Request) -> dict[str, Any]:
             {"name": "list_categories", "description": "List all directory categories."},
             {"name": "stats", "description": "Directory size, healthy count, source breakdown."},
         ],
-        "x402_paid_mcp": {
-            "url": f"{base}/mcp",
-            "tool": "qwen36_chat",
-            "price_usd": X402_PRICE_USD,
-            "network": X402_NETWORK,
-            "facilitator": X402_FACILITATOR_URL,
-        },
     }
 
 
@@ -671,129 +653,14 @@ async def models() -> dict[str, Any]:
     return {"object": "list", "data": data}
 
 
-# --- paid REST endpoint ---------------------------------------------------
-
-
-@app.post("/v1/chat/completions")
-async def chat_completions(request: Request) -> Any:
-    """OpenAI-compatible passthrough; PaymentMiddlewareASGI gates this route."""
-    body = await request.json()
-
-    model = body.get("model")
-    if model not in ALLOWED_MODELS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"model {model!r} not allowed; allowed={sorted(ALLOWED_MODELS)}",
-        )
-
-    if bool(body.get("stream")):
-        upstream_req = _client().build_request("POST", "/v1/chat/completions", json=body)
-        upstream_resp = await _client().send(upstream_req, stream=True)
-
-        async def _gen():
-            try:
-                async for chunk in upstream_resp.aiter_raw():
-                    yield chunk
-            finally:
-                await upstream_resp.aclose()
-
-        return StreamingResponse(
-            _gen(),
-            status_code=upstream_resp.status_code,
-            media_type=upstream_resp.headers.get("content-type", "text/event-stream"),
-        )
-
-    r = await _client().post("/v1/chat/completions", json=body)
-    return JSONResponse(content=r.json(), status_code=r.status_code)
-
-
-# --- paid vertical endpoints ---------------------------------------------
+# --- paid endpoints retired 2026-05-25 ------------------------------------
 #
-# Each handler is gated by its own x402 route entry above. The vertical
-# modules call `_llm_short` (NOT the gated /v1/chat/completions route) so
-# the agent only pays once per outer request.
-
-
-@app.post("/v1/signal/token")
-async def signal_token(request: Request) -> Any:
-    """Token momentum signal — DexScreener data + Qwen optional commentary."""
-    body = await request.json()
-    result = await signals_vertical.handle(body, _llm_short)
-    return JSONResponse(content=result)
-
-
-@app.post("/v1/onchain/ask")
-async def onchain_ask(request: Request) -> Any:
-    """Natural-language Q&A over free on-chain data (Defillama + DexScreener)."""
-    body = await request.json()
-    result = await onchain_vertical.handle(body, _llm_short)
-    return JSONResponse(content=result)
-
-
-@app.post("/v1/defi/plan")
-async def defi_plan(request: Request) -> Any:
-    """DeFi action planner — lend/swap/stake comparison with Qwen risk review."""
-    body = await request.json()
-    result = await defi_vertical.handle(body, _llm_short)
-    return JSONResponse(content=result)
-
-
-@app.post("/v1/signal/bulk")
-async def signal_bulk(request: Request) -> Any:
-    """Pro tier: bulk token signal — up to 10 tokens / call."""
-    body = await request.json()
-    result = await signals_vertical.handle_bulk(body, _llm_short)
-    return JSONResponse(content=result)
-
-
-@app.post("/v1/onchain/report")
-async def onchain_report(request: Request) -> Any:
-    """Pro tier: multi-source on-chain analyst report."""
-    body = await request.json()
-    result = await onchain_vertical.handle_report(body, _llm_short)
-    return JSONResponse(content=result)
-
-
-@app.post("/v1/defi/portfolio")
-async def defi_portfolio(request: Request) -> Any:
-    """Pro tier: multi-leg DeFi portfolio plan."""
-    body = await request.json()
-    result = await defi_vertical.handle_portfolio(body, _llm_short)
-    return JSONResponse(content=result)
-
-
-# --- Portfolio Loop Primitive (snapshot/plan/quote/execute) -------------
-
-@app.post("/v1/portfolio/snapshot")
-async def portfolio_snapshot(request: Request) -> Any:
-    """Stage 1: signed cross-chain holdings snapshot (60s TTL)."""
-    body = await request.json()
-    result = await portfolio_vertical.handle_snapshot(body, _llm_short)
-    return JSONResponse(content=result)
-
-
-@app.post("/v1/portfolio/plan")
-async def portfolio_plan(request: Request) -> Any:
-    """Stage 2: strategy-driven action list bound to a snapshot."""
-    body = await request.json()
-    result = await portfolio_vertical.handle_plan(body, _llm_short)
-    return JSONResponse(content=result)
-
-
-@app.post("/v1/portfolio/quote")
-async def portfolio_quote(request: Request) -> Any:
-    """Stage 3: signed tx + attestation for a single plan step."""
-    body = await request.json()
-    result = await portfolio_vertical.handle_quote(body, _llm_short)
-    return JSONResponse(content=result)
-
-
-@app.post("/v1/portfolio/execute")
-async def portfolio_execute(request: Request) -> Any:
-    """Stage 4: free confirm — record a broadcast tx_hash for a quote."""
-    body = await request.json()
-    result = await portfolio_vertical.handle_execute(body, _llm_short)
-    return JSONResponse(content=result)
+# All previously-gated paid routes (POST /v1/chat/completions, /v1/signal/*,
+# /v1/onchain/*, /v1/defi/*, /v1/portfolio/*, paid MCP at /mcp) have been
+# removed after 30 days with 0 successful x402 settlements. They now 404.
+# History preserved in git; bring back individually with `git show` if
+# we revisit the paid stack. Free MCP discovery at /mcp-discovery and the
+# directory API under /api/v1/ are unaffected.
 
 
 # --- OpenAPI customization for x402scan discovery ------------------------
@@ -975,53 +842,54 @@ def _build_openapi(*, relay_only: bool = False) -> dict[str, Any]:
         "required": ["id", "object", "choices"],
     }
 
-    chat_op = schema["paths"]["/v1/chat/completions"]["post"]
-    chat_op["summary"] = "Frontier Qwen3.6-35B-A3B chat at $0.001/call (x402)"
-    chat_op["description"] = (
-        "OpenAI-compatible chat completions against Qwen3.6-35B-A3B — open-weight 35B MoE "
-        "(3B active), strong reasoning, drop-in for any OpenAI SDK. $0.001 USDC per call, "
-        "orders of magnitude cheaper than hosted Claude/GPT, with no monthly minimum and "
-        "no per-identity rate limit. First call returns 402 with paymentRequirements; "
-        "resubmit with X-PAYMENT header to get the completion."
-    )
-    chat_op["tags"] = ["inference"]
-    chat_op["requestBody"] = {
-        "required": True,
-        "content": {"application/json": {"schema": chat_input_schema}},
-    }
-    chat_op["responses"] = {
-        "200": {
-            "description": "Successful inference response.",
-            "content": {"application/json": {"schema": chat_output_schema}},
-        },
-        "402": {
-            "description": (
-                "Payment Required. Body contains x402 paymentRequirements; "
-                "resubmit with X-PAYMENT header."
-            ),
-        },
-        "400": {"description": "Bad request (e.g. model not allowed)."},
-    }
-    chat_op["x-payment-info"] = {
-        "price": {
-            "mode": "fixed",
-            "currency": "USD",
-            "amount": f"{float(X402_PRICE_USD):.6f}",
-        },
-        "protocols": [{"x402": {}}],
-    }
-    # agentcash/discovery's "bazaar" validator wants input/output schemas
-    # mirrored under x-bazaar.schema as well (in addition to OpenAPI standard
-    # requestBody / responses). Without this, registration emits
-    # SCHEMA_INPUT_MISSING / SCHEMA_OUTPUT_MISSING errors.
-    chat_op["x-bazaar"] = {
-        "schema": {
-            "properties": {
-                "input": chat_input_schema,
-                "output": chat_output_schema,
+    chat_op = schema.get("paths", {}).get("/v1/chat/completions", {}).get("post")
+    if chat_op is not None:
+        chat_op["summary"] = "Frontier Qwen3.6-35B-A3B chat at $0.001/call (x402)"
+        chat_op["description"] = (
+            "OpenAI-compatible chat completions against Qwen3.6-35B-A3B — open-weight 35B MoE "
+            "(3B active), strong reasoning, drop-in for any OpenAI SDK. $0.001 USDC per call, "
+            "orders of magnitude cheaper than hosted Claude/GPT, with no monthly minimum and "
+            "no per-identity rate limit. First call returns 402 with paymentRequirements; "
+            "resubmit with X-PAYMENT header to get the completion."
+        )
+        chat_op["tags"] = ["inference"]
+        chat_op["requestBody"] = {
+            "required": True,
+            "content": {"application/json": {"schema": chat_input_schema}},
+        }
+        chat_op["responses"] = {
+            "200": {
+                "description": "Successful inference response.",
+                "content": {"application/json": {"schema": chat_output_schema}},
             },
-        },
-    }
+            "402": {
+                "description": (
+                    "Payment Required. Body contains x402 paymentRequirements; "
+                    "resubmit with X-PAYMENT header."
+                ),
+            },
+            "400": {"description": "Bad request (e.g. model not allowed)."},
+        }
+        chat_op["x-payment-info"] = {
+            "price": {
+                "mode": "fixed",
+                "currency": "USD",
+                "amount": f"{float(X402_PRICE_USD):.6f}",
+            },
+            "protocols": [{"x402": {}}],
+        }
+        # agentcash/discovery's "bazaar" validator wants input/output schemas
+        # mirrored under x-bazaar.schema as well (in addition to OpenAPI standard
+        # requestBody / responses). Without this, registration emits
+        # SCHEMA_INPUT_MISSING / SCHEMA_OUTPUT_MISSING errors.
+        chat_op["x-bazaar"] = {
+            "schema": {
+                "properties": {
+                    "input": chat_input_schema,
+                    "output": chat_output_schema,
+                },
+            },
+        }
 
     # --- vertical endpoints (signal / onchain / defi) --------------------
     _vertical_specs = [
