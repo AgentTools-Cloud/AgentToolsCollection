@@ -462,101 +462,46 @@ _HOMEPAGE_HTML = """<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>agent-tools.cloud — agent-native crypto stack on x402 (Qwen + signals + on-chain + DeFi)</title>
+<title>agent-tools.cloud — x402 directory + MCP discovery</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="description" content="Agent-native crypto stack on x402: Qwen3.6-35B-A3B chat at $0.001/call + token signals, on-chain Q&A and DeFi planner from $0.01. Eight pay-per-call endpoints, USDC on Base, no signup, no API key, no rate limits.">
-<link rel="alternate" type="application/json" title="x402 discovery" href="/.well-known/x402">
-<link rel="service" type="application/openapi+json" title="OpenAPI 3.1 spec" href="/openapi.json">
-<meta name="x402:discovery" content="/.well-known/x402">
-<meta name="x402:openapi" content="/openapi.json">
-<meta name="x402:network" content="eip155:8453">
-<meta name="x402:pay-to" content="0xC445aa2AA0FA68db67Cd22fc04867773941f9CdF">
+<meta name="description" content="agent-tools.cloud is a free directory and MCP discovery server for x402 paid endpoints. The previously hosted paid Qwen relay and verticals were retired on 2026-05-25.">
+<meta name="robots" content="noindex, nofollow">
 <style>
 :root { color-scheme: light dark; }
-body { font: 15px/1.55 -apple-system, "Segoe UI", system-ui, sans-serif; max-width: 760px; margin: 2.5rem auto; padding: 0 1.2rem; }
-h1 { margin: 0 0 .2em; font-size: 1.6rem; }
-h2 { margin-top: 2rem; font-size: 1.15rem; border-bottom: 1px solid #8884; padding-bottom: .25em; }
-.tag { display: inline-block; padding: 2px 8px; border-radius: 4px; background: #2c7be522; color: #2c7be5; font-size: 12px; margin-right: 6px; }
+body { font: 15px/1.55 -apple-system, "Segoe UI", system-ui, sans-serif; max-width: 720px; margin: 3rem auto; padding: 0 1.2rem; }
+h1 { margin: 0 0 .2em; font-size: 1.5rem; }
+h2 { margin-top: 1.8rem; font-size: 1.05rem; border-bottom: 1px solid #8884; padding-bottom: .25em; }
 code, pre { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 13px; }
 pre { background: #8881; padding: .8em 1em; border-radius: 6px; overflow-x: auto; }
-table { border-collapse: collapse; width: 100%; margin: .6em 0; }
-th, td { border-bottom: 1px solid #8884; padding: .35em .6em; text-align: left; }
-th { font-weight: 600; }
 a { color: #2c7be5; }
 .muted { color: #888; font-size: 13px; }
+.notice { padding: .8em 1em; border-left: 3px solid #c4732d; background: #c4732d18; border-radius: 4px; }
 </style>
 </head>
 <body>
 <h1>agent-tools.cloud</h1>
-<p>
-  <span class="tag">x402</span><span class="tag">MCP</span><span class="tag">Base mainnet</span><span class="tag">USDC</span>
-  <b>Agent-native crypto stack on <a href="https://x402.org" target="_blank" rel="noopener">x402</a>.</b>
-  Frontier <b>Qwen3.6-35B-A3B</b> chat from <b>$0.001/call</b>, plus four data-grounded verticals —
-  token momentum signals, on-chain Q&amp;A, DeFi action planner and multi-leg portfolio.
-  Eight endpoints, one wallet, one chain. <b>No signup. No API key. No human UI.</b>
-  Settles atomically in USDC on Base, per call.
-</p>
-<p class="muted">
-  Cheapest credible price across all four categories on the x402 bazaar — built for agents that
-  iterate fast, batch wide and don't want to babysit a billing dashboard.
+<p class="notice">
+  <b>Paid x402 relay retired on 2026-05-25.</b>
+  The previously hosted Qwen3.6-35B-A3B chat ($0.001/call) and the four verticals
+  (token signal, on-chain Q&amp;A, DeFi planner, multi-leg portfolio) are no longer served.
+  All paid endpoints now return <code>404</code>. This host is directory + MCP discovery only.
 </p>
 
-<h2>Endpoints</h2>
-<table>
-<tr><th>Path</th><th>Method</th><th>Price</th><th>Transport</th></tr>
-<tr><td><code>/v1/chat/completions</code></td><td>POST</td><td>$0.001</td><td>Frontier <b>Qwen3.6-35B-A3B</b> chat — OpenAI-compatible REST, drop-in for any SDK</td></tr>
-<tr><td><code>/mcp</code></td><td>POST</td><td>$0.001</td><td>Same model over <b>MCP</b> streamable-http (tool: <code>qwen36_chat</code>)</td></tr>
-<tr><td><code>/v1/signal/token</code></td><td>POST</td><td>$0.01</td><td>Token momentum — buy/hold/sell + score, wash-trade & pump penalties (live DexScreener + Qwen)</td></tr>
-<tr><td><code>/v1/onchain/ask</code></td><td>POST</td><td>$0.02</td><td>On-chain NL Q&amp;A — yields, stablecoins, TVL, tokens (grounded in live Defillama + DexScreener)</td></tr>
-<tr><td><code>/v1/defi/plan</code></td><td>POST</td><td>$0.05</td><td>DeFi planner — best lend/swap/stake by risk tolerance + Qwen risk review (advisory, never signs)</td></tr>
-<tr><td colspan="4" style="padding-top:.8em;font-size:12px;color:#888"><b>Pro tier</b> — wider scan, deeper synthesis, one call</td></tr>
-<tr><td><code>/v1/signal/bulk</code></td><td>POST</td><td>$0.05</td><td>Bulk momentum — score up to <b>10 tokens / call</b> with portfolio rollup & top pick</td></tr>
-<tr><td><code>/v1/onchain/report</code></td><td>POST</td><td>$0.20</td><td>Analyst report — token+yields+TVL+stables fused into a 5-10 sentence brief with key findings &amp; risks</td></tr>
-<tr><td><code>/v1/defi/portfolio</code></td><td>POST</td><td>$0.50</td><td>Multi-leg allocation — lend/stake/swap budget split with blended APY + Qwen portfolio review</td></tr>
-<tr><td><code>/v1/models</code></td><td>GET</td><td>free</td><td>list available models</td></tr>
-<tr><td><code>/healthz</code></td><td>GET</td><td>free</td><td>liveness probe</td></tr>
-<tr><td><code>/.well-known/x402</code></td><td>GET</td><td>free</td><td>service discovery (JSON)</td></tr>
-</table>
+<h2>What is still here (free)</h2>
+<ul>
+  <li><code>GET /api/v1/search?q=&amp;category=&amp;chain=</code> — directory search across 2300+ indexed x402 services</li>
+  <li><code>GET /api/v1/services/{slug}</code>, <code>/api/v1/categories</code>, <code>/api/v1/stats</code></li>
+  <li><code>POST /mcp-discovery/</code> — MCP streamable-http with tools <code>search</code> / <code>get</code> / <code>list_categories</code> / <code>stats</code> / <code>register</code></li>
+  <li><code>GET /.well-known/agent-tools.json</code> — agents.json manifest</li>
+  <li><code>GET /.well-known/x402</code>, <code>/.well-known/mcp.json</code>, <code>/v1/models</code>, <code>/healthz</code></li>
+</ul>
 
-<h2>Payment</h2>
-<table>
-<tr><td>Network</td><td><code>eip155:8453</code> (Base mainnet)</td></tr>
-<tr><td>Asset</td><td>USDC <code>0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913</code></td></tr>
-<tr><td>Pay to</td><td><code>0xC445aa2AA0FA68db67Cd22fc04867773941f9CdF</code></td></tr>
-<tr><td>Per call</td><td>$0.001 – $0.50 USDC (see endpoints above; settled atomically per request)</td></tr>
-<tr><td>Facilitator</td><td><code>facilitator.fluxapay.xyz</code> (non-custodial, gas covered)</td></tr>
-</table>
-<p class="muted">Live on Base mainnet. Settlement via the FluxA x402 facilitator — funds flow payer → payee directly, the facilitator covers gas. No KYC, no signup, just sign EIP-3009 and go.</p>
-
-<h2>Quick start — REST + x402-fetch (Node)</h2>
-<pre>import { wrapFetchWithPayment } from "x402-fetch";
-import { privateKeyToAccount } from "viem/accounts";
-
-const fetchPaid = wrapFetchWithPayment(
-  fetch,
-  privateKeyToAccount(process.env.PRIVATE_KEY),
-);
-
-const r = await fetchPaid("https://agent-tools.cloud/v1/chat/completions", {
-  method: "POST",
-  headers: { "content-type": "application/json" },
-  body: JSON.stringify({
-    model: "Qwen/Qwen3.6-35B-A3B",
-    messages: [{ role: "user", content: "Say hi." }],
-  }),
-});
-console.log(await r.json());</pre>
-
-<h2>Quick start — MCP client config</h2>
+<h2>MCP client config</h2>
 <pre>{
   "mcpServers": {
     "agent-tools": {
       "transport": "streamable-http",
-      "url": "https://agent-tools.cloud/mcp",
-      "x402": {
-        "privateKeyEnv": "PRIVATE_KEY",
-        "network": "eip155:8453"
-      }
+      "url": "https://agent-tools.cloud/mcp-discovery/"
     }
   }
 }</pre>
@@ -564,8 +509,8 @@ console.log(await r.json());</pre>
 <h2>Source</h2>
 <p>
   <a href="https://github.com/JoursBleu/mcpserver" target="_blank" rel="noopener">github.com/JoursBleu/mcpserver</a>
-
 </p>
+<p class="muted">Last paid call: 2026-05-23. 30-day window showed 0 settled payments &mdash; retiring the paid stack to keep the directory layer clean.</p>
 </body>
 </html>
 """
