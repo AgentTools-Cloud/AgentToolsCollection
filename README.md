@@ -19,7 +19,6 @@ directory of **x402 paid services** with a free MCP discovery endpoint.
 | `GET /v1/models` | free | Upstream model listing (read-only) |
 | `GET /.well-known/x402` | free | x402 v0.4 self-description (free-only) |
 | `GET /.well-known/mcp.json` | free | MCP self-description |
-| `GET /` (host = `relay.agent-tools.cloud`) | free | Static retirement notice |
 
 The MCP discovery server is also published as a standalone PyPI package:
 [`agent-tools-mcp`](https://pypi.org/project/agent-tools-mcp/)
