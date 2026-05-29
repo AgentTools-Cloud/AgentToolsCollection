@@ -1,88 +1,89 @@
-# mcpserver — agent-native LLM relay with x402 payment
+# mcpserver — agent-tools.cloud directory + MCP discovery
 
-A thin **REST + MCP** relay that exposes **Qwen/Qwen3.6-35B-A3B** (served by
-OpenAI-compatible inference behind the scenes) to overseas agents, gated by the
-[x402](https://www.x402.org/) micropayment protocol on Base L2 (USDC).
+The server that powers [agent-tools.cloud](https://agent-tools.cloud) — an open
+directory of **x402 paid services** with a free MCP discovery endpoint.
 
-No accounts. No website. No human UI. An autonomous agent discovers the
-endpoint, gets a `402 Payment Required`, signs an EIP-3009 USDC transfer in
-the `PAYMENT-SIGNATURE` header, and retries — that's it.
+> **Note (2026-05-25):** the previously hosted paid Qwen3.6 relay and the paid
+> vertical endpoints (signal / onchain / defi / portfolio) were retired after
+> 30 days of zero external conversions. This repository now serves the
+> directory site and the free MCP discovery server only.
 
-## SKU (v0.2)
+## What this serves today
 
-| | |
-|---|---|
-| Model | `Qwen/Qwen3.6-35B-A3B` |
-| Price | `$0.001` USDC per call (flat) |
-| Chain | Base Sepolia testnet (`eip155:84532`) — switch to `eip155:8453` after setting up Coinbase CDP facilitator |
-| Asset | USDC (`0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`) |
-| Pay-to | `0xC445aa2AA0FA68db67Cd22fc04867773941f9CdF` |
-| Facilitator | `https://x402.org/facilitator` |
+| Path | Auth | Purpose |
+|---|---|---|
+| `GET /` (host = `agent-tools.cloud`) | free | Directory site (search / browse) |
+| `GET /api/v1/*` | free | JSON API: services, categories, stats |
+| `POST /mcp-discovery/` | free | **MCP streamable-http** discovery server (search/get/list_categories/stats) |
+| `GET /healthz` | free | Liveness |
+| `GET /v1/models` | free | Upstream model listing (read-only) |
+| `GET /.well-known/x402` | free | x402 v0.4 self-description (free-only) |
+| `GET /.well-known/mcp.json` | free | MCP self-description |
+| `GET /` (host = `relay.agent-tools.cloud`) | free | Static retirement notice |
 
-## Endpoints
+The MCP discovery server is also published as a standalone PyPI package:
+[`agent-tools-mcp`](https://pypi.org/project/agent-tools-mcp/)
+([repo](https://github.com/JoursBleu/agent-tools-mcp)).
 
-| Method | Path | Auth | Notes |
-|---|---|---|---|
-| `GET`  | `/healthz`              | free | liveness |
-| `GET`  | `/v1/models`            | free | upstream `/v1/models`, filtered to ALLOWED_MODELS |
-| `POST` | `/v1/chat/completions`  | **x402** | OpenAI-compatible (incl. SSE streaming) |
-| `POST` | `/mcp`                  | **x402** | MCP streamable-http transport |
+## MCP discovery tools
 
-### MCP tool
-
-- name: `qwen36_chat`
-- args: `messages: list[dict]`, `max_tokens=512`, `temperature=0.7`, `top_p=0.95`
-- returns: assistant message content (str)
-
-> v0.2 caveat: the entire `POST /mcp` route is gated, so MCP `initialize` and
-> `tools/list` also incur one payment each. A v0.3 will introspect JSON-RPC
-> and only gate `tools/call` for the paid tools.
-
-## Deploy (latex-tools)
-
-```bash
-ssh latex-tools
-cd /opt
-git clone https://github.com/JoursBleu/mcpserver.git
-cd mcpserver
-cp .env.example .env
-$EDITOR .env                          # set UPSTREAM_API_KEY
-sudo bash deploy/install.sh
-sudo systemctl status mcpserver
+```
+search(intent, top_k=5, category=None, max_price_usd=None, has_mcp=None)
+get(slug)
+list_categories()
+stats()
 ```
 
-Listens on `0.0.0.0:9100`. Public:
+`search` accepts natural-language intent and ranks by FTS5 + popularity +
+health. Each result carries a `match_reason` and a `confidence` score.
 
-- REST: `http://107.174.178.57:9100/v1/chat/completions`
-- MCP:  `http://107.174.178.57:9100/mcp`
+## Deploy
+
+Currently deployed on `latex-tools` behind nginx (vhost: `agent-tools.cloud`).
+
+```bash
+cd /opt/mcpserver
+sudo git pull
+sudo systemctl restart mcpserver
+```
+
+systemd units live in [`deploy/`](deploy/):
+
+- `mcpserver.service` — the ASGI app (uvicorn, 127.0.0.1:9100)
+- `agent-tools-crawl.{service,timer}` — 6h directory crawler
+- `agent-tools-health.{service,timer}` — endpoint health checks
 
 ## Config
 
-See `.env.example`. Required env:
+See [`.env.example`](.env.example). Required:
 
-- `UPSTREAM_BASE_URL` — upstream OpenAI-compatible endpoint
-- `UPSTREAM_API_KEY`  — `sk-...` for the upstream
-- `X402_PAY_TO`      — EVM address to receive USDC
-- `X402_PRICE_USD`   — price string like `"0.001"`
+- `UPSTREAM_BASE_URL` / `UPSTREAM_API_KEY` — only used by `/v1/models`
+- `X402_PAY_TO` — kept for `.well-known/x402` self-description
+- `AGENT_TOOLS_DB_PATH` — SQLite path for the directory
 
 ## Smoke test
 
 ```bash
-# 1. liveness
-curl http://localhost:9100/healthz
+# Liveness
+curl https://agent-tools.cloud/healthz
 
-# 2. unpaid REST -> 402 with paymentRequirements
-curl -i -X POST http://localhost:9100/v1/chat/completions \
+# Directory stats
+curl https://agent-tools.cloud/api/v1/stats
+
+# MCP discovery handshake
+curl -s -X POST https://agent-tools.cloud/mcp-discovery/ \
+  -H 'content-type: application/json' \
+  -H 'accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize",
+       "params":{"protocolVersion":"2025-06-18","capabilities":{},
+                 "clientInfo":{"name":"smoke","version":"1"}}}'
+
+# Retired paid path -> 404
+curl -s -o /dev/null -w '%{http_code}\n' -X POST \
+  https://agent-tools.cloud/v1/chat/completions \
   -H 'content-type: application/json' \
   -d '{"model":"Qwen/Qwen3.6-35B-A3B","messages":[{"role":"user","content":"hi"}]}'
-
-# 3. unpaid MCP -> 402
-curl -i -X POST http://localhost:9100/mcp \
-  -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
-
-# 4. paid: agent SDKs (x402-axios / x402-fetch / Python x402Client) handle the
-#    402 -> sign -> retry round-trip automatically.
+# => 404
 ```
 
 ## License
