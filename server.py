@@ -475,6 +475,8 @@ a { color: #2c7be5; }
 <h2>Source</h2>
 <p>
   <a href="https://github.com/JoursBleu/mcpserver" target="_blank" rel="noopener">github.com/JoursBleu/mcpserver</a>
+  &middot;
+  <a href="https://smithery.ai/servers/kangletian/agent-tools-x402-directory" target="_blank" rel="noopener">smithery.ai listing</a>
 </p>
 <p class="muted">Last paid call: 2026-05-23. 30-day window showed 0 settled payments &mdash; retiring the paid stack to keep the directory layer clean.</p>
 </body>
