@@ -1,10 +1,10 @@
 # mcpserver — agent-tools.cloud directory + MCP discovery
 
-[![smithery badge](https://smithery.ai/badge/kangletian/agent-tools-x402-directory)](https://smithery.ai/server/kangletian/agent-tools-x402-directory)
+[![smithery badge](https://smithery.ai/badge/kangletian/agent-tools-x402-directory)](https://smithery.ai/servers/kangletian/agent-tools-x402-directory)
 
 The server that powers [agent-tools.cloud](https://agent-tools.cloud) — an open
 directory of **x402 paid services** with a free MCP discovery endpoint.
-Also listed on [Smithery](https://smithery.ai/server/kangletian/agent-tools-x402-directory).
+Also listed on [Smithery](https://smithery.ai/servers/kangletian/agent-tools-x402-directory).
 
 > **Note (2026-05-25):** the previously hosted paid Qwen3.6 relay and the paid
 > vertical endpoints (signal / onchain / defi / portfolio) were retired after
