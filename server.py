@@ -1,25 +1,11 @@
 """
-mcpserver — x402-gated relay in front of an OpenAI-compatible inference backend.
+mcpserver — backend for agent-tools.cloud.
 
-Two parallel interfaces, same backend, same per-call price:
-
-  1. REST   POST /v1/chat/completions      (OpenAI-compatible)
-  2. MCP    POST /mcp                      (streamable-http, tool: qwen36_chat)
-
-Both routes are gated by the x402 v2 PaymentMiddlewareASGI. Agents speaking
-either dialect can buy a single inference call against Qwen3.6-35B-A3B on Base
-mainnet USDC.
-
-Flow:
-    agent (x402 client)
-       │  POST /v1/chat/completions  (no payment yet)        OR  POST /mcp
-       ▼
-    mcpserver (latex-tools:9100)
-       │  → 402 + paymentRequirements
-       │  ← retry with PAYMENT-SIGNATURE header (EIP-3009 USDC on Base)
-       │  verify + settle via facilitator
-       ▼
-    upstream OpenAI-compatible inference (Qwen3.6-35B-A3B)
+Serves the open x402 service directory, the free MCP discovery server at
+/mcp-discovery, /.well-known descriptors, and a read-only /v1/models proxy.
+The paid x402 stack (Qwen relay + verticals + relay.agent-tools.cloud host
+split) was retired 2026-05-25 after 30 days with 0 settlements; see git
+history for the previous implementation.
 """
 
 from __future__ import annotations
@@ -202,26 +188,6 @@ app = FastAPI(
 # app.mount("/mcp", mcp_app.streamable_http_app())  # retired
 # Free directory-discovery MCP (search/get/list_categories/stats) — ungated.
 app.mount("/mcp-discovery", wrap_with_client_capture(discover_mcp.streamable_http_app()))
-
-# Hostname split: agent-tools.cloud serves directory + relay (full schema),
-# while the subdomain relay.agent-tools.cloud presents the Qwen3.6 paid
-# relay only. x402scan keys server entries by host, so a clean split lets
-# each role show up as its own bazaar entry with focused metadata.
-RELAY_HOST_PREFIXES = ("relay.",)
-
-
-def _is_relay_host(request: Request) -> bool:
-    h = (request.headers.get("host") or "").split(":", 1)[0].lower()
-    return any(h.startswith(p) for p in RELAY_HOST_PREFIXES)
-
-
-@app.middleware("http")
-async def _relay_host_root(request: Request, call_next):
-    # On relay.agent-tools.cloud the root `/` must serve the relay landing
-    # page; otherwise the directory router (mounted later) would win.
-    if request.method == "GET" and request.url.path == "/" and _is_relay_host(request):
-        return HTMLResponse(_HOMEPAGE_HTML)
-    return await call_next(request)
 
 # ---------------------------------------------------------------------------
 # Bazaar discovery extension — Coinbase Bazaar / AgentKit clients read this to
@@ -516,17 +482,9 @@ a { color: #2c7be5; }
 """
 
 
-@app.get("/relay", response_class=HTMLResponse)
-async def relay_page() -> str:
-    return _HOMEPAGE_HTML
-
-
 @app.get("/.well-known/x402")
 async def well_known_x402(request: Request) -> dict[str, Any]:
-    relay = _is_relay_host(request)
-    host = (request.headers.get("host") or "").split(":", 1)[0].lower() or (
-        "relay.agent-tools.cloud" if relay else "agent-tools.cloud"
-    )
+    host = (request.headers.get("host") or "").split(":", 1)[0].lower() or "agent-tools.cloud"
     description = (
         "Free MCP discovery server for x402 paid services across the ecosystem. "
         "Search 2000+ x402 endpoints, get call details, browse categories. "
@@ -634,72 +592,44 @@ DIRECTORY_PATH_PREFIXES = (
 )
 
 
-def _build_openapi(*, relay_only: bool = False) -> dict[str, Any]:
-    cache_key = "relay" if relay_only else "full"
+def _build_openapi() -> dict[str, Any]:
+    cache_key = "full"
     if cache_key in _SCHEMA_CACHE:
         return _SCHEMA_CACHE[cache_key]
 
-    if relay_only:
-        title = "relay.agent-tools.cloud — agent-native crypto stack on x402"
-        description = (
-            "Agent-native crypto stack on x402, settled in USDC on Base mainnet (chain 8453). "
-            "Eight pay-per-call endpoints: (1) frontier Qwen3.6-35B-A3B chat at $0.001/call over "
-            "OpenAI-compatible REST (POST /v1/chat/completions) and MCP streamable-http (POST /mcp, "
-            "tool qwen36_chat); (2) four data-grounded verticals — token momentum signal "
-            "($0.01) / bulk scan ($0.05), on-chain Q&A ($0.02) / analyst report ($0.20), "
-            "DeFi action planner ($0.05) / multi-leg portfolio ($0.50). All routes share the same "
-            "x402 v2 middleware and pay-to address, so a single wallet pays for the entire stack. "
-            "No signup, no API key, no human UI, no rate limits per identity — built for autonomous agents."
-        )
-        guidance = (
-            "POST /v1/chat/completions is an OpenAI-compatible chat "
-            "completions endpoint gated by x402. Send a JSON body with "
-            "'model' (Qwen/Qwen3.6-35B-A3B) and 'messages' (array of "
-            "{role, content}). First request returns HTTP 402 with "
-            "paymentRequirements; resubmit with an X-PAYMENT header "
-            "(EIP-3009 USDC TransferWithAuthorization on Base mainnet, "
-            "chain 8453, asset 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913) "
-            "to receive the model response. Flat $0.001 USDC per call. The "
-            "MCP streamable-http transport at POST /mcp accepts the same "
-            "payment and exposes a 'qwen36_chat' tool. Facilitator: "
-            "facilitator.fluxapay.xyz (non-custodial, gas covered). PayTo: "
-            "0xC445aa2AA0FA68db67Cd22fc04867773941f9CdF."
-        )
-    else:
-        title = "agent-tools.cloud — x402 directory + agent-native crypto stack"
-        description = (
-            "Two-in-one x402 service for autonomous agents. "
-            "(1) The largest open directory of x402 endpoints in the ecosystem — paid APIs "
-            "across inference, payments, data and DeFi, browsable at https://agent-tools.cloud "
-            "with a free JSON API (/api/v1/search, /api/v1/services/{slug}, /api/v1/categories, "
-            "/api/v1/stats) and an agents.json manifest at /.well-known/agent-tools.json. "
-            "(2) An agent-native paid stack on the same host: frontier Qwen3.6-35B-A3B chat at "
-            "$0.001/call (OpenAI-REST + MCP) plus four data-grounded crypto verticals — token "
-            "momentum signal/bulk scan, on-chain Q&A/analyst report, DeFi planner/portfolio — "
-            "from $0.01/call. USDC on Base, no signup, no API key, no rate limits per identity. "
-            "The paid stack is also reachable relay-only at https://relay.agent-tools.cloud."
-        )
-        guidance = (
-            "Two capabilities on one host. (A) Directory API (free, no "
-            "x402 challenge): GET /api/v1/search?q=&category=&chain= "
-            "returns indexed x402 services; GET /api/v1/services/{slug} "
-            "returns a single service; GET /api/v1/categories and "
-            "/api/v1/stats expose facets; GET "
-            "/.well-known/agent-tools.json is the discoverable agents.json "
-            "manifest. (B) Paid inference relay: POST /v1/chat/completions "
-            "is an OpenAI-compatible chat completions endpoint gated by "
-            "x402. Send a JSON body with 'model' (Qwen/Qwen3.6-35B-A3B) "
-            "and 'messages' (array of {role, content}). First request "
-            "returns HTTP 402 with paymentRequirements; resubmit with an "
-            "X-PAYMENT header (EIP-3009 USDC TransferWithAuthorization on "
-            "Base mainnet, chain 8453, asset "
-            "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913) to receive the "
-            "model response. Flat $0.001 USDC per call. The MCP "
-            "streamable-http transport at POST /mcp accepts the same "
-            "payment and exposes a 'qwen36_chat' tool. Facilitator: "
-            "facilitator.fluxapay.xyz (non-custodial, gas covered). "
-            "PayTo: 0xC445aa2AA0FA68db67Cd22fc04867773941f9CdF."
-        )
+    title = "agent-tools.cloud — x402 directory + agent-native crypto stack"
+    description = (
+        "Two-in-one x402 service for autonomous agents. "
+        "(1) The largest open directory of x402 endpoints in the ecosystem — paid APIs "
+        "across inference, payments, data and DeFi, browsable at https://agent-tools.cloud "
+        "with a free JSON API (/api/v1/search, /api/v1/services/{slug}, /api/v1/categories, "
+        "/api/v1/stats) and an agents.json manifest at /.well-known/agent-tools.json. "
+        "(2) An agent-native paid stack on the same host: frontier Qwen3.6-35B-A3B chat at "
+        "$0.001/call (OpenAI-REST + MCP) plus four data-grounded crypto verticals — token "
+        "momentum signal/bulk scan, on-chain Q&A/analyst report, DeFi planner/portfolio — "
+        "from $0.01/call. USDC on Base, no signup, no API key, no rate limits per identity."
+    )
+    guidance = (
+        "Two capabilities on one host. (A) Directory API (free, no "
+        "x402 challenge): GET /api/v1/search?q=&category=&chain= "
+        "returns indexed x402 services; GET /api/v1/services/{slug} "
+        "returns a single service; GET /api/v1/categories and "
+        "/api/v1/stats expose facets; GET "
+        "/.well-known/agent-tools.json is the discoverable agents.json "
+        "manifest. (B) Paid inference relay: POST /v1/chat/completions "
+        "is an OpenAI-compatible chat completions endpoint gated by "
+        "x402. Send a JSON body with 'model' (Qwen/Qwen3.6-35B-A3B) "
+        "and 'messages' (array of {role, content}). First request "
+        "returns HTTP 402 with paymentRequirements; resubmit with an "
+        "X-PAYMENT header (EIP-3009 USDC TransferWithAuthorization on "
+        "Base mainnet, chain 8453, asset "
+        "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913) to receive the "
+        "model response. Flat $0.001 USDC per call. The MCP "
+        "streamable-http transport at POST /mcp accepts the same "
+        "payment and exposes a 'qwen36_chat' tool. Facilitator: "
+        "facilitator.fluxapay.xyz (non-custodial, gas covered). "
+        "PayTo: 0xC445aa2AA0FA68db67Cd22fc04867773941f9CdF."
+    )
 
     schema = get_openapi(
         title=title,
@@ -707,12 +637,6 @@ def _build_openapi(*, relay_only: bool = False) -> dict[str, Any]:
         description=description,
         routes=app.routes,
     )
-
-    if relay_only:
-        schema["paths"] = {
-            p: v for p, v in schema.get("paths", {}).items()
-            if not any(p == pre or p.startswith(pre) for pre in DIRECTORY_PATH_PREFIXES)
-        }
 
     schema["info"]["x-guidance"] = guidance
 
@@ -977,7 +901,7 @@ app.add_api_route("/metrics", metrics_endpoint, include_in_schema=False, methods
 
 @app.get("/openapi.json", include_in_schema=False)
 async def openapi_endpoint(request: Request):
-    return JSONResponse(_build_openapi(relay_only=_is_relay_host(request)))
+    return JSONResponse(_build_openapi())
 
 
 if __name__ == "__main__":
