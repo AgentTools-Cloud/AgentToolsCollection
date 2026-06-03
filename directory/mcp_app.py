@@ -17,23 +17,31 @@ from typing import Any
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
+from . import ask as directory_ask
+from . import a2a as directory_a2a
+from . import cards
 from . import db as directory_db
+from . import limits
+from . import resources as directory_resources
 
 log = logging.getLogger("mcpserver.directory.mcp")
 
 DB_PATH = os.getenv("AGENT_TOOLS_DB_PATH", directory_db.DEFAULT_DB_PATH)
+ASK_RATE_LIMITS = (
+    ("minute", limits.env_int("AGENT_TOOLS_ASK_RATE_LIMIT_PER_MINUTE", 10), 60),
+    ("day", limits.env_int("AGENT_TOOLS_ASK_RATE_LIMIT_PER_DAY", 200), 86400),
+)
 
 _INSTRUCTIONS = (
     "Directory of x402-paid + MCP services on agent-tools.cloud. Built for "
     "AGENT consumers — humans use the website, agents use these tools.\n\n"
     "Typical flow:\n"
-    "  1. `search(intent=..., has_mcp=True)` to find candidates by natural\n"
-    "     language; or `search(category=..., has_mcp=True)` to browse.\n"
+    "  1. `ask_services(intent=...)` for an LLM-ranked recommendation, or\n"
+    "     `search(intent=..., has_mcp=True)` to manually inspect candidates.\n"
     "  2. Inspect `match_reason` + `confidence` + `tx_30d` on each item to\n"
     "     judge quality. Prefer `popular+healthy` items.\n"
-    "  3. `get(slug)` to fetch full details including `call_template` —\n"
-    "     a ready-to-paste snippet showing how to invoke the service\n"
-    "     (MCP streamable-http and/or x402 HTTP).\n"
+    "  3. `get(slug)` to fetch the service card: payment, call, quality,\n"
+    "     resource samples, and ready-to-paste MCP/x402 call hints.\n"
     "  4. Use `list_categories` to discover the taxonomy and `stats` for\n"
     "     directory size + health."
 )
@@ -215,6 +223,9 @@ async def search(
             if (s.get("price_min") is None) or float(s["price_min"]) <= max_price_usd
         ]
     items = items[:top_k]
+    for item in items:
+        if item.get("slug"):
+            item["service_card_url"] = f"/api/v1/services/{item['slug']}"
     out = {"intent": intent, "count": len(items), "items": items}
     _log_call(
         "search", ctx=ctx,
@@ -228,84 +239,86 @@ async def search(
     return out
 
 
-def _build_call_template(row: dict) -> dict[str, Any]:
-    """Return ready-to-paste call snippets for both MCP and x402 HTTP modes.
+@discover_mcp.tool()
+async def ask_services(
+    intent: str,
+    top_k: int = 5,
+    max_price_usd: float | None = None,
+    category: str | None = None,
+    chain: str | None = None,
+    require_healthy: bool = True,
+    min_confidence: float | None = None,
+    has_mcp: bool = False,
+    use_llm: bool = True,
+    ctx: Context | None = None,
+) -> dict[str, Any]:
+    """Ask for the best x402/MCP services for an agent intent.
 
-    Agents typically need: (a) the exact endpoint URL, (b) which transport
-    (MCP streamable-http vs raw HTTP + 402 handshake), (c) a code skeleton
-    they can fill in. We hand them all three in one place.
+    This is the high-level discovery tool: it retrieves candidates from the
+    directory, asks the configured backend LLM to rank only those candidates,
+    and returns service cards for the selected recommendations. If the LLM is
+    unavailable, it falls back to the directory ranker.
+
+    Args:
+        intent: Natural-language job the agent wants to accomplish.
+        top_k: Max recommendations to return (1-10).
+        max_price_usd: Optional per-call budget cap.
+        category: Optional directory category filter.
+        chain: Optional payment network filter, e.g. "base" or "solana".
+        require_healthy: When true, only consider services marked health=ok.
+        min_confidence: Optional x402scan quality floor (0.0-1.0).
+        has_mcp: When true, only consider services with MCP endpoints.
+        use_llm: Set false for deterministic retrieval-only fallback.
     """
-    out: dict[str, Any] = {}
-    mcp_url = (row.get("mcp_url") or "").strip()
-    if mcp_url:
-        out["mcp"] = {
-            "transport": "streamable-http",
-            "url": mcp_url,
-            "python": (
-                "from mcp import ClientSession\n"
-                "from mcp.client.streamable_http import streamablehttp_client\n"
-                "async with streamablehttp_client(\n"
-                f"    {mcp_url!r}\n"
-                ") as (r, w, _):\n"
-                "    async with ClientSession(r, w) as s:\n"
-                "        await s.initialize()\n"
-                "        tools = await s.list_tools()\n"
-                "        # await s.call_tool('<tool_name>', { ... })"
-            ),
-            "inspector_cli": (
-                f"npx @modelcontextprotocol/inspector --transport http {mcp_url}"
-            ),
-            "claude_desktop_config": {
-                row.get("slug") or "service": {
-                    "type": "streamable-http",
-                    "url": mcp_url,
-                }
-            },
-        }
-
-    url = (row.get("url") or "").strip()
-    if url:
-        chains = row.get("chains") or []
-        price_min = row.get("price_min")
-        price_hint = (
-            f"(≈${price_min}/call in USDC)" if price_min is not None
-            else "(price advertised in 402 response)"
+    if use_llm:
+        state = limits.check_ip_limits(
+            _current_client_ip.get(),
+            "mcp-ask",
+            ASK_RATE_LIMITS,
+            db_path=DB_PATH,
         )
-        out["http_x402"] = {
-            "url": url,
-            "flow": [
-                f"1. GET/POST {url}  →  receives HTTP 402 + accepts[] header",
-                "2. Pick a row from accepts[] (network + maxAmountRequired).",
-                "3. Sign an EIP-3009 USDC transferWithAuthorization payload.",
-                "4. Retry with header `X-PAYMENT: <base64 payload>`.",
-                "5. Service settles via facilitator and returns the result.",
-            ],
-            "curl_probe": (
-                f'curl -sS -i -X POST "{url}"  '
-                "# expect HTTP/1.1 402 Payment Required " + price_hint
-            ),
-            "well_known": row.get("well_known_url"),
-            "chains": chains,
-            "facilitator": row.get("facilitator"),
-        }
-
-    if not out:
-        out["note"] = "Service has no callable endpoint registered yet."
+        if state:
+            return {
+                "error": "rate_limited",
+                "message": "Too many LLM-backed ask_services calls. Try again later or set use_llm=false.",
+                "window": state.get("window"),
+                "limit": state.get("limit"),
+                "retry_after_seconds": state.get("retry_after"),
+            }
+    out = await directory_ask.answer_query(
+        intent,
+        db_path=DB_PATH,
+        limit=top_k,
+        category=category,
+        chain=chain,
+        max_price_usd=max_price_usd,
+        health="ok" if require_healthy else None,
+        min_confidence=min_confidence,
+        has_mcp=has_mcp,
+        use_llm=use_llm,
+    )
+    recs = out.get("recommendations") or []
+    _log_call(
+        "ask_services", ctx=ctx,
+        args={
+            "intent": intent, "top_k": top_k,
+            "max_price_usd": max_price_usd, "category": category,
+            "chain": chain, "require_healthy": require_healthy,
+            "min_confidence": min_confidence, "has_mcp": has_mcp,
+            "use_llm": use_llm,
+        },
+        result_n=len(recs),
+        result_slug=(recs[0].get("slug") if recs else None),
+    )
     return out
-
 
 @discover_mcp.tool()
 async def get(slug: str, ctx: Context | None = None) -> dict[str, Any]:
     """Get full details + ready-to-paste call template for a service.
 
-    Returns the service row plus a `call_template` field:
-      - call_template.mcp        : how to call via MCP streamable-http
-                                   (python snippet, inspector CLI line,
-                                   Claude Desktop config fragment).
-      - call_template.http_x402  : 5-step HTTP+402 payment flow with the
-                                   exact endpoint URL and a curl probe.
-    Use this AFTER `search` to grab the snippet — no need for the agent
-    to hand-craft an x402 client.
+    Returns the service card with payment, call, quality, resource samples,
+    and ready-to-use MCP/x402 call hints. Use this after `search` or
+    `ask_services` before paying/calling an external service.
 
     Args:
         slug: Service slug as returned by `search` items.
@@ -315,7 +328,8 @@ async def get(slug: str, ctx: Context | None = None) -> dict[str, Any]:
     if row is None:
         _log_call("get", ctx=ctx, args={"slug": slug}, result_n=0)
         return {"error": "not_found", "slug": slug}
-    row["call_template"] = _build_call_template(row)
+    row = cards.build_service_card(row)
+    row["call_template"] = row.get("call", {}).get("template")
     _log_call("get", ctx=ctx, args={"slug": slug}, result_n=1, result_slug=slug)
     return row
 
@@ -336,6 +350,104 @@ async def stats(ctx: Context | None = None) -> dict[str, Any]:
     with _open() as conn:
         out = directory_db.stats(conn)
     _log_call("stats", ctx=ctx, result_n=out.get("total"))
+    return out
+
+
+@discover_mcp.tool()
+async def search_mcp_servers(
+    intent: str | None = None,
+    top_k: int = 5,
+    chain: str | None = None,
+    require_healthy: bool = False,
+    ctx: Context | None = None,
+) -> dict[str, Any]:
+    """Find MCP servers in the directory (services that expose an MCP endpoint).
+
+    Returns normalised resource entries with a ready-to-use streamable-http
+    `call_hint.mcp.url`. Extends the existing x402 discovery data: an MCP
+    server here is a directory service that advertises an `mcp_url`.
+
+    Args:
+        intent: Natural-language description of the tool/capability needed.
+        top_k: Max servers to return (1-20).
+        chain: Optional payment-network filter for paid MCP servers.
+        require_healthy: When true, only return services marked health=ok.
+    """
+    top_k = max(1, min(20, top_k))
+    with _open() as conn:
+        rows = directory_db.search(
+            conn, q=intent, chain=chain,
+            health="ok" if require_healthy else None,
+            has_mcp=True, limit=top_k,
+        )
+    servers = [directory_resources.normalize_service(r, as_mcp=True) for r in rows]
+    _log_call("search_mcp_servers", ctx=ctx,
+              args={"intent": intent, "top_k": top_k, "chain": chain,
+                    "require_healthy": require_healthy},
+              result_n=len(servers),
+              result_slug=(servers[0].get("slug") if servers else None))
+    return {"intent": intent, "count": len(servers), "servers": servers}
+
+
+@discover_mcp.tool()
+async def get_mcp_server(slug: str, ctx: Context | None = None) -> dict[str, Any]:
+    """Get the full card for one MCP server by slug (includes MCP call template)."""
+    with _open() as conn:
+        row = directory_db.get_by_slug(conn, slug)
+    if not row or not (row.get("mcp_url") or "").strip():
+        return {"error": "not_found", "message": f"No MCP server with slug {slug!r}"}
+    card = cards.build_service_card(row)
+    _log_call("get_mcp_server", ctx=ctx, args={"slug": slug}, result_slug=slug)
+    return card
+
+
+@discover_mcp.tool()
+async def search_a2a_agents(
+    intent: str | None = None,
+    top_k: int = 5,
+    x402_only: bool = False,
+    ctx: Context | None = None,
+) -> dict[str, Any]:
+    """Find A2A agents you can delegate a task to.
+
+    Args:
+        intent: Natural-language description of the task to delegate.
+        top_k: Max agents to return (1-20).
+        x402_only: When true, only return agents that advertise x402 payment.
+    """
+    top_k = max(1, min(20, top_k))
+    with _open() as conn:
+        rows = directory_db.search_a2a(conn, q=intent, x402_only=x402_only, limit=top_k)
+    agents = [directory_a2a.public_agent(r) for r in rows]
+    _log_call("search_a2a_agents", ctx=ctx,
+              args={"intent": intent, "top_k": top_k, "x402_only": x402_only},
+              result_n=len(agents),
+              result_slug=(agents[0].get("slug") if agents else None))
+    return {"intent": intent, "count": len(agents), "agents": agents}
+
+
+@discover_mcp.tool()
+async def search_resources(
+    intent: str | None = None,
+    protocol: str | None = None,
+    top_k: int = 10,
+    ctx: Context | None = None,
+) -> dict[str, Any]:
+    """Unified search across x402 services, MCP servers and A2A agents.
+
+    Args:
+        intent: Natural-language query.
+        protocol: Optional filter: "x402", "mcp" or "a2a".
+        top_k: Max resources to return (1-50).
+    """
+    top_k = max(1, min(50, top_k))
+    with _open() as conn:
+        out = directory_resources.unified_search(
+            conn, q=intent, protocol=protocol, limit=top_k,
+        )
+    _log_call("search_resources", ctx=ctx,
+              args={"intent": intent, "protocol": protocol, "top_k": top_k},
+              result_n=out.get("count"))
     return out
 
 
@@ -485,4 +597,4 @@ async def register(
     }
 
 
-log.info("directory MCP app built (db=%s, tools=5)", DB_PATH)
+log.info("directory MCP app built (db=%s, tools=6)", DB_PATH)

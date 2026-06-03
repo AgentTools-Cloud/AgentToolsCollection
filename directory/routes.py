@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field, HttpUrl
 from . import ask as directory_ask
 from . import cards, db
 from . import a2a as directory_a2a
+from . import resources as directory_resources
 from . import limits
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -238,6 +239,71 @@ async def api_a2a_stats():
         return db.a2a_stats(c)
 
 
+@router.get("/api/v1/mcp/search", tags=["mcp"])
+async def api_mcp_search(
+    q: str | None = Query(default=None, max_length=800),
+    chain: str | None = Query(default=None),
+    health: str | None = Query(default=None),
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+):
+    """Search MCP-callable services (x402 services that expose an mcp_url)."""
+    with _conn() as c:
+        rows = db.search(c, q=q, chain=chain, health=health,
+                         has_mcp=True, limit=limit, offset=offset)
+    return {
+        "query": q,
+        "count": len(rows),
+        "servers": [directory_resources.normalize_service(r, as_mcp=True) for r in rows],
+    }
+
+
+@router.get("/api/v1/mcp/servers/{slug}", tags=["mcp"])
+async def api_mcp_server(slug: str):
+    with _conn() as c:
+        row = db.get_by_slug(c, slug)
+    if not row or not (row.get("mcp_url") or "").strip():
+        raise HTTPException(status_code=404, detail="MCP server not found")
+    return cards.build_service_card(row)
+
+
+@router.get("/api/v1/resources/search", tags=["directory"])
+async def api_resources_search(
+    q: str | None = Query(default=None, max_length=800),
+    protocol: str | None = Query(default=None, pattern="^(x402|mcp|a2a)$"),
+    chain: str | None = Query(default=None),
+    health: str | None = Query(default=None),
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+):
+    """Unified search across x402 services, MCP servers and A2A agents."""
+    with _conn() as c:
+        return directory_resources.unified_search(
+            c, q=q, protocol=protocol, chain=chain, health=health,
+            limit=limit, offset=offset,
+        )
+
+
+@router.get("/api/v1/broker/recommend", tags=["directory"])
+async def api_broker_recommend(
+    request: Request,
+    q: str = Query(min_length=1, max_length=800),
+    max_price_usd: float | None = Query(default=None, ge=0),
+    chain: str | None = Query(default=None),
+    require_healthy: bool = True,
+    limit: int = Query(default=5, ge=1, le=20),
+):
+    """Discovery + scoring broker: rank payable x402 endpoints for an intent.
+
+    Does not settle payments; returns call_hint + pay_hint per recommendation.
+    """
+    with _conn() as c:
+        return directory_resources.broker_recommend(
+            c, q=q, max_price_usd=max_price_usd, chain=chain,
+            require_healthy=require_healthy, limit=limit,
+        )
+
+
 @router.get("/api/v1/stats", tags=["directory"])
 async def api_stats():
     with _conn() as c:
@@ -321,6 +387,9 @@ async def well_known():
             "mcp_discovery",
             "search_a2a_agents",
             "a2a_jsonrpc",
+            "search_mcp_servers",
+            "unified_resource_search",
+            "broker_recommend",
         ],
         "endpoints": {
             "search": {
@@ -359,6 +428,22 @@ async def well_known():
                 "jsonrpc": "https://agent-tools.cloud/a2a",
                 "search": "https://agent-tools.cloud/api/v1/a2a/search",
                 "get_agent": "https://agent-tools.cloud/api/v1/a2a/agents/{slug}",
+            },
+            "mcp_servers": {
+                "search": "https://agent-tools.cloud/api/v1/mcp/search",
+                "get_server": "https://agent-tools.cloud/api/v1/mcp/servers/{slug}",
+            },
+            "resources_search": {
+                "method": "GET",
+                "url": "https://agent-tools.cloud/api/v1/resources/search",
+                "query": ["q", "protocol", "chain", "health", "limit", "offset"],
+                "returns": "unified x402 / mcp / a2a resources in one normalised shape",
+            },
+            "broker_recommend": {
+                "method": "GET",
+                "url": "https://agent-tools.cloud/api/v1/broker/recommend",
+                "query": ["q", "max_price_usd", "chain", "require_healthy", "limit"],
+                "returns": "scored payable endpoints with call_hint + pay_hint (no settlement)",
             },
             "x402_manifest": "https://agent-tools.cloud/.well-known/x402",
             "openapi": "https://agent-tools.cloud/openapi.json",
