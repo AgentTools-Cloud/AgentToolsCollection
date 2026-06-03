@@ -1,0 +1,10 @@
+{
+  "_comment": "Seed A2A agent card URLs. Each entry is probed; only cards returning valid JSON with a name/skills are inserted. url may be a direct card URL or a homepage (well-known paths are then tried). Scaling beyond hand-picked cards is handled by the directory-API crawlers (P1: StackA2A / AgentJUKU / AgentCrawl list endpoints).",
+  "agents": [
+    { "url": "https://agentcrawl.dev/.well-known/agent-card.json", "source": "manual-seed" },
+    { "url": "https://nerq.ai/.well-known/agent-card.json", "source": "manual-seed" },
+    { "url": "https://yomo.run/.well-known/agent-card.json", "source": "manual-seed" },
+    { "url": "https://coinrailz.com/.well-known/agent.json", "source": "manual-seed" },
+    { "url": "https://a2achat.com/.well-known/agent-card.json", "source": "manual-seed" }
+  ]
+}

@@ -46,6 +46,11 @@ CREATE TABLE IF NOT EXISTS services (
   last_seen       INTEGER,
   confidence      REAL,
   tx_30d          INTEGER,
+    resource_count  INTEGER,
+    resource_samples TEXT,
+    payment         TEXT,
+    call_info       TEXT,
+    quality         TEXT,
   created_at      INTEGER NOT NULL,
   updated_at      INTEGER NOT NULL
 );
@@ -106,6 +111,81 @@ CREATE TABLE IF NOT EXISTS tool_calls (
 );
 CREATE INDEX IF NOT EXISTS idx_tool_calls_ts   ON tool_calls(ts);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_tool ON tool_calls(tool);
+
+CREATE TABLE IF NOT EXISTS rate_limits (
+    key          TEXT NOT NULL,
+    window_start INTEGER NOT NULL,
+    count        INTEGER NOT NULL DEFAULT 0,
+    updated_at   INTEGER NOT NULL,
+    PRIMARY KEY (key, window_start)
+);
+CREATE INDEX IF NOT EXISTS idx_rate_limits_updated ON rate_limits(updated_at);
+
+CREATE TABLE IF NOT EXISTS health_history (
+  id          INTEGER PRIMARY KEY,
+  service_id  INTEGER NOT NULL,
+  checked_at  INTEGER NOT NULL,
+  status      TEXT NOT NULL,
+  latency_ms  INTEGER,
+  http_status INTEGER,
+  x402        INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_health_history_svc ON health_history(service_id, checked_at);
+
+CREATE TABLE IF NOT EXISTS a2a_agents (
+  id                  INTEGER PRIMARY KEY,
+  slug                TEXT UNIQUE NOT NULL,
+  name                TEXT NOT NULL,
+  description         TEXT,
+  provider_name       TEXT,
+  provider_url        TEXT,
+  card_url            TEXT,
+  endpoint_url        TEXT,
+  homepage_url        TEXT,
+  documentation_url   TEXT,
+  protocol_version    TEXT,
+  preferred_transport TEXT,
+  skills              TEXT,
+  skill_names         TEXT,
+  capabilities        TEXT,
+  default_input_modes  TEXT,
+  default_output_modes TEXT,
+  auth_schemes        TEXT,
+  x402_supported      INTEGER DEFAULT 0,
+  price_hint_usd      REAL,
+  payto               TEXT,
+  source              TEXT NOT NULL,
+  source_id           TEXT,
+  health              TEXT DEFAULT 'unknown',
+  health_checked      INTEGER,
+  latency_ms          INTEGER,
+  last_seen           INTEGER,
+  last_success_at     INTEGER,
+  confidence          REAL,
+  created_at          INTEGER NOT NULL,
+  updated_at          INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_a2a_source ON a2a_agents(source);
+CREATE INDEX IF NOT EXISTS idx_a2a_health ON a2a_agents(health);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS a2a_fts USING fts5(
+  name, description, skill_names, provider_name,
+  content='a2a_agents', content_rowid='id', tokenize='porter unicode61'
+);
+CREATE TRIGGER IF NOT EXISTS a2a_ai AFTER INSERT ON a2a_agents BEGIN
+  INSERT INTO a2a_fts(rowid, name, description, skill_names, provider_name)
+    VALUES (new.id, new.name, new.description, new.skill_names, new.provider_name);
+END;
+CREATE TRIGGER IF NOT EXISTS a2a_ad AFTER DELETE ON a2a_agents BEGIN
+  INSERT INTO a2a_fts(a2a_fts, rowid, name, description, skill_names, provider_name)
+    VALUES('delete', old.id, old.name, old.description, old.skill_names, old.provider_name);
+END;
+CREATE TRIGGER IF NOT EXISTS a2a_au AFTER UPDATE ON a2a_agents BEGIN
+  INSERT INTO a2a_fts(a2a_fts, rowid, name, description, skill_names, provider_name)
+    VALUES('delete', old.id, old.name, old.description, old.skill_names, old.provider_name);
+  INSERT INTO a2a_fts(rowid, name, description, skill_names, provider_name)
+    VALUES (new.id, new.name, new.description, new.skill_names, new.provider_name);
+END;
 """
 
 
@@ -163,6 +243,17 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
         for ddl in (
             "ALTER TABLE services ADD COLUMN confidence REAL",
             "ALTER TABLE services ADD COLUMN tx_30d INTEGER",
+            "ALTER TABLE services ADD COLUMN resource_count INTEGER",
+            "ALTER TABLE services ADD COLUMN resource_samples TEXT",
+            "ALTER TABLE services ADD COLUMN payment TEXT",
+            "ALTER TABLE services ADD COLUMN call_info TEXT",
+            "ALTER TABLE services ADD COLUMN quality TEXT",
+            "ALTER TABLE services ADD COLUMN latency_ms INTEGER",
+            "ALTER TABLE services ADD COLUMN http_status INTEGER",
+            "ALTER TABLE services ADD COLUMN x402_ok INTEGER",
+            "ALTER TABLE services ADD COLUMN payto_tx_30d INTEGER",
+            "ALTER TABLE services ADD COLUMN payto_payers_30d INTEGER",
+            "ALTER TABLE services ADD COLUMN payto_checked INTEGER",
         ):
             try:
                 c.execute(ddl)
@@ -200,6 +291,10 @@ def upsert_service(conn: sqlite3.Connection, row: dict) -> tuple:
     row["last_seen"] = now
     row["chains"] = _to_json(row.get("chains"))
     row["tags"] = _to_json(row.get("tags"))
+    row["resource_samples"] = _to_json(row.get("resource_samples"))
+    row["payment"] = _to_json(row.get("payment"))
+    row["call_info"] = _to_json(row.get("call_info"))
+    row["quality"] = _to_json(row.get("quality"))
 
     cur = conn.cursor()
     existing = None
@@ -219,7 +314,8 @@ def upsert_service(conn: sqlite3.Connection, row: dict) -> tuple:
         "facilitator", "mcp_url", "openapi_url", "well_known_url",
         "source", "source_id", "tags", "region",
         "health", "health_checked", "last_seen",
-        "confidence", "tx_30d",
+        "confidence", "tx_30d", "resource_count", "resource_samples",
+        "payment", "call_info", "quality",
         "created_at", "updated_at",
     ]
 
@@ -248,7 +344,7 @@ def upsert_service(conn: sqlite3.Connection, row: dict) -> tuple:
 
 def row_to_dict(row) -> dict:
     d = dict(row)
-    for k in ("chains", "tags"):
+    for k in ("chains", "tags", "resource_samples", "payment", "call_info", "quality"):
         if d.get(k):
             try:
                 d[k] = json.loads(d[k])
@@ -422,8 +518,10 @@ def search(conn, q=None, category=None, chain=None, region=None, health=None,
     #   6. recency
     sql_parts.append(
         "ORDER BY "
+        # primary tier: ok -> degraded -> unknown -> down (dead links sink)
+        "CASE s.health WHEN 'ok' THEN 0 WHEN 'degraded' THEN 1 "
+        "WHEN 'unknown' THEN 2 WHEN 'down' THEN 3 ELSE 4 END ASC, "
         "(s.health='ok' AND COALESCE(s.tx_30d,0) > 0) DESC, "
-        "(s.health='ok') DESC, "
         "(s.confidence IS NOT NULL) DESC, "
         "s.confidence DESC, "
         "COALESCE(s.tx_30d, 0) DESC, "
@@ -463,10 +561,6 @@ def stats(conn):
     cur = conn.cursor()
     total = cur.execute("SELECT COUNT(*) AS n FROM services").fetchone()["n"]
     healthy = cur.execute("SELECT COUNT(*) AS n FROM services WHERE health='ok'").fetchone()["n"]
-    by_source = {
-        r["source"]: r["n"]
-        for r in cur.execute("SELECT source, COUNT(*) AS n FROM services GROUP BY source").fetchall()
-    }
     by_chain_rows = cur.execute("SELECT chains FROM services WHERE chains IS NOT NULL").fetchall()
     chains = {}
     for r in by_chain_rows:
@@ -475,7 +569,7 @@ def stats(conn):
                 chains[c] = chains.get(c, 0) + 1
         except Exception:
             pass
-    return {"total": total, "healthy": healthy, "by_source": by_source, "by_chain": chains}
+    return {"total": total, "healthy": healthy, "by_chain": chains}
 
 
 def record_crawl_start(conn, source):
@@ -496,6 +590,62 @@ def log_tool_call(conn, tool, args=None, result_n=None, result_slug=None,
          result_n, result_slug, client_name, client_ip),
     )
     conn.commit()
+
+
+def hit_rate_limit(conn, key: str, limit: int, window_seconds: int,
+                   now: int | None = None) -> dict:
+    """Increment a fixed-window counter and return the rate-limit state."""
+    now = int(time.time() if now is None else now)
+    limit = int(limit)
+    window_seconds = max(1, int(window_seconds))
+    window_start = now - (now % window_seconds)
+    reset_at = window_start + window_seconds
+    if limit <= 0:
+        return {
+            "allowed": True,
+            "limit": limit,
+            "remaining": None,
+            "reset_at": reset_at,
+            "retry_after": 0,
+        }
+
+    # Keep the table small without doing expensive maintenance on every row.
+    conn.execute(
+        "DELETE FROM rate_limits WHERE updated_at < ?",
+        (now - max(86400 * 7, window_seconds * 2),),
+    )
+    row = conn.execute(
+        "SELECT count FROM rate_limits WHERE key=? AND window_start=?",
+        (key, window_start),
+    ).fetchone()
+    current = int(row["count"] if row else 0)
+    if current >= limit:
+        return {
+            "allowed": False,
+            "limit": limit,
+            "remaining": 0,
+            "reset_at": reset_at,
+            "retry_after": max(1, reset_at - now),
+        }
+
+    new_count = current + 1
+    if row:
+        conn.execute(
+            "UPDATE rate_limits SET count=?, updated_at=? WHERE key=? AND window_start=?",
+            (new_count, now, key, window_start),
+        )
+    else:
+        conn.execute(
+            "INSERT INTO rate_limits (key, window_start, count, updated_at) VALUES (?, ?, ?, ?)",
+            (key, window_start, new_count, now),
+        )
+    return {
+        "allowed": True,
+        "limit": limit,
+        "remaining": max(0, limit - new_count),
+        "reset_at": reset_at,
+        "retry_after": 0,
+    }
 
 
 def record_crawl_finish(conn, run_id, added, updated, errors=(), status="ok"):
@@ -610,3 +760,182 @@ def mark_submission(conn, sub_id: int, status: str, note: str | None = None):
         (status, note, int(time.time()), sub_id),
     )
     conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# A2A agents (P0): separate table from `services`. Lifecycle, health probe
+# and schema differ from x402 services, so we never merge them; the unified
+# resource search (P1) is a read-time union instead.
+# ---------------------------------------------------------------------------
+
+_A2A_COLS = [
+    "slug", "name", "description", "provider_name", "provider_url",
+    "card_url", "endpoint_url", "homepage_url", "documentation_url",
+    "protocol_version", "preferred_transport",
+    "skills", "skill_names", "capabilities",
+    "default_input_modes", "default_output_modes", "auth_schemes",
+    "x402_supported", "price_hint_usd", "payto",
+    "source", "source_id",
+    "health", "health_checked", "latency_ms",
+    "last_seen", "last_success_at", "confidence",
+    "created_at", "updated_at",
+]
+
+_A2A_JSON_COLS = (
+    "skills", "capabilities", "default_input_modes",
+    "default_output_modes", "auth_schemes",
+)
+
+
+def a2a_row_to_dict(row) -> dict:
+    d = dict(row)
+    for k in _A2A_JSON_COLS:
+        if d.get(k):
+            try:
+                d[k] = json.loads(d[k])
+            except (TypeError, json.JSONDecodeError):
+                pass
+    return d
+
+
+def upsert_a2a_agent(conn: sqlite3.Connection, row: dict) -> tuple:
+    """Insert/update an A2A agent. Dedup on (source, source_id) then slug.
+
+    `skills` may be a list of dicts; we also derive `skill_names` (a flat
+    text blob) so FTS can match skill ids/names/tags without parsing JSON.
+    """
+    now = int(time.time())
+    row.setdefault("created_at", now)
+    row["updated_at"] = now
+    row["last_seen"] = now
+
+    # derive skill_names blob for FTS if not explicitly supplied
+    if not row.get("skill_names"):
+        names: list[str] = []
+        skills = row.get("skills")
+        if isinstance(skills, list):
+            for sk in skills:
+                if isinstance(sk, dict):
+                    for key in ("name", "id", "description"):
+                        v = sk.get(key)
+                        if v:
+                            names.append(str(v))
+                    tags = sk.get("tags")
+                    if isinstance(tags, list):
+                        names.extend(str(t) for t in tags)
+                elif sk:
+                    names.append(str(sk))
+        row["skill_names"] = " ".join(names) if names else None
+
+    row["x402_supported"] = 1 if row.get("x402_supported") else 0
+    for k in _A2A_JSON_COLS:
+        row[k] = _to_json(row.get(k))
+
+    cur = conn.cursor()
+    existing = None
+    if row.get("source") and row.get("source_id"):
+        existing = cur.execute(
+            "SELECT id, created_at, health, health_checked, last_success_at "
+            "FROM a2a_agents WHERE source=? AND source_id=?",
+            (row["source"], row["source_id"]),
+        ).fetchone()
+    if existing is None:
+        existing = cur.execute(
+            "SELECT id, created_at, health, health_checked, last_success_at "
+            "FROM a2a_agents WHERE slug=?",
+            (row["slug"],),
+        ).fetchone()
+
+    if existing is None:
+        placeholders = ",".join(["?"] * len(_A2A_COLS))
+        cur.execute(
+            f"INSERT INTO a2a_agents ({','.join(_A2A_COLS)}) VALUES ({placeholders})",
+            [row.get(c) for c in _A2A_COLS],
+        )
+        return True, cur.lastrowid
+
+    row["created_at"] = existing["created_at"]
+    # metadata-only refresh must not reset a previously probed health
+    if row.get("health") is None:
+        row["health"] = existing["health"]
+    if row.get("health_checked") is None:
+        row["health_checked"] = existing["health_checked"]
+    if row.get("last_success_at") is None:
+        row["last_success_at"] = existing["last_success_at"]
+    set_clause = ",".join(f"{c}=?" for c in _A2A_COLS if c != "created_at")
+    params = [row.get(c) for c in _A2A_COLS if c != "created_at"]
+    params.append(existing["id"])
+    cur.execute(f"UPDATE a2a_agents SET {set_clause} WHERE id=?", params)
+    return False, int(existing["id"])
+
+
+def search_a2a(conn, q=None, health=None, x402_only=False,
+               limit=50, offset=0):
+    """Search A2A agents. Ranks healthy + x402-capable + confident first."""
+    select_cols = ["a.*"]
+    where: list[str] = []
+    params: list = []
+    fts_query = _expand_fts_query(q) if q else None
+
+    if fts_query is not None:
+        select_cols.append(
+            "snippet(a2a_fts, -1, '[[', ']]', '…', 12) AS match_snippet"
+        )
+        sql = ["SELECT " + ", ".join(select_cols) + " FROM a2a_agents a"]
+        sql.append("JOIN a2a_fts f ON f.rowid = a.id")
+        where.append("a2a_fts MATCH ?")
+        params.append(fts_query)
+    else:
+        sql = ["SELECT " + ", ".join(select_cols) + " FROM a2a_agents a"]
+
+    if health:
+        where.append("a.health=?"); params.append(health)
+    if x402_only:
+        where.append("a.x402_supported=1")
+    if where:
+        sql.append("WHERE " + " AND ".join(where))
+    sql.append(
+        "ORDER BY "
+        "CASE a.health WHEN 'ok' THEN 0 WHEN 'degraded' THEN 1 "
+        "WHEN 'unknown' THEN 2 WHEN 'down' THEN 3 ELSE 4 END ASC, "
+        "a.x402_supported DESC, "
+        "(a.confidence IS NOT NULL) DESC, "
+        "a.confidence DESC, "
+        "a.updated_at DESC"
+    )
+    sql.append("LIMIT ? OFFSET ?")
+    params.extend([limit, offset])
+    rows = conn.execute(" ".join(sql), params).fetchall()
+    out: list[dict] = []
+    for r in rows:
+        d = a2a_row_to_dict(r)
+        if d.get("match_snippet") in (None, "", "…"):
+            d.pop("match_snippet", None)
+        out.append(d)
+    return out
+
+
+def get_a2a_by_slug(conn, slug):
+    row = conn.execute("SELECT * FROM a2a_agents WHERE slug=?", (slug,)).fetchone()
+    return a2a_row_to_dict(row) if row else None
+
+
+def find_a2a_by_card_url(conn, card_url: str) -> dict | None:
+    if not card_url:
+        return None
+    row = conn.execute(
+        "SELECT * FROM a2a_agents WHERE card_url=? LIMIT 1", (card_url,)
+    ).fetchone()
+    return a2a_row_to_dict(row) if row else None
+
+
+def a2a_stats(conn):
+    cur = conn.cursor()
+    total = cur.execute("SELECT COUNT(*) AS n FROM a2a_agents").fetchone()["n"]
+    healthy = cur.execute(
+        "SELECT COUNT(*) AS n FROM a2a_agents WHERE health='ok'"
+    ).fetchone()["n"]
+    x402 = cur.execute(
+        "SELECT COUNT(*) AS n FROM a2a_agents WHERE x402_supported=1"
+    ).fetchone()["n"]
+    return {"total": total, "healthy": healthy, "x402_capable": x402}

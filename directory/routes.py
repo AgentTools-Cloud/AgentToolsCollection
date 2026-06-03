@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -10,7 +9,10 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field, HttpUrl
 
-from . import db
+from . import ask as directory_ask
+from . import cards, db
+from . import a2a as directory_a2a
+from . import limits
 
 BASE_DIR = Path(__file__).resolve().parent
 TEMPLATES = Jinja2Templates(directory=str(BASE_DIR / "templates"))
@@ -20,6 +22,25 @@ router = APIRouter()
 
 def _conn():
     return db.connect(read_only=True)
+
+
+ASK_RATE_LIMITS = (
+    ("minute", limits.env_int("AGENT_TOOLS_ASK_RATE_LIMIT_PER_MINUTE", 10), 60),
+    ("day", limits.env_int("AGENT_TOOLS_ASK_RATE_LIMIT_PER_DAY", 200), 86400),
+)
+SUBMIT_RATE_LIMIT_PER_DAY = limits.env_int("AGENT_TOOLS_SUBMIT_RATE_LIMIT_PER_DAY", 5)
+
+
+def _enforce_ask_limit(request: Request, use_llm: bool) -> None:
+    if not use_llm:
+        return
+    state = limits.check_ip_limits(
+        limits.client_ip_from_request(request),
+        "ask",
+        ASK_RATE_LIMITS,
+    )
+    if state:
+        limits.raise_rate_limited(state, "Too many LLM-backed ask requests. Try again later or set use_llm=false.")
 
 
 @router.get("/", response_class=HTMLResponse, include_in_schema=False)
@@ -102,6 +123,11 @@ async def api_search(
     with _conn() as c:
         services = db.search(c, q=q, category=category, chain=chain,
                              region=region, health=health, limit=limit, offset=offset)
+    for svc in services:
+        svc.pop("source", None)
+        svc.pop("source_id", None)
+        if svc.get("slug"):
+            svc["service_card_url"] = f"/api/v1/services/{svc['slug']}"
     return {"count": len(services), "services": services}
 
 
@@ -111,13 +137,105 @@ async def api_service(slug: str):
         svc = db.get_by_slug(c, slug)
     if not svc:
         raise HTTPException(404, "service not found")
-    return svc
+    return cards.build_service_card(svc)
+
+
+class AskPayload(BaseModel):
+    query: str = Field(min_length=1, max_length=800)
+    limit: int = Field(default=5, ge=1, le=10)
+    candidate_limit: int = Field(default=30, ge=5, le=50)
+    category: str | None = None
+    chain: str | None = None
+    max_price_usd: float | None = Field(default=None, ge=0)
+    require_healthy: bool = True
+    min_confidence: float | None = Field(default=None, ge=0, le=1)
+    has_mcp: bool = False
+    use_llm: bool = True
+
+
+@router.post("/api/v1/ask", tags=["directory"])
+async def api_ask(request: Request, payload: AskPayload):
+    """Ask for the best x402/MCP services for an intent.
+
+    The endpoint retrieves directory candidates first, then asks the configured
+    LLM to rank only those candidates. If the LLM is unavailable, it returns a
+    deterministic directory-ranked fallback.
+    """
+    _enforce_ask_limit(request, payload.use_llm)
+    return await directory_ask.answer_query(
+        payload.query,
+        limit=payload.limit,
+        candidate_limit=payload.candidate_limit,
+        category=payload.category,
+        chain=payload.chain,
+        max_price_usd=payload.max_price_usd,
+        health="ok" if payload.require_healthy else None,
+        min_confidence=payload.min_confidence,
+        has_mcp=payload.has_mcp,
+        use_llm=payload.use_llm,
+    )
+
+
+@router.get("/api/v1/ask", tags=["directory"])
+async def api_ask_get(
+    request: Request,
+    q: str = Query(min_length=1, max_length=800),
+    limit: int = Query(default=5, ge=1, le=10),
+    category: str | None = None,
+    chain: str | None = None,
+    max_price_usd: float | None = Query(default=None, ge=0),
+    require_healthy: bool = True,
+    use_llm: bool = True,
+):
+    _enforce_ask_limit(request, use_llm)
+    return await directory_ask.answer_query(
+        q,
+        limit=limit,
+        category=category,
+        chain=chain,
+        max_price_usd=max_price_usd,
+        health="ok" if require_healthy else None,
+        use_llm=use_llm,
+    )
 
 
 @router.get("/api/v1/categories", tags=["directory"])
 async def api_categories():
     with _conn() as c:
         return {"categories": db.list_categories(c)}
+
+
+@router.get("/api/v1/a2a/search", tags=["a2a"])
+async def api_a2a_search(
+    q: str | None = Query(default=None, max_length=800),
+    health: str | None = Query(default=None),
+    x402_only: bool = Query(default=False),
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+):
+    with _conn() as c:
+        rows = db.search_a2a(c, q=q, health=health, x402_only=x402_only,
+                             limit=limit, offset=offset)
+    return {
+        "query": q,
+        "count": len(rows),
+        "agents": [directory_a2a.public_agent(r) for r in rows],
+    }
+
+
+@router.get("/api/v1/a2a/agents/{slug}", tags=["a2a"])
+async def api_a2a_agent(slug: str):
+    with _conn() as c:
+        row = db.get_a2a_by_slug(c, slug)
+    if not row:
+        raise HTTPException(status_code=404, detail="A2A agent not found")
+    return directory_a2a.public_agent(row)
+
+
+@router.get("/api/v1/a2a/stats", tags=["a2a"])
+async def api_a2a_stats():
+    with _conn() as c:
+        return db.a2a_stats(c)
 
 
 @router.get("/api/v1/stats", tags=["directory"])
@@ -137,33 +255,117 @@ class SubmissionPayload(BaseModel):
 
 
 @router.post("/api/v1/submit", tags=["directory"])
-async def api_submit(payload: SubmissionPayload):
-    with db.writer() as c:
-        c.execute(
-            "INSERT INTO submissions (payload, status, created_at) VALUES (?, 'pending', ?)",
-            (payload.model_dump_json(), int(time.time())),
+async def api_submit(request: Request, payload: SubmissionPayload):
+    url = str(payload.url).strip()
+    client_ip = limits.client_ip_from_request(request)
+    with _conn() as c:
+        existing = db.find_service_by_url(c, url)
+        pending = db.find_pending_submission(c, url)
+        recent = db.count_recent_submissions(c, client_ip)
+    if existing:
+        return {
+            "status": "already_listed",
+            "message": "A service with this URL is already in the directory.",
+            "slug": existing.get("slug"),
+            "url": existing.get("url"),
+        }
+    if pending:
+        return {
+            "status": "already_pending",
+            "message": "A submission for this URL is already awaiting review.",
+            "submission_id": pending.get("id"),
+        }
+    if recent >= SUBMIT_RATE_LIMIT_PER_DAY:
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "rate_limited",
+                "message": "Too many pending submissions from this IP in the last 24h.",
+                "limit": SUBMIT_RATE_LIMIT_PER_DAY,
+            },
         )
-    return {"status": "received"}
+    state = limits.check_ip_limits(
+        client_ip,
+        "submit",
+        (("day", SUBMIT_RATE_LIMIT_PER_DAY, 86400),),
+    )
+    if state:
+        limits.raise_rate_limited(state, "Too many service submissions from this IP.")
+    submission = payload.model_dump(mode="json")
+    submission["url"] = url
+    submission["_client_ip"] = client_ip
+    submission["_source"] = "rest-submit"
+    with db.writer() as c:
+        sub_id = db.create_submission(c, submission)
+    return {"status": "pending", "submission_id": sub_id}
 
 
 @router.get("/.well-known/agent-tools.json", tags=["discovery"])
 async def well_known():
     return {
         "name": "agent-tools.cloud",
-        "description": "Global directory of x402 paid APIs and MCP services, "
-                       "plus a pay-per-call Qwen3.6-35B-A3B inference relay at "
-                       "flat $0.001 USDC / call on Base (x402 v2).",
+        "type": "x402-service-directory",
+        "version": "0.5",
+        "description": (
+            "Free directory and MCP discovery layer for x402 paid APIs. "
+            "The previously hosted paid Qwen relay and vertical paid endpoints "
+            "were retired on 2026-05-25; this host is discovery-only."
+        ),
+        "paid_relay": False,
+        "capabilities": [
+            "search_services",
+            "ask_services",
+            "get_service_card",
+            "list_categories",
+            "submit_service",
+            "mcp_discovery",
+            "search_a2a_agents",
+            "a2a_jsonrpc",
+        ],
         "endpoints": {
-            "search": "https://agent-tools.cloud/api/v1/search",
+            "search": {
+                "method": "GET",
+                "url": "https://agent-tools.cloud/api/v1/search",
+                "query": ["q", "category", "chain", "region", "health", "limit", "offset"],
+                "returns": "ranked directory rows with service_card_url",
+            },
+            "ask": {
+                "method": "POST",
+                "url": "https://agent-tools.cloud/api/v1/ask",
+                "body": {
+                    "query": "find a current weather API that accepts x402",
+                    "limit": 5,
+                    "chain": "base",
+                    "max_price_usd": 0.01,
+                    "require_healthy": True,
+                },
+                "returns": "LLM-ranked recommendations grounded in directory candidates",
+            },
+            "get_service_card": {
+                "method": "GET",
+                "url_template": "https://agent-tools.cloud/api/v1/services/{slug}",
+                "returns": "agent-readable service card with payment, call and quality metadata",
+            },
             "categories": "https://agent-tools.cloud/api/v1/categories",
             "stats": "https://agent-tools.cloud/api/v1/stats",
             "submit": "https://agent-tools.cloud/api/v1/submit",
+            "mcp": {
+                "transport": "streamable-http",
+                "url": "https://agent-tools.cloud/mcp-discovery/",
+                "tools": ["search", "ask_services", "get", "list_categories", "stats", "register"],
+            },
+            "a2a": {
+                "agent_card": "https://agent-tools.cloud/.well-known/agent-card.json",
+                "jsonrpc": "https://agent-tools.cloud/a2a",
+                "search": "https://agent-tools.cloud/api/v1/a2a/search",
+                "get_agent": "https://agent-tools.cloud/api/v1/a2a/agents/{slug}",
+            },
+            "x402_manifest": "https://agent-tools.cloud/.well-known/x402",
             "openapi": "https://agent-tools.cloud/openapi.json",
         },
         "agent_hint": (
-            "Use GET /api/v1/search?q=<query>&category=<cat>&chain=<chain> "
-            "to discover x402-payable APIs. Each result includes the "
-            "service URL, /.well-known/x402.json (if any), MCP/OpenAPI "
-            "endpoints, price range in USDC, and current health status."
+            "Use POST /api/v1/ask for intent-level recommendations. Use "
+            "GET /api/v1/search for faceted retrieval and then GET "
+            "/api/v1/services/{slug} for the service card before paying or calling."
         ),
     }
