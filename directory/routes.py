@@ -20,7 +20,7 @@ from . import limits
 BASE_DIR = Path(__file__).resolve().parent
 TEMPLATES = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 # Build version — bump on deploy to bust browser/CDN HTML caches.
-BUILD_VERSION = "2026-06-04.2"
+BUILD_VERSION = "2026-06-04.3"
 TEMPLATES.env.globals["build_version"] = BUILD_VERSION
 
 router = APIRouter()
@@ -83,9 +83,17 @@ async def service_detail(request: Request, slug: str):
 @router.get("/categories", response_class=HTMLResponse, include_in_schema=False)
 async def categories_page(request: Request):
     with _conn() as c:
-        cats = db.list_categories(c)
+        x402_cats = db.list_categories(c)
+        mcp_cats = db.mcp_categories(c)
+        a2a_cats = db.a2a_categories(c)
         s = db.stats(c)
-    return TEMPLATES.TemplateResponse(request, "categories.html", {"request": request, "categories": cats, "stats": s}
+        ms = db.mcp_stats(c)
+        a2s = db.a2a_stats(c)
+    return TEMPLATES.TemplateResponse(request, "categories.html", {
+            "request": request,
+            "x402_cats": x402_cats, "mcp_cats": mcp_cats, "a2a_cats": a2a_cats,
+            "stats": s, "mcp_stats": ms, "a2a_stats": a2s,
+        },
     )
 
 

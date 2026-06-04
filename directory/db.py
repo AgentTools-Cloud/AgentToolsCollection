@@ -1136,3 +1136,65 @@ def mcp_stats(conn):
     return {"total": total, "healthy": healthy, "remote_callable": remote,
             "x402_capable": x402}
 
+
+# Curated topic keywords used to bucket MCP servers (which carry no tags).
+# Each keyword is also a working full-text search term, so a category link
+# (/mcp?q=<keyword>) returns exactly the servers counted here.
+_MCP_TOPIC_KEYWORDS = (
+    "search", "web", "data", "database", "finance", "payment", "crypto",
+    "wallet", "trading", "blockchain", "weather", "maps", "github", "code",
+    "deploy", "ai", "llm", "image", "video", "audio", "pdf", "document",
+    "email", "calendar", "news", "social", "api", "automation", "security",
+    "analytics", "translation", "knowledge",
+)
+
+
+def mcp_categories(conn, min_count=3):
+    """Bucket MCP servers by curated topic keyword (name + description).
+
+    Returns [{category, count}] sorted by count desc. Each `category` is a
+    searchable keyword: link to /mcp?q=<category> to see the matching servers.
+    """
+    rows = conn.execute(
+        "SELECT name, description FROM mcp_servers"
+    ).fetchall()
+    counts = {k: 0 for k in _MCP_TOPIC_KEYWORDS}
+    for r in rows:
+        text = ((r["name"] or "") + " " + (r["description"] or "")).lower()
+        for k in _MCP_TOPIC_KEYWORDS:
+            if k in text:
+                counts[k] += 1
+    out = [{"category": k, "count": c} for k, c in counts.items() if c >= min_count]
+    out.sort(key=lambda d: (-d["count"], d["category"]))
+    return out
+
+
+def a2a_categories(conn, min_count=1):
+    """Aggregate A2A agents by skill tag.
+
+    Returns [{category, count}] where count is the number of agents that
+    expose at least one skill carrying that tag. Link to /a2a?q=<category>.
+    """
+    rows = conn.execute(
+        "SELECT skills FROM a2a_agents WHERE skills IS NOT NULL AND skills != ''"
+    ).fetchall()
+    counts: dict[str, int] = {}
+    for r in rows:
+        try:
+            skills = json.loads(r["skills"])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        seen: set[str] = set()
+        for s in (skills or []):
+            if not isinstance(s, dict):
+                continue
+            for t in (s.get("tags") or []):
+                t = str(t).strip().lower()
+                if t:
+                    seen.add(t)
+        for t in seen:
+            counts[t] = counts.get(t, 0) + 1
+    out = [{"category": t, "count": c} for t, c in counts.items() if c >= min_count]
+    out.sort(key=lambda d: (-d["count"], d["category"]))
+    return out
+
