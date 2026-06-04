@@ -77,19 +77,19 @@
       <div class="text-xs text-slate-400 mt-3">x402 · MCP · A2A combined</div>
     </div>
     <div class="stat-card">
+      <div class="text-sm text-slate-500">Healthy</div>
+      <div class="text-3xl font-bold mt-1 text-emerald-600">{{ stats.healthy + mcp_stats.healthy + a2a_stats.healthy }}</div>
+      <div class="text-xs text-slate-400 mt-3">passed last liveness probe</div>
+    </div>
+    <div class="stat-card">
+      <div class="text-sm text-slate-500">Remote-callable MCP</div>
+      <div class="text-3xl font-bold mt-1">{{ mcp_stats.remote_callable }}</div>
+      <div class="text-xs text-slate-400 mt-3">have a live endpoint URL</div>
+    </div>
+    <div class="stat-card">
       <div class="text-sm text-slate-500">x402 paid APIs</div>
       <div class="text-3xl font-bold mt-1">{{ stats.total }}</div>
       <div class="text-xs text-slate-400 mt-3">settle on-chain micropayments</div>
-    </div>
-    <div class="stat-card">
-      <div class="text-sm text-slate-500">MCP servers</div>
-      <div class="text-3xl font-bold mt-1">{{ mcp_stats.total }}</div>
-      <div class="text-xs text-slate-400 mt-3">{{ mcp_stats.remote_callable }} remote-callable</div>
-    </div>
-    <div class="stat-card">
-      <div class="text-sm text-slate-500">A2A agents</div>
-      <div class="text-3xl font-bold mt-1">{{ a2a_stats.total }}</div>
-      <div class="text-xs text-slate-400 mt-3">{{ a2a_stats.healthy }} healthy</div>
     </div>
   </div>
 </section>
