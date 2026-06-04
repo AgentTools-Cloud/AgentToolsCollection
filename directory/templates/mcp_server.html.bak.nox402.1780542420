@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+{% block title %}{{ m.name }} — MCP server — agent-tools.cloud{% endblock %}
+{% block desc %}{{ (m.description or m.name)|truncate(140) }}{% endblock %}
+{% block content %}
+<a href="/mcp" class="text-sm text-slate-500 hover:text-blue-600 inline-flex items-center gap-1">
+  <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+  Back to MCP servers
+</a>
+
+<header class="mt-4 mb-6 flex flex-wrap items-start justify-between gap-4">
+  <div class="min-w-0">
+    <h1 class="text-3xl md:text-4xl font-extrabold tracking-tight">{{ m.name }}</h1>
+    {% if m.endpoint_url %}
+      <a href="{{ m.endpoint_url }}" target="_blank" rel="noopener" class="text-blue-600 hover:underline text-sm mono break-all mt-2 inline-block">{{ m.endpoint_url }}</a>
+    {% endif %}
+  </div>
+  <div class="flex items-center gap-2">
+    {% if m.health == 'ok' %}
+      <span class="badge bg-emerald-50 text-emerald-700 ring-1 ring-emerald-100">● healthy</span>
+    {% elif m.health == 'degraded' %}
+      <span class="badge bg-amber-50 text-amber-700 ring-1 ring-amber-100">● degraded</span>
+    {% elif m.health == 'down' %}
+      <span class="badge bg-rose-50 text-rose-700 ring-1 ring-rose-100">● down</span>
+    {% else %}
+      <span class="badge bg-slate-100 text-slate-500 ring-1 ring-slate-200">● unknown</span>
+    {% endif %}
+    {% if m.x402_supported %}<span class="badge bg-violet-50 text-violet-700 ring-1 ring-violet-100">x402</span>{% endif %}
+  </div>
+</header>
+
+{% if m.description %}
+<section class="svc-card p-6 mb-6">
+  <p class="text-slate-800 whitespace-pre-line leading-relaxed">{{ m.description }}</p>
+</section>
+{% endif %}
+
+<section class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+  <div class="stat-card">
+    <div class="text-xs text-slate-500 mb-1">Transport</div>
+    <div class="font-semibold mono text-sm">{{ m.transport or "—" }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="text-xs text-slate-500 mb-1">Auth</div>
+    <div class="font-semibold mono text-sm">{{ m.auth_method or "—" }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="text-xs text-slate-500 mb-1">Cost</div>
+    <div class="font-semibold mono text-sm">{{ m.cost_hint or "—" }}</div>
+  </div>
+</section>
+
+<section class="svc-card p-6 mb-6">
+  <h2 class="text-base font-semibold mb-4">How to connect</h2>
+  <div class="space-y-5">
+    {% if m.endpoint_url %}
+    <div>
+      <div class="text-xs text-slate-500 mb-1.5">MCP endpoint ({{ m.transport or "streamable-http" }})</div>
+      <pre class="bg-slate-900 text-slate-100 text-xs p-3 rounded-lg overflow-x-auto"><code>{{ m.endpoint_url }}</code></pre>
+    </div>
+    <div>
+      <div class="text-xs text-slate-500 mb-1.5">JSON-RPC initialize probe</div>
+      <pre class="bg-slate-900 text-slate-100 text-xs p-3 rounded-lg overflow-x-auto"><code>curl -X POST {{ m.endpoint_url }} \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'</code></pre>
+    </div>
+    {% endif %}
+    {% if m.homepage_url %}
+    <div>
+      <div class="text-xs text-slate-500 mb-1.5">Homepage</div>
+      <a href="{{ m.homepage_url }}" target="_blank" rel="noopener" class="text-blue-600 hover:underline text-sm mono break-all">{{ m.homepage_url }}</a>
+    </div>
+    {% endif %}
+    {% if m.source_code_url %}
+    <div>
+      <div class="text-xs text-slate-500 mb-1.5">Source code</div>
+      <a href="{{ m.source_code_url }}" target="_blank" rel="noopener" class="text-blue-600 hover:underline text-sm mono break-all">{{ m.source_code_url }}</a>
+    </div>
+    {% endif %}
+    {% if m.source_url %}
+    <div>
+      <div class="text-xs text-slate-500 mb-1.5">Listed at ({{ m.source }})</div>
+      <a href="{{ m.source_url }}" target="_blank" rel="noopener" class="text-blue-600 hover:underline text-sm mono break-all">{{ m.source_url }}</a>
+    </div>
+    {% endif %}
+  </div>
+</section>
+{% endblock %}
