@@ -1,0 +1,458 @@
+"""CLI entry for periodic crawl + health jobs.
+
+Usage:
+  python -m directory.jobs init
+  python -m directory.jobs crawl [source]
+  python -m directory.jobs health
+  python -m directory.jobs stats
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import sys
+import time
+from pathlib import Path
+
+from . import crawlers, db
+
+log = logging.getLogger("directory.jobs")
+SEED_FILE = Path(__file__).resolve().parent / "seed.json"
+
+
+def cmd_init() -> int:
+    db.init_db()
+    log.info("schema initialized at %s", db.DEFAULT_DB_PATH)
+    if SEED_FILE.exists():
+        with SEED_FILE.open(encoding="utf-8") as f:
+            seed = json.load(f)
+        added = 0
+        with db.writer() as c:
+            for row in seed:
+                row.setdefault("source", "manual")
+                row.setdefault("source_id", row.get("slug") or row["url"])
+                created, _ = db.upsert_service(c, dict(row))
+                added += int(created)
+        log.info("seeded %d new services (file has %d)", added, len(seed))
+    return 0
+
+
+def _start_run(name: str) -> int:
+    def op():
+        with db.writer() as c:
+            return db.record_crawl_start(c, name)
+    return db.with_retry(op)
+
+
+def _finish_run(run_id: int, added: int, updated: int, errors: list[str], status: str) -> None:
+    def op():
+        with db.writer() as c:
+            db.record_crawl_finish(c, run_id, added, updated, errors, status=status)
+    db.with_retry(op)
+
+
+def _run_one(name):
+    fn = crawlers.ALL_CRAWLERS[name]
+    errors = []
+    added = updated = 0
+    run_id = _start_run(name)
+    try:
+        items = fn()
+    except Exception as e:
+        errors.append(f"fetch failed: {e!r}")
+        _finish_run(run_id, 0, 0, errors, status="error")
+        return 0, 0, errors
+
+    # Write in short batches instead of holding a writer transaction while a
+    # full source is processed. This keeps the website responsive and avoids
+    # timer jobs fighting each other for a long sqlite write lock.
+    batch_size = 50
+    for start in range(0, len(items), batch_size):
+        batch = items[start:start + batch_size]
+        def op(batch=batch):
+            batch_added = batch_updated = 0
+            batch_errors = []
+            with db.writer() as c:
+                for item in batch:
+                    try:
+                        if not crawlers._url_acceptable(item.get("url") or ""):
+                            log.info("skip non-discoverable url: %s", item.get("url"))
+                            continue
+                        created, _ = db.upsert_service(c, item)
+                        if created:
+                            batch_added += 1
+                        else:
+                            batch_updated += 1
+                    except Exception as e:
+                        batch_errors.append(f"upsert {item.get('slug')}: {e!r}")
+            return batch_added, batch_updated, batch_errors
+        batch_added, batch_updated, batch_errors = db.with_retry(op)
+        added += batch_added
+        updated += batch_updated
+        errors.extend(batch_errors)
+
+    _finish_run(run_id, added, updated, errors,
+                status="ok" if not errors else "partial")
+    return added, updated, errors
+
+
+def cmd_crawl(only=None) -> int:
+    if only and only not in crawlers.ALL_CRAWLERS:
+        print(f"unknown source {only!r}. available: {list(crawlers.ALL_CRAWLERS)}", file=sys.stderr)
+        return 2
+    names = [only] if only else list(crawlers.ALL_CRAWLERS)
+    total_added = total_updated = 0
+    for n in names:
+        added, updated, errors = _run_one(n)
+        log.info("crawl %s: added=%d updated=%d errors=%d", n, added, updated, len(errors))
+        for e in errors[:5]:
+            log.warning("  %s: %s", n, e)
+        total_added += added
+        total_updated += updated
+    log.info("done. added=%d updated=%d", total_added, total_updated)
+    if total_added:
+        log.info("probing %d newly added service(s) for health...", total_added)
+        cmd_health(only_unknown=True)
+    return 0
+
+
+def cmd_health(only_unknown: bool = False) -> int:
+    n_ok = n_down = n_degraded = 0
+    sql = "SELECT id, url, well_known_url FROM services"
+    if only_unknown:
+        # crawler inserts leave health NULL (bypasses the column DEFAULT), so
+        # treat NULL / '' / 'unknown' all as "never probed yet".
+        sql += " WHERE health IS NULL OR health='' OR health='unknown'"
+    with db.connect(read_only=True) as c:
+        rows = list(c.execute(sql).fetchall())
+    if not rows:
+        if only_unknown:
+            log.info("no new (unknown-health) services to probe")
+        return 0
+
+    batch_size = 50
+    for start in range(0, len(rows), batch_size):
+        batch_rows = rows[start:start + batch_size]
+        updates = []
+        history = []
+        now = int(time.time())
+        for r in batch_rows:
+            res = crawlers.probe_health(r["url"], r["well_known_url"])
+            h = res["status"]
+            x = 1 if res["x402"] else 0
+            updates.append((h, now, res["latency_ms"], res["http_status"], x, r["id"]))
+            history.append((r["id"], now, h, res["latency_ms"], res["http_status"], x))
+            if h == "ok":
+                n_ok += 1
+            elif h == "down":
+                n_down += 1
+            else:
+                n_degraded += 1
+
+        def op(updates=updates, history=history):
+            with db.writer() as c:
+                c.executemany(
+                    "UPDATE services SET health=?, health_checked=?, latency_ms=?, "
+                    "http_status=?, x402_ok=? WHERE id=?",
+                    updates,
+                )
+                c.executemany(
+                    "INSERT INTO health_history "
+                    "(service_id, checked_at, status, latency_ms, http_status, x402) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    history,
+                )
+        db.with_retry(op)
+        log.info("health progress: checked=%d/%d ok=%d degraded=%d down=%d",
+                 min(start + batch_size, len(rows)), len(rows), n_ok, n_degraded, n_down)
+
+    # keep the time series bounded (90d window is plenty for uptime stats)
+    cutoff = int(time.time()) - 90 * 86400
+    def _prune():
+        with db.writer() as c:
+            c.execute("DELETE FROM health_history WHERE checked_at < ?", (cutoff,))
+    db.with_retry(_prune)
+
+    log.info("health: ok=%d degraded=%d down=%d", n_ok, n_degraded, n_down)
+    return 0
+
+
+def _base_payto_for_row(payment_json):
+    """First Base-mainnet (chainid 8453) USDC payTo address for a service."""
+    if not payment_json:
+        return None
+    try:
+        p = json.loads(payment_json) if isinstance(payment_json, str) else payment_json
+    except Exception:
+        return None
+    for a in (p.get("accepts") or []):
+        net = (a.get("network") or "").lower()
+        if net in ("base", "eip155:8453"):
+            pt = a.get("pay_to") or a.get("payTo")
+            if pt and pt.startswith("0x"):
+                return pt.lower()
+    return None
+
+
+def cmd_onchain(limit=None, stale_days=3, refresh_all=False, rate=0.3) -> int:
+    """Signal C: measure real on-chain demand per service (Base USDC payTo)."""
+    now = int(time.time())
+    stale_cutoff = now - stale_days * 86400
+    with db.connect(read_only=True) as c:
+        rows = list(c.execute(
+            "SELECT id, payment, payto_checked FROM services "
+            "WHERE payment IS NOT NULL AND payment != ''"
+        ).fetchall())
+
+    payto_services = {}
+    for r in rows:
+        pt = _base_payto_for_row(r["payment"])
+        if not pt:
+            continue
+        if not refresh_all and r["payto_checked"] and r["payto_checked"] > stale_cutoff:
+            continue
+        payto_services.setdefault(pt, []).append(r["id"])
+
+    addrs = list(payto_services)
+    if limit:
+        addrs = addrs[:limit]
+    if not addrs:
+        log.info("onchain: no Base payTo addresses to refresh")
+        return 0
+    log.info("onchain: querying %d unique Base payTo addresses", len(addrs))
+
+    done = n_active = 0
+    for pt in addrs:
+        act = crawlers.fetch_payto_activity(pt)
+        if not act["ok"]:
+            time.sleep(rate)
+            continue
+        if act["tx"] > 0:
+            n_active += 1
+        sids = payto_services[pt]
+        def op(sids=sids, act=act, now=now):
+            with db.writer() as c:
+                c.executemany(
+                    "UPDATE services SET payto_tx_30d=?, payto_payers_30d=?, "
+                    "payto_checked=? WHERE id=?",
+                    [(act["tx"], act["payers"], now, sid) for sid in sids],
+                )
+        db.with_retry(op)
+        done += 1
+        if done % 50 == 0:
+            log.info("onchain progress: %d/%d addresses (active=%d)", done, len(addrs), n_active)
+        time.sleep(rate)
+    log.info("onchain: refreshed %d addresses, %d with paying demand", done, n_active)
+    return 0
+
+
+def cmd_stats() -> int:
+    with db.connect(read_only=True) as c:
+        s = db.stats(c)
+    print(json.dumps(s, indent=2, ensure_ascii=False))
+    return 0
+
+
+def cmd_submissions(status: str = "pending", limit: int = 50) -> int:
+    """List submissions (pending by default) for human review."""
+    with db.connect(read_only=True) as c:
+        rows = db.list_submissions(c, status=status, limit=limit)
+    if not rows:
+        print(f"no submissions with status={status}")
+        return 0
+    for r in rows:
+        p = r.get("payload") or {}
+        if not isinstance(p, dict):
+            p = {}
+        ts = r.get("created_at")
+        print(f"--- submission #{r['id']} ({r['status']}) "
+              f"created={ts} ip={p.get('_client_ip')} client={p.get('_client_name')} ---")
+        for k in ("name", "url", "mcp_url", "category", "chains",
+                 "price_min_usdc", "price_max_usdc", "description", "contact"):
+            v = p.get(k)
+            if v not in (None, "", []):
+                print(f"  {k}: {v}")
+        if r.get("note"):
+            print(f"  note: {r['note']}")
+    return 0
+
+
+def cmd_approve(sub_id: int, note: str | None = None) -> int:
+    """Approve a pending submission: copy fields into services + mark reviewed."""
+    from urllib.parse import urlparse
+
+    def _slugify(text: str) -> str:
+        import re as _re
+        s = _re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+        return s or "unnamed"
+
+    with db.connect(read_only=True) as c:
+        rows = db.list_submissions(c, status="pending", limit=1000)
+    row = next((r for r in rows if r["id"] == sub_id), None)
+    if row is None:
+        print(f"submission #{sub_id} not found or not pending", file=sys.stderr)
+        return 1
+    p = row.get("payload") or {}
+    if not isinstance(p, dict):
+        print("submission payload not parseable", file=sys.stderr)
+        return 1
+    url = (p.get("url") or "").strip()
+    if not url:
+        print("submission has no url", file=sys.stderr)
+        return 1
+    host = urlparse(url).hostname or url
+    name = p.get("name") or host
+    service = {
+        "slug": _slugify(host) + "-sub" + str(sub_id),
+        "name": name,
+        "url": url,
+        "description": p.get("description"),
+        "category": _slugify(p.get("category") or "general"),
+        "chains": p.get("chains") or [],
+        "price_min": p.get("price_min_usdc"),
+        "price_max": p.get("price_max_usdc"),
+        "mcp_url": p.get("mcp_url"),
+        "source": "submission",
+        "source_id": f"sub:{sub_id}",
+        "tags": [p.get("category")] if p.get("category") else [],
+        "region": "global",
+    }
+    def op():
+        with db.writer() as wc:
+            created, _sid = db.upsert_service(wc, service)
+            db.mark_submission(wc, sub_id, "approved", note=note)
+            return created
+    created = db.with_retry(op)
+    print(f"approved submission #{sub_id} -> service slug={service['slug']} "
+          f"({'new' if created else 'updated'})")
+    # Probe once now so the new service is not stuck at health=unknown
+    # until the next 6h health timer fires.
+    try:
+        h = crawlers.check_health(service["url"], service.get("well_known_url"))
+        def _probe():
+            with db.writer() as wc:
+                wc.execute(
+                    "UPDATE services SET health=?, health_checked=? WHERE slug=?",
+                    (h, int(time.time()), service["slug"]),
+                )
+        db.with_retry(_probe)
+        print(f"  health probe: {h}")
+    except Exception as e:
+        log.warning("approve health probe failed: %r", e)
+    return 0
+
+
+def cmd_reject(sub_id: int, note: str | None = None) -> int:
+    def op():
+        with db.writer() as wc:
+            db.mark_submission(wc, sub_id, "rejected", note=note)
+    db.with_retry(op)
+    print(f"rejected submission #{sub_id}")
+    return 0
+
+
+def cmd_auto_review(limit: int = 100, dry_run: bool = False) -> int:
+    """Automatically approve/reject pending submissions by x402 verification.
+
+    verified  -> approve (clear x402 proof)
+    rejected  -> reject  (no well-known + no 402 challenge)
+    uncertain -> left pending for a human (network flake / ambiguous)
+    """
+    with db.connect(read_only=True) as c:
+        rows = db.list_submissions(c, status="pending", limit=limit)
+    if not rows:
+        log.info("auto-review: no pending submissions")
+        return 0
+    n_app = n_rej = n_unc = 0
+    for row in rows:
+        sid = row["id"]
+        p = row.get("payload") or {}
+        if not isinstance(p, dict):
+            log.warning("auto-review #%d: payload not parseable, leaving pending", sid)
+            n_unc += 1
+            continue
+        url = (p.get("url") or "").strip()
+        well_known = p.get("well_known") or p.get("well_known_url")
+        if not url:
+            verdict = {"status": "rejected", "evidence": ["submission has no url"], "payment": None}
+        else:
+            try:
+                verdict = crawlers.verify_x402(url, well_known)
+            except Exception as e:
+                log.warning("auto-review #%d: verify error %r -> uncertain", sid, e)
+                verdict = {"status": "uncertain", "evidence": [f"verify exception: {e!r}"], "payment": None}
+        status = verdict["status"]
+        ev = "; ".join(verdict.get("evidence") or [])
+        note = f"auto-review: {status} — {ev}"
+        log.info("auto-review #%d %s | %s -> %s", sid, url, status, ev)
+        if dry_run:
+            if status == "verified": n_app += 1
+            elif status == "rejected": n_rej += 1
+            else: n_unc += 1
+            continue
+        if status == "verified":
+            cmd_approve(sid, note=note)
+            n_app += 1
+        elif status == "rejected":
+            cmd_reject(sid, note=note)
+            n_rej += 1
+        else:
+            n_unc += 1  # uncertain: leave pending for human
+    log.info("auto-review done: approved=%d rejected=%d left_pending=%d", n_app, n_rej, n_unc)
+    return 0
+
+
+def main(argv=None) -> int:
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    p = argparse.ArgumentParser(prog="directory.jobs")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("init")
+    p_crawl = sub.add_parser("crawl")
+    p_crawl.add_argument("source", nargs="?", default=None)
+    sub.add_parser("health")
+    sub.add_parser("stats")
+    p_subs = sub.add_parser("submissions")
+    p_subs.add_argument("--status", default="pending")
+    p_subs.add_argument("--limit", type=int, default=50)
+    p_app = sub.add_parser("approve")
+    p_app.add_argument("id", type=int)
+    p_app.add_argument("--note", default=None)
+    p_rej = sub.add_parser("reject")
+    p_rej.add_argument("id", type=int)
+    p_rej.add_argument("--note", default=None)
+    p_auto = sub.add_parser("auto-review")
+    p_auto.add_argument("--limit", type=int, default=100)
+    p_auto.add_argument("--dry-run", action="store_true")
+    p_onchain = sub.add_parser("onchain")
+    p_onchain.add_argument("--limit", type=int, default=None)
+    p_onchain.add_argument("--stale-days", type=int, default=3)
+    p_onchain.add_argument("--all", action="store_true")
+    args = p.parse_args(argv)
+
+    if args.cmd == "init":
+        return cmd_init()
+    if args.cmd == "crawl":
+        return cmd_crawl(args.source)
+    if args.cmd == "health":
+        return cmd_health()
+    if args.cmd == "stats":
+        return cmd_stats()
+    if args.cmd == "submissions":
+        return cmd_submissions(status=args.status, limit=args.limit)
+    if args.cmd == "approve":
+        return cmd_approve(args.id, note=args.note)
+    if args.cmd == "reject":
+        return cmd_reject(args.id, note=args.note)
+    if args.cmd == "auto-review":
+        return cmd_auto_review(limit=args.limit, dry_run=args.dry_run)
+    if args.cmd == "onchain":
+        return cmd_onchain(limit=args.limit, stale_days=args.stale_days,
+                           refresh_all=args.all)
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

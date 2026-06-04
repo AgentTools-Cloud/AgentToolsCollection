@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -13,6 +14,7 @@ from starlette.concurrency import run_in_threadpool
 from . import ask as directory_ask
 from . import cards, db
 from . import a2a as directory_a2a
+from . import crawlers as directory_crawlers
 from . import jobs as directory_jobs
 from . import resources as directory_resources
 from . import limits
@@ -20,7 +22,7 @@ from . import limits
 BASE_DIR = Path(__file__).resolve().parent
 TEMPLATES = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 # Build version — bump on deploy to bust browser/CDN HTML caches.
-BUILD_VERSION = "2026-06-04.6"
+BUILD_VERSION = "2026-06-04.7"
 TEMPLATES.env.globals["build_version"] = BUILD_VERSION
 
 router = APIRouter()
@@ -98,8 +100,9 @@ async def categories_page(request: Request):
 
 
 @router.get("/submit", response_class=HTMLResponse, include_in_schema=False)
-async def submit_page(request: Request):
-    return TEMPLATES.TemplateResponse(request, "submit.html", {"request": request})
+async def submit_page(request: Request, type: str | None = Query(default=None)):
+    active = type if type in ("x402", "mcp", "a2a") else "x402"
+    return TEMPLATES.TemplateResponse(request, "submit.html", {"request": request, "active_type": active})
 
 
 @router.get("/about", response_class=HTMLResponse, include_in_schema=False)
@@ -511,6 +514,96 @@ async def api_submit(request: Request, payload: SubmissionPayload):
         "submission_id": sub_id,
         "message": "Submitted; auto-verification was inconclusive and will be retried automatically.",
         "evidence": review.get("evidence"),
+    }
+
+
+class McpSubmissionPayload(BaseModel):
+    url: HttpUrl
+    name: str | None = Field(default=None, max_length=200)
+    description: str | None = Field(default=None, max_length=2000)
+    transport: str | None = Field(default=None, max_length=40)
+    contact: str | None = Field(default=None, max_length=200)
+
+
+class A2ASubmissionPayload(BaseModel):
+    url: HttpUrl
+    contact: str | None = Field(default=None, max_length=200)
+
+
+def _enforce_submit_limit(request: Request, scope: str) -> str:
+    """Shared per-IP rate limit for the manual submit endpoints."""
+    client_ip = limits.client_ip_from_request(request)
+    state = limits.check_ip_limits(
+        client_ip, scope, (("day", SUBMIT_RATE_LIMIT_PER_DAY, 86400),))
+    if state:
+        limits.raise_rate_limited(state, "Too many submissions from this IP today.")
+    return client_ip
+
+
+@router.post("/api/v1/mcp/submit", tags=["mcp"])
+async def api_submit_mcp(request: Request, payload: McpSubmissionPayload):
+    """Index a single MCP server by its streamable-http endpoint URL."""
+    _enforce_submit_limit(request, "submit-mcp")
+    endpoint = str(payload.url).strip()
+    name = (payload.name or "").strip() or directory_crawlers._host_slug(endpoint).replace("-", " ").title()
+    slug = directory_a2a._slugify(name) or directory_crawlers._host_slug(endpoint)
+    probe = await run_in_threadpool(directory_crawlers.probe_mcp_health, endpoint)
+    row = {
+        "slug": slug,
+        "name": name,
+        "description": (payload.description or "").strip() or None,
+        "homepage_url": endpoint,
+        "endpoint_url": endpoint,
+        "transport": (payload.transport or "streamable-http").strip(),
+        "x402_supported": False,
+        "source": "manual",
+        "source_id": endpoint,
+        "source_url": endpoint,
+        "health": probe.get("status"),
+        "health_checked": int(time.time()),
+        "latency_ms": probe.get("latency_ms"),
+        "http_status": probe.get("http_status"),
+        "last_success_at": int(time.time()) if probe.get("status") == "ok" else None,
+        "confidence": 0.5,
+    }
+    with db.writer() as c:
+        created, server_id = db.upsert_mcp_server(c, row)
+    return {
+        "status": "listed" if created else "updated",
+        "slug": slug,
+        "health": probe.get("status"),
+        "view_url": f"/mcp/servers/{slug}",
+        "message": ("Indexed your MCP server."
+                    if created else "This MCP server was already indexed; refreshed it."),
+    }
+
+
+@router.post("/api/v1/a2a/submit", tags=["a2a"])
+async def api_submit_a2a(request: Request, payload: A2ASubmissionPayload):
+    """Index an A2A agent by fetching its well-known Agent Card."""
+    _enforce_submit_limit(request, "submit-a2a")
+    url = str(payload.url).strip()
+    card, card_url = await run_in_threadpool(directory_a2a.fetch_agent_card, url)
+    if not card:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "no_agent_card",
+                "message": ("No A2A Agent Card found at this URL. Make sure "
+                            "/.well-known/agent-card.json is reachable."),
+            },
+        )
+    row = directory_a2a.card_to_row(card, card_url, source="manual")
+    with db.writer() as c:
+        created, agent_id = db.upsert_a2a_agent(c, row)
+    slug = row["slug"]
+    return {
+        "status": "listed" if created else "updated",
+        "slug": slug,
+        "name": row.get("name"),
+        "view_url": f"/a2a/agents/{slug}",
+        "message": ("Indexed your A2A agent from its Agent Card."
+                    if created else "This agent was already indexed; refreshed its card."),
     }
 
 

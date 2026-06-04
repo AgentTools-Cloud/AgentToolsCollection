@@ -1,50 +1,159 @@
 {% extends "base.html" %}
 {% block title %}Submit — agent-tools.cloud{% endblock %}
 {% block content %}
-<section class="mb-8 max-w-2xl">
-  <h1 class="text-3xl md:text-4xl font-extrabold tracking-tight">Submit a service</h1>
-  <p class="text-slate-500 mt-2">Lightweight review before listing. You can also <span class="mono">POST</span> directly to <code class="mono bg-slate-100 px-1 rounded">/api/v1/submit</code>.</p>
+<section class="mb-6 max-w-2xl">
+  <h1 class="text-3xl md:text-4xl font-extrabold tracking-tight">Submit to the directory</h1>
+  <p class="text-slate-500 mt-2">Pick what you're listing. Each type is verified differently — x402 services are payment-probed, MCP servers are health-probed, and A2A agents are read from their Agent Card.</p>
 </section>
 
-<form id="submit-form" class="svc-card p-6 space-y-4 max-w-2xl" onsubmit="return submitForm(event)">
-  <div>
-    <label class="block text-sm font-medium mb-1">Name <span class="text-rose-500">*</span></label>
-    <input name="name" required class="w-full px-3 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:border-slate-400">
+{% set active = active_type or 'x402' %}
+<div class="max-w-2xl">
+  <div class="flex gap-1 p-1 bg-slate-100 rounded-xl mb-5 text-sm font-medium">
+    <button type="button" data-tab="x402" class="submit-tab flex-1 px-3 py-2 rounded-lg">x402 Service</button>
+    <button type="button" data-tab="mcp"  class="submit-tab flex-1 px-3 py-2 rounded-lg">MCP Server</button>
+    <button type="button" data-tab="a2a"  class="submit-tab flex-1 px-3 py-2 rounded-lg">A2A Agent</button>
   </div>
-  <div>
-    <label class="block text-sm font-medium mb-1">URL <span class="text-rose-500">*</span></label>
-    <input name="url" type="url" required placeholder="https://..." class="w-full px-3 py-2.5 border border-slate-200 rounded-xl mono text-sm focus:outline-none focus:border-slate-400">
-  </div>
-  <div>
-    <label class="block text-sm font-medium mb-1">Description</label>
-    <textarea name="description" rows="3" class="w-full px-3 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:border-slate-400"></textarea>
-  </div>
-  <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+
+  <!-- ============ x402 ============ -->
+  <form id="form-x402" class="submit-panel svc-card p-6 space-y-4" onsubmit="return submitX402(event)">
+    <p class="text-sm text-slate-500 -mt-1">A paid HTTP API that answers <span class="mono">402 Payment Required</span> with x402 payment details. We auto-verify and list it immediately on success.</p>
     <div>
-      <label class="block text-sm font-medium mb-1">Category</label>
-      <input name="category" placeholder="weather / data / inference / …" class="w-full px-3 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:border-slate-400">
+      <label class="block text-sm font-medium mb-1">Name <span class="text-rose-500">*</span></label>
+      <input name="name" required class="inp">
     </div>
     <div>
-      <label class="block text-sm font-medium mb-1">Price (USDC / call)</label>
-      <input name="price_usdc" type="number" step="0.0001" min="0" class="w-full px-3 py-2.5 border border-slate-200 rounded-xl mono focus:outline-none focus:border-slate-400">
+      <label class="block text-sm font-medium mb-1">URL <span class="text-rose-500">*</span></label>
+      <input name="url" type="url" required placeholder="https://api.example.com/endpoint" class="inp mono text-sm">
     </div>
-  </div>
-  <div>
-    <label class="block text-sm font-medium mb-1">Chains (comma-separated)</label>
-    <input name="chains" placeholder="base, solana" class="w-full px-3 py-2.5 border border-slate-200 rounded-xl mono text-sm focus:outline-none focus:border-slate-400">
-  </div>
-  <div>
-    <label class="block text-sm font-medium mb-1">Contact (email / X / TG · optional)</label>
-    <input name="contact" class="w-full px-3 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:border-slate-400">
-  </div>
-  <div class="flex items-center gap-3">
-    <button type="submit" class="btn-primary">Submit</button>
-    <div id="submit-result" class="text-sm"></div>
-  </div>
-</form>
+    <div>
+      <label class="block text-sm font-medium mb-1">Description</label>
+      <textarea name="description" rows="3" class="inp"></textarea>
+    </div>
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+      <div>
+        <label class="block text-sm font-medium mb-1">Category</label>
+        <input name="category" placeholder="weather / data / inference / …" class="inp">
+      </div>
+      <div>
+        <label class="block text-sm font-medium mb-1">Price (USDC / call)</label>
+        <input name="price_usdc" type="number" step="0.0001" min="0" class="inp mono">
+      </div>
+    </div>
+    <div>
+      <label class="block text-sm font-medium mb-1">Chains (comma-separated)</label>
+      <input name="chains" placeholder="base, solana" class="inp mono text-sm">
+    </div>
+    <div>
+      <label class="block text-sm font-medium mb-1">Contact (email / X / TG · optional)</label>
+      <input name="contact" class="inp">
+    </div>
+    <div class="flex items-center gap-3">
+      <button type="submit" class="btn-primary">Submit service</button>
+      <div class="submit-result text-sm"></div>
+    </div>
+  </form>
+
+  <!-- ============ MCP ============ -->
+  <form id="form-mcp" class="submit-panel svc-card p-6 space-y-4 hidden" onsubmit="return submitMcp(event)">
+    <p class="text-sm text-slate-500 -mt-1">A remotely callable MCP server (streamable-http endpoint). We probe it with an <span class="mono">initialize</span> request and index it with its live health status.</p>
+    <div>
+      <label class="block text-sm font-medium mb-1">Endpoint URL <span class="text-rose-500">*</span></label>
+      <input name="url" type="url" required placeholder="https://mcp.example.com/mcp" class="inp mono text-sm">
+    </div>
+    <div>
+      <label class="block text-sm font-medium mb-1">Name <span class="text-slate-400 font-normal">(optional — derived from host if blank)</span></label>
+      <input name="name" class="inp">
+    </div>
+    <div>
+      <label class="block text-sm font-medium mb-1">Description</label>
+      <textarea name="description" rows="3" class="inp"></textarea>
+    </div>
+    <div>
+      <label class="block text-sm font-medium mb-1">Transport</label>
+      <input name="transport" placeholder="streamable-http" class="inp mono text-sm">
+    </div>
+    <div>
+      <label class="block text-sm font-medium mb-1">Contact (optional)</label>
+      <input name="contact" class="inp">
+    </div>
+    <div class="flex items-center gap-3">
+      <button type="submit" class="btn-primary">Index server</button>
+      <div class="submit-result text-sm"></div>
+    </div>
+  </form>
+
+  <!-- ============ A2A ============ -->
+  <form id="form-a2a" class="submit-panel svc-card p-6 space-y-4 hidden" onsubmit="return submitA2a(event)">
+    <p class="text-sm text-slate-500 -mt-1">An agent that publishes an A2A Agent Card. Give us the base URL (or the card URL) and we read <span class="mono">/.well-known/agent-card.json</span> — name, skills, and capabilities come from the card.</p>
+    <div>
+      <label class="block text-sm font-medium mb-1">Agent URL <span class="text-rose-500">*</span></label>
+      <input name="url" type="url" required placeholder="https://agent.example.com" class="inp mono text-sm">
+    </div>
+    <div>
+      <label class="block text-sm font-medium mb-1">Contact (optional)</label>
+      <input name="contact" class="inp">
+    </div>
+    <div class="flex items-center gap-3">
+      <button type="submit" class="btn-primary">Index agent</button>
+      <div class="submit-result text-sm"></div>
+    </div>
+  </form>
+
+  <p class="text-xs text-slate-400 mt-4">Programmatic submit: <code class="mono bg-slate-100 px-1 rounded">POST /api/v1/submit</code> (x402) · <code class="mono bg-slate-100 px-1 rounded">/api/v1/mcp/submit</code> · <code class="mono bg-slate-100 px-1 rounded">/api/v1/a2a/submit</code></p>
+</div>
+
+<style>
+  .inp { width:100%; padding:.625rem .75rem; border:1px solid #e2e8f0; border-radius:.75rem; outline:none; }
+  .inp:focus { border-color:#94a3b8; }
+  .submit-tab { color:#475569; transition:all .12s; }
+  .submit-tab.active { background:#fff; color:#0f172a; box-shadow:0 1px 2px rgba(0,0,0,.06); }
+</style>
 
 <script>
-async function submitForm(e) {
+(function () {
+  const tabs = document.querySelectorAll(".submit-tab");
+  const panels = {
+    x402: document.getElementById("form-x402"),
+    mcp:  document.getElementById("form-mcp"),
+    a2a:  document.getElementById("form-a2a"),
+  };
+  function show(type) {
+    Object.keys(panels).forEach(k => panels[k].classList.toggle("hidden", k !== type));
+    tabs.forEach(t => t.classList.toggle("active", t.dataset.tab === type));
+    try { history.replaceState(null, "", "/submit?type=" + type); } catch (e) {}
+  }
+  tabs.forEach(t => t.addEventListener("click", () => show(t.dataset.tab)));
+  show({{ active | tojson }});
+})();
+
+function _result(form) { return form.querySelector(".submit-result"); }
+
+async function _post(url, body, form, ok) {
+  const out = _result(form);
+  out.textContent = "Submitting…"; out.className = "submit-result text-sm text-slate-500";
+  try {
+    const r = await fetch(url, {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(body),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (r.ok) {
+      out.innerHTML = ok(data);
+      out.className = "submit-result text-sm text-emerald-600";
+      if (data.status === "listed") form.reset();
+    } else {
+      const msg = (data.detail && (data.detail.message || data.detail)) || data.message || (await r.text());
+      out.textContent = "Failed: " + msg;
+      out.className = "submit-result text-sm text-rose-600";
+    }
+  } catch (err) {
+    out.textContent = "Failed: " + err;
+    out.className = "submit-result text-sm text-rose-600";
+  }
+  return false;
+}
+
+function submitX402(e) {
   e.preventDefault();
   const f = new FormData(e.target);
   const chains = (f.get("chains") || "").split(/[,\s]+/).filter(Boolean);
@@ -56,17 +165,33 @@ async function submitForm(e) {
     price_usdc: f.get("price_usdc") ? Number(f.get("price_usdc")) : null,
     contact: f.get("contact") || null,
   };
-  const out = document.getElementById("submit-result");
-  out.textContent = "Submitting…"; out.className = "text-sm text-slate-500";
-  try {
-    const r = await fetch("/api/v1/submit", {
-      method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify(body),
-    });
-    if (r.ok) { out.textContent = "Submitted · pending review."; out.className = "text-sm text-emerald-600"; e.target.reset(); }
-    else { out.textContent = "Failed: " + await r.text(); out.className = "text-sm text-rose-600"; }
-  } catch (err) { out.textContent = "Failed: " + err; out.className = "text-sm text-rose-600"; }
-  return false;
+  return _post("/api/v1/submit", body, e.target, d =>
+    (d.status === "listed") ? "Auto-verified — your service is live." :
+    (d.status === "already_listed") ? "Already in the directory." :
+    (d.status === "rejected") ? "Couldn't confirm x402 support." :
+    (d.message || "Submitted · pending verification."));
+}
+
+function submitMcp(e) {
+  e.preventDefault();
+  const f = new FormData(e.target);
+  const body = {
+    url: f.get("url"),
+    name: f.get("name") || null,
+    description: f.get("description") || null,
+    transport: f.get("transport") || null,
+    contact: f.get("contact") || null,
+  };
+  return _post("/api/v1/mcp/submit", body, e.target, d =>
+    `Indexed (health: ${d.health || "unknown"}). <a class="underline" href="${d.view_url}">View →</a>`);
+}
+
+function submitA2a(e) {
+  e.preventDefault();
+  const f = new FormData(e.target);
+  const body = { url: f.get("url"), contact: f.get("contact") || null };
+  return _post("/api/v1/a2a/submit", body, e.target, d =>
+    `Indexed “${d.name || d.slug}”. <a class="underline" href="${d.view_url}">View →</a>`);
 }
 </script>
 {% endblock %}

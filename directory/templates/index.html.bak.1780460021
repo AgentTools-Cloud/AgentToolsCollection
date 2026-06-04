@@ -1,0 +1,116 @@
+{% extends "base.html" %}
+{% block content %}
+
+<section class="mb-10">
+  <div class="flex flex-wrap items-start justify-between gap-4 mb-5">
+    <div class="flex items-center gap-3">
+      <svg viewBox="0 0 32 32" class="w-12 h-12" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M5 5 L18 5 L27 16 L18 27 L5 27 Z" fill="#2563eb"/>
+        <path d="M11 11 L21 21 M21 11 L11 21" stroke="#fff" stroke-width="2.8" stroke-linecap="round"/>
+      </svg>
+      <h1 class="text-4xl md:text-5xl font-extrabold tracking-tight">agent-tools</h1>
+    </div>
+    <a href="/submit" class="btn-primary">
+      <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12h14"/></svg>
+      Add your API
+    </a>
+  </div>
+  <p class="text-slate-600 max-w-3xl">
+    The open discovery layer for x402 services — {{ stats.total }} indexed APIs and MCP servers,
+    LLM-ranked recommendations via <span class="mono">/api/v1/ask</span>, and service cards with payment, call, and quality metadata.
+  </p>
+
+  <form id="filter-form"
+        hx-get="/_partials/services"
+        hx-trigger="change from:select, input delay:300ms from:input[name=q], submit"
+        hx-target="#service-grid"
+        hx-swap="innerHTML"
+        hx-push-url="true"
+        class="search-shell mt-6">
+    <svg class="w-5 h-5 text-slate-400 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+    <input name="q" value="{{ q }}" placeholder="Try: weather, MCP, dexscreener, social data, payments…"
+           class="flex-1 bg-transparent outline-none text-base placeholder:text-slate-400">
+    <button type="submit" class="text-sm text-slate-500 hover:text-slate-900 hidden md:inline">↵ Search</button>
+  </form>
+</section>
+
+<section class="mb-10">
+  <div class="flex flex-wrap items-end justify-between gap-4 mb-4">
+    <div>
+      <h2 class="text-2xl font-bold tracking-tight">Overall Stats</h2>
+      <p class="text-sm text-slate-500 mt-1">Live counters across the directory and discovery API</p>
+    </div>
+    <div class="flex items-center gap-2 text-sm">
+      <a href="/api/v1/stats" class="pill mono text-xs">/api/v1/stats</a>
+      <a href="/.well-known/agent-tools.json" class="pill mono text-xs">/.well-known</a>
+    </div>
+  </div>
+
+  {% set chain_count = stats.by_chain|length if stats.by_chain else 0 %}
+  {% set cat_count = categories|length %}
+  <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+    <div class="stat-card">
+      <div class="text-sm text-slate-500">Services indexed</div>
+      <div class="text-3xl font-bold mt-1">{{ stats.total }}</div>
+      <div class="text-xs text-slate-400 mt-3">x402 APIs · MCP · agent tools</div>
+    </div>
+    <div class="stat-card">
+      <div class="text-sm text-slate-500">Healthy</div>
+      <div class="text-3xl font-bold mt-1 text-emerald-600">{{ stats.healthy }}</div>
+      <div class="text-xs text-slate-400 mt-3">last health check &lt; 6 h</div>
+    </div>
+    <div class="stat-card">
+      <div class="text-sm text-slate-500">Categories</div>
+      <div class="text-3xl font-bold mt-1">{{ cat_count }}</div>
+      <div class="text-xs text-slate-400 mt-3">crypto · agent · data · LLM …</div>
+    </div>
+    <div class="stat-card">
+      <div class="text-sm text-slate-500">Chains</div>
+      <div class="text-3xl font-bold mt-1">{{ chain_count }}</div>
+      <div class="text-xs text-slate-400 mt-3">base · solana · arbitrum · …</div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="flex flex-wrap items-end justify-between gap-4 mb-4">
+    <div>
+      <h2 class="text-2xl font-bold tracking-tight">All services</h2>
+      <p class="text-sm text-slate-500 mt-1">Crawled from awesome-x402, CDP Bazaar, x402scan and manual submissions · refreshed every 6 h.</p>
+    </div>
+  </div>
+  <form
+        hx-get="/_partials/services"
+        hx-trigger="change from:select"
+        hx-target="#service-grid"
+        hx-swap="innerHTML"
+        hx-push-url="true"
+        hx-include="[name=q]"
+        class="grid grid-cols-1 md:grid-cols-3 gap-3 mb-5">
+    <select name="category" class="px-3 py-2.5 bg-white border border-slate-200 rounded-xl text-sm focus:outline-none focus:border-slate-400">
+      <option value="">All categories</option>
+      {% for c in categories %}
+        <option value="{{ c.category }}" {% if c.category == active_category %}selected{% endif %}>{{ c.category }} · {{ c.count }}</option>
+      {% endfor %}
+    </select>
+    <select name="chain" class="px-3 py-2.5 bg-white border border-slate-200 rounded-xl text-sm focus:outline-none focus:border-slate-400">
+      <option value="">All chains</option>
+      {% for chain in ["base","solana","arbitrum","polygon","ethereum"] %}
+        <option value="{{ chain }}" {% if chain == active_chain %}selected{% endif %}>{{ chain }}</option>
+      {% endfor %}
+    </select>
+    <select name="health" class="px-3 py-2.5 bg-white border border-slate-200 rounded-xl text-sm focus:outline-none focus:border-slate-400">
+      <option value="">All health</option>
+      <option value="ok" {% if active_health == 'ok' %}selected{% endif %}>Healthy</option>
+      <option value="degraded" {% if active_health == 'degraded' %}selected{% endif %}>Degraded</option>
+      <option value="down" {% if active_health == 'down' %}selected{% endif %}>Down</option>
+      <option value="unknown" {% if active_health == 'unknown' %}selected{% endif %}>Unknown</option>
+    </select>
+  </form>
+
+  <div id="service-grid">
+    {% include "_service_grid.html" %}
+  </div>
+</section>
+
+{% endblock %}

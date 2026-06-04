@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Categories — agent-tools.cloud{% endblock %}
+{% block content %}
+<section class="mb-8">
+  <h1 class="text-3xl md:text-4xl font-extrabold tracking-tight">Categories</h1>
+  <p class="text-slate-500 mt-2">{{ stats.total }} services grouped by domain · pick one to filter the directory.</p>
+</section>
+<ul class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
+  {% for c in categories %}
+  <li>
+    <a href="/?category={{ c.category }}" class="svc-card p-4 flex items-center justify-between">
+      <span class="font-semibold text-slate-900">{{ c.category }}</span>
+      <span class="badge bg-slate-50 text-slate-600 ring-1 ring-slate-200 mono">{{ c.count }}</span>
+    </a>
+  </li>
+  {% endfor %}
+</ul>
+{% endblock %}

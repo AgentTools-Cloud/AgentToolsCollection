@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% block title %}{{ svc.name_zh or svc.name }} — agent-tools.cloud{% endblock %}
+{% block desc %}{{ (svc.description_zh or svc.description or svc.name)|truncate(140) }}{% endblock %}
+{% block content %}
+<a href="/" class="text-sm text-slate-500 hover:text-blue-600 inline-flex items-center gap-1">
+  <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+  Back to directory
+</a>
+
+<header class="mt-4 mb-6 flex flex-wrap items-start justify-between gap-4">
+  <div class="min-w-0">
+    <h1 class="text-3xl md:text-4xl font-extrabold tracking-tight">{{ svc.name_zh or svc.name }}</h1>
+    {% if svc.name_zh and svc.name != svc.name_zh %}
+      <div class="text-slate-500 text-sm mt-1">{{ svc.name }}</div>
+    {% endif %}
+    <a href="{{ svc.url }}" target="_blank" rel="noopener" class="text-blue-600 hover:underline text-sm mono break-all mt-2 inline-block">{{ svc.url }}</a>
+  </div>
+  <div class="flex items-center gap-2">
+    {% if svc.health == 'ok' %}
+      <span class="badge bg-emerald-50 text-emerald-700 ring-1 ring-emerald-100">● healthy</span>
+    {% elif svc.health == 'degraded' %}
+      <span class="badge bg-amber-50 text-amber-700 ring-1 ring-amber-100">● degraded</span>
+    {% elif svc.health == 'down' %}
+      <span class="badge bg-rose-50 text-rose-700 ring-1 ring-rose-100">● down</span>
+    {% else %}
+      <span class="badge bg-slate-100 text-slate-500 ring-1 ring-slate-200">● unknown</span>
+    {% endif %}
+    {% if svc.category %}<span class="badge bg-blue-50 text-blue-700 ring-1 ring-blue-100">{{ svc.category }}</span>{% endif %}
+  </div>
+</header>
+
+{% if svc.description_zh or svc.description %}
+<section class="svc-card p-6 mb-6">
+  <p class="text-slate-800 whitespace-pre-line leading-relaxed">{{ svc.description_zh or svc.description }}</p>
+</section>
+{% endif %}
+
+<section class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+  <div class="stat-card">
+    <div class="text-xs text-slate-500 mb-1">Category</div>
+    <div class="font-semibold">{{ svc.category or "—" }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="text-xs text-slate-500 mb-1">Chains</div>
+    <div class="font-semibold mono text-sm">{{ (svc.chains or [])|join(", ") or "—" }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="text-xs text-slate-500 mb-1">Price</div>
+    <div class="font-semibold mono">
+      {% if svc.price_min is not none %}
+        {% if svc.price_max and svc.price_max != svc.price_min %}
+          ${{ "%.4f"|format(svc.price_min) }}–${{ "%.4f"|format(svc.price_max) }} {{ svc.currency or "USDC" }}
+        {% else %}
+          ${{ "%.4f"|format(svc.price_min) }} {{ svc.currency or "USDC" }} / call
+        {% endif %}
+      {% else %}—{% endif %}
+    </div>
+  </div>
+</section>
+
+<section class="svc-card p-6 mb-6">
+  <h2 class="text-base font-semibold mb-4">How to call</h2>
+  <div class="space-y-5">
+    <div>
+      <div class="text-xs text-slate-500 mb-1.5">cURL · x402-fetch / x402-axios will auto-handle 402</div>
+      <pre class="bg-slate-900 text-slate-100 text-xs p-3 rounded-lg overflow-x-auto"><code>curl -X POST {{ svc.url }}</code></pre>
+    </div>
+    {% if svc.mcp_url %}
+    <div>
+      <div class="text-xs text-slate-500 mb-1.5">MCP endpoint</div>
+      <pre class="bg-slate-900 text-slate-100 text-xs p-3 rounded-lg overflow-x-auto"><code>{{ svc.mcp_url }}</code></pre>
+    </div>
+    {% endif %}
+    {% if svc.openapi_url %}
+    <div>
+      <div class="text-xs text-slate-500 mb-1.5">OpenAPI spec</div>
+      <a href="{{ svc.openapi_url }}" target="_blank" rel="noopener" class="text-blue-600 hover:underline text-sm mono break-all">{{ svc.openapi_url }}</a>
+    </div>
+    {% endif %}
+    {% if svc.well_known_url %}
+    <div>
+      <div class="text-xs text-slate-500 mb-1.5">/.well-known/x402.json</div>
+      <a href="{{ svc.well_known_url }}" target="_blank" rel="noopener" class="text-blue-600 hover:underline text-sm mono break-all">{{ svc.well_known_url }}</a>
+    </div>
+    {% endif %}
+  </div>
+</section>
+
+<section class="text-xs text-slate-500">
+  Source: <span class="font-medium text-slate-700">{{ svc.source }}</span>
+</section>
+{% endblock %}
