@@ -20,7 +20,7 @@ from . import limits
 BASE_DIR = Path(__file__).resolve().parent
 TEMPLATES = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 # Build version — bump on deploy to bust browser/CDN HTML caches.
-BUILD_VERSION = "2026-06-04.4"
+BUILD_VERSION = "2026-06-04.5"
 TEMPLATES.env.globals["build_version"] = BUILD_VERSION
 
 router = APIRouter()
