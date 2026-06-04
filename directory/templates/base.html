@@ -39,21 +39,14 @@
         </svg>
         <span class="text-[15px] font-semibold tracking-tight">Agent Tools<span class="text-slate-400"> · x402 · MCP · A2A</span></span>
       </a>
-      <div class="flex items-center gap-2">
-        <a href="/categories" class="pill hidden md:inline-flex">
-          <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg>
-          所有分类
-        </a>
-        <a href="/openapi.json" class="pill hidden md:inline-flex">
-          <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 21l-1-1-7-7 7-7 1-1M13 3l1 1 7 7-7 7-1 1"/></svg>
-          OpenAPI
-        </a>
-        </div>
+      <a href="/submit" class="pill hidden md:inline-flex">
+        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
+        Submit
+      </a>
     </div>
     <div class="max-w-6xl mx-auto px-5">
       <nav class="flex items-center gap-6 text-sm text-slate-500 overflow-x-auto">
         {% set p = request.url.path %}
-        <span class="text-[11px] font-semibold uppercase tracking-wider text-slate-300 hidden md:inline">Browse</span>
         <a href="/" class="py-3 -mb-px whitespace-nowrap {% if p == '/' %}tab-active{% else %}tab-link{% endif %}">x402 Services</a>
         <a href="/mcp" class="py-3 -mb-px whitespace-nowrap {% if p.startswith('/mcp') %}tab-active{% else %}tab-link{% endif %}">MCP Servers</a>
         <a href="/a2a" class="py-3 -mb-px whitespace-nowrap {% if p.startswith('/a2a') %}tab-active{% else %}tab-link{% endif %}">A2A Agents</a>
