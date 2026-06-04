@@ -62,7 +62,7 @@ app.add_middleware(PrometheusMiddleware)
 
 
 # Build version — bump to bust browser/CDN HTML caches on each deploy.
-BUILD_VERSION = "2026-06-04.12"
+BUILD_VERSION = "2026-06-04.13"
 
 
 @app.middleware("http")
