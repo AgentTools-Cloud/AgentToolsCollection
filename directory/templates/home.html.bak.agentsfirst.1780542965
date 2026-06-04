@@ -27,26 +27,6 @@
   </form>
 </section>
 
-<section class="mt-2 svc-card p-6 md:p-8 bg-gradient-to-br from-slate-900 to-slate-800 text-white border-0">
-  <div class="flex flex-wrap items-start justify-between gap-6">
-    <div class="max-w-xl">
-      <div class="text-xs font-semibold uppercase tracking-wider text-slate-400">API-first</div>
-      <h2 class="text-2xl md:text-3xl font-bold tracking-tight mt-1">Built for agents, not just humans</h2>
-      <p class="text-sm text-slate-300 mt-3">
-        Every page has a JSON counterpart. Ask for LLM-ranked recommendations, search by intent,
-        or pull a single card — no scraping required.
-      </p>
-    </div>
-    <div class="flex flex-wrap gap-2 text-xs">
-      <a href="/api/v1/ask" class="pill mono bg-white/10 text-white ring-white/15 hover:bg-white/20">POST /api/v1/ask</a>
-      <a href="/api/v1/search" class="pill mono bg-white/10 text-white ring-white/15 hover:bg-white/20">/api/v1/search</a>
-      <a href="/api/v1/mcp/search" class="pill mono bg-white/10 text-white ring-white/15 hover:bg-white/20">/api/v1/mcp/search</a>
-      <a href="/api/v1/a2a/search" class="pill mono bg-white/10 text-white ring-white/15 hover:bg-white/20">/api/v1/a2a/search</a>
-      <a href="/openapi.json" class="pill mono bg-white/10 text-white ring-white/15 hover:bg-white/20">openapi.json</a>
-    </div>
-  </div>
-</section>
-
 <section class="grid grid-cols-1 md:grid-cols-3 gap-5 mt-4">
   <a href="/x402" class="svc-card p-6 group hover:border-slate-300 transition">
     <div class="flex items-center justify-between">
@@ -110,6 +90,25 @@
       <div class="text-sm text-slate-500">x402 paid APIs</div>
       <div class="text-3xl font-bold mt-1">{{ stats.total }}</div>
       <div class="text-xs text-slate-400 mt-3">settle on-chain micropayments</div>
+    </div>
+  </div>
+</section>
+
+<section class="mt-12 svc-card p-6 md:p-8 bg-slate-50/60">
+  <div class="flex flex-wrap items-start justify-between gap-6">
+    <div class="max-w-xl">
+      <h2 class="text-xl font-bold tracking-tight">Built for agents, not just humans</h2>
+      <p class="text-sm text-slate-600 mt-2">
+        Every page has a JSON counterpart. Ask for LLM-ranked recommendations, search by intent,
+        or pull a single card — no scraping required.
+      </p>
+    </div>
+    <div class="flex flex-wrap gap-2 text-xs">
+      <a href="/api/v1/ask" class="pill mono">POST /api/v1/ask</a>
+      <a href="/api/v1/search" class="pill mono">/api/v1/search</a>
+      <a href="/api/v1/mcp/search" class="pill mono">/api/v1/mcp/search</a>
+      <a href="/api/v1/a2a/search" class="pill mono">/api/v1/a2a/search</a>
+      <a href="/openapi.json" class="pill mono">openapi.json</a>
     </div>
   </div>
 </section>
