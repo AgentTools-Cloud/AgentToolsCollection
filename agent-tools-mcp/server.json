@@ -4,7 +4,7 @@
   "title": "agent-tools (x402 directory)",
   "description": "Discover and call x402 paid services — search by intent, filter by price/chain.",
   "repository": {
-    "url": "https://github.com/JoursBleu/agent-tools-mcp",
+    "url": "https://github.com/JoursBleu/mcpserver",
     "source": "github"
   },
   "version": "0.1.4",
