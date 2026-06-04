@@ -24,6 +24,7 @@
     {% else %}
       <span class="badge bg-slate-100 text-slate-500 ring-1 ring-slate-200">● unknown</span>
     {% endif %}
+    {% if m.x402_supported %}<span class="badge bg-violet-50 text-violet-700 ring-1 ring-violet-100">x402</span>{% endif %}
   </div>
 </header>
 

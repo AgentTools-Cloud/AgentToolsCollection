@@ -27,7 +27,6 @@
     <div class="mt-4 flex flex-wrap items-center gap-2 text-xs">
       {% if a.preferred_transport %}<span class="badge bg-blue-50 text-blue-700 ring-1 ring-blue-100">{{ a.preferred_transport }}</span>{% endif %}
       {% if a.skills %}<span class="badge bg-slate-50 text-slate-600 ring-1 ring-slate-200">{{ a.skills|length }} skill{{ 's' if a.skills|length != 1 else '' }}</span>{% endif %}
-      {% if a.x402_supported %}<span class="badge bg-violet-50 text-violet-700 ring-1 ring-violet-100">x402</span>{% endif %}
     </div>
   </li>
   {% endfor %}

@@ -87,9 +87,9 @@
       <div class="text-xs text-slate-400 mt-3">have a live endpoint URL</div>
     </div>
     <div class="stat-card">
-      <div class="text-sm text-slate-500">x402 paid APIs</div>
-      <div class="text-3xl font-bold mt-1">{{ stats.total }}</div>
-      <div class="text-xs text-slate-400 mt-3">settle on-chain micropayments</div>
+      <div class="text-sm text-slate-500">x402-capable</div>
+      <div class="text-3xl font-bold mt-1">{{ stats.total + mcp_stats.x402_capable + a2a_stats.x402_capable }}</div>
+      <div class="text-xs text-slate-400 mt-3">accept on-chain payment</div>
     </div>
   </div>
 </section>

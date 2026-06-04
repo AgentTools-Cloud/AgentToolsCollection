@@ -30,7 +30,7 @@
 </section>
 
 <section class="mb-10">
-  <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+  <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
     <div class="stat-card">
       <div class="text-sm text-slate-500">Servers indexed</div>
       <div class="text-3xl font-bold mt-1">{{ stats.total }}</div>
@@ -45,6 +45,11 @@
       <div class="text-sm text-slate-500">Remote-callable</div>
       <div class="text-3xl font-bold mt-1">{{ stats.remote_callable }}</div>
       <div class="text-xs text-slate-400 mt-3">has a streamable-http endpoint</div>
+    </div>
+    <div class="stat-card">
+      <div class="text-sm text-slate-500">x402-capable</div>
+      <div class="text-3xl font-bold mt-1">{{ stats.x402_capable }}</div>
+      <div class="text-xs text-slate-400 mt-3">accepts x402 micropayments</div>
     </div>
   </div>
 </section>
@@ -73,6 +78,10 @@
       <option value="degraded" {% if active_health == 'degraded' %}selected{% endif %}>Degraded</option>
       <option value="down" {% if active_health == 'down' %}selected{% endif %}>Down</option>
       <option value="unknown" {% if active_health == 'unknown' %}selected{% endif %}>Unknown</option>
+    </select>
+    <select name="x402" class="px-3 py-2.5 bg-white border border-slate-200 rounded-xl text-sm focus:outline-none focus:border-slate-400">
+      <option value="">All servers</option>
+      <option value="1" {% if active_x402 %}selected{% endif %}>x402-capable only</option>
     </select>
   </form>
 
