@@ -5,7 +5,7 @@
   <div class="flex flex-wrap items-start justify-between gap-4">
     <div class="max-w-2xl">
       <h1 class="text-4xl md:text-5xl font-extrabold tracking-tight leading-[1.1]">
-        The discovery layer for the agent economy
+        Built for agents, not just humans
       </h1>
       <p class="text-slate-600 mt-4 text-lg">
         One open, agent-readable directory for <span class="font-semibold text-slate-900">x402 paid APIs</span>,
