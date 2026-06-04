@@ -8,10 +8,12 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field, HttpUrl
+from starlette.concurrency import run_in_threadpool
 
 from . import ask as directory_ask
 from . import cards, db
 from . import a2a as directory_a2a
+from . import jobs as directory_jobs
 from . import resources as directory_resources
 from . import limits
 
@@ -369,7 +371,7 @@ async def api_submit(request: Request, payload: SubmissionPayload):
     if pending:
         return {
             "status": "already_pending",
-            "message": "A submission for this URL is already awaiting review.",
+            "message": "A submission for this URL is already submitted and auto-verifying.",
             "submission_id": pending.get("id"),
         }
     if recent >= SUBMIT_RATE_LIMIT_PER_DAY:
@@ -394,7 +396,35 @@ async def api_submit(request: Request, payload: SubmissionPayload):
     submission["_source"] = "rest-submit"
     with db.writer() as c:
         sub_id = db.create_submission(c, submission)
-    return {"status": "pending", "submission_id": sub_id}
+    # Auto-review immediately — there is no human gate. x402 verification
+    # decides: verified -> listed now, rejected -> dropped, uncertain ->
+    # stays pending and is retried automatically by the crawl timer.
+    try:
+        review = await run_in_threadpool(
+            directory_jobs.review_submission, sub_id, "auto-review (on-submit)")
+    except Exception:
+        review = {"status": "pending", "submission_id": sub_id}
+    rstatus = review.get("status")
+    if rstatus == "listed":
+        return {
+            "status": "listed",
+            "submission_id": sub_id,
+            "slug": review.get("slug"),
+            "message": "Auto-verified x402 support — your service is now live in the directory.",
+        }
+    if rstatus == "rejected":
+        return {
+            "status": "rejected",
+            "submission_id": sub_id,
+            "message": "Auto-review could not confirm x402 payment support for this URL.",
+            "evidence": review.get("evidence"),
+        }
+    return {
+        "status": "pending",
+        "submission_id": sub_id,
+        "message": "Submitted; auto-verification was inconclusive and will be retried automatically.",
+        "evidence": review.get("evidence"),
+    }
 
 
 @router.get("/.well-known/agent-tools.json", tags=["discovery"])

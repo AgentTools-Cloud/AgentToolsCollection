@@ -129,6 +129,13 @@ def cmd_crawl(only=None) -> int:
             cmd_crawl_a2a()
         except Exception as e:
             log.warning("a2a crawl failed: %r", e)
+        # Clear the submission queue automatically — there is no human
+        # gate. verified -> listed, rejected -> dropped, uncertain ->
+        # retried next cycle.
+        try:
+            cmd_auto_review()
+        except Exception as e:
+            log.warning("auto-review failed: %r", e)
     return 0
 
 
@@ -441,8 +448,10 @@ def cmd_submissions(status: str = "pending", limit: int = 50) -> int:
     return 0
 
 
-def cmd_approve(sub_id: int, note: str | None = None) -> int:
-    """Approve a pending submission: copy fields into services + mark reviewed."""
+def _approve(sub_id: int, note: str | None = None) -> dict | None:
+    """Core approve logic: copy a pending submission into services + mark it
+    approved + health-probe + notify. Returns a dict describing the listed
+    service, or None if the submission could not be approved."""
     from urllib.parse import urlparse
 
     def _slugify(text: str) -> str:
@@ -454,16 +463,16 @@ def cmd_approve(sub_id: int, note: str | None = None) -> int:
         rows = db.list_submissions(c, status="pending", limit=1000)
     row = next((r for r in rows if r["id"] == sub_id), None)
     if row is None:
-        print(f"submission #{sub_id} not found or not pending", file=sys.stderr)
-        return 1
+        log.warning("approve: submission #%d not found or not pending", sub_id)
+        return None
     p = row.get("payload") or {}
     if not isinstance(p, dict):
-        print("submission payload not parseable", file=sys.stderr)
-        return 1
+        log.warning("approve: submission #%d payload not parseable", sub_id)
+        return None
     url = (p.get("url") or "").strip()
     if not url:
-        print("submission has no url", file=sys.stderr)
-        return 1
+        log.warning("approve: submission #%d has no url", sub_id)
+        return None
     host = urlparse(url).hostname or url
     name = p.get("name") or host
     service = {
@@ -487,8 +496,8 @@ def cmd_approve(sub_id: int, note: str | None = None) -> int:
             db.mark_submission(wc, sub_id, "approved", note=note)
             return created
     created = db.with_retry(op)
-    print(f"approved submission #{sub_id} -> service slug={service['slug']} "
-          f"({'new' if created else 'updated'})")
+    log.info("approved submission #%d -> service slug=%s (%s)",
+             sub_id, service["slug"], "new" if created else "updated")
     # Probe once now so the new service is not stuck at health=unknown
     # until the next 6h health timer fires.
     try:
@@ -500,7 +509,7 @@ def cmd_approve(sub_id: int, note: str | None = None) -> int:
                     (h, int(time.time()), service["slug"]),
                 )
         db.with_retry(_probe)
-        print(f"  health probe: {h}")
+        log.info("  health probe: %s", h)
     except Exception as e:
         log.warning("approve health probe failed: %r", e)
     # Notify the submitter that their service is now listed.
@@ -520,7 +529,64 @@ def cmd_approve(sub_id: int, note: str | None = None) -> int:
         mailer.send_approval_email(contact, name, service["slug"], verified_line)
     except Exception as e:
         log.warning("approve notification email failed: %r", e)
+    return {"slug": service["slug"], "created": bool(created),
+            "name": name, "url": url}
+
+
+def cmd_approve(sub_id: int, note: str | None = None) -> int:
+    """CLI manual-override approve (the normal flow is fully automatic)."""
+    res = _approve(sub_id, note=note)
+    if res is None:
+        print(f"submission #{sub_id} could not be approved", file=sys.stderr)
+        return 1
+    print(f"approved submission #{sub_id} -> service slug={res['slug']} "
+          f"({'new' if res['created'] else 'updated'})")
     return 0
+
+
+def review_submission(sub_id: int, note_prefix: str = "auto-review") -> dict:
+    """Auto-review a single pending submission via x402 verification.
+
+    verified  -> approve + publish immediately
+    rejected  -> reject
+    uncertain -> leave pending (the crawl timer retries it automatically;
+                 no human is ever required)
+
+    Returns a dict: {status: listed|rejected|pending|not_pending, ...}.
+    """
+    with db.connect(read_only=True) as c:
+        rows = db.list_submissions(c, status="pending", limit=2000)
+    row = next((r for r in rows if r["id"] == sub_id), None)
+    if row is None:
+        return {"status": "not_pending", "submission_id": sub_id}
+    p = row.get("payload") or {}
+    if not isinstance(p, dict):
+        p = {}
+    url = (p.get("url") or "").strip()
+    well_known = p.get("well_known") or p.get("well_known_url")
+    if not url:
+        verdict = {"status": "rejected", "evidence": ["submission has no url"]}
+    else:
+        try:
+            verdict = crawlers.verify_x402(url, well_known)
+        except Exception as e:
+            verdict = {"status": "uncertain",
+                       "evidence": [f"verify exception: {e!r}"]}
+    vstatus = verdict.get("status")
+    evidence = verdict.get("evidence") or []
+    note = f"{note_prefix}: {vstatus} — {'; '.join(evidence)}"
+    if vstatus == "verified":
+        res = _approve(sub_id, note=note)
+        if res:
+            return {"status": "listed", "submission_id": sub_id,
+                    "slug": res["slug"], "evidence": evidence}
+        return {"status": "pending", "submission_id": sub_id,
+                "evidence": ["approve failed; left pending for retry"]}
+    if vstatus == "rejected":
+        cmd_reject(sub_id, note=note)
+        return {"status": "rejected", "submission_id": sub_id,
+                "evidence": evidence}
+    return {"status": "pending", "submission_id": sub_id, "evidence": evidence}
 
 
 def cmd_reject(sub_id: int, note: str | None = None) -> int:
@@ -533,11 +599,11 @@ def cmd_reject(sub_id: int, note: str | None = None) -> int:
 
 
 def cmd_auto_review(limit: int = 100, dry_run: bool = False) -> int:
-    """Automatically approve/reject pending submissions by x402 verification.
+    """Automatically review every pending submission by x402 verification.
 
-    verified  -> approve (clear x402 proof)
-    rejected  -> reject  (no well-known + no 402 challenge)
-    uncertain -> left pending for a human (network flake / ambiguous)
+    This is the only review path — there is no human gate. verified
+    submissions are published, rejected ones are dropped, and uncertain
+    ones stay pending and are retried on the next run.
     """
     with db.connect(read_only=True) as c:
         rows = db.list_submissions(c, status="pending", limit=limit)
@@ -547,39 +613,34 @@ def cmd_auto_review(limit: int = 100, dry_run: bool = False) -> int:
     n_app = n_rej = n_unc = 0
     for row in rows:
         sid = row["id"]
-        p = row.get("payload") or {}
-        if not isinstance(p, dict):
-            log.warning("auto-review #%d: payload not parseable, leaving pending", sid)
-            n_unc += 1
-            continue
-        url = (p.get("url") or "").strip()
-        well_known = p.get("well_known") or p.get("well_known_url")
-        if not url:
-            verdict = {"status": "rejected", "evidence": ["submission has no url"], "payment": None}
-        else:
-            try:
-                verdict = crawlers.verify_x402(url, well_known)
-            except Exception as e:
-                log.warning("auto-review #%d: verify error %r -> uncertain", sid, e)
-                verdict = {"status": "uncertain", "evidence": [f"verify exception: {e!r}"], "payment": None}
-        status = verdict["status"]
-        ev = "; ".join(verdict.get("evidence") or [])
-        note = f"auto-review: {status} — {ev}"
-        log.info("auto-review #%d %s | %s -> %s", sid, url, status, ev)
         if dry_run:
-            if status == "verified": n_app += 1
-            elif status == "rejected": n_rej += 1
-            else: n_unc += 1
+            p = row.get("payload") or {}
+            url = (p.get("url") or "").strip() if isinstance(p, dict) else ""
+            wk = p.get("well_known") or p.get("well_known_url") if isinstance(p, dict) else None
+            try:
+                verdict = crawlers.verify_x402(url, wk) if url else {"status": "rejected"}
+            except Exception as e:
+                verdict = {"status": "uncertain", "evidence": [repr(e)]}
+            st = verdict.get("status")
+            log.info("auto-review(dry) #%d %s -> %s", sid, url, st)
+            if st == "verified":
+                n_app += 1
+            elif st == "rejected":
+                n_rej += 1
+            else:
+                n_unc += 1
             continue
-        if status == "verified":
-            cmd_approve(sid, note=note)
+        out = review_submission(sid)
+        st = out.get("status")
+        log.info("auto-review #%d -> %s", sid, st)
+        if st == "listed":
             n_app += 1
-        elif status == "rejected":
-            cmd_reject(sid, note=note)
+        elif st == "rejected":
             n_rej += 1
         else:
-            n_unc += 1  # uncertain: leave pending for human
-    log.info("auto-review done: approved=%d rejected=%d left_pending=%d", n_app, n_rej, n_unc)
+            n_unc += 1
+    log.info("auto-review done: listed=%d rejected=%d left_pending=%d",
+             n_app, n_rej, n_unc)
     return 0
 
 

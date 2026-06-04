@@ -9,6 +9,7 @@ no self-HTTP roundtrip.
 """
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import logging
 import os
@@ -21,6 +22,7 @@ from . import ask as directory_ask
 from . import a2a as directory_a2a
 from . import cards
 from . import db as directory_db
+from . import jobs as directory_jobs
 from . import limits
 from . import resources as directory_resources
 
@@ -486,8 +488,10 @@ async def register(
     """Self-register an x402 / MCP service in the agent-tools directory.
 
     Service owners and agents may submit new services here. Submissions
-    land in a pending queue and are reviewed by a human before they show
-    up in `search` results. Listing is FREE.
+    are auto-reviewed instantly by x402 verification (no human gate): if
+    the URL proves x402 payment support it is listed immediately and shows
+    up in `search`; otherwise it is rejected or retried automatically.
+    Listing is FREE.
 
     Dedup: if a service with the same canonical origin (scheme://host)
     already exists in the directory we return its slug instead of
@@ -556,7 +560,7 @@ async def register(
                   args={"url": url, "outcome": "already_pending"}, result_n=0)
         return {
             "status": "already_pending",
-            "message": "A submission for this URL is already awaiting review.",
+            "message": "A submission for this URL is already submitted and auto-verifying.",
             "submission_id": pending.get("id"),
         }
 
@@ -573,7 +577,7 @@ async def register(
                 "message": (
                     f"You have {recent} pending submissions in the last 24h "
                     f"(limit {_REGISTER_RATE_LIMIT_PER_IP_PER_DAY}). "
-                    "Wait for review or email contact@agent-tools.cloud."
+                    "Wait for the auto-verifier to clear them or email contact@agent-tools.cloud."
                 ),
             }
 
@@ -599,17 +603,41 @@ async def register(
         log.exception("register failed: %r", e)
         return {"status": "error", "message": "submission_failed"}
 
+    # Auto-review immediately (no human gate): verify x402 support and
+    # publish / reject / retry accordingly.
+    try:
+        review = await asyncio.to_thread(
+            directory_jobs.review_submission, sub_id, "auto-review (mcp-register)")
+    except Exception as e:
+        log.warning("register auto-review failed: %r", e)
+        review = {"status": "pending", "submission_id": sub_id}
+
+    rstatus = review.get("status")
     _log_call("register", ctx=ctx,
-              args={"url": url, "outcome": "pending"},
-              result_n=1, result_slug=str(sub_id))
+              args={"url": url, "outcome": rstatus},
+              result_n=1, result_slug=str(review.get("slug") or sub_id))
+    if rstatus == "listed":
+        return {
+            "status": "listed",
+            "submission_id": sub_id,
+            "slug": review.get("slug"),
+            "message": "Auto-verified x402 support — your service is now live in `search`. Listing is free.",
+        }
+    if rstatus == "rejected":
+        return {
+            "status": "rejected",
+            "submission_id": sub_id,
+            "message": "Auto-review could not confirm x402 payment support for this URL.",
+            "evidence": review.get("evidence"),
+        }
     return {
         "status": "pending",
         "submission_id": sub_id,
         "message": (
-            "Submission received. A human will review and (if approved) "
-            "your service will appear in `search` within 1–2 days. "
-            "Listing is free."
+            "Submitted; auto-verification was inconclusive and will be retried "
+            "automatically. Listing is free."
         ),
+        "evidence": review.get("evidence"),
     }
 
 
