@@ -128,4 +128,4 @@ Apache-2.0. See [LICENSE](LICENSE).
 - x402 spec: <https://x402.org>
 - MCP spec: <https://modelcontextprotocol.io>
 
-<!-- mcp-name: io.github.JoursBleu/agent-tools-mcp -->
+<!-- mcp-name: io.github.AgentTools-Cloud/agent-tools-mcp -->
