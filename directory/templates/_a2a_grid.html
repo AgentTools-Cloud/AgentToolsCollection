@@ -1,0 +1,40 @@
+{% if agents %}
+<ul class="grid grid-cols-1 md:grid-cols-2 gap-4">
+  {% for a in agents %}
+  <li class="svc-card p-5">
+    <div class="flex items-start justify-between gap-3 mb-2">
+      <a href="/a2a/agents/{{ a.slug }}" class="block min-w-0">
+        <div class="text-[15px] font-semibold text-slate-900 hover:text-blue-600 leading-tight">
+          {{ a.name }}
+        </div>
+        {% if a.provider_name %}
+          <div class="text-[12px] text-slate-400 mt-1 truncate">{{ a.provider_name }}</div>
+        {% endif %}
+      </a>
+      {% if a.health == 'ok' %}
+        <span class="badge bg-emerald-50 text-emerald-700 ring-1 ring-emerald-100">● healthy</span>
+      {% elif a.health == 'degraded' %}
+        <span class="badge bg-amber-50 text-amber-700 ring-1 ring-amber-100">● degraded</span>
+      {% elif a.health == 'down' %}
+        <span class="badge bg-rose-50 text-rose-700 ring-1 ring-rose-100">● down</span>
+      {% else %}
+        <span class="badge bg-slate-100 text-slate-500 ring-1 ring-slate-200">● unknown</span>
+      {% endif %}
+    </div>
+    <p class="text-sm text-slate-600 line-clamp-2 min-h-[2.6rem]">
+      {{ a.description or "—" }}
+    </p>
+    <div class="mt-4 flex flex-wrap items-center gap-2 text-xs">
+      {% if a.preferred_transport %}<span class="badge bg-blue-50 text-blue-700 ring-1 ring-blue-100">{{ a.preferred_transport }}</span>{% endif %}
+      {% if a.skills %}<span class="badge bg-slate-50 text-slate-600 ring-1 ring-slate-200">{{ a.skills|length }} skill{{ 's' if a.skills|length != 1 else '' }}</span>{% endif %}
+      {% if a.x402_supported %}<span class="badge bg-violet-50 text-violet-700 ring-1 ring-violet-100">x402</span>{% endif %}
+    </div>
+  </li>
+  {% endfor %}
+</ul>
+{% else %}
+<div class="bg-white border border-dashed border-slate-300 rounded-xl p-10 text-center text-slate-500">
+  No matching A2A agents. Try clearing filters, or
+  <a href="/submit" class="text-blue-600 hover:underline">submit an agent</a>.
+</div>
+{% endif %}

@@ -96,6 +96,82 @@ async def about_page(request: Request):
     return TEMPLATES.TemplateResponse(request, "about.html", {"request": request})
 
 
+@router.get("/mcp", response_class=HTMLResponse, include_in_schema=False)
+async def mcp_page(
+    request: Request,
+    q: str | None = Query(default=None),
+    health: str | None = Query(default=None),
+    x402: str | None = Query(default=None),
+):
+    with _conn() as c:
+        servers = db.search_mcp(c, q=q, health=health, x402_only=bool(x402), limit=60)
+        s = db.mcp_stats(c)
+    return TEMPLATES.TemplateResponse(request, "mcp.html", {
+            "request": request, "servers": servers, "stats": s, "q": q or "",
+            "active_health": health, "active_x402": bool(x402),
+        },
+    )
+
+
+@router.get("/mcp/servers/{slug}", response_class=HTMLResponse, include_in_schema=False)
+async def mcp_detail(request: Request, slug: str):
+    with _conn() as c:
+        m = db.get_mcp_by_slug(c, slug)
+    if not m:
+        raise HTTPException(404, "mcp server not found")
+    return TEMPLATES.TemplateResponse(request, "mcp_server.html", {"request": request, "m": m})
+
+
+@router.get("/_partials/mcp", response_class=HTMLResponse, include_in_schema=False)
+async def mcp_partial(
+    request: Request,
+    q: str | None = Query(default=None),
+    health: str | None = Query(default=None),
+    x402: str | None = Query(default=None),
+):
+    with _conn() as c:
+        servers = db.search_mcp(c, q=q, health=health, x402_only=bool(x402), limit=60)
+    return TEMPLATES.TemplateResponse(request, "_mcp_grid.html", {"request": request, "servers": servers})
+
+
+@router.get("/a2a", response_class=HTMLResponse, include_in_schema=False)
+async def a2a_page(
+    request: Request,
+    q: str | None = Query(default=None),
+    health: str | None = Query(default=None),
+    x402: str | None = Query(default=None),
+):
+    with _conn() as c:
+        agents = db.search_a2a(c, q=q, health=health, x402_only=bool(x402), limit=60)
+        s = db.a2a_stats(c)
+    return TEMPLATES.TemplateResponse(request, "a2a.html", {
+            "request": request, "agents": agents, "stats": s, "q": q or "",
+            "active_health": health, "active_x402": bool(x402),
+        },
+    )
+
+
+@router.get("/a2a/agents/{slug}", response_class=HTMLResponse, include_in_schema=False)
+async def a2a_detail(request: Request, slug: str):
+    with _conn() as c:
+        a = db.get_a2a_by_slug(c, slug)
+    if not a:
+        raise HTTPException(404, "a2a agent not found")
+    return TEMPLATES.TemplateResponse(request, "a2a_agent.html", {"request": request, "a": a})
+
+
+@router.get("/_partials/a2a", response_class=HTMLResponse, include_in_schema=False)
+async def a2a_partial(
+    request: Request,
+    q: str | None = Query(default=None),
+    health: str | None = Query(default=None),
+    x402: str | None = Query(default=None),
+):
+    with _conn() as c:
+        agents = db.search_a2a(c, q=q, health=health, x402_only=bool(x402), limit=60)
+    return TEMPLATES.TemplateResponse(request, "_a2a_grid.html", {"request": request, "agents": agents})
+
+
 @router.get("/_partials/services", response_class=HTMLResponse, include_in_schema=False)
 async def services_partial(
     request: Request,
