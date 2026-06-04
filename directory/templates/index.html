@@ -8,7 +8,10 @@
         <path d="M5 5 L18 5 L27 16 L18 27 L5 27 Z" fill="#2563eb"/>
         <path d="M11 11 L21 21 M21 11 L11 21" stroke="#fff" stroke-width="2.8" stroke-linecap="round"/>
       </svg>
-      <h1 class="text-4xl md:text-5xl font-extrabold tracking-tight">agent-tools</h1>
+      <div>
+        <h1 class="text-4xl md:text-5xl font-extrabold tracking-tight leading-none">x402 Services</h1>
+        <p class="mt-1.5 text-sm md:text-[15px] font-semibold tracking-wide text-blue-600">The x402 service discovery layer</p>
+      </div>
     </div>
     <a href="/submit" class="btn-primary">
       <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12h14"/></svg>
@@ -16,8 +19,8 @@
     </a>
   </div>
   <p class="text-slate-600 max-w-3xl">
-    The open directory and pay-per-call relay for x402 services — {{ stats.total }} agent-ready paid APIs,
-    Qwen3.6-35B-A3B inference from $0.001/call, and a crypto-native stack (signals · on-chain · DeFi) on Base USDC.
+    The open discovery layer for x402 services — {{ stats.total }} indexed APIs and MCP servers,
+    LLM-ranked recommendations via <span class="mono">/api/v1/ask</span>, and service cards with payment, call, and quality metadata.
   </p>
 
   <form id="filter-form"
@@ -28,7 +31,7 @@
         hx-push-url="true"
         class="search-shell mt-6">
     <svg class="w-5 h-5 text-slate-400 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
-    <input name="q" value="{{ q }}" placeholder="Try: signals, MCP, dexscreener, Qwen, on-chain Q&A…"
+    <input name="q" value="{{ q }}" placeholder="Try: weather, MCP, dexscreener, social data, payments…"
            class="flex-1 bg-transparent outline-none text-base placeholder:text-slate-400">
     <button type="submit" class="text-sm text-slate-500 hover:text-slate-900 hidden md:inline">↵ Search</button>
   </form>
@@ -38,7 +41,7 @@
   <div class="flex flex-wrap items-end justify-between gap-4 mb-4">
     <div>
       <h2 class="text-2xl font-bold tracking-tight">Overall Stats</h2>
-      <p class="text-sm text-slate-500 mt-1">Live counters across the directory and the relay</p>
+      <p class="text-sm text-slate-500 mt-1">Live counters across the directory and discovery API</p>
     </div>
     <div class="flex items-center gap-2 text-sm">
       <a href="/api/v1/stats" class="pill mono text-xs">/api/v1/stats</a>
@@ -52,7 +55,7 @@
     <div class="stat-card">
       <div class="text-sm text-slate-500">Services indexed</div>
       <div class="text-3xl font-bold mt-1">{{ stats.total }}</div>
-      <div class="text-xs text-slate-400 mt-3">paid APIs · MCP · agent tools</div>
+      <div class="text-xs text-slate-400 mt-3">x402 APIs · MCP · agent tools</div>
     </div>
     <div class="stat-card">
       <div class="text-sm text-slate-500">Healthy</div>
