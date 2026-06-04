@@ -28,8 +28,8 @@ dependencies = [
 
 [project.urls]
 Homepage     = "https://agent-tools.cloud"
-Repository   = "https://github.com/JoursBleu/mcpserver"
-Issues       = "https://github.com/JoursBleu/mcpserver/issues"
+Repository   = "https://github.com/AgentTools-Cloud/AgentToolsCollection"
+Issues       = "https://github.com/AgentTools-Cloud/AgentToolsCollection/issues"
 Registry     = "https://registry.modelcontextprotocol.io/"
 
 [project.scripts]

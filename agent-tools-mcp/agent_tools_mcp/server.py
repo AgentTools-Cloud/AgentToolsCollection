@@ -29,7 +29,7 @@ def _api_base() -> str:
 
 def _user_agent() -> str:
     from . import __version__
-    return f"agent-tools-mcp/{__version__} (+https://github.com/JoursBleu/mcpserver)"
+    return f"agent-tools-mcp/{__version__} (+https://github.com/AgentTools-Cloud/AgentToolsCollection)"
 
 
 def build_server() -> FastMCP:
