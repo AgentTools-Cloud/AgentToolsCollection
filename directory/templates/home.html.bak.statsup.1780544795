@@ -27,7 +27,42 @@
   </form>
 </section>
 
-<section class="mt-8">
+<section class="grid grid-cols-1 md:grid-cols-3 gap-5 mt-4">
+  <a href="/x402" class="svc-card p-6 group hover:border-slate-300 transition">
+    <div class="flex items-center justify-between">
+      <span class="text-xs font-semibold uppercase tracking-wider text-slate-400">x402 Services</span>
+      <span class="text-3xl font-bold">{{ stats.total }}</span>
+    </div>
+    <p class="text-sm text-slate-600 mt-3">Paid HTTP APIs that settle micro-payments over the x402 protocol. Auto-verified, with payment + health metadata.</p>
+    <div class="text-sm font-medium text-slate-900 mt-4 inline-flex items-center gap-1 group-hover:gap-2 transition-all">
+      Browse services →
+    </div>
+  </a>
+
+  <a href="/mcp" class="svc-card p-6 group hover:border-slate-300 transition">
+    <div class="flex items-center justify-between">
+      <span class="text-xs font-semibold uppercase tracking-wider text-slate-400">MCP Servers</span>
+      <span class="text-3xl font-bold">{{ mcp_stats.total }}</span>
+    </div>
+    <p class="text-sm text-slate-600 mt-3">Model Context Protocol servers crawled from PulseMCP and the official registry, probed live for remote callability.</p>
+    <div class="text-sm font-medium text-slate-900 mt-4 inline-flex items-center gap-1 group-hover:gap-2 transition-all">
+      Browse servers →
+    </div>
+  </a>
+
+  <a href="/a2a" class="svc-card p-6 group hover:border-slate-300 transition">
+    <div class="flex items-center justify-between">
+      <span class="text-xs font-semibold uppercase tracking-wider text-slate-400">A2A Agents</span>
+      <span class="text-3xl font-bold">{{ a2a_stats.total }}</span>
+    </div>
+    <p class="text-sm text-slate-600 mt-3">Agents that publish an A2A Agent Card. Discover skills, capabilities, and endpoints straight from <span class="mono">/.well-known</span>.</p>
+    <div class="text-sm font-medium text-slate-900 mt-4 inline-flex items-center gap-1 group-hover:gap-2 transition-all">
+      Browse agents →
+    </div>
+  </a>
+</section>
+
+<section class="mt-12">
   <div class="flex flex-wrap items-end justify-between gap-4 mb-4">
     <h2 class="text-2xl font-bold tracking-tight">Across the directory</h2>
     <div class="flex items-center gap-2 text-sm">
@@ -62,41 +97,6 @@
       <div class="text-xs text-slate-400 mt-3">{{ a2a_stats.healthy }} healthy</div>
     </div>
   </div>
-</section>
-
-<section class="grid grid-cols-1 md:grid-cols-3 gap-5 mt-8">
-  <a href="/x402" class="svc-card p-6 group hover:border-slate-300 transition">
-    <div class="flex items-center justify-between">
-      <span class="text-xs font-semibold uppercase tracking-wider text-slate-400">x402 Services</span>
-      <span class="text-3xl font-bold">{{ stats.total }}</span>
-    </div>
-    <p class="text-sm text-slate-600 mt-3">Paid HTTP APIs that settle micro-payments over the x402 protocol. Auto-verified, with payment + health metadata.</p>
-    <div class="text-sm font-medium text-slate-900 mt-4 inline-flex items-center gap-1 group-hover:gap-2 transition-all">
-      Browse services →
-    </div>
-  </a>
-
-  <a href="/mcp" class="svc-card p-6 group hover:border-slate-300 transition">
-    <div class="flex items-center justify-between">
-      <span class="text-xs font-semibold uppercase tracking-wider text-slate-400">MCP Servers</span>
-      <span class="text-3xl font-bold">{{ mcp_stats.total }}</span>
-    </div>
-    <p class="text-sm text-slate-600 mt-3">Model Context Protocol servers crawled from PulseMCP and the official registry, probed live for remote callability.</p>
-    <div class="text-sm font-medium text-slate-900 mt-4 inline-flex items-center gap-1 group-hover:gap-2 transition-all">
-      Browse servers →
-    </div>
-  </a>
-
-  <a href="/a2a" class="svc-card p-6 group hover:border-slate-300 transition">
-    <div class="flex items-center justify-between">
-      <span class="text-xs font-semibold uppercase tracking-wider text-slate-400">A2A Agents</span>
-      <span class="text-3xl font-bold">{{ a2a_stats.total }}</span>
-    </div>
-    <p class="text-sm text-slate-600 mt-3">Agents that publish an A2A Agent Card. Discover skills, capabilities, and endpoints straight from <span class="mono">/.well-known</span>.</p>
-    <div class="text-sm font-medium text-slate-900 mt-4 inline-flex items-center gap-1 group-hover:gap-2 transition-all">
-      Browse agents →
-    </div>
-  </a>
 </section>
 
 <section class="mt-12 svc-card p-6 md:p-8 bg-slate-50/60">
