@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-tools-mcp"
-version = "0.1.4"
+version = "0.1.5"
 description = "Search and call x402 paid services from any MCP-compatible agent (Claude, Cursor, Cline)."
 readme = "README.md"
 license = { text = "Apache-2.0" }
