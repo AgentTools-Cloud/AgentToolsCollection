@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}Submit — agent-tools.cloud{% endblock %}
+{% block content %}
+<section class="mb-8 max-w-2xl">
+  <h1 class="text-3xl md:text-4xl font-extrabold tracking-tight">Submit a service</h1>
+  <p class="text-slate-500 mt-2">Lightweight review before listing. Duplicate URLs are detected, and public submissions are rate-limited to keep the queue clean. You can also <span class="mono">POST</span> directly to <code class="mono bg-slate-100 px-1 rounded">/api/v1/submit</code>.</p>
+</section>
+
+<form id="submit-form" class="svc-card p-6 space-y-4 max-w-2xl" onsubmit="return submitForm(event)">
+  <div>
+    <label class="block text-sm font-medium mb-1">Name <span class="text-rose-500">*</span></label>
+    <input name="name" required class="w-full px-3 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:border-slate-400">
+  </div>
+  <div>
+    <label class="block text-sm font-medium mb-1">URL <span class="text-rose-500">*</span></label>
+    <input name="url" type="url" required placeholder="https://..." class="w-full px-3 py-2.5 border border-slate-200 rounded-xl mono text-sm focus:outline-none focus:border-slate-400">
+  </div>
+  <div>
+    <label class="block text-sm font-medium mb-1">Description</label>
+    <textarea name="description" rows="3" class="w-full px-3 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:border-slate-400"></textarea>
+  </div>
+  <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+    <div>
+      <label class="block text-sm font-medium mb-1">Category</label>
+      <input name="category" placeholder="weather / data / inference / …" class="w-full px-3 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:border-slate-400">
+    </div>
+    <div>
+      <label class="block text-sm font-medium mb-1">Price (USDC / call)</label>
+      <input name="price_usdc" type="number" step="0.0001" min="0" class="w-full px-3 py-2.5 border border-slate-200 rounded-xl mono focus:outline-none focus:border-slate-400">
+    </div>
+  </div>
+  <div>
+    <label class="block text-sm font-medium mb-1">Chains (comma-separated)</label>
+    <input name="chains" placeholder="base, solana" class="w-full px-3 py-2.5 border border-slate-200 rounded-xl mono text-sm focus:outline-none focus:border-slate-400">
+  </div>
+  <div>
+    <label class="block text-sm font-medium mb-1">Contact (email / X / TG · optional)</label>
+    <input name="contact" class="w-full px-3 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:border-slate-400">
+  </div>
+  <div class="flex items-center gap-3">
+    <button type="submit" class="btn-primary">Submit</button>
+    <div id="submit-result" class="text-sm"></div>
+  </div>
+</form>
+
+<script>
+async function submitForm(e) {
+  e.preventDefault();
+  const f = new FormData(e.target);
+  const chains = (f.get("chains") || "").split(/[,\s]+/).filter(Boolean);
+  const body = {
+    name: f.get("name"), url: f.get("url"),
+    description: f.get("description") || null,
+    category: f.get("category") || null,
+    chains: chains.length ? chains : null,
+    price_usdc: f.get("price_usdc") ? Number(f.get("price_usdc")) : null,
+    contact: f.get("contact") || null,
+  };
+  const out = document.getElementById("submit-result");
+  out.textContent = "Submitting…"; out.className = "text-sm text-slate-500";
+  try {
+    const r = await fetch("/api/v1/submit", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(body),
+    });
+    if (r.ok) { out.textContent = "Submitted · pending review."; out.className = "text-sm text-emerald-600"; e.target.reset(); }
+    else { out.textContent = "Failed: " + await r.text(); out.className = "text-sm text-rose-600"; }
+  } catch (err) { out.textContent = "Failed: " + err; out.className = "text-sm text-rose-600"; }
+  return false;
+}
+</script>
+{% endblock %}

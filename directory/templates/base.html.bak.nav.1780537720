@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="h-full">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Agent Tools — x402 · MCP · A2A discovery directory{% endblock %}</title>
+  <meta name="description" content="{% block desc %}Agent-readable directory and discovery layer for x402 services, MCP servers, and A2A agents. Search, ask for LLM-ranked recommendations, inspect cards, and submit new entries.{% endblock %}">
+  <link rel="alternate" type="application/json" title="agent-tools discovery" href="/.well-known/agent-tools.json">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/htmx.org@2.0.3"></script>
+  <style>
+    :root { color-scheme: light; }
+    html, body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; -webkit-font-smoothing: antialiased; }
+    code, pre, .mono { font-family: 'JetBrains Mono', ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+    .badge { display:inline-flex; align-items:center; padding:2px 8px; font-size:11px; border-radius:9999px; font-weight:500; }
+    .tab-active { color:#0f172a; font-weight:600; border-bottom:2px solid #0f172a; }
+    .tab-link:hover { color:#0f172a; }
+    .stat-card { background:#fff; border:1px solid #e2e8f0; border-radius:14px; padding:20px 22px; }
+    .svc-card { background:#fff; border:1px solid #e2e8f0; border-radius:14px; transition: border-color .15s ease, box-shadow .15s ease; }
+    .svc-card:hover { border-color:#2563eb; box-shadow: 0 4px 18px -6px rgba(37,99,235,.18); }
+    .pill { display:inline-flex; align-items:center; gap:6px; padding:6px 12px; border:1px solid #e2e8f0; background:#fff; border-radius:10px; font-size:13px; color:#0f172a; }
+    .pill:hover { border-color:#cbd5e1; }
+    .btn-primary { display:inline-flex; align-items:center; gap:6px; background:#2563eb; color:#fff; font-weight:600; padding:9px 16px; border-radius:10px; font-size:14px; box-shadow: 0 1px 0 rgba(0,0,0,.04); }
+    .btn-primary:hover { background:#1d4ed8; }
+    .search-shell { display:flex; align-items:center; gap:10px; background:#fff; border:1px solid #e2e8f0; border-radius:14px; padding:14px 18px; }
+    .search-shell:focus-within { border-color:#94a3b8; box-shadow:0 0 0 4px rgba(148,163,184,.15); }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-900 min-h-screen flex flex-col">
+  <header class="border-b border-slate-200 bg-white">
+    <div class="max-w-6xl mx-auto px-5 h-14 flex items-center justify-between gap-4">
+      <a href="/" class="flex items-center gap-2">
+        <svg viewBox="0 0 32 32" class="w-7 h-7" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M5 5 L18 5 L27 16 L18 27 L5 27 Z" fill="#2563eb"/>
+          <path d="M11 11 L21 21 M21 11 L11 21" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/>
+        </svg>
+        <span class="text-[15px] font-semibold tracking-tight">Agent Tools<span class="text-slate-400"> · x402 · MCP · A2A</span></span>
+      </a>
+      <div class="flex items-center gap-2">
+        <a href="/categories" class="pill hidden md:inline-flex">
+          <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg>
+          所有分类
+        </a>
+        <a href="/openapi.json" class="pill hidden md:inline-flex">
+          <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 21l-1-1-7-7 7-7 1-1M13 3l1 1 7 7-7 7-1 1"/></svg>
+          OpenAPI
+        </a>
+        </div>
+    </div>
+    <div class="max-w-6xl mx-auto px-5">
+      <nav class="flex items-center gap-7 text-sm text-slate-500">
+        {% set p = request.url.path %}
+        <a href="/" class="py-3 -mb-px {% if p == '/' %}tab-active{% else %}tab-link{% endif %}">Directory</a>
+        <a href="/mcp" class="py-3 -mb-px {% if p.startswith('/mcp') %}tab-active{% else %}tab-link{% endif %}">MCP Servers</a>
+        <a href="/a2a" class="py-3 -mb-px {% if p.startswith('/a2a') %}tab-active{% else %}tab-link{% endif %}">A2A Agents</a>
+        <a href="/categories" class="py-3 -mb-px {% if p == '/categories' %}tab-active{% else %}tab-link{% endif %}">Categories</a>
+        <a href="/submit" class="py-3 -mb-px {% if p == '/submit' %}tab-active{% else %}tab-link{% endif %}">Submit</a>
+        <a href="/about" class="py-3 -mb-px {% if p == '/about' %}tab-active{% else %}tab-link{% endif %}">About</a>
+        <a href="/openapi.json" class="py-3 -mb-px tab-link">API</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="flex-1 max-w-6xl w-full mx-auto px-5 py-10">
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="border-t border-slate-200 bg-white mt-12">
+    <div class="max-w-6xl mx-auto px-5 py-8 flex flex-wrap gap-4 justify-between text-sm text-slate-500">
+      <div>
+        <div class="font-medium text-slate-700">agent-tools.cloud</div>
+        <div class="text-xs mt-1">x402 directory · MCP servers · A2A agents · discovery · open data</div>
+      </div>
+      <div class="text-right space-x-4">
+        <a href="/.well-known/agent-tools.json" class="hover:text-blue-600 mono">/.well-known/agent-tools.json</a>
+        <a href="/openapi.json" class="hover:text-blue-600">OpenAPI</a>
+        <a href="https://smithery.ai/servers/kangletian/agent-tools-x402-directory" class="hover:text-blue-600" target="_blank" rel="noopener">Smithery</a>
+        </div>
+    </div>
+  </footer>
+</body>
+</html>

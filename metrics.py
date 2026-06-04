@@ -6,6 +6,8 @@ route labels.
 """
 from __future__ import annotations
 
+import ipaddress
+import os
 import re
 import time
 
@@ -95,5 +97,31 @@ class PrometheusMiddleware:
             DURATION.labels(method, route).observe(duration)
 
 
+def _peer_ip(request: Request) -> str | None:
+    cf = request.headers.get("cf-connecting-ip")
+    if cf:
+        return cf.strip()
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        return xff.split(",", 1)[0].strip()
+    return request.client.host if request.client else None
+
+
+def _is_loopback(ip: str | None) -> bool:
+    if not ip:
+        return False
+    try:
+        return ipaddress.ip_address(ip).is_loopback
+    except ValueError:
+        return False
+
+
 async def metrics_endpoint(request: Request) -> Response:
+    token = os.getenv("METRICS_BEARER_TOKEN") or os.getenv("METRICS_TOKEN")
+    if token:
+        auth = request.headers.get("authorization") or ""
+        if auth != f"Bearer {token}":
+            return Response("not found\n", status_code=404, media_type="text/plain")
+    elif not _is_loopback(_peer_ip(request)):
+        return Response("not found\n", status_code=404, media_type="text/plain")
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)

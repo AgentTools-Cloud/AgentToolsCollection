@@ -1,0 +1,85 @@
+"""Outbound email for directory notifications (Aliyun DirectMail / SMTP_SSL).
+
+Reads SMTP_* from the environment. If SMTP is not configured the helpers
+become no-ops (logged), so approval flows never fail because of email.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import smtplib
+import ssl
+from email.message import EmailMessage
+
+log = logging.getLogger("directory.mailer")
+
+FROM_NAME = "agent-tools.cloud"
+REPLY_TO = "contact@agent-tools.cloud"
+SITE = "https://agent-tools.cloud"
+
+
+def _conf() -> dict | None:
+    host = os.getenv("SMTP_HOST")
+    user = os.getenv("SMTP_USER")
+    pw = os.getenv("SMTP_PASS")
+    if not (host and user and pw):
+        return None
+    return {
+        "host": host,
+        "port": int(os.getenv("SMTP_PORT", "465")),
+        "user": user,
+        "pass": pw,
+        "from": os.getenv("SMTP_FROM", user),
+    }
+
+
+def _send(to_email: str, subject: str, body: str) -> bool:
+    conf = _conf()
+    if conf is None:
+        log.warning("SMTP not configured; skipping email to %s", to_email)
+        return False
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = f"{FROM_NAME} <{conf['from']}>"
+    msg["To"] = to_email
+    msg["Reply-To"] = REPLY_TO
+    msg.set_content(body)
+    try:
+        ctx = ssl.create_default_context()
+        with smtplib.SMTP_SSL(conf["host"], conf["port"], context=ctx, timeout=30) as s:
+            s.login(conf["user"], conf["pass"])
+            s.send_message(msg)
+        log.info("sent notification email to %s (%s)", to_email, subject)
+        return True
+    except Exception as e:  # noqa: BLE001 - email must never break approval
+        log.warning("failed to send email to %s: %r", to_email, e)
+        return False
+
+
+def send_approval_email(to_email: str, service_name: str, slug: str) -> bool:
+    """Notify a submitter that their service was approved and listed."""
+    if not to_email or "@" not in to_email:
+        log.info("no valid contact email for %r; skipping", service_name)
+        return False
+    url = f"{SITE}/services/{slug}"
+    subject = f'Your service "{service_name}" is now listed on agent-tools.cloud'
+    body = f"""Hi,
+
+Good news — your submission "{service_name}" has been reviewed and approved. It is now live in the agent-tools.cloud directory.
+
+View your listing:
+{url}
+
+agent-tools.cloud is a directory of x402 / pay-per-call services for AI agents. Your service is now discoverable via our search, MCP tools, and public API.
+
+A few notes:
+- We periodically health-check listed services and surface on-chain payment activity, so keeping your endpoint up helps your ranking.
+- If any details (pricing, description, category, contact) need updating, just reply to this email.
+
+Questions or corrections? Reply here or reach us at {REPLY_TO}.
+
+Thanks for building on x402,
+The agent-tools.cloud team
+"""
+    return _send(to_email, subject, body)

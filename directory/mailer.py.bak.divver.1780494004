@@ -1,0 +1,148 @@
+"""Outbound email for directory notifications (Aliyun DirectMail / SMTP_SSL).
+
+Reads SMTP_* from the environment. If SMTP is not configured the helpers
+become no-ops (logged), so approval flows never fail because of email.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import smtplib
+import ssl
+from email.message import EmailMessage
+
+log = logging.getLogger("directory.mailer")
+
+FROM_NAME = "agent-tools.cloud"
+REPLY_TO = "contact@agent-tools.cloud"
+SITE = "https://agent-tools.cloud"
+
+BRAND = "#7c3aed"  # agent-tools.cloud accent (violet)
+
+
+def _conf() -> dict | None:
+    host = os.getenv("SMTP_HOST")
+    user = os.getenv("SMTP_USER")
+    pw = os.getenv("SMTP_PASS")
+    if not (host and user and pw):
+        return None
+    return {
+        "host": host,
+        "port": int(os.getenv("SMTP_PORT", "465")),
+        "user": user,
+        "pass": pw,
+        "from": os.getenv("SMTP_FROM", user),
+    }
+
+
+def _shell(inner: str) -> str:
+    """Wrap inner HTML in the branded email shell."""
+    return (
+        '<div style="background:#f5f5f7;padding:32px 0;margin:0">'
+        '<div style="font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,'
+        'sans-serif;max-width:560px;margin:0 auto;background:#ffffff;'
+        'border:1px solid #ececf1;border-radius:14px;overflow:hidden">'
+        f'<div style="background:linear-gradient(135deg,{BRAND},#4f46e5);'
+        'padding:22px 28px">'
+        '<a href="' + SITE + '" style="color:#fff;text-decoration:none;'
+        'font-size:18px;font-weight:700;letter-spacing:-.2px">agent-tools.cloud</a>'
+        '<div style="color:#e9e6ff;font-size:12px;margin-top:2px">'
+        'x402 service directory for AI agents</div>'
+        '</div>'
+        f'<div style="padding:28px;color:#1f2329;font-size:15px;line-height:1.65">{inner}</div>'
+        '<div style="border-top:1px solid #f0f0f4;padding:16px 28px;'
+        'color:#9a9aa8;font-size:12px;line-height:1.6">'
+        'You received this because you submitted a service to '
+        f'<a href="{SITE}" style="color:{BRAND};text-decoration:none">agent-tools.cloud</a>. '
+        f'Questions? Reply to this email or reach us at '
+        f'<a href="mailto:{REPLY_TO}" style="color:{BRAND};text-decoration:none">{REPLY_TO}</a>.'
+        '</div>'
+        '</div></div>'
+    )
+
+
+def _button(url: str, label: str) -> str:
+    return (
+        f'<p style="margin:24px 0 8px"><a href="{url}" '
+        f'style="display:inline-block;background:{BRAND};color:#ffffff;'
+        'padding:12px 24px;border-radius:8px;text-decoration:none;'
+        'font-weight:600;font-size:14px">' + label + '</a></p>'
+    )
+
+
+def _send(to_email: str, subject: str, body: str, html: str | None = None) -> bool:
+    conf = _conf()
+    if conf is None:
+        log.warning("SMTP not configured; skipping email to %s", to_email)
+        return False
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = f"{FROM_NAME} <{conf['from']}>"
+    msg["To"] = to_email
+    msg["Reply-To"] = REPLY_TO
+    msg.set_content(body)
+    if html:
+        msg.add_alternative(html, subtype="html")
+    try:
+        ctx = ssl.create_default_context()
+        with smtplib.SMTP_SSL(conf["host"], conf["port"], context=ctx, timeout=30) as s:
+            s.login(conf["user"], conf["pass"])
+            s.send_message(msg)
+        log.info("sent notification email to %s (%s)", to_email, subject)
+        return True
+    except Exception as e:  # noqa: BLE001 - email must never break approval
+        log.warning("failed to send email to %s: %r", to_email, e)
+        return False
+
+
+def send_approval_email(to_email: str, service_name: str, slug: str) -> bool:
+    """Notify a submitter that their service was approved and listed."""
+    if not to_email or "@" not in to_email:
+        log.info("no valid contact email for %r; skipping", service_name)
+        return False
+    url = f"{SITE}/services/{slug}"
+    subject = f'Your service "{service_name}" is now listed on agent-tools.cloud'
+    body = f"""Hi,
+
+Good news - your submission "{service_name}" has been reviewed and approved. It is now live in the agent-tools.cloud directory.
+
+View your listing:
+{url}
+
+agent-tools.cloud is a directory of x402 / pay-per-call services for AI agents. Your service is now discoverable via our search, MCP tools, and public API.
+
+A few notes:
+- We periodically health-check listed services and surface on-chain payment activity, so keeping your endpoint up helps your ranking.
+- If any details (pricing, description, category, contact) need updating, just reply to this email.
+
+Questions or corrections? Reply here or reach us at {REPLY_TO}.
+
+Thanks for building on x402,
+The agent-tools.cloud team
+"""
+    inner = (
+        '<div style="display:inline-block;background:#e9fbef;color:#137a3b;'
+        'font-size:12px;font-weight:600;padding:4px 12px;border-radius:999px;'
+        'margin-bottom:14px">&#10003; Approved &amp; listed</div>'
+        f'<p style="margin:0 0 14px">Hi,</p>'
+        f'<p style="margin:0 0 14px">Good news &mdash; your submission '
+        f'<strong>&ldquo;{service_name}&rdquo;</strong> has been reviewed and approved. '
+        'It is now live in the agent-tools.cloud directory.</p>'
+        + _button(url, "View your listing &rarr;") +
+        f'<p style="margin:18px 0 14px;color:#52525b">agent-tools.cloud is a directory of '
+        'x402 / pay-per-call services for AI agents. Your service is now discoverable '
+        'via our search, MCP tools, and public API.</p>'
+        '<div style="background:#faf9fd;border:1px solid #f0eefb;border-radius:10px;'
+        'padding:14px 16px;color:#52525b;font-size:13px;line-height:1.6">'
+        '<strong style="color:#1f2329">A few notes</strong>'
+        '<ul style="margin:8px 0 0;padding-left:18px">'
+        '<li>We periodically health-check listed services and surface on-chain '
+        'payment activity, so keeping your endpoint up helps your ranking.</li>'
+        '<li>If any details (pricing, description, category, contact) need updating, '
+        'just reply to this email.</li>'
+        '</ul></div>'
+        '<p style="margin:20px 0 0;color:#52525b">Thanks for building on x402,<br>'
+        'The agent-tools.cloud team</p>'
+    )
+    return _send(to_email, subject, body, _shell(inner))

@@ -16,10 +16,15 @@ Also listed on [Smithery](https://smithery.ai/servers/kangletian/agent-tools-x40
 | Path | Auth | Purpose |
 |---|---|---|
 | `GET /` (host = `agent-tools.cloud`) | free | Directory site (search / browse) |
-| `GET /api/v1/*` | free | JSON API: services, categories, stats |
-| `POST /mcp-discovery/` | free | **MCP streamable-http** discovery server (search/get/list_categories/stats) |
+| `GET /api/v1/search` | free | Faceted service search |
+| `POST /api/v1/ask` | free, rate-limited | LLM-ranked recommendations grounded in directory candidates |
+| `GET /api/v1/services/{slug}` | free | Service card with payment, call and quality metadata |
+| `GET /api/v1/categories`, `/api/v1/stats` | free | Directory facets and aggregate stats |
+| `POST /api/v1/submit` | free, rate-limited | Pending service submission with dedupe |
+| `POST /mcp-discovery/` | free | **MCP streamable-http** discovery server |
 | `GET /healthz` | free | Liveness |
 | `GET /v1/models` | free | Upstream model listing (read-only) |
+| `GET /.well-known/agent-tools.json` | free | Agent discovery manifest |
 | `GET /.well-known/x402` | free | x402 v0.4 self-description (free-only) |
 | `GET /.well-known/mcp.json` | free | MCP self-description |
 
@@ -31,13 +36,16 @@ The MCP discovery server is also published as a standalone PyPI package:
 
 ```
 search(intent, top_k=5, category=None, max_price_usd=None, has_mcp=None)
+ask_services(intent, top_k=5, category=None, max_price_usd=None, use_llm=True)
 get(slug)
 list_categories()
 stats()
+register(url, name=None, description=None, mcp_url=None, category=None)
 ```
 
 `search` accepts natural-language intent and ranks by FTS5 + popularity +
 health. Each result carries a `match_reason` and a `confidence` score.
+`ask_services` uses the same retrieval-first / LLM-rerank flow as `/api/v1/ask`.
 
 ## Deploy
 
@@ -59,9 +67,11 @@ systemd units live in [`deploy/`](deploy/):
 
 See [`.env.example`](.env.example). Required:
 
-- `UPSTREAM_BASE_URL` / `UPSTREAM_API_KEY` — only used by `/v1/models`
-- `X402_PAY_TO` — kept for `.well-known/x402` self-description
+- `UPSTREAM_BASE_URL` / `UPSTREAM_API_KEY` — used by `/v1/models`
+- `AGENT_TOOLS_ASK_BASE_URL` / `AGENT_TOOLS_ASK_API_KEY` / `AGENT_TOOLS_ASK_MODEL` — LLM backend for `/api/v1/ask`
 - `AGENT_TOOLS_DB_PATH` — SQLite path for the directory
+- `AGENT_TOOLS_ASK_RATE_LIMIT_PER_MINUTE` / `AGENT_TOOLS_ASK_RATE_LIMIT_PER_DAY` — public ask abuse limits
+- `METRICS_BEARER_TOKEN` — optional remote access token for `/metrics`; without it metrics are local-only
 
 ## Smoke test
 
@@ -71,6 +81,14 @@ curl https://agent-tools.cloud/healthz
 
 # Directory stats
 curl https://agent-tools.cloud/api/v1/stats
+
+# Intent-level service recommendation
+curl -s -X POST https://agent-tools.cloud/api/v1/ask \
+  -H 'content-type: application/json' \
+  -d '{"query":"find a weather API that accepts x402","limit":2}'
+
+# Service card
+curl https://agent-tools.cloud/api/v1/services/weather-hugen-tokyo-scan
 
 # MCP discovery handshake
 curl -s -X POST https://agent-tools.cloud/mcp-discovery/ \
