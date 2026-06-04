@@ -401,3 +401,138 @@ def crawl_seeds(seed_path: str) -> dict:
         "failed": failed,
         "failures": failures,
     }
+
+
+# ---------------------------------------------------------------------------
+# Directory crawlers: discover live Agent Cards from public "awesome-a2a"
+# lists. We extract candidate homepages, dedupe by host and probe each for a
+# well-known Agent Card. Hit rate is low (most entries are GitHub repos, not
+# live endpoints) but every hit is a real, callable A2A agent.
+# ---------------------------------------------------------------------------
+
+A2A_DIR_SOURCES = [
+    ("awesome-a2a-aiboost",
+     "https://raw.githubusercontent.com/ai-boost/awesome-a2a/main/README.md"),
+    ("awesome-a2a-pab1it0",
+     "https://raw.githubusercontent.com/pab1it0/awesome-a2a/main/README.md"),
+]
+
+_MD_LINK_RE = re.compile(r"\((https?://[^)\s]+)\)")
+# hosts that never serve an Agent Card -- skip to avoid wasted probes
+_SKIP_HOSTS = (
+    "github.com", "raw.githubusercontent.com", "gist.github.com",
+    "twitter.com", "x.com", "youtube.com", "youtu.be", "medium.com",
+    "linkedin.com", "discord.gg", "discord.com", "t.me", "reddit.com",
+    "npmjs.com", "pypi.org", "awesome.re", "img.shields.io", "shields.io",
+    "google.com", "docs.google.com", "notion.so", "substack.com",
+)
+
+
+def _extract_candidate_homepages(text: str) -> list[str]:
+    """Pull non-repo http(s) homepages from a markdown list, deduped by host."""
+    out: list[str] = []
+    seen_hosts: set[str] = set()
+    for m in _MD_LINK_RE.finditer(text):
+        url = m.group(1).rstrip(".,);")
+        try:
+            host = (urlparse(url).hostname or "").lower()
+        except Exception:
+            continue
+        if not host or any(host == h or host.endswith("." + h) for h in _SKIP_HOSTS):
+            continue
+        # normalise to scheme://host (probe well-known paths from the root)
+        base = f"{urlparse(url).scheme}://{host}"
+        if host in seen_hosts:
+            continue
+        seen_hosts.add(host)
+        out.append(base)
+    return out
+
+
+def crawl_directories(max_hosts: int = 80) -> dict:
+    """Crawl awesome-a2a lists, probe candidate homepages for Agent Cards."""
+    client = httpx.Client(timeout=TIMEOUT, follow_redirects=True,
+                          headers={"User-Agent": UA, "Accept": "application/json"})
+    candidates: list[str] = []
+    seen_hosts: set[str] = set()
+    try:
+        for tag, url in A2A_DIR_SOURCES:
+            try:
+                r = client.get(url)
+                r.raise_for_status()
+            except httpx.HTTPError as e:
+                log.warning("a2a dir source %s failed: %r", tag, e)
+                continue
+            for base in _extract_candidate_homepages(r.text):
+                host = urlparse(base).hostname or base
+                if host in seen_hosts:
+                    continue
+                seen_hosts.add(host)
+                candidates.append(base)
+
+        candidates = candidates[:max_hosts]
+        log.info("a2a directories: probing %d candidate hosts", len(candidates))
+        rows: list[dict] = []
+        for base in candidates:
+            try:
+                card, card_url = fetch_agent_card(base, client=client)
+            except Exception:
+                card, card_url = None, None
+            if card and card_url:
+                rows.append(card_to_row(card, card_url, source="awesome-a2a"))
+    finally:
+        client.close()
+
+    inserted = updated = 0
+    if rows:
+        with db.writer() as c:
+            for row in rows:
+                is_new, _ = db.upsert_a2a_agent(c, row)
+                if is_new:
+                    inserted += 1
+                else:
+                    updated += 1
+            c.commit()
+    return {
+        "candidates": len(candidates),
+        "resolved": len(rows),
+        "inserted": inserted,
+        "updated": updated,
+    }
+
+
+def probe_a2a_health(card_url: str | None, endpoint_url: str | None = None) -> dict:
+    """Liveness probe for an indexed A2A agent.
+
+    A reachable Agent Card (valid JSON) means the agent is published and
+    discoverable -> 'ok'. A reachable-but-not-a-card response -> 'degraded'.
+    Unreachable card with a reachable endpoint -> 'degraded'. Otherwise down.
+    """
+    targets = [t for t in (card_url, endpoint_url) if t]
+    if not targets:
+        return {"status": "unknown", "latency_ms": None, "http_status": None}
+    last = {"status": "down", "latency_ms": None, "http_status": None}
+    try:
+        with httpx.Client(timeout=httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0),
+                          follow_redirects=True,
+                          headers={"User-Agent": UA, "Accept": "application/json"}) as c:
+            for i, t in enumerate(targets):
+                try:
+                    t0 = time.monotonic()
+                    r = c.get(t)
+                    dt = int((time.monotonic() - t0) * 1000)
+                    sc = r.status_code
+                    if i == 0 and sc == 200:
+                        try:
+                            card = r.json()
+                            if isinstance(card, dict) and (card.get("name") or card.get("skills")):
+                                return {"status": "ok", "latency_ms": dt, "http_status": sc}
+                        except (ValueError, json.JSONDecodeError):
+                            pass
+                    if sc < 500:
+                        last = {"status": "degraded", "latency_ms": dt, "http_status": sc}
+                except Exception:
+                    continue
+        return last
+    except Exception:
+        return {"status": "down", "latency_ms": None, "http_status": None}

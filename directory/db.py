@@ -186,6 +186,57 @@ CREATE TRIGGER IF NOT EXISTS a2a_au AFTER UPDATE ON a2a_agents BEGIN
   INSERT INTO a2a_fts(rowid, name, description, skill_names, provider_name)
     VALUES (new.id, new.name, new.description, new.skill_names, new.provider_name);
 END;
+
+CREATE TABLE IF NOT EXISTS mcp_servers (
+  id                INTEGER PRIMARY KEY,
+  slug              TEXT UNIQUE NOT NULL,
+  name              TEXT NOT NULL,
+  description       TEXT,
+  homepage_url      TEXT,
+  endpoint_url      TEXT,
+  transport         TEXT,
+  auth_method       TEXT,
+  cost_hint         TEXT,
+  source_code_url   TEXT,
+  package_registry  TEXT,
+  package_name      TEXT,
+  github_stars      INTEGER,
+  tags              TEXT,
+  x402_supported    INTEGER DEFAULT 0,
+  source            TEXT NOT NULL,
+  source_id         TEXT,
+  source_url        TEXT,
+  health            TEXT DEFAULT 'unknown',
+  health_checked    INTEGER,
+  latency_ms        INTEGER,
+  http_status       INTEGER,
+  last_seen         INTEGER,
+  last_success_at   INTEGER,
+  confidence        REAL,
+  created_at        INTEGER NOT NULL,
+  updated_at        INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mcp_source ON mcp_servers(source);
+CREATE INDEX IF NOT EXISTS idx_mcp_health ON mcp_servers(health);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS mcp_fts USING fts5(
+  name, description, tags,
+  content='mcp_servers', content_rowid='id', tokenize='porter unicode61'
+);
+CREATE TRIGGER IF NOT EXISTS mcp_ai AFTER INSERT ON mcp_servers BEGIN
+  INSERT INTO mcp_fts(rowid, name, description, tags)
+    VALUES (new.id, new.name, new.description, new.tags);
+END;
+CREATE TRIGGER IF NOT EXISTS mcp_ad AFTER DELETE ON mcp_servers BEGIN
+  INSERT INTO mcp_fts(mcp_fts, rowid, name, description, tags)
+    VALUES('delete', old.id, old.name, old.description, old.tags);
+END;
+CREATE TRIGGER IF NOT EXISTS mcp_au AFTER UPDATE ON mcp_servers BEGIN
+  INSERT INTO mcp_fts(mcp_fts, rowid, name, description, tags)
+    VALUES('delete', old.id, old.name, old.description, old.tags);
+  INSERT INTO mcp_fts(rowid, name, description, tags)
+    VALUES (new.id, new.name, new.description, new.tags);
+END;
 """
 
 
@@ -939,3 +990,149 @@ def a2a_stats(conn):
         "SELECT COUNT(*) AS n FROM a2a_agents WHERE x402_supported=1"
     ).fetchone()["n"]
     return {"total": total, "healthy": healthy, "x402_capable": x402}
+
+
+# ---------------------------------------------------------------------------
+# MCP servers: standalone directory (PulseMCP / official registry import).
+# Kept separate from `services` so non-x402 MCP servers never pollute the
+# x402 service search; the unified resource search (P1) unions them at read
+# time alongside x402 services that also expose an mcp_url.
+# ---------------------------------------------------------------------------
+
+_MCP_COLS = [
+    "slug", "name", "description", "homepage_url", "endpoint_url",
+    "transport", "auth_method", "cost_hint", "source_code_url",
+    "package_registry", "package_name", "github_stars", "tags",
+    "x402_supported", "source", "source_id", "source_url",
+    "health", "health_checked", "latency_ms", "http_status",
+    "last_seen", "last_success_at", "confidence",
+    "created_at", "updated_at",
+]
+
+_MCP_JSON_COLS = ("tags",)
+
+
+def mcp_row_to_dict(row) -> dict:
+    d = dict(row)
+    for k in _MCP_JSON_COLS:
+        if d.get(k):
+            try:
+                d[k] = json.loads(d[k])
+            except (TypeError, json.JSONDecodeError):
+                pass
+    return d
+
+
+def upsert_mcp_server(conn: sqlite3.Connection, row: dict) -> tuple:
+    """Insert/update an MCP server. Dedup on (source, source_id) then slug."""
+    now = int(time.time())
+    row.setdefault("created_at", now)
+    row["updated_at"] = now
+    row["last_seen"] = now
+    row["x402_supported"] = 1 if row.get("x402_supported") else 0
+    for k in _MCP_JSON_COLS:
+        row[k] = _to_json(row.get(k))
+
+    cur = conn.cursor()
+    existing = None
+    if row.get("source") and row.get("source_id"):
+        existing = cur.execute(
+            "SELECT id, created_at, health, health_checked, last_success_at "
+            "FROM mcp_servers WHERE source=? AND source_id=?",
+            (row["source"], row["source_id"]),
+        ).fetchone()
+    if existing is None:
+        existing = cur.execute(
+            "SELECT id, created_at, health, health_checked, last_success_at "
+            "FROM mcp_servers WHERE slug=?",
+            (row["slug"],),
+        ).fetchone()
+
+    if existing is None:
+        placeholders = ",".join(["?"] * len(_MCP_COLS))
+        cur.execute(
+            f"INSERT INTO mcp_servers ({','.join(_MCP_COLS)}) VALUES ({placeholders})",
+            [row.get(c) for c in _MCP_COLS],
+        )
+        return True, cur.lastrowid
+
+    row["created_at"] = existing["created_at"]
+    # metadata-only refresh must not reset a previously probed health
+    if row.get("health") is None:
+        row["health"] = existing["health"]
+    if row.get("health_checked") is None:
+        row["health_checked"] = existing["health_checked"]
+    if row.get("last_success_at") is None:
+        row["last_success_at"] = existing["last_success_at"]
+    set_clause = ",".join(f"{c}=?" for c in _MCP_COLS if c != "created_at")
+    params = [row.get(c) for c in _MCP_COLS if c != "created_at"]
+    params.append(existing["id"])
+    cur.execute(f"UPDATE mcp_servers SET {set_clause} WHERE id=?", params)
+    return False, int(existing["id"])
+
+
+def search_mcp(conn, q=None, health=None, x402_only=False, limit=50, offset=0):
+    """Search standalone MCP servers. Ranks healthy + remotely callable first."""
+    select_cols = ["m.*"]
+    where: list[str] = []
+    params: list = []
+    fts_query = _expand_fts_query(q) if q else None
+
+    if fts_query is not None:
+        select_cols.append("snippet(mcp_fts, -1, '[[', ']]', '…', 12) AS match_snippet")
+        sql = ["SELECT " + ", ".join(select_cols) + " FROM mcp_servers m"]
+        sql.append("JOIN mcp_fts f ON f.rowid = m.id")
+        where.append("mcp_fts MATCH ?")
+        params.append(fts_query)
+    else:
+        sql = ["SELECT " + ", ".join(select_cols) + " FROM mcp_servers m"]
+
+    if health:
+        where.append("m.health=?"); params.append(health)
+    if x402_only:
+        where.append("m.x402_supported=1")
+    if where:
+        sql.append("WHERE " + " AND ".join(where))
+    sql.append(
+        "ORDER BY "
+        "CASE m.health WHEN 'ok' THEN 0 WHEN 'degraded' THEN 1 "
+        "WHEN 'unknown' THEN 2 WHEN 'down' THEN 3 ELSE 4 END ASC, "
+        "(m.endpoint_url IS NOT NULL AND m.endpoint_url != '') DESC, "
+        "(m.confidence IS NOT NULL) DESC, "
+        "m.confidence DESC, "
+        "(m.github_stars IS NOT NULL) DESC, m.github_stars DESC, "
+        "m.updated_at DESC"
+    )
+    sql.append("LIMIT ? OFFSET ?")
+    params.extend([limit, offset])
+    rows = conn.execute(" ".join(sql), params).fetchall()
+    out: list[dict] = []
+    for r in rows:
+        d = mcp_row_to_dict(r)
+        if d.get("match_snippet") in (None, "", "…"):
+            d.pop("match_snippet", None)
+        out.append(d)
+    return out
+
+
+def get_mcp_by_slug(conn, slug):
+    row = conn.execute("SELECT * FROM mcp_servers WHERE slug=?", (slug,)).fetchone()
+    return mcp_row_to_dict(row) if row else None
+
+
+def mcp_stats(conn):
+    cur = conn.cursor()
+    total = cur.execute("SELECT COUNT(*) AS n FROM mcp_servers").fetchone()["n"]
+    healthy = cur.execute(
+        "SELECT COUNT(*) AS n FROM mcp_servers WHERE health='ok'"
+    ).fetchone()["n"]
+    remote = cur.execute(
+        "SELECT COUNT(*) AS n FROM mcp_servers "
+        "WHERE endpoint_url IS NOT NULL AND endpoint_url != ''"
+    ).fetchone()["n"]
+    x402 = cur.execute(
+        "SELECT COUNT(*) AS n FROM mcp_servers WHERE x402_supported=1"
+    ).fetchone()["n"]
+    return {"total": total, "healthy": healthy, "remote_callable": remote,
+            "x402_capable": x402}
+

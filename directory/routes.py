@@ -247,20 +247,51 @@ async def api_mcp_search(
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
 ):
-    """Search MCP-callable services (x402 services that expose an mcp_url)."""
+    """Search MCP servers.
+
+    Unions the standalone MCP directory (PulseMCP / official registry import)
+    with x402 services that also expose an mcp_url.
+    """
+    pull = limit + offset
+    servers: list[dict] = []
+    seen: set[str] = set()
     with _conn() as c:
-        rows = db.search(c, q=q, chain=chain, health=health,
-                         has_mcp=True, limit=limit, offset=offset)
+        for r in db.search_mcp(c, q=q, health=health, limit=pull):
+            item = directory_resources.normalize_mcp_server(r)
+            key = (item.get("endpoint_url") or item.get("slug") or "").lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            servers.append(item)
+        for r in db.search(c, q=q, chain=chain, health=health,
+                           has_mcp=True, limit=pull):
+            item = directory_resources.normalize_service(r, as_mcp=True)
+            key = (item.get("endpoint_url") or item.get("slug") or "").lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            servers.append(item)
+    window = servers[offset:offset + limit]
     return {
         "query": q,
-        "count": len(rows),
-        "servers": [directory_resources.normalize_service(r, as_mcp=True) for r in rows],
+        "count": len(window),
+        "total_matched": len(servers),
+        "servers": window,
     }
+
+
+@router.get("/api/v1/mcp/stats", tags=["mcp"])
+async def api_mcp_stats():
+    with _conn() as c:
+        return db.mcp_stats(c)
 
 
 @router.get("/api/v1/mcp/servers/{slug}", tags=["mcp"])
 async def api_mcp_server(slug: str):
     with _conn() as c:
+        mcp = db.get_mcp_by_slug(c, slug)
+        if mcp:
+            return mcp
         row = db.get_by_slug(c, slug)
     if not row or not (row.get("mcp_url") or "").strip():
         raise HTTPException(status_code=404, detail="MCP server not found")
@@ -432,6 +463,7 @@ async def well_known():
             "mcp_servers": {
                 "search": "https://agent-tools.cloud/api/v1/mcp/search",
                 "get_server": "https://agent-tools.cloud/api/v1/mcp/servers/{slug}",
+                "stats": "https://agent-tools.cloud/api/v1/mcp/stats",
             },
             "resources_search": {
                 "method": "GET",
