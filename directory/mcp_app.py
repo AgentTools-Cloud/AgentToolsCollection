@@ -361,26 +361,38 @@ async def search_mcp_servers(
     require_healthy: bool = False,
     ctx: Context | None = None,
 ) -> dict[str, Any]:
-    """Find MCP servers in the directory (services that expose an MCP endpoint).
+    """Find MCP servers in the directory.
 
-    Returns normalised resource entries with a ready-to-use streamable-http
-    `call_hint.mcp.url`. Extends the existing x402 discovery data: an MCP
-    server here is a directory service that advertises an `mcp_url`.
+    Searches the standalone MCP directory (PulseMCP / official MCP registry
+    import) unioned with x402 services that also expose an MCP endpoint.
+    Returns normalised entries with a ready-to-use streamable-http
+    `call_hint.mcp.url`.
 
     Args:
         intent: Natural-language description of the tool/capability needed.
         top_k: Max servers to return (1-20).
         chain: Optional payment-network filter for paid MCP servers.
-        require_healthy: When true, only return services marked health=ok.
+        require_healthy: When true, only return servers marked health=ok.
     """
     top_k = max(1, min(20, top_k))
+    health = "ok" if require_healthy else None
+    servers: list[dict[str, Any]] = []
+    seen: set[str] = set()
     with _open() as conn:
-        rows = directory_db.search(
-            conn, q=intent, chain=chain,
-            health="ok" if require_healthy else None,
+        for r in directory_db.search_mcp(conn, q=intent, health=health, limit=top_k):
+            item = directory_resources.normalize_mcp_server(r)
+            key = (item.get("endpoint_url") or item.get("slug") or "").lower()
+            if key not in seen:
+                seen.add(key); servers.append(item)
+        for r in directory_db.search(
+            conn, q=intent, chain=chain, health=health,
             has_mcp=True, limit=top_k,
-        )
-    servers = [directory_resources.normalize_service(r, as_mcp=True) for r in rows]
+        ):
+            item = directory_resources.normalize_service(r, as_mcp=True)
+            key = (item.get("endpoint_url") or item.get("slug") or "").lower()
+            if key not in seen:
+                seen.add(key); servers.append(item)
+    servers = servers[:top_k]
     _log_call("search_mcp_servers", ctx=ctx,
               args={"intent": intent, "top_k": top_k, "chain": chain,
                     "require_healthy": require_healthy},
@@ -391,8 +403,12 @@ async def search_mcp_servers(
 
 @discover_mcp.tool()
 async def get_mcp_server(slug: str, ctx: Context | None = None) -> dict[str, Any]:
-    """Get the full card for one MCP server by slug (includes MCP call template)."""
+    """Get the full card for one MCP server by slug."""
     with _open() as conn:
+        mcp = directory_db.get_mcp_by_slug(conn, slug)
+        if mcp:
+            _log_call("get_mcp_server", ctx=ctx, args={"slug": slug}, result_slug=slug)
+            return mcp
         row = directory_db.get_by_slug(conn, slug)
     if not row or not (row.get("mcp_url") or "").strip():
         return {"error": "not_found", "message": f"No MCP server with slug {slug!r}"}

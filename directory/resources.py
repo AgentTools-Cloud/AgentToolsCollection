@@ -4,10 +4,9 @@ Sits on top of the per-protocol stores and presents one normalised shape
 across the three agent-capability entry points:
 
   - x402 service  -> `services` table (payable HTTP API)
-  - mcp server    -> `services` rows that carry an `mcp_url` (MCP-callable);
-                     a standalone MCP directory (Smithery / MCP.so import) is
-                     deferred -- for now MCP discovery extends the x402 data
-                     we already have, per doc "MCP search 从已有 discovery 扩展".
+  - mcp server    -> standalone `mcp_servers` table (PulseMCP / official MCP
+                     registry import), unioned with `services` rows that also
+                     carry an `mcp_url` (an x402 API that is MCP-callable).
   - a2a agent     -> `a2a_agents` table
 
 The broker (P2) does *discovery + scoring only*. It never moves money; it
@@ -76,6 +75,35 @@ def normalize_service(row: dict, as_mcp: bool = False) -> dict:
     }
 
 
+def normalize_mcp_server(row: dict) -> dict:
+    """Normalise a standalone mcp_servers row into the unified shape."""
+    protocols = ["mcp"]
+    if row.get("x402_supported"):
+        protocols.append("x402")
+    endpoint = row.get("endpoint_url")
+    call_hint: dict[str, Any] = {}
+    if endpoint:
+        call_hint["mcp"] = {
+            "transport": row.get("transport") or "streamable-http",
+            "url": endpoint,
+            "auth": row.get("auth_method"),
+            "cost": row.get("cost_hint"),
+        }
+    return {
+        "type": "mcp",
+        "slug": row.get("slug"),
+        "name": row.get("name"),
+        "description": row.get("description"),
+        "protocols": protocols,
+        "endpoint_url": endpoint,
+        "price_hint": None,
+        "health_status": row.get("health") or "unknown",
+        "confidence": row.get("confidence"),
+        "call_hint": call_hint,
+        "detail_url": f"https://agent-tools.cloud/api/v1/mcp/servers/{row.get('slug')}",
+    }
+
+
 def normalize_a2a(row: dict) -> dict:
     protocols = ["a2a"]
     if row.get("x402_supported"):
@@ -122,6 +150,8 @@ def unified_search(conn, q: str | None = None, protocol: str | None = None,
         for r in db.search(conn, q=q, chain=chain, health=health, limit=pull):
             items.append(normalize_service(r, as_mcp=False))
     if protocol in (None, "mcp"):
+        for r in db.search_mcp(conn, q=q, health=health, limit=pull):
+            items.append(normalize_mcp_server(r))
         for r in db.search(conn, q=q, chain=chain, health=health,
                            has_mcp=True, limit=pull):
             items.append(normalize_service(r, as_mcp=True))

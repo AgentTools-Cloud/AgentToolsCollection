@@ -5,6 +5,9 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
+
+import yaml
 from typing import Any
 from urllib.parse import urlparse
 
@@ -87,6 +90,9 @@ def _parse_awesome_md(text, source_tag):
             "description": desc or None,
             "category": _slugify(current_cat),
             "mcp_url": mcp_url,
+            "resource_count": 1,
+            "resource_samples": [{"url": url, "kind": "mcp" if mcp_url else "homepage"}],
+            "call_info": {"resource_samples": [{"url": url, "kind": "mcp" if mcp_url else "homepage"}]},
             "source": "awesome-x402", "source_id": f"{source_tag}:{url}",
             "tags": [current_cat], "region": "global",
         })
@@ -145,6 +151,15 @@ def fetch_cdp_bazaar() -> list:
             "openapi_url": item.get("openapi"),
             "mcp_url": item.get("mcp"),
             "well_known_url": item.get("well_known"),
+            "resource_count": 1,
+            "resource_samples": [{"url": url, "kind": "x402-resource"}],
+            "payment": {
+                "price_min_usd": price_amount,
+                "price_max_usd": price_amount,
+                "chains": chains,
+                "facilitator": item.get("facilitator"),
+            },
+            "call_info": {"resource_samples": [{"url": url, "kind": "x402-resource"}]},
             "source": "cdp-bazaar", "source_id": str(item.get("id") or url),
             "tags": item.get("tags") or [], "region": "global",
         })
@@ -172,6 +187,59 @@ def _max_amount_to_usd(raw: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return amount / (10**_X402_TOKEN_DECIMALS)
+
+
+def _resource_accepts(res: dict[str, Any]) -> list[dict[str, Any]]:
+    accepts: list[dict[str, Any]] = []
+    direct = res.get("accepts") or []
+    if isinstance(direct, list):
+        accepts.extend([a for a in direct if isinstance(a, dict)])
+    resolved = (res.get("response") or {}).get("response") or {}
+    resolved_accepts = resolved.get("accepts") or []
+    if isinstance(resolved_accepts, list):
+        accepts.extend([a for a in resolved_accepts if isinstance(a, dict)])
+    return accepts
+
+
+def _accept_summary(accept: dict[str, Any], resource_url: str | None = None) -> dict[str, Any]:
+    extra = accept.get("extra") if isinstance(accept.get("extra"), dict) else {}
+    price_usd = _max_amount_to_usd(accept.get("maxAmountRequired"))
+    return {
+        "scheme": accept.get("scheme"),
+        "network": str(accept.get("network")).lower() if accept.get("network") else None,
+        "asset": accept.get("asset"),
+        "pay_to": accept.get("payTo"),
+        "max_amount_required": accept.get("maxAmountRequired"),
+        "estimated_usd": price_usd,
+        "resource": accept.get("resource") or resource_url,
+        "description": accept.get("description"),
+        "mime_type": accept.get("mimeType"),
+        "mcp_server": extra.get("mcpServer"),
+    }
+
+
+def _quality_summary(md: dict[str, Any] | None) -> dict[str, Any]:
+    if not md:
+        return {}
+    confidence = md.get("confidence") or {}
+    payment = md.get("paymentAnalytics") or {}
+    reliability = md.get("reliability") or {}
+    performance = md.get("performance") or {}
+    return {
+        "confidence": confidence.get("overallScore"),
+        "payment_analytics": {
+            "transactions_month": payment.get("transactionsMonth"),
+            "volume_month_usd": payment.get("volumeMonthUsd"),
+        },
+        "reliability": {
+            "success_rate": reliability.get("successRate"),
+            "uptime": reliability.get("uptime"),
+        },
+        "performance": {
+            "p50_ms": performance.get("p50"),
+            "p95_ms": performance.get("p95"),
+        },
+    }
 
 
 def fetch_x402scan() -> list:
@@ -214,6 +282,9 @@ def fetch_x402scan() -> list:
         descriptions: list = []
         confidences: list = []
         tx_30d_total = 0
+        resource_samples: list[dict[str, Any]] = []
+        accept_samples: list[dict[str, Any]] = []
+        quality_samples: list[dict[str, Any]] = []
         mcp_server_urls: set = set()
         mcp_resource_urls: set = set()
         for res in resources:
@@ -227,7 +298,10 @@ def fetch_x402scan() -> list:
             mm = re.search(r"^(.+?/(mcp|sse|streamable))(/|$)", res_url.lower())
             if mm:
                 mcp_resource_urls.add(res_url[: mm.end(1)])
-            for accept in res.get("accepts") or []:
+            accepts = _resource_accepts(res)
+            accept_summaries: list[dict[str, Any]] = []
+            local_description = None
+            for accept in accepts:
                 if not isinstance(accept, dict):
                     continue
                 if accept.get("network"):
@@ -236,7 +310,13 @@ def fetch_x402scan() -> list:
                 if price is not None and price > 0:
                     prices.append(price)
                 if accept.get("description"):
-                    descriptions.append(str(accept["description"]).strip())
+                    local_description = str(accept["description"]).strip()
+                    descriptions.append(local_description)
+                summary = _accept_summary(accept, res_url)
+                if len(accept_summaries) < 3:
+                    accept_summaries.append(summary)
+                if len(accept_samples) < 20:
+                    accept_samples.append(summary)
             # Higher-fidelity MCP signal: x402scan's resolved response object
             # at response.response.accepts[].extra.mcpServer (explicitly
             # declared by the service in its .well-known).
@@ -256,10 +336,27 @@ def fetch_x402scan() -> list:
                 tx30 = pa.get("transactionsMonth")
                 if isinstance(tx30, int):
                     tx_30d_total += tx30
+                if len(quality_samples) < 10:
+                    quality_samples.append(_quality_summary(md))
             for tag_link in res.get("tags") or []:
                 tag = (tag_link or {}).get("tag") if isinstance(tag_link, dict) else None
                 if isinstance(tag, dict) and tag.get("name"):
                     tag_set.add(str(tag["name"]))
+            if len(resource_samples) < 20:
+                tags = []
+                for tag_link in res.get("tags") or []:
+                    tag = (tag_link or {}).get("tag") if isinstance(tag_link, dict) else None
+                    if isinstance(tag, dict) and tag.get("name"):
+                        tags.append(str(tag["name"]))
+                resource_samples.append({
+                    "url": res_url,
+                    "kind": res.get("type") or "x402-resource",
+                    "x402_version": res.get("x402Version"),
+                    "description": local_description,
+                    "tags": tags[:8],
+                    "accepts": accept_summaries,
+                    "quality": _quality_summary(md),
+                })
 
         name = origin.get("title") or urlparse(origin_url).hostname or origin_url
         description = origin.get("description") or (descriptions[0] if descriptions else None)
@@ -293,15 +390,42 @@ def fetch_x402scan() -> list:
             "well_known_url": origin_url.rstrip("/") + "/.well-known/x402",
             "confidence": max(confidences) if confidences else None,
             "tx_30d": tx_30d_total if tx_30d_total > 0 else None,
+            "resource_count": len(resources),
+            "resource_samples": resource_samples,
+            "payment": {
+                "price_min_usd": min(prices) if prices else None,
+                "price_max_usd": max(prices) if prices else None,
+                "chains": sorted(chains),
+                "accepts": accept_samples,
+            },
+            "call_info": {
+                "resource_count": len(resources),
+                "resource_samples": resource_samples,
+                "mcp_resource_urls": sorted(mcp_resource_urls),
+                "mcp_server_urls": sorted(mcp_server_urls),
+            },
+            "quality": {
+                "confidence_samples": confidences[:10],
+                "metadata_samples": quality_samples,
+            },
             "source": "x402scan", "source_id": str(origin.get("id") or origin_url),
             "tags": sorted(tag_set), "region": "global",
         })
     return rows
 
 
-def check_health(url, well_known=None):
+def probe_health(url, well_known=None):
+    """Probe an endpoint and return a structured callability signal.
+
+    Returns a dict:
+      status      -> "ok" | "degraded" | "down"
+      latency_ms  -> int | None   (round-trip of the deciding request)
+      http_status -> int | None   (status code that decided the verdict)
+      x402        -> bool         (endpoint answered with a proper HTTP 402)
+    """
     targets = [well_known] if well_known else []
     targets.append(url)
+    last = {"status": "down", "latency_ms": None, "http_status": None, "x402": False}
     try:
         with httpx.Client(timeout=httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0),
                           headers={"User-Agent": UA}) as c:
@@ -309,18 +433,301 @@ def check_health(url, well_known=None):
                 if not t:
                     continue
                 try:
+                    t0 = time.monotonic()
                     r = c.head(t)
                     if r.status_code in (405, 501):
                         r = c.get(t)
-                    if r.status_code < 400 or r.status_code == 402:
-                        return "ok"
-                    if r.status_code in (401, 403, 429):
-                        return "degraded"
+                    dt = int((time.monotonic() - t0) * 1000)
+                    sc = r.status_code
+                    if sc < 400 or sc == 402:
+                        return {"status": "ok", "latency_ms": dt,
+                                "http_status": sc, "x402": sc == 402}
+                    if sc in (401, 403, 429):
+                        last = {"status": "degraded", "latency_ms": dt,
+                                "http_status": sc, "x402": False}
                 except Exception:
                     continue
-        return "down"
+        return last
     except Exception:
-        return "down"
+        return {"status": "down", "latency_ms": None, "http_status": None, "x402": False}
+
+
+def check_health(url, well_known=None):
+    """Backward-compatible string verdict; see probe_health for full signal."""
+    return probe_health(url, well_known)["status"]
+
+
+# ---------------------------------------------------------------------------
+# Signal C: real on-chain demand. For each Base-mainnet USDC payTo address we
+# count incoming USDC transfers + unique payers over a 30d window via the free
+# Blockscout Base indexer (Etherscan-compatible tokentx). This is the hardest
+# signal to fake: spoofing it requires actually paying the service on-chain.
+# ---------------------------------------------------------------------------
+
+_BASE_USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+_BLOCKSCOUT_BASE = "https://base.blockscout.com/api"
+
+
+def fetch_payto_activity(payto, days=30, max_pages=8, contract=_BASE_USDC):
+    """Count incoming Base USDC transfers to ``payto`` over the window.
+
+    Returns {"tx": int, "payers": int, "ok": bool, "capped": bool}. ``ok`` is
+    False on a query/network failure so callers can skip the write instead of
+    recording a false zero.
+    """
+    payto_l = payto.lower()
+    cutoff = int(time.time()) - days * 86400
+    tx = 0
+    payers = set()
+    capped = False
+    try:
+        with httpx.Client(timeout=httpx.Timeout(connect=5.0, read=20.0, write=5.0, pool=5.0),
+                          headers={"User-Agent": UA}) as c:
+            for page in range(1, max_pages + 1):
+                params = {
+                    "module": "account", "action": "tokentx",
+                    "contractaddress": contract, "address": payto,
+                    "page": page, "offset": 100, "sort": "desc",
+                }
+                r = c.get(_BLOCKSCOUT_BASE, params=params)
+                if r.status_code == 429:
+                    time.sleep(1.5)
+                    r = c.get(_BLOCKSCOUT_BASE, params=params)
+                data = r.json()
+                rows = data.get("result")
+                if not isinstance(rows, list):
+                    break  # "No transactions found" -> status 0
+                stop = False
+                for row in rows:
+                    try:
+                        ts = int(row.get("timeStamp", 0))
+                    except (TypeError, ValueError):
+                        continue
+                    if ts < cutoff:
+                        stop = True
+                        break
+                    if (row.get("to") or "").lower() == payto_l:
+                        tx += 1
+                        frm = (row.get("from") or "").lower()
+                        if frm:
+                            payers.add(frm)
+                if stop or len(rows) < 100:
+                    break
+                if page == max_pages:
+                    capped = True
+        return {"tx": tx, "payers": len(payers), "ok": True, "capped": capped}
+    except Exception as e:
+        log.debug("payto activity fetch failed for %s: %r", payto, e)
+        return {"tx": 0, "payers": 0, "ok": False, "capped": False}
+
+
+# ---------------------------------------------------------------------------
+# x402 verification (automated review)
+#
+# A submission is a *real* x402 service if we can machine-prove at least one of:
+#   1. a /.well-known/x402 descriptor that parses as JSON with x402 markers
+#      (accepts / endpoints / x402Version), OR
+#   2. a declared endpoint that answers an un-paid request with HTTP 402 and a
+#      payment-requirements body (accepts / paymentRequirements / x402Version).
+#
+# Returns a 3-state verdict so the auto-reviewer never hard-rejects on a flaky
+# network: "verified" -> auto-approve, "rejected" -> auto-reject (clearly not
+# x402), "uncertain" -> leave pending for a human.
+# ---------------------------------------------------------------------------
+
+import ipaddress as _ipaddress
+import socket as _socket
+
+_X402_MARKERS = ("accepts", "paymentrequirements", "x402version", "x402_version",
+                 "paymentrequired", "maxamountrequired", "payto")
+_VERIFY_TIMEOUT = httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0)
+_MAX_BODY = 256 * 1024  # cap response body we parse
+
+
+def _host_safety(host: str) -> str:
+    """SSRF guard. Returns one of:
+      "public"       -> resolves to public addresses, safe to probe
+      "private"      -> resolves to loopback/private/link-local (reject: SSRF)
+      "unresolvable" -> empty host or DNS resolution failed (uncertain, not reject)
+    """
+    if not host:
+        return "private"
+    try:
+        infos = _socket.getaddrinfo(host, None)
+    except Exception:
+        return "unresolvable"
+    if not infos:
+        return "unresolvable"
+    for info in infos:
+        ip = info[4][0]
+        try:
+            addr = _ipaddress.ip_address(ip.split("%")[0])
+        except ValueError:
+            return "private"
+        if (addr.is_private or addr.is_loopback or addr.is_link_local
+                or addr.is_multicast or addr.is_reserved or addr.is_unspecified):
+            return "private"
+    return "public"
+
+
+def _url_acceptable(url: str) -> bool:
+    """Ingestion gate: reject endpoints with no discoverability value.
+
+    Currently drops bare-IP hosts (no domain = unverifiable, unstable, and
+    typically dev/demo leftovers like 127.0.0.1 or ephemeral EC2 IPs).
+    Domained http(s) URLs are kept.
+    """
+    try:
+        host = urlparse(url if "//" in url else "https://" + url).hostname or ""
+    except Exception:
+        return False
+    if not host:
+        return False
+    try:
+        _ipaddress.ip_address(host.strip("[]").split("%")[0])
+        return False  # host is a bare IP literal -> reject
+    except ValueError:
+        return True   # not an IP -> it's a domain, keep
+
+
+def _looks_like_x402(obj: Any) -> bool:
+    """True if a parsed JSON body carries recognizable x402 markers."""
+    try:
+        blob = json.dumps(obj).lower()
+    except (TypeError, ValueError):
+        return False
+    return any(m in blob for m in _X402_MARKERS)
+
+
+def _extract_payment(obj: Any) -> dict[str, Any] | None:
+    """Pull asset/network/amount/payTo out of an accepts[] / requirements body."""
+    accepts = None
+    if isinstance(obj, dict):
+        accepts = (obj.get("accepts") or obj.get("paymentRequirements")
+                   or obj.get("payment_requirements"))
+        if accepts is None and ("payTo" in obj or "maxAmountRequired" in obj):
+            accepts = [obj]
+        # well-known descriptors nest accepts[] inside endpoints[]
+        if accepts is None and isinstance(obj.get("endpoints"), list):
+            for ep in obj["endpoints"]:
+                if isinstance(ep, dict) and isinstance(ep.get("accepts"), list) and ep["accepts"]:
+                    accepts = ep["accepts"]
+                    break
+    if not isinstance(accepts, list) or not accepts:
+        return None
+    first = accepts[0] if isinstance(accepts[0], dict) else {}
+    # Some descriptors wrap real accept objects: [{resource, accepts:[{scheme,...}]}]
+    for _ in range(3):
+        if (isinstance(first, dict) and "scheme" not in first
+                and isinstance(first.get("accepts"), list) and first["accepts"]):
+            first = first["accepts"][0] if isinstance(first["accepts"][0], dict) else {}
+        else:
+            break
+    amount_raw = (first.get("maxAmountRequired") or first.get("amount")
+                  or first.get("price"))
+    return {
+        "scheme": first.get("scheme"),
+        "network": first.get("network") or first.get("chain"),
+        "asset": first.get("asset") or first.get("currency") or "USDC",
+        "max_amount_usdc": _max_amount_to_usd(amount_raw),
+        "pay_to": first.get("payTo") or first.get("pay_to"),
+        "facilitator": first.get("facilitator") or (obj.get("facilitator") if isinstance(obj, dict) else None),
+    }
+
+
+def verify_x402(url: str, well_known: str | None = None) -> dict[str, Any]:
+    """Machine-verify whether `url` exposes a real x402 service.
+
+    Returns {"status": "verified"|"rejected"|"uncertain",
+             "evidence": [str, ...], "payment": {...}|None}.
+    """
+    evidence: list[str] = []
+    payment: dict[str, Any] | None = None
+    net_error = False
+
+    url = (url or "").strip()
+    parsed = urlparse(url if "//" in url else "https://" + url)
+    if parsed.scheme not in ("http", "https"):
+        return {"status": "rejected", "evidence": ["url scheme not http(s)"],
+                "payment": None}
+    host = parsed.hostname or ""
+    safety = _host_safety(host)
+    if safety == "private":
+        return {"status": "rejected",
+                "evidence": [f"host resolves to a private/loopback address: {host!r}"],
+                "payment": None}
+    if safety == "unresolvable":
+        return {"status": "uncertain",
+                "evidence": [f"host did not resolve (transient DNS or dead host): {host!r}"],
+                "payment": None}
+
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    wk_candidates = []
+    if well_known:
+        wk_candidates.append(well_known)
+    wk_candidates += [origin + "/.well-known/x402",
+                      origin + "/.well-known/x402.json"]
+
+    with httpx.Client(timeout=_VERIFY_TIMEOUT, follow_redirects=True,
+                      max_redirects=3,
+                      headers={"User-Agent": UA, "Accept": "application/json"}) as c:
+        # --- 1. well-known descriptor ---
+        seen_wk = set()
+        for wk in wk_candidates:
+            if not wk or wk in seen_wk:
+                continue
+            seen_wk.add(wk)
+            try:
+                r = c.get(wk)
+            except Exception:
+                net_error = True
+                continue
+            if r.status_code == 200:
+                try:
+                    obj = json.loads(r.content[:_MAX_BODY])
+                except (ValueError, json.JSONDecodeError):
+                    continue
+                if _looks_like_x402(obj):
+                    evidence.append(f"well-known x402 descriptor at {wk} (200, x402 markers)")
+                    payment = payment or _extract_payment(obj)
+
+        # --- 2. endpoint 402 challenge ---
+        for target in (url, origin):
+            if not target:
+                continue
+            try:
+                r = c.get(target)
+            except Exception:
+                net_error = True
+                continue
+            if r.status_code == 402:
+                body_ok = False
+                try:
+                    obj = json.loads(r.content[:_MAX_BODY])
+                    body_ok = _looks_like_x402(obj)
+                    if body_ok:
+                        payment = payment or _extract_payment(obj)
+                except (ValueError, json.JSONDecodeError):
+                    obj = None
+                # A bare 402 is suggestive; 402 + payment body is conclusive.
+                if body_ok:
+                    evidence.append(f"endpoint {target} returns HTTP 402 with payment requirements")
+                else:
+                    evidence.append(f"endpoint {target} returns HTTP 402 (no parseable accepts body)")
+                break
+
+    if evidence:
+        # Conclusive only if we saw real x402 markers somewhere.
+        conclusive = any("markers" in e or "payment requirements" in e for e in evidence)
+        return {"status": "verified" if conclusive else "uncertain",
+                "evidence": evidence, "payment": payment}
+    if net_error:
+        return {"status": "uncertain",
+                "evidence": ["no x402 evidence; network errors during probe"],
+                "payment": None}
+    return {"status": "rejected",
+            "evidence": ["no /.well-known/x402 and no 402 challenge from endpoint"],
+            "payment": None}
 
 
 def fetch_awesome_x402() -> list:
@@ -336,8 +743,394 @@ def fetch_awesome_x402() -> list:
     return out
 
 
+
+PAY_SKILLS_REPO = "solana-foundation/pay-skills"
+PAY_SKILLS_API = f"https://api.github.com/repos/{PAY_SKILLS_REPO}/pulls"
+
+# Map common payment network identifiers to friendly chain names.
+_PAYSKILL_NETWORKS = {
+    "eip155:8453": "base", "8453": "base", "base": "base",
+    "eip155:84532": "base-sepolia", "84532": "base-sepolia",
+    "eip155:1": "ethereum", "1": "ethereum", "ethereum": "ethereum",
+    "eip155:137": "polygon", "137": "polygon", "polygon": "polygon",
+    "solana": "solana",
+}
+
+
+def _payskill_chain(network: Any) -> list:
+    if not network:
+        return []
+    key = str(network).strip().lower()
+    return [_PAYSKILL_NETWORKS.get(key, key)]
+
+
+def _parse_pay_md_from_diff(diff_text: str) -> dict | None:
+    """Pull the YAML frontmatter of an *added* PAY.md out of a unified diff.
+
+    pay-skills PRs add `providers/<org>/<name>/PAY.md` whose frontmatter carries
+    name/title/description/category/service_url. We read only the added (`+`)
+    lines between the first and second `---` fence of that file.
+    """
+    in_paymd = False
+    seen_open = False
+    collecting = False
+    fm_lines: list[str] = []
+    for ln in diff_text.splitlines():
+        if ln.startswith("+++ ") and ln.rstrip().endswith("PAY.md"):
+            in_paymd, seen_open, collecting, fm_lines = True, False, False, []
+            continue
+        if not in_paymd:
+            continue
+        if ln.startswith("diff --git") or ln.startswith("--- ") or ln.startswith("+++ "):
+            break  # reached the next file in the diff; stop at first PAY.md
+        if not ln.startswith("+"):
+            continue
+        content = ln[1:]
+        if content.strip() == "---":
+            if not seen_open:
+                seen_open = collecting = True
+                continue
+            break  # closing fence
+        if collecting:
+            fm_lines.append(content)
+    if not fm_lines:
+        return None
+    try:
+        meta = yaml.safe_load("\n".join(fm_lines))
+    except Exception:
+        return None
+    return meta if isinstance(meta, dict) else None
+
+
+def fetch_pay_skills_prs() -> list:
+    """Crawl OPEN pull requests on solana-foundation/pay-skills.
+
+    These are *pre-launch* services (submitted but not yet merged into any live
+    registry). Each candidate is machine-verified with verify_x402() and ONLY
+    conclusively-verified x402 services are returned for listing; rejected or
+    uncertain candidates are skipped (logged, never listed).
+    """
+    out: list = []
+    headers = {"User-Agent": UA, "Accept": "application/vnd.github+json"}
+    prs: list = []
+    skipped = 0
+    with httpx.Client(timeout=TIMEOUT, follow_redirects=True, headers=headers) as c:
+        for page in range(1, 4):
+            try:
+                r = c.get(PAY_SKILLS_API,
+                          params={"state": "open", "per_page": 100, "page": page})
+            except Exception as e:
+                log.warning("pay-skills: list PRs page %d failed: %r", page, e)
+                break
+            if r.status_code != 200:
+                log.warning("pay-skills: list PRs page %d -> HTTP %d",
+                            page, r.status_code)
+                break
+            batch = r.json()
+            if not isinstance(batch, list) or not batch:
+                break
+            prs.extend(batch)
+            if len(batch) < 100:
+                break
+
+        for pr in prs:
+            num = pr.get("number")
+            if not num:
+                continue
+            title = pr.get("title") or ""
+            author = (pr.get("user") or {}).get("login")
+            html_url = pr.get("html_url")
+            created = pr.get("created_at")
+            # .diff is served by codeload (no API rate limit)
+            try:
+                dr = c.get(f"https://github.com/{PAY_SKILLS_REPO}/pull/{num}.diff")
+            except Exception as e:
+                log.warning("pay-skills PR#%s diff fetch failed: %r", num, e)
+                continue
+            if dr.status_code != 200:
+                continue
+            meta = _parse_pay_md_from_diff(dr.text)
+            if not meta:
+                continue
+            service_url = str(meta.get("service_url") or "").strip()
+            if not service_url.startswith("http"):
+                continue
+
+            # MANDATORY gate: must be a real, reachable x402 service to list.
+            try:
+                verdict = verify_x402(service_url)
+            except Exception as e:
+                log.warning("pay-skills PR#%s verify error %r -> skip", num, e)
+                continue
+            status = verdict.get("status")
+            if status != "verified":
+                skipped += 1
+                log.info("pay-skills PR#%s %s -> %s (not listed)",
+                         num, service_url, status)
+                continue
+
+            pay = verdict.get("payment") or {}
+            price = pay.get("max_amount_usdc")
+            name = str(meta.get("title") or meta.get("name")
+                       or _host_slug(service_url)).strip()
+            category = _slugify(str(meta.get("category") or "uncategorized"))
+            tags = ["pre-launch", "pay-skills-pr"]
+            if meta.get("category"):
+                tags.append(str(meta["category"]))
+            out.append({
+                "slug": _host_slug(service_url) + "-payskill",
+                "name": name,
+                "url": service_url,
+                "description": (meta.get("description")
+                               or meta.get("use_case") or None),
+                "category": category,
+                "chains": _payskill_chain(pay.get("network")),
+                "price_min": price,
+                "price_max": price,
+                "currency": "USDC",
+                "facilitator": pay.get("facilitator"),
+                "well_known_url": service_url.rstrip("/") + "/.well-known/x402",
+                "source": "pay-skills-pr",
+                "source_id": f"pr:{num}",
+                "tags": tags,
+                "region": "global",
+                "resource_count": 1,
+                "resource_samples": [{"url": service_url, "kind": "x402-resource"}],
+                "call_info": {
+                    "resource_samples": [{"url": service_url, "kind": "x402-resource"}],
+                    "pr": {"number": num, "title": title, "author": author,
+                           "url": html_url, "created_at": created},
+                },
+                "payment": pay or None,
+            })
+
+    log.info("pay-skills: scanned %d open PRs, listed %d verified, skipped %d",
+             len(prs), len(out), skipped)
+    return out
+
+
 ALL_CRAWLERS = {
     "awesome-x402": fetch_awesome_x402,
     "cdp-bazaar": fetch_cdp_bazaar,
     "x402scan": fetch_x402scan,
+    "pay-skills-pr": fetch_pay_skills_prs,
 }
+
+
+# ---------------------------------------------------------------------------
+# MCP server directory sources (standalone MCP directory).
+# PulseMCP and the official MCP registry are public JSON APIs that list
+# remotely-callable MCP servers (streamable-http / sse endpoints).
+# ---------------------------------------------------------------------------
+
+_PULSEMCP_API = "https://api.pulsemcp.com/v0beta/servers"
+_MCP_REGISTRY_API = "https://registry.modelcontextprotocol.io/v0/servers"
+
+
+def _mcp_x402(*texts: Any) -> bool:
+    blob = " ".join(str(t or "") for t in texts).lower()
+    return "x402" in blob
+
+
+def fetch_pulsemcp(max_pages: int = 20, per_page: int = 100,
+                   remote_only: bool = True) -> list:
+    """Import remotely-callable MCP servers from the PulseMCP directory.
+
+    PulseMCP lists ~16k servers; we keep the ones that expose a remote
+    endpoint (url_direct) so the directory stays a list of callable servers.
+    """
+    out: list[dict] = []
+    seen: set[str] = set()
+    with httpx.Client(timeout=TIMEOUT, follow_redirects=True,
+                      headers={"User-Agent": UA, "Accept": "application/json"}) as c:
+        offset = 0
+        for _ in range(max_pages):
+            # The v0beta API is being sunset and randomly fails a growing
+            # fraction of requests with HTTP 410 / code=API_SUNSET. Those
+            # failures are random, so retry each page a few times before
+            # giving up.
+            data = None
+            for attempt in range(6):
+                try:
+                    r = c.get(_PULSEMCP_API,
+                              params={"count_per_page": per_page, "offset": offset})
+                    if r.status_code == 410:
+                        # random sunset failure -> retry
+                        continue
+                    r.raise_for_status()
+                    data = r.json()
+                    break
+                except (httpx.HTTPError, ValueError) as e:
+                    if attempt == 5:
+                        log.warning("pulsemcp page offset=%d failed: %r", offset, e)
+                    continue
+            if data is None:
+                log.warning("pulsemcp page offset=%d gave up after retries", offset)
+                break
+            servers = data.get("servers") or []
+            if not servers:
+                break
+            for s in servers:
+                remotes = s.get("remotes") or []
+                remote = remotes[0] if isinstance(remotes, list) and remotes else {}
+                endpoint = (remote.get("url_direct") or "").strip() or None
+                if remote_only and not endpoint:
+                    continue
+                name = (s.get("name") or "").strip()
+                homepage = (s.get("external_url") or "").strip() or None
+                source_id = (s.get("url") or "").strip() or (name + ":" + (endpoint or ""))
+                if source_id in seen:
+                    continue
+                seen.add(source_id)
+                desc = (s.get("short_description")
+                        or s.get("EXPERIMENTAL_ai_generated_description") or "").strip() or None
+                slug = _slugify(name) if name else _host_slug(endpoint or homepage or source_id)
+                if endpoint:
+                    slug = f"{slug}-{_host_slug(endpoint)}"[:80]
+                stars = s.get("github_stars")
+                conf = 0.5
+                if endpoint:
+                    conf += 0.1
+                if isinstance(stars, int) and stars >= 50:
+                    conf += 0.1
+                out.append({
+                    "slug": slug,
+                    "name": name or slug,
+                    "description": desc,
+                    "homepage_url": homepage,
+                    "endpoint_url": endpoint,
+                    "transport": remote.get("transport"),
+                    "auth_method": remote.get("authentication_method"),
+                    "cost_hint": remote.get("cost"),
+                    "source_code_url": s.get("source_code_url"),
+                    "package_registry": s.get("package_registry"),
+                    "package_name": s.get("package_name"),
+                    "github_stars": stars if isinstance(stars, int) else None,
+                    "tags": None,
+                    "x402_supported": _mcp_x402(desc, name, remote.get("cost")),
+                    "source": "pulsemcp",
+                    "source_id": source_id,
+                    "source_url": (s.get("url") or "").strip() or None,
+                    "confidence": round(min(1.0, conf), 3),
+                })
+            offset += len(servers)
+            total = data.get("total_count")
+            if isinstance(total, int) and offset >= total:
+                break
+            if not data.get("next"):
+                break
+    log.info("pulsemcp: collected %d remote MCP servers", len(out))
+    return out
+
+
+def fetch_mcp_registry(max_pages: int = 20, per_page: int = 100,
+                       remote_only: bool = True) -> list:
+    """Import remotely-callable servers from the official MCP registry."""
+    out: list[dict] = []
+    seen: set[str] = set()
+    with httpx.Client(timeout=TIMEOUT, follow_redirects=True,
+                      headers={"User-Agent": UA, "Accept": "application/json"}) as c:
+        cursor = None
+        for _ in range(max_pages):
+            params: dict[str, Any] = {"limit": per_page}
+            if cursor:
+                params["cursor"] = cursor
+            try:
+                r = c.get(_MCP_REGISTRY_API, params=params)
+                r.raise_for_status()
+                data = r.json()
+            except (httpx.HTTPError, ValueError) as e:
+                log.warning("mcp-registry page failed: %r", e)
+                break
+            servers = data.get("servers") or []
+            if not servers:
+                break
+            for entry in servers:
+                srv = entry.get("server") if isinstance(entry, dict) else None
+                if not isinstance(srv, dict):
+                    continue
+                remotes = srv.get("remotes") or []
+                remote = remotes[0] if isinstance(remotes, list) and remotes else {}
+                endpoint = (remote.get("url") or "").strip() or None
+                if remote_only and not endpoint:
+                    continue
+                name = (srv.get("name") or "").strip()
+                if not name or name in seen:
+                    continue
+                seen.add(name)
+                desc = (srv.get("description") or "").strip() or None
+                title = (srv.get("title") or "").strip() or None
+                slug = _slugify(title or name)
+                if endpoint:
+                    slug = f"{slug}-{_host_slug(endpoint)}"[:80]
+                repo = srv.get("repository")
+                out.append({
+                    "slug": slug,
+                    "name": title or name,
+                    "description": desc,
+                    "homepage_url": (srv.get("websiteUrl") or "").strip() or None,
+                    "endpoint_url": endpoint,
+                    "transport": remote.get("type"),
+                    "auth_method": None,
+                    "cost_hint": None,
+                    "source_code_url": repo.get("url") if isinstance(repo, dict) else None,
+                    "package_registry": None,
+                    "package_name": None,
+                    "github_stars": None,
+                    "tags": None,
+                    "x402_supported": _mcp_x402(desc, name),
+                    "source": "mcp-registry",
+                    "source_id": name,
+                    "source_url": None,
+                    "confidence": 0.55 if endpoint else 0.4,
+                })
+            cursor = (data.get("metadata") or {}).get("nextCursor")
+            if not cursor:
+                break
+    log.info("mcp-registry: collected %d remote MCP servers", len(out))
+    return out
+
+
+MCP_CRAWLERS = {
+    "pulsemcp": fetch_pulsemcp,
+    "mcp-registry": fetch_mcp_registry,
+}
+
+
+def probe_mcp_health(endpoint: str) -> dict:
+    """Probe an MCP streamable-http endpoint with an `initialize` request.
+
+    Returns {status, latency_ms, http_status}. A reachable endpoint that
+    answers any HTTP status < 500 is considered up: MCP servers commonly
+    reply 400/406 to a bare probe (missing session / SSE Accept) yet are
+    fully alive, so we treat those as 'degraded' rather than 'down'.
+    """
+    if not endpoint:
+        return {"status": "unknown", "latency_ms": None, "http_status": None}
+    body = {
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": {"name": "agent-tools.cloud", "version": "0.1"},
+        },
+    }
+    headers = {
+        "User-Agent": UA,
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+    }
+    try:
+        with httpx.Client(timeout=httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0),
+                          follow_redirects=True) as c:
+            t0 = time.monotonic()
+            r = c.post(endpoint, json=body, headers=headers)
+            dt = int((time.monotonic() - t0) * 1000)
+            sc = r.status_code
+            if sc < 300:
+                return {"status": "ok", "latency_ms": dt, "http_status": sc}
+            if sc < 500:
+                return {"status": "degraded", "latency_ms": dt, "http_status": sc}
+            return {"status": "down", "latency_ms": dt, "http_status": sc}
+    except Exception:
+        return {"status": "down", "latency_ms": None, "http_status": None}
