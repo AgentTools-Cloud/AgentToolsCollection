@@ -1,0 +1,101 @@
+{% extends "base.html" %}
+{% block title %}{{ a.name }} — A2A agent — agent-tools.cloud{% endblock %}
+{% block desc %}{{ (a.description or a.name)|truncate(140) }}{% endblock %}
+{% block content %}
+<a href="/a2a" class="text-sm text-slate-500 hover:text-blue-600 inline-flex items-center gap-1">
+  <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+  Back to A2A agents
+</a>
+
+<header class="mt-4 mb-6 flex flex-wrap items-start justify-between gap-4">
+  <div class="min-w-0">
+    <h1 class="text-3xl md:text-4xl font-extrabold tracking-tight">{{ a.name }}</h1>
+    {% if a.provider_name %}
+      <div class="text-slate-500 text-sm mt-1">{{ a.provider_name }}{% if a.provider_url %} · <a href="{{ a.provider_url }}" target="_blank" rel="noopener" class="text-blue-600 hover:underline">{{ a.provider_url }}</a>{% endif %}</div>
+    {% endif %}
+    {% if a.card_url %}
+      <a href="{{ a.card_url }}" target="_blank" rel="noopener" class="text-blue-600 hover:underline text-sm mono break-all mt-2 inline-block">{{ a.card_url }}</a>
+    {% endif %}
+  </div>
+  <div class="flex items-center gap-2">
+    {% if a.health == 'ok' %}
+      <span class="badge bg-emerald-50 text-emerald-700 ring-1 ring-emerald-100">● healthy</span>
+    {% elif a.health == 'degraded' %}
+      <span class="badge bg-amber-50 text-amber-700 ring-1 ring-amber-100">● degraded</span>
+    {% elif a.health == 'down' %}
+      <span class="badge bg-rose-50 text-rose-700 ring-1 ring-rose-100">● down</span>
+    {% else %}
+      <span class="badge bg-slate-100 text-slate-500 ring-1 ring-slate-200">● unknown</span>
+    {% endif %}
+    {% if a.x402_supported %}<span class="badge bg-violet-50 text-violet-700 ring-1 ring-violet-100">x402</span>{% endif %}
+  </div>
+</header>
+
+{% if a.description %}
+<section class="svc-card p-6 mb-6">
+  <p class="text-slate-800 whitespace-pre-line leading-relaxed">{{ a.description }}</p>
+</section>
+{% endif %}
+
+<section class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+  <div class="stat-card">
+    <div class="text-xs text-slate-500 mb-1">Transport</div>
+    <div class="font-semibold mono text-sm">{{ a.preferred_transport or "—" }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="text-xs text-slate-500 mb-1">Protocol</div>
+    <div class="font-semibold mono text-sm">{{ a.protocol_version or "—" }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="text-xs text-slate-500 mb-1">Price</div>
+    <div class="font-semibold mono text-sm">
+      {% if a.price_hint_usd is not none %}${{ "%.4f"|format(a.price_hint_usd) }} / call{% else %}—{% endif %}
+    </div>
+  </div>
+</section>
+
+{% if a.skills %}
+<section class="svc-card p-6 mb-6">
+  <h2 class="text-base font-semibold mb-4">Skills</h2>
+  <ul class="space-y-3">
+    {% for s in a.skills %}
+    <li class="border-b border-slate-100 pb-3 last:border-0 last:pb-0">
+      <div class="font-medium text-sm">{{ s.name or s.id or "skill" }}</div>
+      {% if s.description %}<div class="text-sm text-slate-600 mt-0.5">{{ s.description }}</div>{% endif %}
+      {% if s.tags %}<div class="mt-1.5 flex flex-wrap gap-1.5">{% for t in s.tags %}<span class="badge bg-slate-50 text-slate-600 ring-1 ring-slate-200">{{ t }}</span>{% endfor %}</div>{% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}
+
+<section class="svc-card p-6 mb-6">
+  <h2 class="text-base font-semibold mb-4">How to call</h2>
+  <div class="space-y-5">
+    {% if a.endpoint_url %}
+    <div>
+      <div class="text-xs text-slate-500 mb-1.5">A2A endpoint ({{ a.preferred_transport or "JSONRPC" }})</div>
+      <pre class="bg-slate-900 text-slate-100 text-xs p-3 rounded-lg overflow-x-auto"><code>{{ a.endpoint_url }}</code></pre>
+    </div>
+    {% endif %}
+    {% if a.card_url %}
+    <div>
+      <div class="text-xs text-slate-500 mb-1.5">Agent card</div>
+      <a href="{{ a.card_url }}" target="_blank" rel="noopener" class="text-blue-600 hover:underline text-sm mono break-all">{{ a.card_url }}</a>
+    </div>
+    {% endif %}
+    {% if a.documentation_url %}
+    <div>
+      <div class="text-xs text-slate-500 mb-1.5">Documentation</div>
+      <a href="{{ a.documentation_url }}" target="_blank" rel="noopener" class="text-blue-600 hover:underline text-sm mono break-all">{{ a.documentation_url }}</a>
+    </div>
+    {% endif %}
+    {% if a.homepage_url %}
+    <div>
+      <div class="text-xs text-slate-500 mb-1.5">Homepage</div>
+      <a href="{{ a.homepage_url }}" target="_blank" rel="noopener" class="text-blue-600 hover:underline text-sm mono break-all">{{ a.homepage_url }}</a>
+    </div>
+    {% endif %}
+  </div>
+</section>
+{% endblock %}
