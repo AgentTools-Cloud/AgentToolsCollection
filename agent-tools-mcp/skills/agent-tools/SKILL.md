@@ -104,6 +104,6 @@ charge — typically $0.001–$0.50 per call.
 ## Related
 
 - Project home: <https://agent-tools.cloud>
-- Source: <https://github.com/JoursBleu/agent-tools-mcp>
+- Source: <https://github.com/JoursBleu/mcpserver>
 - PyPI: <https://pypi.org/project/agent-tools-mcp/>
 - x402 spec: <https://x402.org>

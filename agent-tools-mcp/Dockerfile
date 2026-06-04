@@ -4,7 +4,7 @@ FROM python:3.11-slim
 
 LABEL org.opencontainers.image.title="agent-tools-mcp"
 LABEL org.opencontainers.image.description="Discover and call x402 paid services from any MCP-compatible agent."
-LABEL org.opencontainers.image.source="https://github.com/JoursBleu/agent-tools-mcp"
+LABEL org.opencontainers.image.source="https://github.com/JoursBleu/mcpserver"
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 
 WORKDIR /app
