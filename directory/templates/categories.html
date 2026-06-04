@@ -3,16 +3,55 @@
 {% block content %}
 <section class="mb-8">
   <h1 class="text-3xl md:text-4xl font-extrabold tracking-tight">Categories</h1>
-  <p class="text-slate-500 mt-2">{{ stats.total }} services grouped by domain · pick one to filter the directory.</p>
+  <p class="text-slate-500 mt-2">Browse all three directories by topic — x402 services, MCP servers, and A2A agents.</p>
 </section>
+
+{% macro cat_grid(cats, base_url, param) %}
 <ul class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
-  {% for c in categories %}
+  {% for c in cats %}
   <li>
-    <a href="/?category={{ c.category }}" class="svc-card p-4 flex items-center justify-between">
-      <span class="font-semibold text-slate-900">{{ c.category }}</span>
-      <span class="badge bg-slate-50 text-slate-600 ring-1 ring-slate-200 mono">{{ c.count }}</span>
+    <a href="{{ base_url }}?{{ param }}={{ c.category | urlencode }}" class="svc-card p-4 flex items-center justify-between">
+      <span class="font-semibold text-slate-900 capitalize truncate">{{ c.category }}</span>
+      <span class="badge bg-slate-50 text-slate-600 ring-1 ring-slate-200 mono shrink-0 ml-2">{{ c.count }}</span>
     </a>
   </li>
   {% endfor %}
 </ul>
+{% endmacro %}
+
+<section class="mb-12">
+  <div class="flex items-baseline gap-3 mb-4">
+    <h2 class="text-xl font-bold tracking-tight">x402 Services</h2>
+    <span class="text-sm text-slate-400">{{ stats.total }} services · {{ x402_cats|length }} categories</span>
+  </div>
+  {% if x402_cats %}
+    {{ cat_grid(x402_cats, "/", "category") }}
+  {% else %}
+    <p class="text-slate-400 text-sm">No categories yet.</p>
+  {% endif %}
+</section>
+
+<section class="mb-12">
+  <div class="flex items-baseline gap-3 mb-4">
+    <h2 class="text-xl font-bold tracking-tight">MCP Servers</h2>
+    <span class="text-sm text-slate-400">{{ mcp_stats.total }} servers · grouped by topic</span>
+  </div>
+  {% if mcp_cats %}
+    {{ cat_grid(mcp_cats, "/mcp", "q") }}
+  {% else %}
+    <p class="text-slate-400 text-sm">No topics yet.</p>
+  {% endif %}
+</section>
+
+<section class="mb-12">
+  <div class="flex items-baseline gap-3 mb-4">
+    <h2 class="text-xl font-bold tracking-tight">A2A Agents</h2>
+    <span class="text-sm text-slate-400">{{ a2a_stats.total }} agents · {{ a2a_cats|length }} skill tags</span>
+  </div>
+  {% if a2a_cats %}
+    {{ cat_grid(a2a_cats, "/a2a", "q") }}
+  {% else %}
+    <p class="text-slate-400 text-sm">No skill tags yet.</p>
+  {% endif %}
+</section>
 {% endblock %}
