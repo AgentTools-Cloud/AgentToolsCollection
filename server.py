@@ -61,6 +61,21 @@ app.mount("/mcp-discovery", wrap_with_client_capture(discover_mcp.streamable_htt
 app.add_middleware(PrometheusMiddleware)
 
 
+# Build version — bump to bust browser/CDN HTML caches on each deploy.
+BUILD_VERSION = "2026-06-04.1"
+
+
+@app.middleware("http")
+async def _no_cache_html(request: Request, call_next):
+    resp = await call_next(request)
+    ctype = resp.headers.get("content-type", "")
+    if ctype.startswith("text/html"):
+        resp.headers["Cache-Control"] = "no-cache, must-revalidate"
+        resp.headers["X-Build-Version"] = BUILD_VERSION
+    return resp
+
+
+
 # --- free endpoints -------------------------------------------------------
 
 
