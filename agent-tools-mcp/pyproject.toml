@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agent-tools-mcp"
+version = "0.1.4"
+description = "Search and call x402 paid services from any MCP-compatible agent (Claude, Cursor, Cline)."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+authors = [{ name = "JoursBleu", email = "kangletian@hotmail.com" }]
+keywords = ["mcp", "model-context-protocol", "x402", "agent-tools", "agent", "crypto", "web3", "directory"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Software Development :: Libraries",
+]
+dependencies = [
+  "mcp>=1.2.0",
+  "httpx>=0.27",
+]
+
+[project.urls]
+Homepage     = "https://agent-tools.cloud"
+Repository   = "https://github.com/JoursBleu/agent-tools-mcp"
+Issues       = "https://github.com/JoursBleu/agent-tools-mcp/issues"
+Registry     = "https://registry.modelcontextprotocol.io/"
+
+[project.scripts]
+agent-tools-mcp = "agent_tools_mcp.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["agent_tools_mcp"]
