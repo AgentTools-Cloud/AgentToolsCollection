@@ -1,0 +1,116 @@
+{% extends "base.html" %}
+{% block content %}
+
+<section class="py-6 md:py-10">
+  <div class="flex flex-wrap items-start justify-between gap-4">
+    <div class="max-w-2xl">
+      <h1 class="text-4xl md:text-5xl font-extrabold tracking-tight leading-[1.1]">
+        The discovery layer for the agent economy
+      </h1>
+      <p class="text-slate-600 mt-4 text-lg">
+        One open, agent-readable directory for <span class="font-semibold text-slate-900">x402 paid APIs</span>,
+        <span class="font-semibold text-slate-900">MCP servers</span>, and
+        <span class="font-semibold text-slate-900">A2A agents</span> — searchable by humans and callable by agents.
+      </p>
+    </div>
+    <a href="/submit" class="btn-primary shrink-0">
+      <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12h14"/></svg>
+      List your service
+    </a>
+  </div>
+
+  <form action="/x402" method="get" class="search-shell mt-8 max-w-3xl">
+    <svg class="w-5 h-5 text-slate-400 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+    <input name="q" placeholder="Search x402 services — weather, dexscreener, social data, payments…"
+           class="flex-1 bg-transparent outline-none text-base placeholder:text-slate-400">
+    <button type="submit" class="text-sm text-slate-500 hover:text-slate-900 hidden md:inline">↵ Search</button>
+  </form>
+</section>
+
+<section class="grid grid-cols-1 md:grid-cols-3 gap-5 mt-4">
+  <a href="/x402" class="svc-card p-6 group hover:border-slate-300 transition">
+    <div class="flex items-center justify-between">
+      <span class="text-xs font-semibold uppercase tracking-wider text-slate-400">x402 Services</span>
+      <span class="text-3xl font-bold">{{ stats.total }}</span>
+    </div>
+    <p class="text-sm text-slate-600 mt-3">Paid HTTP APIs that settle micro-payments over the x402 protocol. Auto-verified, with payment + health metadata.</p>
+    <div class="text-sm font-medium text-slate-900 mt-4 inline-flex items-center gap-1 group-hover:gap-2 transition-all">
+      Browse services →
+    </div>
+  </a>
+
+  <a href="/mcp" class="svc-card p-6 group hover:border-slate-300 transition">
+    <div class="flex items-center justify-between">
+      <span class="text-xs font-semibold uppercase tracking-wider text-slate-400">MCP Servers</span>
+      <span class="text-3xl font-bold">{{ mcp_stats.total }}</span>
+    </div>
+    <p class="text-sm text-slate-600 mt-3">Model Context Protocol servers crawled from PulseMCP and the official registry, probed live for remote callability.</p>
+    <div class="text-sm font-medium text-slate-900 mt-4 inline-flex items-center gap-1 group-hover:gap-2 transition-all">
+      Browse servers →
+    </div>
+  </a>
+
+  <a href="/a2a" class="svc-card p-6 group hover:border-slate-300 transition">
+    <div class="flex items-center justify-between">
+      <span class="text-xs font-semibold uppercase tracking-wider text-slate-400">A2A Agents</span>
+      <span class="text-3xl font-bold">{{ a2a_stats.total }}</span>
+    </div>
+    <p class="text-sm text-slate-600 mt-3">Agents that publish an A2A Agent Card. Discover skills, capabilities, and endpoints straight from <span class="mono">/.well-known</span>.</p>
+    <div class="text-sm font-medium text-slate-900 mt-4 inline-flex items-center gap-1 group-hover:gap-2 transition-all">
+      Browse agents →
+    </div>
+  </a>
+</section>
+
+<section class="mt-12">
+  <div class="flex flex-wrap items-end justify-between gap-4 mb-4">
+    <h2 class="text-2xl font-bold tracking-tight">Across the directory</h2>
+    <div class="flex items-center gap-2 text-sm">
+      <a href="/api/v1/stats" class="pill mono text-xs">/api/v1/stats</a>
+      <a href="/.well-known/agent-tools.json" class="pill mono text-xs">/.well-known</a>
+    </div>
+  </div>
+  <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+    <div class="stat-card">
+      <div class="text-sm text-slate-500">Total entries</div>
+      <div class="text-3xl font-bold mt-1">{{ stats.total + mcp_stats.total + a2a_stats.total }}</div>
+      <div class="text-xs text-slate-400 mt-3">x402 · MCP · A2A combined</div>
+    </div>
+    <div class="stat-card">
+      <div class="text-sm text-slate-500">Healthy</div>
+      <div class="text-3xl font-bold mt-1 text-emerald-600">{{ stats.healthy + mcp_stats.healthy + a2a_stats.healthy }}</div>
+      <div class="text-xs text-slate-400 mt-3">passed last liveness probe</div>
+    </div>
+    <div class="stat-card">
+      <div class="text-sm text-slate-500">Remote-callable MCP</div>
+      <div class="text-3xl font-bold mt-1">{{ mcp_stats.remote_callable }}</div>
+      <div class="text-xs text-slate-400 mt-3">have a live endpoint URL</div>
+    </div>
+    <div class="stat-card">
+      <div class="text-sm text-slate-500">x402-capable</div>
+      <div class="text-3xl font-bold mt-1">{{ stats.total + mcp_stats.x402_capable + a2a_stats.x402_capable }}</div>
+      <div class="text-xs text-slate-400 mt-3">accept on-chain payment</div>
+    </div>
+  </div>
+</section>
+
+<section class="mt-12 svc-card p-6 md:p-8 bg-slate-50/60">
+  <div class="flex flex-wrap items-start justify-between gap-6">
+    <div class="max-w-xl">
+      <h2 class="text-xl font-bold tracking-tight">Built for agents, not just humans</h2>
+      <p class="text-sm text-slate-600 mt-2">
+        Every page has a JSON counterpart. Ask for LLM-ranked recommendations, search by intent,
+        or pull a single card — no scraping required.
+      </p>
+    </div>
+    <div class="flex flex-wrap gap-2 text-xs">
+      <a href="/api/v1/ask" class="pill mono">POST /api/v1/ask</a>
+      <a href="/api/v1/search" class="pill mono">/api/v1/search</a>
+      <a href="/api/v1/mcp/search" class="pill mono">/api/v1/mcp/search</a>
+      <a href="/api/v1/a2a/search" class="pill mono">/api/v1/a2a/search</a>
+      <a href="/openapi.json" class="pill mono">openapi.json</a>
+    </div>
+  </div>
+</section>
+
+{% endblock %}

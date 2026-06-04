@@ -43,8 +43,7 @@
       </a>
       <nav class="flex items-center gap-5 text-sm text-slate-500 overflow-x-auto h-full flex-1 min-w-0">
         {% set p = request.url.path %}
-        <a href="/" class="h-full flex items-center border-b-2 whitespace-nowrap {% if p == '/' %}tab-active{% else %}tab-link{% endif %}">Home</a>
-        <a href="/x402" class="h-full flex items-center border-b-2 whitespace-nowrap {% if p.startswith('/x402') or p.startswith('/services') %}tab-active{% else %}tab-link{% endif %}">x402 Services</a>
+        <a href="/" class="h-full flex items-center border-b-2 whitespace-nowrap {% if p == '/' %}tab-active{% else %}tab-link{% endif %}">x402 Services</a>
         <a href="/mcp" class="h-full flex items-center border-b-2 whitespace-nowrap {% if p.startswith('/mcp') %}tab-active{% else %}tab-link{% endif %}">MCP Servers</a>
         <a href="/a2a" class="h-full flex items-center border-b-2 whitespace-nowrap {% if p.startswith('/a2a') %}tab-active{% else %}tab-link{% endif %}">A2A Agents</a>
         <a href="/categories" class="h-full flex items-center border-b-2 whitespace-nowrap {% if p == '/categories' %}tab-active{% else %}tab-link{% endif %}">Categories</a>

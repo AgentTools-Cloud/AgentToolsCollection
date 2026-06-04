@@ -22,7 +22,7 @@ from . import limits
 BASE_DIR = Path(__file__).resolve().parent
 TEMPLATES = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 # Build version — bump on deploy to bust browser/CDN HTML caches.
-BUILD_VERSION = "2026-06-04.8"
+BUILD_VERSION = "2026-06-04.7"
 TEMPLATES.env.globals["build_version"] = BUILD_VERSION
 
 router = APIRouter()
@@ -52,19 +52,7 @@ def _enforce_ask_limit(request: Request, use_llm: bool) -> None:
 
 
 @router.get("/", response_class=HTMLResponse, include_in_schema=False)
-async def home(request: Request):
-    with _conn() as c:
-        s = db.stats(c)
-        ms = db.mcp_stats(c)
-        a2s = db.a2a_stats(c)
-    return TEMPLATES.TemplateResponse(request, "home.html", {
-            "request": request, "stats": s, "mcp_stats": ms, "a2a_stats": a2s,
-        },
-    )
-
-
-@router.get("/x402", response_class=HTMLResponse, include_in_schema=False)
-async def x402_page(
+async def home(
     request: Request,
     q: str | None = Query(default=None),
     category: str | None = Query(default=None),
