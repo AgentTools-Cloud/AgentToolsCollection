@@ -4,20 +4,16 @@
 {% block content %}
 
 <section class="mb-10">
-  <div class="flex flex-wrap items-start justify-between gap-4 mb-5">
-    <div>
-      <h1 class="text-4xl md:text-5xl font-extrabold tracking-tight leading-none">A2A Agents</h1>
-      <p class="mt-1.5 text-sm md:text-[15px] font-semibold tracking-wide text-blue-600">Agent-to-Agent protocol · discoverable agent cards</p>
-    </div>
-    <a href="/submit" class="btn-primary">
+  <div class="flex flex-wrap items-start justify-between gap-4 mb-3">
+    <p class="text-slate-600 max-w-3xl">
+      Agents that publish an A2A <span class="mono">/.well-known/agent-card.json</span> — {{ stats.total }} discovered,
+      health-probed, and tagged for x402 micropayment support.
+    </p>
+    <a href="/submit" class="btn-primary shrink-0">
       <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12h14"/></svg>
       Add your agent
     </a>
   </div>
-  <p class="text-slate-600 max-w-3xl">
-    Agents that publish an A2A <span class="mono">/.well-known/agent-card.json</span> — {{ stats.total }} discovered,
-    health-probed, and tagged for x402 micropayment support.
-  </p>
 
   <form id="a2a-filter-form"
         hx-get="/_partials/a2a"
