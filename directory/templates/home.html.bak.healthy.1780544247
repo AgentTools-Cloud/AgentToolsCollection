@@ -70,16 +70,11 @@
       <a href="/.well-known/agent-tools.json" class="pill mono text-xs">/.well-known</a>
     </div>
   </div>
-  <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
+  <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
     <div class="stat-card">
       <div class="text-sm text-slate-500">Total entries</div>
       <div class="text-3xl font-bold mt-1">{{ stats.total + mcp_stats.total + a2a_stats.total }}</div>
       <div class="text-xs text-slate-400 mt-3">x402 · MCP · A2A combined</div>
-    </div>
-    <div class="stat-card">
-      <div class="text-sm text-slate-500">Healthy</div>
-      <div class="text-3xl font-bold mt-1 text-emerald-600">{{ stats.healthy + mcp_stats.healthy + a2a_stats.healthy }}</div>
-      <div class="text-xs text-slate-400 mt-3">passed last liveness probe</div>
     </div>
     <div class="stat-card">
       <div class="text-sm text-slate-500">x402 paid APIs</div>
