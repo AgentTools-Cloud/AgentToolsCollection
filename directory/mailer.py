@@ -6,6 +6,7 @@ become no-ops (logged), so approval flows never fail because of email.
 
 from __future__ import annotations
 
+import html
 import logging
 import os
 import smtplib
@@ -19,6 +20,7 @@ log = logging.getLogger("directory.mailer")
 FROM_NAME = "Agent Tools"
 REPLY_TO = "contact@agent-tools.cloud"
 SITE = "https://agent-tools.cloud"
+ADMIN_EMAIL = os.getenv("ADMIN_NOTIFY_EMAIL", "admin@agent-tools.cloud")
 
 # palette
 BLUE = "#2563eb"
@@ -181,3 +183,93 @@ def send_approval_email(
     )
     html = _approval_html(service_name, service_url, verified_line)
     return _send(to_email, subject, text, html)
+
+
+# --- admin notifications (every submission + auto-review verdict) -----------
+
+_VERDICT_COLOR = {
+    "listed": "#15803d", "verified": "#15803d", "updated": "#15803d",
+    "rejected": "#b91c1c", "pending": "#b45309", "uncertain": "#b45309",
+    "error": "#b91c1c",
+}
+
+
+def _admin_html(title: str, kind: str, verdict: str, fields: list[tuple]) -> str:
+    color = _VERDICT_COLOR.get((verdict or "").lower(), SLATE)
+    rows = ""
+    for label, value in fields:
+        if value is None or value == "":
+            continue
+        lbl = html.escape(str(label))
+        val = html.escape(str(value))
+        rows += (
+            f'<tr><td style="padding:11px 0;border-bottom:1px solid {BORDER};">'
+            f'<div style="font-size:11px;font-weight:600;color:#94a3b8;'
+            f'letter-spacing:.5px;text-transform:uppercase;margin-bottom:3px;">{lbl}</div>'
+            f'<div style="font-size:14px;color:{INK};line-height:1.5;'
+            f'word-break:break-word;">{val}</div>'
+            f'</td></tr>'
+        )
+    safe_title = html.escape(str(title))
+    safe_kind = html.escape(str(kind))
+    safe_verdict = html.escape(str(verdict))
+    return f"""\
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"></head>
+<body style="margin:0;padding:0;background:{LIGHT};">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:{LIGHT};padding:28px 12px;">
+    <tr><td align="center">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+        style="max-width:560px;background:#ffffff;border:1px solid {BORDER};border-radius:14px;overflow:hidden;
+        font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+        <tr><td style="background:{INK};padding:14px 24px;color:#fff;font-size:14px;font-weight:700;">
+          Agent&nbsp;Tools &middot; admin
+        </td></tr>
+        <tr><td style="padding:24px 24px 8px 24px;">
+          <div style="font-size:11px;font-weight:600;color:#94a3b8;letter-spacing:.6px;text-transform:uppercase;">{safe_kind}</div>
+          <h1 style="margin:6px 0 2px 0;font-size:19px;color:{INK};font-weight:800;">{safe_title}</h1>
+          <span style="display:inline-block;margin:10px 0 18px 0;background:{color}1a;color:{color};
+            font-size:12px;font-weight:700;padding:5px 13px;border-radius:9999px;text-transform:uppercase;letter-spacing:.4px;">
+            {safe_verdict}</span>
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+            style="border-top:1px solid {BORDER};margin-top:4px;">
+            {rows}
+          </table>
+        </td></tr>
+        <tr><td style="padding:16px 24px 22px 24px;">
+          <p style="margin:0;font-size:11px;color:#94a3b8;">
+            Automated admin notification &middot; <a href="{SITE}" style="color:{BLUE};text-decoration:none;">agent-tools.cloud</a>
+          </p>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body></html>"""
+
+
+def send_admin_notification(
+    kind: str,
+    title: str,
+    verdict: str,
+    fields: list[tuple],
+) -> bool:
+    """Email admin@agent-tools.cloud about a submission + its review verdict.
+
+    kind    short channel label, e.g. "x402 submission", "MCP submission".
+    title   service / endpoint name.
+    verdict listed | rejected | pending | updated | verified | uncertain.
+    fields  list of (label, value) rows to render (url, contact, x402, ...).
+    Never raises — email failures must not break the submit/review flow.
+    """
+    try:
+        subject = f"[Agent Tools] {kind}: {title} — {verdict}"
+        text_lines = [f"{kind}", f"{title}", f"verdict: {verdict}", ""]
+        for label, value in fields:
+            if value not in (None, ""):
+                text_lines.append(f"{label}: {value}")
+        text = "\n".join(text_lines) + "\n"
+        html = _admin_html(title, kind, verdict, fields)
+        return _send(ADMIN_EMAIL, subject, text, html)
+    except Exception as e:  # noqa: BLE001
+        log.warning("admin notification failed for %r: %r", title, e)
+        return False

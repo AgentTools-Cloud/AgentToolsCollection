@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 import re
 import time
 
@@ -11,6 +12,7 @@ import yaml
 from typing import Any
 from urllib.parse import urlparse
 
+import os
 import httpx
 
 log = logging.getLogger("directory.crawlers")
@@ -99,71 +101,224 @@ def _parse_awesome_md(text, source_tag):
     return out
 
 
-CDP_BAZAAR_CANDIDATES = [
-    "https://api.cdp.coinbase.com/platform/v1/x402/discovery/resources",
-    "https://bazaar.coinbase.com/api/services",
-]
+# CDP Bazaar (Coinbase) public x402 discovery feed. The v2 endpoint is fully
+# public (no auth / no KYC); the old v1 path returns 401 and the bazaar.coinbase
+# subdomain does not resolve. The feed is resource/path-level (~30k rows) while
+# our directory is host-level, so we aggregate by host.
+CDP_BAZAAR_V2 = "https://api.cdp.coinbase.com/platform/v2/x402/discovery/resources"
+
+# USDC contracts (6 decimals) on supported chains, lowercased. Used to turn a
+# bazaar accept ``amount`` (atomic units) into a USD price.
+_BAZAAR_USDC = {
+    "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",  # base
+    "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",  # ethereum
+    "0x0b2c639c533813f4aa9d7837caf62653d097ff85",  # optimism
+    "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359",  # polygon
+    "0xaf88d065e77c8cc2239327c5edb3a432268e5831",  # arbitrum
+}
+
+
+def _bazaar_price_usd(accept: dict):
+    """USD price from a bazaar accept entry (USDC atomic amount / 1e6)."""
+    amt = accept.get("amount")
+    if amt in (None, ""):
+        amt = accept.get("maxAmountRequired")
+    if amt in (None, ""):
+        return None
+    try:
+        amt = float(amt)
+    except (TypeError, ValueError):
+        return None
+    asset = (accept.get("asset") or "").lower()
+    extra = accept.get("extra") if isinstance(accept.get("extra"), dict) else {}
+    name = (extra.get("name") or "").lower()
+    if asset not in _BAZAAR_USDC and name not in ("usdc", "usd coin"):
+        return None
+    return (amt / 1_000_000) or None
+
+
+def _bazaar_host(url: str) -> str:
+    if not url or "://" not in url:
+        return ""
+    h = (urlparse(url).hostname or "").lower()
+    return h[4:] if h.startswith("www.") else h
+
+
+def _bazaar_fetch_raw(page_sleep: float = 0.3, max_pages: int = 400,
+                      since_iso: str | None = None) -> list:
+    """Page through the public CDP Bazaar v2 discovery feed.
+
+    The v2 feed has no reliable server-side time filter and its
+    ``sortBy=lastUpdated&order=desc`` is NOT monotone across pages (verified
+    2026-06-05: deeper offsets can hold newer items), so we cannot early-stop on
+    a sorted boundary without skipping recent updates. Instead, when
+    ``since_iso`` is given we page through everything in natural order but keep
+    only items with ``lastUpdated >= since_iso``. The aggregate/dedup/upsert
+    work downstream then only touches the recently-changed tail.
+    """
+    items: list = []
+    with httpx.Client(timeout=TIMEOUT, headers={"User-Agent": UA, "Accept": "application/json"}) as c:
+        offset = 0
+        for _ in range(max_pages):
+            params = {"limit": 100, "offset": offset}
+            try:
+                r = c.get(CDP_BAZAAR_V2, params=params)
+                if r.status_code == 429:
+                    time.sleep(2.5)
+                    r = c.get(CDP_BAZAAR_V2, params=params)
+                if r.status_code != 200:
+                    log.warning("cdp-bazaar: stop HTTP %d at offset %d", r.status_code, offset)
+                    break
+                d = r.json()
+            except Exception as e:
+                log.warning("cdp-bazaar: fetch error at offset %d: %r", offset, e)
+                break
+            page = d.get("items") or []
+            if not page:
+                break
+            if since_iso:
+                for it in page:
+                    if (it.get("lastUpdated") or "") >= since_iso:
+                        items.append(it)
+            else:
+                items.extend(page)
+            total = (d.get("pagination") or {}).get("total", 0)
+            offset += 100
+            if offset >= total:
+                break
+            time.sleep(page_sleep)
+    return items
 
 
 def fetch_cdp_bazaar() -> list:
-    payload = None
-    last_err = None
-    with httpx.Client(timeout=TIMEOUT, headers={"User-Agent": UA, "Accept": "application/json"}) as c:
-        for url in CDP_BAZAAR_CANDIDATES:
-            try:
-                r = c.get(url)
-                if r.status_code // 100 == 2 and "json" in r.headers.get("content-type", ""):
-                    payload = r.json()
-                    break
-                last_err = f"{url} -> HTTP {r.status_code}"
-            except Exception as e:
-                last_err = f"{url} -> {e!r}"
-    if payload is None:
-        log.warning("cdp-bazaar: no endpoint reachable (last=%s)", last_err)
+    """CDP Bazaar x402 discovery -> host-level service entries.
+
+    Aggregates the resource/path-level feed by host. To keep one entry per
+    service, a host already listed by a *different* source is skipped here
+    (cross-source dedup); hosts new to the directory -- or previously added by
+    this same source -- are emitted and upserted normally.
+
+    Incremental: a ``cdp_bazaar:updated_since`` watermark in the meta table
+    bounds each run to resources changed since the last crawl (minus a safety
+    overlap), so the routine 6h timer pulls only the recent tail. A cold start
+    (no watermark) does a full crawl.
+    """
+    from . import db
+
+    _OVERLAP_S = 12 * 3600  # re-scan a 12h overlap to absorb in-page jitter
+    since_iso = None
+    try:
+        with db.connect(read_only=True) as conn:
+            wm = db.get_meta(conn, "cdp_bazaar:updated_since")
+        if wm:
+            t = time.strptime(wm[:19], "%Y-%m-%dT%H:%M:%S")
+            since_iso = time.strftime(
+                "%Y-%m-%dT%H:%M:%S.000Z",
+                time.gmtime(time.mktime(t) - time.timezone - _OVERLAP_S),
+            )
+    except Exception as e:
+        log.warning("cdp-bazaar: watermark read failed, full crawl: %r", e)
+        since_iso = None
+
+    raw = _bazaar_fetch_raw(since_iso=since_iso)
+    if not raw:
         return []
 
-    items = []
-    raw_list = (payload.get("resources") or payload.get("services") or payload.get("data")
-                or (payload if isinstance(payload, list) else []))
-    for item in raw_list:
-        if not isinstance(item, dict):
+    # Advance watermark to the newest lastUpdated seen this run.
+    max_seen = ""
+    for it in raw:
+        lu = (it.get("lastUpdated") or "") if isinstance(it, dict) else ""
+        if lu > max_seen:
+            max_seen = lu
+    if max_seen:
+        try:
+            with db.writer() as conn:
+                db.set_meta(conn, "cdp_bazaar:updated_since", max_seen)
+        except Exception as e:
+            log.warning("cdp-bazaar: watermark write failed: %r", e)
+
+    by_host: dict = {}
+    for it in raw:
+        if not isinstance(it, dict):
             continue
-        url = item.get("url") or item.get("endpoint") or item.get("resource")
-        if not url:
+        host = _bazaar_host(it.get("resource") or "")
+        if host:
+            by_host.setdefault(host, []).append(it)
+
+    other_hosts: set = set()
+    try:
+        from . import db
+        with db.connect(read_only=True) as conn:
+            for r in conn.execute(
+                "SELECT url, source FROM services WHERE url IS NOT NULL AND url != ''"
+            ):
+                if r["source"] == "cdp-bazaar":
+                    continue
+                h = _bazaar_host(r["url"] or "")
+                if h:
+                    other_hosts.add(h)
+    except Exception as e:
+        log.warning("cdp-bazaar: dedup preload failed, may list dups: %r", e)
+
+    out = []
+    for host, resources in sorted(by_host.items()):
+        if host in other_hosts:
             continue
-        name = item.get("name") or item.get("title") or url
-        price = item.get("price") or {}
-        price_amount = None
-        if isinstance(price, dict):
-            try:
-                price_amount = float(price.get("amount") or price.get("value") or 0) or None
-            except (TypeError, ValueError):
-                price_amount = None
-        chains = _normalize_chains(item.get("chains") or item.get("network"))
-        items.append({
-            "slug": _host_slug(url) + "-bazaar",
-            "name": name, "url": url,
-            "description": item.get("description"),
-            "category": _slugify(item.get("category") or "general"),
-            "chains": chains,
-            "price_min": price_amount, "price_max": price_amount,
-            "facilitator": item.get("facilitator"),
-            "openapi_url": item.get("openapi"),
-            "mcp_url": item.get("mcp"),
-            "well_known_url": item.get("well_known"),
-            "resource_count": 1,
-            "resource_samples": [{"url": url, "kind": "x402-resource"}],
+        origin = "https://" + host
+        chains: set = set()
+        prices: list = []
+        samples: list = []
+        descriptions: list = []
+        payto = None
+        mcp_url = None
+        for it in resources:
+            res = it.get("resource") or ""
+            if it.get("description"):
+                descriptions.append(it["description"])
+            for a in (it.get("accepts") or []):
+                if a.get("network"):
+                    chains.update(_normalize_chains(a.get("network")))
+                p = _bazaar_price_usd(a)
+                if p is not None:
+                    prices.append(p)
+                if payto is None and a.get("payTo"):
+                    payto = a.get("payTo")
+            if len(samples) < 12:
+                samples.append({"url": res, "kind": it.get("type") or "x402-resource"})
+            low = res.lower()
+            if mcp_url is None and re.search(r"(^|[./_-])mcp([./_-]|$)|/sse|/streamable", low):
+                mcp_url = res
+        description = descriptions[0] if descriptions else None
+        if description and len(description) > 400:
+            description = description[:397] + "..."
+        out.append({
+            "slug": _host_slug(origin) + "-bazaar",
+            "name": host,
+            "url": origin,
+            "description": description,
+            "category": "general",
+            "chains": sorted(chains),
+            "price_min": min(prices) if prices else None,
+            "price_max": max(prices) if prices else None,
+            "mcp_url": mcp_url,
+            "well_known_url": origin + "/.well-known/x402",
+            "resource_count": len(resources),
+            "resource_samples": samples,
             "payment": {
-                "price_min_usd": price_amount,
-                "price_max_usd": price_amount,
-                "chains": chains,
-                "facilitator": item.get("facilitator"),
+                "price_min_usd": min(prices) if prices else None,
+                "price_max_usd": max(prices) if prices else None,
+                "chains": sorted(chains),
+                "pay_to": payto,
             },
-            "call_info": {"resource_samples": [{"url": url, "kind": "x402-resource"}]},
-            "source": "cdp-bazaar", "source_id": str(item.get("id") or url),
-            "tags": item.get("tags") or [], "region": "global",
+            "call_info": {"resource_count": len(resources), "resource_samples": samples},
+            "source": "cdp-bazaar",
+            "source_id": host,
+            "tags": [],
+            "region": "global",
         })
-    return items
+    log.info("cdp-bazaar: %d resources -> %d hosts, %d new after cross-source dedup",
+             len(raw), len(by_host), len(out))
+    return out
 
 
 # x402scan exposes its data via a public tRPC API.
@@ -464,17 +619,50 @@ def check_health(url, well_known=None):
 # signal to fake: spoofing it requires actually paying the service on-chain.
 # ---------------------------------------------------------------------------
 
-_BASE_USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
-_BLOCKSCOUT_BASE = "https://base.blockscout.com/api"
+EVM_USDC_INDEXERS = {
+    # chain key -> (Blockscout Etherscan-compatible API base, native USDC).
+    # All verified live on 2026-06-05 (getToken -> symbol=USDC, 6 decimals).
+    "base":     ("https://base.blockscout.com/api",     "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"),
+    "ethereum": ("https://eth.blockscout.com/api",      "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"),
+    "optimism": ("https://optimism.blockscout.com/api", "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85"),
+    "polygon":  ("https://polygon.blockscout.com/api",  "0x3c499c542cEF5E3811e1192ce70d8cc03d5c3359"),
+    "arbitrum": ("https://arbitrum.blockscout.com/api", "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"),
+    "gnosis":   ("https://gnosis.blockscout.com/api",   "0xDDAfbb505ad214D7b80b1f830fcCc89B60fb7A83"),
+}
+
+# payment.accepts[].network identifier -> chain key above.
+_NETWORK_CHAIN = {
+    "base": "base", "eip155:8453": "base", "8453": "base",
+    "ethereum": "ethereum", "eth": "ethereum", "eip155:1": "ethereum", "1": "ethereum",
+    "optimism": "optimism", "op": "optimism", "eip155:10": "optimism", "10": "optimism",
+    "polygon": "polygon", "matic": "polygon", "eip155:137": "polygon", "137": "polygon",
+    "arbitrum": "arbitrum", "arbitrum-one": "arbitrum", "eip155:42161": "arbitrum", "42161": "arbitrum",
+    "gnosis": "gnosis", "xdai": "gnosis", "eip155:100": "gnosis", "100": "gnosis",
+}
+
+# Back-compat alias (kept for any external import).
+_BASE_USDC = EVM_USDC_INDEXERS["base"][1]
 
 
-def fetch_payto_activity(payto, days=30, max_pages=8, contract=_BASE_USDC):
-    """Count incoming Base USDC transfers to ``payto`` over the window.
+def network_to_chain(network):
+    """Map a payment-network identifier to a supported chain key, or None."""
+    if not network:
+        return None
+    return _NETWORK_CHAIN.get(str(network).strip().lower())
 
-    Returns {"tx": int, "payers": int, "ok": bool, "capped": bool}. ``ok`` is
-    False on a query/network failure so callers can skip the write instead of
-    recording a false zero.
+
+def fetch_payto_activity(payto, chain="base", days=30, max_pages=8):
+    """Count incoming USDC transfers to ``payto`` on ``chain`` over the window.
+
+    ``chain`` is a key of EVM_USDC_INDEXERS. Returns
+    {"tx": int, "payers": int, "ok": bool, "capped": bool}. ``ok`` is False on a
+    query/network failure or unsupported chain, so callers can skip the write
+    instead of recording a false zero.
     """
+    indexer = EVM_USDC_INDEXERS.get(chain)
+    if indexer is None:
+        return {"tx": 0, "payers": 0, "ok": False, "capped": False}
+    _api_base, contract = indexer
     payto_l = payto.lower()
     cutoff = int(time.time()) - days * 86400
     tx = 0
@@ -489,10 +677,10 @@ def fetch_payto_activity(payto, days=30, max_pages=8, contract=_BASE_USDC):
                     "contractaddress": contract, "address": payto,
                     "page": page, "offset": 100, "sort": "desc",
                 }
-                r = c.get(_BLOCKSCOUT_BASE, params=params)
+                r = c.get(_api_base, params=params)
                 if r.status_code == 429:
                     time.sleep(1.5)
-                    r = c.get(_BLOCKSCOUT_BASE, params=params)
+                    r = c.get(_api_base, params=params)
                 data = r.json()
                 rows = data.get("result")
                 if not isinstance(rows, list):
@@ -928,8 +1116,10 @@ _MCP_REGISTRY_API = "https://registry.modelcontextprotocol.io/v0/servers"
 
 
 def _mcp_x402(*texts: Any) -> bool:
-    blob = " ".join(str(t or "") for t in texts).lower()
-    return "x402" in blob
+    # x402 support is never inferred from text. directory.reverify_x402
+    # proves it by probing each endpoint for an HTTP 402 / .well-known/x402
+    # descriptor and owns the x402_supported flag.
+    return False
 
 
 def fetch_pulsemcp(max_pages: int = 20, per_page: int = 100,
@@ -938,35 +1128,53 @@ def fetch_pulsemcp(max_pages: int = 20, per_page: int = 100,
 
     PulseMCP lists ~16k servers; we keep the ones that expose a remote
     endpoint (url_direct) so the directory stays a list of callable servers.
+
+    The v0beta API is being sunset and randomly rejects ~half of all
+    requests with HTTP 410 (code=API_SUNSET). We retry each page with
+    exponential backoff + jitter, and a page that still fails is skipped
+    (we advance to the next offset) instead of abandoning the whole crawl,
+    so one unlucky page can no longer wipe out the entire pulsemcp refresh.
     """
     out: list[dict] = []
     seen: set[str] = set()
+    consecutive_fail = 0
     with httpx.Client(timeout=TIMEOUT, follow_redirects=True,
                       headers={"User-Agent": UA, "Accept": "application/json"}) as c:
         offset = 0
         for _ in range(max_pages):
-            # The v0beta API is being sunset and randomly fails a growing
-            # fraction of requests with HTTP 410 / code=API_SUNSET. Those
-            # failures are random, so retry each page a few times before
-            # giving up.
             data = None
-            for attempt in range(6):
+            for attempt in range(8):
                 try:
                     r = c.get(_PULSEMCP_API,
                               params={"count_per_page": per_page, "offset": offset})
                     if r.status_code == 410:
-                        # random sunset failure -> retry
+                        # random sunset failure -> back off and retry
+                        time.sleep(min(8.0, 0.5 * (1.6 ** attempt))
+                                   + random.uniform(0, 0.4))
                         continue
                     r.raise_for_status()
                     data = r.json()
                     break
                 except (httpx.HTTPError, ValueError) as e:
-                    if attempt == 5:
+                    if attempt == 7:
                         log.warning("pulsemcp page offset=%d failed: %r", offset, e)
+                    else:
+                        time.sleep(min(8.0, 0.5 * (1.6 ** attempt))
+                                   + random.uniform(0, 0.4))
                     continue
             if data is None:
-                log.warning("pulsemcp page offset=%d gave up after retries", offset)
-                break
+                # Skip this page instead of dropping the whole crawl; bail
+                # only if several consecutive pages are unreachable.
+                consecutive_fail += 1
+                log.warning("pulsemcp page offset=%d gave up after retries "
+                            "(skip; consecutive_fail=%d)", offset, consecutive_fail)
+                if consecutive_fail >= 3:
+                    log.warning("pulsemcp: too many consecutive failed pages, "
+                                "stopping with %d collected", len(out))
+                    break
+                offset += per_page
+                continue
+            consecutive_fail = 0
             servers = data.get("servers") or []
             if not servers:
                 break
@@ -1023,9 +1231,17 @@ def fetch_pulsemcp(max_pages: int = 20, per_page: int = 100,
     return out
 
 
-def fetch_mcp_registry(max_pages: int = 20, per_page: int = 100,
+def fetch_mcp_registry(updated_since: str | None = None,
+                       max_pages: int = 1000, per_page: int = 100,
                        remote_only: bool = True) -> list:
-    """Import remotely-callable servers from the official MCP registry."""
+    """Import servers from the official MCP registry.
+
+    ``updated_since=None`` does a full crawl (pages through everything).
+    When ``updated_since`` is an ISO-8601 timestamp the registry returns only
+    servers changed since then AND includes deleted ones (status != "active"),
+    so removals propagate. Returned items carry private ``_status`` and
+    ``_updated_at`` keys for the caller to advance the watermark / drop rows.
+    """
     out: list[dict] = []
     seen: set[str] = set()
     with httpx.Client(timeout=TIMEOUT, follow_redirects=True,
@@ -1035,6 +1251,8 @@ def fetch_mcp_registry(max_pages: int = 20, per_page: int = 100,
             params: dict[str, Any] = {"limit": per_page}
             if cursor:
                 params["cursor"] = cursor
+            if updated_since:
+                params["updated_since"] = updated_since
             try:
                 r = c.get(_MCP_REGISTRY_API, params=params)
                 r.raise_for_status()
@@ -1049,15 +1267,29 @@ def fetch_mcp_registry(max_pages: int = 20, per_page: int = 100,
                 srv = entry.get("server") if isinstance(entry, dict) else None
                 if not isinstance(srv, dict):
                     continue
+                rmeta = ((entry.get("_meta") or {}).get(
+                    "io.modelcontextprotocol.registry/official") or {})
+                status = (rmeta.get("status") or "active").strip().lower()
+                updated_at = rmeta.get("updatedAt") or rmeta.get("publishedAt")
+                name = (srv.get("name") or "").strip()
+                if not name or name in seen:
+                    continue
+                seen.add(name)
+                # Deleted servers are emitted (incremental only) so the caller
+                # can remove them, even with no endpoint left.
+                if status != "active":
+                    out.append({
+                        "source": "mcp-registry",
+                        "source_id": name,
+                        "_status": status,
+                        "_updated_at": updated_at,
+                    })
+                    continue
                 remotes = srv.get("remotes") or []
                 remote = remotes[0] if isinstance(remotes, list) and remotes else {}
                 endpoint = (remote.get("url") or "").strip() or None
                 if remote_only and not endpoint:
                     continue
-                name = (srv.get("name") or "").strip()
-                if not name or name in seen:
-                    continue
-                seen.add(name)
                 desc = (srv.get("description") or "").strip() or None
                 title = (srv.get("title") or "").strip() or None
                 slug = _slugify(title or name)
@@ -1083,11 +1315,14 @@ def fetch_mcp_registry(max_pages: int = 20, per_page: int = 100,
                     "source_id": name,
                     "source_url": None,
                     "confidence": 0.55 if endpoint else 0.4,
+                    "_status": status,
+                    "_updated_at": updated_at,
                 })
             cursor = (data.get("metadata") or {}).get("nextCursor")
             if not cursor:
                 break
-    log.info("mcp-registry: collected %d remote MCP servers", len(out))
+    log.info("mcp-registry: collected %d items (updated_since=%s)",
+             len(out), updated_since)
     return out
 
 
@@ -1097,17 +1332,51 @@ MCP_CRAWLERS = {
 }
 
 
-def probe_mcp_health(endpoint: str) -> dict:
-    """Probe an MCP streamable-http endpoint with an `initialize` request.
+def _mcp_parse_response(r):
+    """Parse an MCP streamable-http response body (JSON or SSE) to a dict."""
+    ct = r.headers.get("content-type", "")
+    if "event-stream" in ct:
+        for line in r.text.splitlines():
+            if line.startswith("data:"):
+                try:
+                    return json.loads(line[5:].strip())
+                except Exception:
+                    continue
+        return None
+    try:
+        return r.json()
+    except Exception:
+        return None
 
-    Returns {status, latency_ms, http_status}. A reachable endpoint that
-    answers any HTTP status < 500 is considered up: MCP servers commonly
-    reply 400/406 to a bare probe (missing session / SSE Accept) yet are
-    fully alive, so we treat those as 'degraded' rather than 'down'.
+
+def probe_mcp_health(endpoint: str) -> dict:
+    """Probe an MCP streamable-http endpoint.
+
+    Does the `initialize` handshake and, when it succeeds, a follow-up
+    `tools/list` (Tier-2 conformance: the server really exposes the tools it
+    advertises). Returns {status, latency_ms, http_status, conformance,
+    tool_count}. ``conformance`` is 'pass' (tools/list returned a tools array),
+    'partial' (initialize ok but tools/list failed/errored), 'fail' (initialize
+    reachable but not a clean 2xx) or None (not probed). A reachable endpoint
+    answering < 500 is up; MCP servers often reply 400/406 to a bare probe yet
+    are alive, so those are 'degraded'.
     """
+    base = {"status": "unknown", "latency_ms": None, "http_status": None,
+            "conformance": None, "tool_count": None}
     if not endpoint:
-        return {"status": "unknown", "latency_ms": None, "http_status": None}
-    body = {
+        return base
+    # Smithery-hosted endpoints require the caller's own Smithery api_key.
+    if ("server.smithery.ai" in endpoint or ".run.tools" in endpoint):
+        _sk = (os.environ.get("SMITHERY_API_KEY") or "").strip()
+        if _sk and "api_key=" not in endpoint:
+            sep = "&" if "?" in endpoint else "?"
+            endpoint = f"{endpoint}{sep}api_key={_sk}"
+    headers = {
+        "User-Agent": UA,
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+    }
+    init = {
         "jsonrpc": "2.0", "id": 1, "method": "initialize",
         "params": {
             "protocolVersion": "2025-06-18",
@@ -1115,22 +1384,437 @@ def probe_mcp_health(endpoint: str) -> dict:
             "clientInfo": {"name": "agent-tools.cloud", "version": "0.1"},
         },
     }
-    headers = {
-        "User-Agent": UA,
-        "Content-Type": "application/json",
-        "Accept": "application/json, text/event-stream",
-    }
     try:
         with httpx.Client(timeout=httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0),
                           follow_redirects=True) as c:
             t0 = time.monotonic()
-            r = c.post(endpoint, json=body, headers=headers)
+            r = c.post(endpoint, json=init, headers=headers)
             dt = int((time.monotonic() - t0) * 1000)
             sc = r.status_code
-            if sc < 300:
-                return {"status": "ok", "latency_ms": dt, "http_status": sc}
-            if sc < 500:
-                return {"status": "degraded", "latency_ms": dt, "http_status": sc}
-            return {"status": "down", "latency_ms": dt, "http_status": sc}
+            if sc >= 500:
+                return {**base, "status": "down", "latency_ms": dt, "http_status": sc}
+            if sc >= 300:
+                return {**base, "status": "degraded", "latency_ms": dt,
+                        "http_status": sc, "conformance": "fail"}
+            # initialize ok -> Tier-2: confirm tools/list
+            sid = r.headers.get("mcp-session-id") or r.headers.get("Mcp-Session-Id")
+            h2 = dict(headers)
+            if sid:
+                h2["Mcp-Session-Id"] = sid
+            conformance = "partial"
+            tool_count = None
+            try:
+                c.post(endpoint, json={"jsonrpc": "2.0",
+                                       "method": "notifications/initialized"},
+                       headers=h2)
+            except Exception:
+                pass
+            try:
+                rt = c.post(endpoint, json={"jsonrpc": "2.0", "id": 2,
+                                            "method": "tools/list", "params": {}},
+                            headers=h2)
+                if rt.status_code < 300:
+                    parsed = _mcp_parse_response(rt)
+                    if isinstance(parsed, dict) and not parsed.get("error"):
+                        tools = (parsed.get("result") or {}).get("tools")
+                        if isinstance(tools, list):
+                            conformance = "pass"
+                            tool_count = len(tools)
+            except Exception:
+                pass
+            return {"status": "ok", "latency_ms": dt, "http_status": sc,
+                    "conformance": conformance, "tool_count": tool_count}
     except Exception:
-        return {"status": "down", "latency_ms": None, "http_status": None}
+        return {**base, "status": "down"}
+
+
+# ---------------------------------------------------------------------------
+# Additional MCP directory sources (added 2026-06-04).
+#   - Smithery: public registry (no auth), ~6k servers, deployed ones expose a
+#     callable streamable-http endpoint at server.smithery.ai/{name}/mcp.
+#   - Glama: public cursor-paginated catalog (repo + metadata).
+# Both append themselves to MCP_CRAWLERS at import time (see bottom).
+# ---------------------------------------------------------------------------
+
+_SMITHERY_API = "https://registry.smithery.ai/servers"
+_SMITHERY_SEED = 1325  # stable seed -> deterministic deep pagination past the 500 rerank cap
+_SMITHERY_REMOTE = "https://server.smithery.ai/{name}/mcp"
+
+
+def fetch_smithery(max_pages: int = 80, per_page: int = 100,
+                   remote_only: bool = False) -> list:
+    """Import MCP servers from the Smithery registry.
+
+    Smithery hosts ~5.9k servers. With a ``SMITHERY_API_KEY`` in the env the
+    full registry is paginated (``seed`` gives stable deep pagination past the
+    500 rerank cap). Remote/deployed servers are callable over streamable-http
+    at ``server.smithery.ai/{qualifiedName}/mcp`` (clients bring their own
+    ``api_key``) and stored with an endpoint; the rest (local/stdio configs)
+    are kept as catalog entries. With ``remote_only`` we keep just the callable
+    ones.
+    """
+    out: list[dict] = []
+    seen: set[str] = set()
+    headers = {"User-Agent": UA, "Accept": "application/json"}
+    api_key = (os.environ.get("SMITHERY_API_KEY") or "").strip()
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    with httpx.Client(timeout=TIMEOUT, follow_redirects=True,
+                      headers=headers) as c:
+        page = 1
+        total_pages = None
+        for _ in range(max_pages):
+            try:
+                params = {"seed": _SMITHERY_SEED,
+                          "page": page, "pageSize": per_page}
+                if remote_only:
+                    params["remote"] = "1"
+                r = c.get(_SMITHERY_API, params=params)
+                r.raise_for_status()
+                data = r.json()
+            except (httpx.HTTPError, ValueError) as e:
+                log.warning("smithery page %d failed: %r", page, e)
+                break
+            servers = data.get("servers") or []
+            if not servers:
+                break
+            for s in servers:
+                qn = (s.get("qualifiedName") or "").strip()
+                if not qn or qn in seen:
+                    continue
+                remote = bool(s.get("remote")) and bool(s.get("isDeployed"))
+                endpoint = _SMITHERY_REMOTE.format(name=qn) if remote else None
+                if remote_only and not endpoint:
+                    continue
+                seen.add(qn)
+                name = (s.get("displayName") or qn).strip()
+                desc = (s.get("description") or "").strip() or None
+                homepage = (s.get("homepage") or "").strip() or None
+                use = s.get("useCount")
+                conf = 0.55
+                if s.get("verified"):
+                    conf += 0.15
+                if isinstance(use, int) and use >= 100:
+                    conf += 0.1
+                slug = _slugify(qn)
+                if endpoint:
+                    slug = f"{slug}-smithery"[:80]
+                out.append({
+                    "slug": slug,
+                    "name": name,
+                    "description": desc,
+                    "homepage_url": homepage,
+                    "endpoint_url": endpoint,
+                    "transport": "streamable-http" if endpoint else None,
+                    "auth_method": "smithery_api_key" if endpoint else None,
+                    "cost_hint": None,
+                    "source_code_url": None,
+                    "package_registry": None,
+                    "package_name": qn,
+                    "github_stars": None,
+                    "tags": None,
+                    "x402_supported": _mcp_x402(desc, name),
+                    "source": "smithery",
+                    "source_id": qn,
+                    "source_url": homepage,
+                    "confidence": round(min(1.0, conf), 3),
+                })
+            pg = data.get("pagination") or {}
+            total_pages = pg.get("totalPages")
+            page += 1
+            if isinstance(total_pages, int) and page > total_pages:
+                break
+    log.info("smithery: collected %d MCP servers", len(out))
+    return out
+
+
+_GLAMA_API = "https://glama.ai/api/mcp/v1/servers"
+
+
+def fetch_glama(max_pages: int = 60, per_page: int = 100,
+                remote_only: bool = False) -> list:
+    """Import MCP servers from the Glama catalog (public, cursor paginated).
+
+    Glama exposes rich metadata (repo, hosting attributes) but no single
+    callable URL in the list response, so these are stored as catalog
+    entries (source_code_url + description). With ``remote_only`` only
+    remote-capable servers are kept.
+    """
+    out: list[dict] = []
+    seen: set[str] = set()
+    with httpx.Client(timeout=TIMEOUT, follow_redirects=True,
+                      headers={"User-Agent": UA, "Accept": "application/json"}) as c:
+        cursor = None
+        for _ in range(max_pages):
+            params: dict[str, Any] = {"first": per_page}
+            if cursor:
+                params["after"] = cursor
+            try:
+                r = c.get(_GLAMA_API, params=params)
+                r.raise_for_status()
+                data = r.json()
+            except (httpx.HTTPError, ValueError) as e:
+                log.warning("glama page failed: %r", e)
+                break
+            servers = data.get("servers") or []
+            if not servers:
+                break
+            for s in servers:
+                sid = (s.get("id") or "").strip()
+                if not sid or sid in seen:
+                    continue
+                attrs = s.get("attributes") or []
+                remote_capable = any("remote" in str(a).lower() for a in attrs)
+                if remote_only and not remote_capable:
+                    continue
+                seen.add(sid)
+                name = (s.get("name") or s.get("slug") or sid).strip()
+                desc = (s.get("description") or "").strip() or None
+                repo = s.get("repository")
+                repo_url = repo.get("url") if isinstance(repo, dict) else None
+                page_url = (s.get("url") or "").strip() or None
+                base = f"{s.get('namespace') or ''}-{s.get('slug') or name}"
+                slug = _slugify(base)[:80]
+                tags = ",".join(str(a) for a in attrs) or None
+                conf = 0.4
+                if remote_capable:
+                    conf += 0.1
+                out.append({
+                    "slug": slug,
+                    "name": name,
+                    "description": desc,
+                    "homepage_url": page_url,
+                    "endpoint_url": None,
+                    "transport": None,
+                    "auth_method": None,
+                    "cost_hint": None,
+                    "source_code_url": repo_url,
+                    "package_registry": None,
+                    "package_name": None,
+                    "github_stars": None,
+                    "tags": tags,
+                    "x402_supported": _mcp_x402(desc, name, tags),
+                    "source": "glama",
+                    "source_id": sid,
+                    "source_url": page_url,
+                    "confidence": round(min(1.0, conf), 3),
+                })
+            pi = data.get("pageInfo") or {}
+            if not pi.get("hasNextPage"):
+                break
+            cursor = pi.get("endCursor")
+            if not cursor:
+                break
+    log.info("glama: collected %d MCP servers", len(out))
+    return out
+
+
+MCP_CRAWLERS["smithery"] = fetch_smithery
+
+# ---------------------------------------------------------------------------
+# chiark.ai - "Agent Quality Index". Crawls 9 MCP/A2A registries, dedupes by
+# endpoint, and scores each agent 0..100 (uptime/conformance/latency). Public
+# paginated REST at /api/v1/agents (limit<=100). We ingest as MCP servers; the
+# endpoint-level dedup in upsert_mcp_server collapses overlaps with our other
+# sources. chiark's operational_score (/100) maps to our confidence (0..1).
+# ---------------------------------------------------------------------------
+CHIARK_API = "https://chiark.ai/api/v1/agents"
+
+
+def fetch_chiark(max_pages: int = 80, per_page: int = 100, page_sleep: float = 0.3) -> list:
+    """Pull chiark.ai's quality-indexed agents as MCP server rows."""
+    out: list = []
+    seen_ep: set = set()
+    # /agents is a mixed A2A+MCP feed with no protocol field; pull the A2A ids
+    # from /discover so we don't dump A2A agents into the MCP table.
+    a2a_skip = _chiark_a2a_id_set()
+    with httpx.Client(timeout=TIMEOUT, headers={"User-Agent": UA, "Accept": "application/json"}) as c:
+        for page in range(max_pages):
+            offset = page * per_page
+            try:
+                r = c.get(CHIARK_API, params={"limit": per_page, "offset": offset})
+                if r.status_code == 429:
+                    time.sleep(2.0)
+                    r = c.get(CHIARK_API, params={"limit": per_page, "offset": offset})
+                if r.status_code != 200:
+                    log.warning("chiark: stop HTTP %d at offset %d", r.status_code, offset)
+                    break
+                rows = r.json()
+            except Exception as e:
+                log.warning("chiark: fetch error at offset %d: %r", offset, e)
+                break
+            if not isinstance(rows, list) or not rows:
+                break
+            for it in rows:
+                if not isinstance(it, dict):
+                    continue
+                _cid = it.get("id")
+                if _cid is not None and str(_cid) in a2a_skip:
+                    continue
+                ep = (it.get("endpoint_url") or "").strip()
+                if not ep or not ep.lower().startswith("http"):
+                    continue
+                ep_key = ep.lower().rstrip("/")
+                if ep_key in seen_ep:
+                    continue
+                seen_ep.add(ep_key)
+                cid = it.get("id") or ep_key
+                name = it.get("name") or it.get("provider") or _host_slug(ep)
+                low = ep.lower()
+                transport = "streamable-http" if "/mcp" in low or low.rstrip("/").endswith("mcp") else None
+                # operational_score is 0..max_possible_score (100 or 45 for
+                # auth-gated). Normalise to 0..1 against its own max.
+                score = it.get("operational_score")
+                maxp = it.get("max_possible_score") or 100.0
+                conf = None
+                try:
+                    if score is not None and maxp:
+                        conf = max(0.0, min(1.0, float(score) / float(maxp)))
+                except (TypeError, ValueError):
+                    conf = None
+                skills = it.get("skills") or []
+                desc_bits = []
+                if skills:
+                    desc_bits.append("skills: " + ", ".join(str(s) for s in skills[:8]))
+                up = it.get("uptime_30d")
+                if up is not None:
+                    desc_bits.append(f"uptime_30d {up}%")
+                p95 = it.get("p95_latency_ms")
+                if p95 is not None:
+                    desc_bits.append(f"p95 {p95}ms")
+                conf_label = it.get("conformance")
+                if conf_label:
+                    desc_bits.append(f"conformance: {conf_label}")
+                out.append({
+                    "slug": _host_slug(ep) + "-chiark",
+                    "name": name,
+                    "description": "; ".join(desc_bits) or None,
+                    "endpoint_url": ep,
+                    "homepage_url": ep,
+                    "transport": transport,
+                    "auth_method": "required" if it.get("auth_required") else None,
+                    "tags": [str(s) for s in skills[:8]],
+                    "confidence": conf,
+                    "source": "chiark",
+                    "source_id": str(cid),
+                    "source_url": f"https://chiark.ai/agents/{cid}",
+                })
+            if len(rows) < per_page:
+                break
+            time.sleep(page_sleep)
+    log.info("chiark: collected %d unique-endpoint agents", len(out))
+    return out
+
+
+CHIARK_DISCOVER = "https://chiark.ai/api/v1/discover"
+
+
+def _chiark_discover(protocol: str, page_size: int = 100, max_pages: int = 40,
+                     page_sleep: float = 0.3) -> list:
+    """Paginate chiark's /discover endpoint for one protocol (a2a|mcp).
+
+    The plain /agents list neither returns the `protocol` field nor filters
+    by it; /discover does both, so it is the only way to isolate the A2A set.
+    """
+    out: list = []
+    with httpx.Client(timeout=TIMEOUT,
+                      headers={"User-Agent": UA, "Accept": "application/json"}) as c:
+        for page in range(1, max_pages + 1):
+            params = {"protocol": protocol, "page": page, "page_size": page_size}
+            try:
+                r = c.get(CHIARK_DISCOVER, params=params)
+                if r.status_code == 429:
+                    time.sleep(2.0)
+                    r = c.get(CHIARK_DISCOVER, params=params)
+                if r.status_code != 200:
+                    log.warning("chiark discover: stop HTTP %d at page %d",
+                                r.status_code, page)
+                    break
+                payload = r.json()
+            except Exception as e:
+                log.warning("chiark discover: error at page %d: %r", page, e)
+                break
+            agents = payload.get("agents") if isinstance(payload, dict) else None
+            if not agents:
+                break
+            out.extend(a for a in agents if isinstance(a, dict))
+            total = payload.get("total") or 0
+            if len(out) >= total or len(agents) < page_size:
+                break
+            time.sleep(page_sleep)
+    return out
+
+
+def _chiark_a2a_id_set() -> set:
+    """Source ids of chiark agents whose protocol is A2A, so the MCP crawler can
+    skip them (the /agents list it reads cannot tell A2A and MCP apart)."""
+    try:
+        return {str(a.get("id")) for a in _chiark_discover("a2a") if a.get("id")}
+    except Exception as e:
+        log.warning("chiark a2a id set failed: %r", e)
+        return set()
+
+
+def fetch_chiark_a2a() -> list:
+    """Pull chiark.ai's A2A agents (the protocol the /agents list hides) as
+    a2a_agents row dicts."""
+    out: list = []
+    seen_slug: set = set()
+    for it in _chiark_discover("a2a"):
+        ep = (it.get("endpoint_url") or "").strip()
+        if not ep or not ep.lower().startswith("http"):
+            continue
+        cid = it.get("id")
+        name = (it.get("name") or _host_slug(ep)).strip()
+        # operational_score is 0..max_score; normalise to a 0..1 confidence.
+        score = it.get("operational_score")
+        maxs = it.get("max_score") or 100.0
+        conf = None
+        try:
+            if score is not None and maxs:
+                conf = max(0.0, min(1.0, float(score) / float(maxs)))
+        except (TypeError, ValueError):
+            conf = None
+        # discover gives skills as plain strings; wrap as dicts so the public
+        # card view (which expects skill objects) renders them.
+        skills = [{"name": str(s)} for s in (it.get("skills") or []) if s]
+        cats = it.get("categories") or []
+        desc_bits = []
+        if cats:
+            desc_bits.append(", ".join(str(c) for c in cats[:4]))
+        up = it.get("uptime_30d")
+        if up is not None:
+            desc_bits.append(f"uptime_30d {up}")
+        p95 = it.get("p95_latency_ms")
+        if p95 is not None:
+            desc_bits.append(f"p95 {p95}ms")
+        # slug must be unique within a2a_agents (vs agenstry and within batch),
+        # since upsert merges same-slug rows across sources.
+        base = (_slugify(name) or _host_slug(ep)) + "-chiark"
+        slug = base if base not in seen_slug else f"{base}-{str(cid)[:8]}"
+        seen_slug.add(base)
+        seen_slug.add(slug)
+        out.append({
+            "slug": slug,
+            "name": name,
+            "description": "; ".join(desc_bits) or None,
+            "provider_name": it.get("provider"),
+            "provider_url": it.get("provider_url"),
+            "card_url": None,
+            "endpoint_url": ep,
+            "homepage_url": it.get("provider_url") or ep,
+            "skills": skills,
+            "auth_schemes": ["required"] if it.get("auth_gated") else None,
+            "x402_supported": bool(it.get("payment_enabled")),
+            "confidence": conf,
+            "source": "chiark",
+            "source_id": str(cid),
+        })
+    log.info("chiark a2a: collected %d agents", len(out))
+    return out
+
+
+MCP_CRAWLERS["chiark"] = fetch_chiark
+
+# glama removed: catalog-only, all endpoint_url=null, not callable by agents (2026-06-04)
+# MCP_CRAWLERS["glama"] = fetch_glama

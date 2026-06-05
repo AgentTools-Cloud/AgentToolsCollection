@@ -1,12 +1,12 @@
 {% extends "base.html" %}
 {% block title %}MCP Servers — agent-tools.cloud{% endblock %}
-{% block desc %}Directory of {{ stats.total }} remotely-callable MCP servers, crawled from PulseMCP and the official MCP registry and health-probed via JSON-RPC initialize.{% endblock %}
+{% block desc %}Directory of {{ stats.total }} remotely-callable MCP servers, continuously aggregated and health-probed via JSON-RPC initialize.{% endblock %}
 {% block content %}
 
 <section class="mb-10">
   <div class="flex flex-wrap items-start justify-between gap-4 mb-3">
     <p class="text-slate-600 max-w-3xl">
-      Standalone MCP directory — {{ stats.total }} servers crawled from PulseMCP and the official MCP registry,
+      Standalone MCP directory — {{ stats.total }} servers,
       each exposing a remote (streamable-http) endpoint and health-probed via a JSON-RPC <span class="mono">initialize</span> handshake.
     </p>
     <a href="/submit?type=mcp" class="btn-primary shrink-0">
@@ -14,6 +14,17 @@
       Add your server
     </a>
   </div>
+
+  <p class="text-sm text-slate-500 max-w-3xl -mt-2 mb-6 leading-relaxed">
+    Aggregated from the <span class="text-slate-700">official MCP Registry</span>,
+    <span class="text-slate-700">Smithery</span>, <span class="text-slate-700">PulseMCP</span>
+    and other public registries, plus our own crawling and operator submissions. Every server is
+    <span class="text-slate-700">de-duplicated by endpoint</span> and
+    <span class="text-slate-700">health-probed via a live JSON-RPC <span class="mono">initialize</span> handshake</span>
+    before listing — yielding <span class="font-semibold text-slate-700">{{ stats.total }}</span>
+    indexed servers, of which <span class="font-semibold text-slate-700">{{ stats.healthy }}</span>
+    answered within the last 6 h.
+  </p>
 
   <form id="mcp-filter-form"
         hx-get="/_partials/mcp"
@@ -30,11 +41,11 @@
 </section>
 
 <section class="mb-10">
-  <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+  <div class="grid grid-cols-2 sm:grid-cols-4 gap-4">
     <div class="stat-card">
       <div class="text-sm text-slate-500">Servers indexed</div>
       <div class="text-3xl font-bold mt-1">{{ stats.total }}</div>
-      <div class="text-xs text-slate-400 mt-3">PulseMCP · official registry</div>
+      <div class="text-xs text-slate-400 mt-3">remotely-callable</div>
     </div>
     <div class="stat-card">
       <div class="text-sm text-slate-500">Healthy</div>
@@ -42,9 +53,14 @@
       <div class="text-xs text-slate-400 mt-3">initialize handshake &lt; 6 h</div>
     </div>
     <div class="stat-card">
-      <div class="text-sm text-slate-500">Remote-callable</div>
-      <div class="text-3xl font-bold mt-1">{{ stats.remote_callable }}</div>
-      <div class="text-xs text-slate-400 mt-3">has a streamable-http endpoint</div>
+      <div class="text-sm text-slate-500">Conformant</div>
+      <div class="text-3xl font-bold mt-1 text-emerald-600">{{ stats.conformant }}</div>
+      <div class="text-xs text-slate-400 mt-3">tools/list verified{% if stats.avg_p95_ms %} · ~{{ stats.avg_p95_ms }}ms p95{% endif %}</div>
+    </div>
+    <div class="stat-card">
+      <div class="text-sm text-slate-500">x402-capable</div>
+      <div class="text-3xl font-bold mt-1">{{ stats.x402_capable }}</div>
+      <div class="text-xs text-slate-400 mt-3">accepts x402 payment</div>
     </div>
   </div>
 </section>
@@ -53,7 +69,7 @@
   <div class="flex flex-wrap items-end justify-between gap-4 mb-4">
     <div>
       <h2 class="text-2xl font-bold tracking-tight">All MCP servers</h2>
-      <p class="text-sm text-slate-500 mt-1">Crawled from PulseMCP and the official MCP registry · refreshed every 6 h.</p>
+      <p class="text-sm text-slate-500 mt-1">Continuously aggregated · refreshed every 6 h.</p>
     </div>
     <div class="flex items-center gap-2 text-sm">
       <a href="/api/v1/mcp/stats" class="pill mono text-xs">/api/v1/mcp/stats</a>

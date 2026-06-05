@@ -35,6 +35,17 @@
       <a href="/.well-known/agent-tools.json" class="pill mono text-xs">/.well-known</a>
     </div>
   </div>
+  <p class="text-sm text-slate-500 max-w-3xl mb-5 leading-relaxed">
+    Aggregated from public sources — <span class="text-slate-700">x402scan</span>,
+    <span class="text-slate-700">awesome-x402</span>,
+    <span class="text-slate-700">Coinbase CDP Bazaar</span>,
+    the <span class="text-slate-700">official MCP Registry</span>,
+    <span class="text-slate-700">Smithery</span>, <span class="text-slate-700">PulseMCP</span>,
+    <span class="text-slate-700">awesome-a2a</span> — plus our own crawling and provider
+    self-submissions. Everything is <span class="text-slate-700">de-duplicated across sources</span>,
+    <span class="text-slate-700">liveness-probed</span> (health, JSON-RPC handshake, on-chain
+    payment demand) and filtered before listing, so the counts below are verified, not raw.
+  </p>
   <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
     <div class="stat-card">
       <div class="text-sm text-slate-500">Total entries</div>
@@ -81,7 +92,7 @@
       <span class="text-xs font-semibold uppercase tracking-wider text-slate-400">MCP Servers</span>
       <span class="text-3xl font-bold">{{ mcp_stats.total }}</span>
     </div>
-    <p class="text-sm text-slate-600 mt-3">Model Context Protocol servers crawled from PulseMCP and the official registry, probed live for remote callability.</p>
+    <p class="text-sm text-slate-600 mt-3">Model Context Protocol servers continuously aggregated and probed live for remote callability.</p>
     <div class="text-sm font-medium text-slate-900 mt-4 inline-flex items-center gap-1 group-hover:gap-2 transition-all">
       Browse servers →
     </div>
