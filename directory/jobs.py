@@ -817,6 +817,13 @@ def review_submission(sub_id: int, note_prefix: str = "auto-review") -> dict:
                 "evidence": ["approve failed; left pending for retry"]}
     if vstatus == "rejected":
         cmd_reject(sub_id, note=note)
+        contact = (p.get("contact") or "").strip()
+        if contact and "@" in contact:
+            try:
+                mailer.send_rejection_email(
+                    contact, sname, "; ".join(evidence) or None)
+            except Exception as e:
+                log.warning("rejection notification email failed: %r", e)
         return {"status": "rejected", "submission_id": sub_id,
                 "evidence": evidence}
     return {"status": "pending", "submission_id": sub_id, "evidence": evidence}

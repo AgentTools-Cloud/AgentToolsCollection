@@ -185,6 +185,120 @@ def send_approval_email(
     return _send(to_email, subject, text, html)
 
 
+
+def _rejection_html(service_name: str, reason: str | None) -> str:
+    reason_card = ""
+    if reason:
+        reason_card = f"""
+          <!-- reason card -->
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+            style="background:#fff7ed;border:1px solid #fed7aa;border-radius:12px;margin:0 0 24px 0;">
+            <tr><td style="padding:14px 16px;">
+              <div style="font-size:11px;font-weight:600;color:#c2730c;letter-spacing:.6px;text-transform:uppercase;margin-bottom:6px;">Why it wasn&rsquo;t listed</div>
+              <div style="font-size:13px;color:{INK};line-height:1.55;">
+                {reason}
+              </div>
+            </td></tr>
+          </table>"""
+    return f"""\
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:{LIGHT};">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:{LIGHT};padding:32px 12px;">
+    <tr><td align="center">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+        style="max-width:560px;background:#ffffff;border:1px solid {BORDER};border-radius:16px;overflow:hidden;
+        font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+
+        <!-- header -->
+        <tr><td style="background:{BLUE};padding:18px 28px;">
+          <table role="presentation" cellpadding="0" cellspacing="0"><tr>
+            <td style="vertical-align:middle;padding-right:10px;">
+              <div style="width:26px;height:26px;background:#ffffff;border-radius:6px;text-align:center;line-height:26px;color:{BLUE};font-weight:800;font-size:15px;">&#9670;</div>
+            </td>
+            <td style="vertical-align:middle;color:#ffffff;font-size:16px;font-weight:700;letter-spacing:.2px;">
+              Agent&nbsp;Tools <span style="color:#bfdbfe;font-weight:500;">&middot; x402</span>
+            </td>
+          </tr></table>
+        </td></tr>
+
+        <!-- body -->
+        <tr><td style="padding:34px 32px 8px 32px;">
+          <span style="display:inline-block;background:#ffedd5;color:#c2410c;font-size:12px;font-weight:600;
+            padding:5px 12px;border-radius:9999px;letter-spacing:.3px;">&#9888;&nbsp; NOT LISTED YET</span>
+
+          <h1 style="margin:18px 0 4px 0;font-size:22px;line-height:1.3;color:{INK};font-weight:800;">
+            We couldn&rsquo;t verify your submission
+          </h1>
+          <p style="margin:0 0 20px 0;font-size:15px;line-height:1.6;color:{SLATE};">
+            Thanks for submitting <strong style="color:{INK};">{service_name}</strong> to the
+            Agent&nbsp;Tools x402 directory. We couldn&rsquo;t confirm x402 support, so it&rsquo;s
+            not listed yet.
+          </p>
+{reason_card}
+          <!-- how to fix -->
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 8px 0;">
+            <tr><td style="font-size:14px;line-height:1.7;color:{SLATE};">
+              &bull;&nbsp; <strong style="color:{INK};">Expose x402.</strong> Your endpoint should return an HTTP <strong>402</strong> challenge, or serve a <strong>/.well-known/x402</strong> manifest.<br>
+              &bull;&nbsp; <strong style="color:{INK};">Then resubmit</strong> &mdash; auto-verification runs again and you&rsquo;ll be listed within minutes.<br>
+              &bull;&nbsp; Think this is a mistake? Just reply to this email and a human will take a look.
+            </td></tr>
+          </table>
+
+          <!-- CTA -->
+          <table role="presentation" cellpadding="0" cellspacing="0" style="margin:18px 0 26px 0;">
+            <tr><td style="border-radius:10px;background:{BLUE};">
+              <a href="{SITE}/submit" target="_blank"
+                style="display:inline-block;padding:11px 22px;font-size:14px;font-weight:600;color:#ffffff;text-decoration:none;border-radius:10px;">
+                Resubmit &rarr;
+              </a>
+            </td></tr>
+          </table>
+        </td></tr>
+
+        <!-- footer -->
+        <tr><td style="padding:20px 32px 26px 32px;border-top:1px solid {BORDER};">
+          <p style="margin:0;font-size:12px;line-height:1.6;color:#94a3b8;">
+            Agent&nbsp;Tools &mdash; the open x402 service discovery layer.<br>
+            <a href="{SITE}" style="color:{BLUE};text-decoration:none;">agent-tools.cloud</a>
+            &nbsp;&middot;&nbsp; Reply to reach a human.
+          </p>
+        </td></tr>
+
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>"""
+
+
+def send_rejection_email(
+    to_email: str,
+    service_name: str,
+    reason: str | None = None,
+) -> bool:
+    """Notify a submitter that their service was not listed, with the reason."""
+    if not to_email or "@" not in to_email:
+        log.info("no valid contact email for %r; skipping rejection", service_name)
+        return False
+    subject = "Your Agent Tools submission wasn't listed (here's why)"
+    reason_line = f"\n\nReason: {reason}" if reason else ""
+    text = (
+        "We couldn't verify your Agent Tools submission\n\n"
+        f'Thanks for submitting "{service_name}" to the Agent Tools x402 directory.'
+        " We couldn't confirm x402 support, so it's not listed yet."
+        f"{reason_line}\n\n"
+        "How to fix:\n"
+        "- Expose x402: return an HTTP 402 challenge, or serve a /.well-known/x402 manifest.\n"
+        "- Then resubmit at " + SITE + "/submit - auto-verification runs again.\n"
+        "- Think this is a mistake? Just reply to this email.\n\n"
+        "Agent Tools - agent-tools.cloud\n"
+    )
+    html = _rejection_html(service_name, reason)
+    return _send(to_email, subject, text, html)
+
+
 # --- admin notifications (every submission + auto-review verdict) -----------
 
 _VERDICT_COLOR = {

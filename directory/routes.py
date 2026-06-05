@@ -477,7 +477,8 @@ class SubmissionPayload(BaseModel):
     category: str | None = None
     chains: list[str] | None = None
     price_usdc: float | None = Field(default=None, ge=0)
-    contact: str | None = Field(default=None, max_length=200)
+    contact: str = Field(min_length=3, max_length=200,
+                         pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 @router.post("/api/v1/submit", tags=["directory"])
@@ -559,12 +560,14 @@ class McpSubmissionPayload(BaseModel):
     name: str | None = Field(default=None, max_length=200)
     description: str | None = Field(default=None, max_length=2000)
     transport: str | None = Field(default=None, max_length=40)
-    contact: str | None = Field(default=None, max_length=200)
+    contact: str = Field(min_length=3, max_length=200,
+                         pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 class A2ASubmissionPayload(BaseModel):
     url: HttpUrl
-    contact: str | None = Field(default=None, max_length=200)
+    contact: str = Field(min_length=3, max_length=200,
+                         pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 def _enforce_submit_limit(request: Request, scope: str) -> str:
