@@ -184,13 +184,14 @@ async def well_known_mcp(request: Request) -> dict[str, Any]:
     return {
         "name": "agent-tools",
         "description": (
-            "Free MCP discovery server for x402 paid services. "
-            "Search the x402 ecosystem, ask for recommendations, get service cards, browse categories. "
+            "Free MCP discovery server for the agentic economy. "
+            "Searches a curated directory of x402 paid APIs, MCP servers and A2A agents, "
+            "and recommends payable/callable endpoints for a given intent. "
             "Same tools also available as a stdio MCP via `uvx agent-tools-mcp`."
         ),
-        "version": "0.1.0",
+        "version": "0.2.0",
         "homepage": "https://agent-tools.cloud",
-        "repository": "https://github.com/JoursBleu/agent-tools-mcp",
+        "repository": "https://github.com/AgentTools-Cloud/AgentToolsCollection",
         "license": "Apache-2.0",
         "transports": {
             "stdio": {
@@ -204,12 +205,16 @@ async def well_known_mcp(request: Request) -> dict[str, Any]:
             },
         },
         "tools": [
-            {"name": "search", "description": "Find services by natural-language intent (with optional max price, category, chain)."},
-            {"name": "ask_services", "description": "LLM-ranked service recommendations grounded in directory candidates."},
-            {"name": "get", "description": "Get the full service card for a service by slug."},
+            {"name": "search", "description": "Find x402 / MCP services matching an intent or filter set."},
+            {"name": "ask_services", "description": "LLM-ranked recommendation of the best x402/MCP services for an intent."},
+            {"name": "get", "description": "Get full details + ready-to-paste call template for a service by slug."},
             {"name": "list_categories", "description": "List all directory categories."},
             {"name": "stats", "description": "Directory size, healthy count, source breakdown."},
-            {"name": "register", "description": "Submit a new x402/MCP service for human review."},
+            {"name": "search_mcp_servers", "description": "Search the standalone MCP server directory (registry / Smithery / PulseMCP)."},
+            {"name": "get_mcp_server", "description": "Get the full card for one MCP server by slug."},
+            {"name": "search_a2a_agents", "description": "Find A2A agents you can delegate a task to."},
+            {"name": "search_resources", "description": "Unified search across x402 services, MCP servers and A2A agents."},
+            {"name": "register", "description": "Self-register an x402 / MCP service for human review."},
         ],
     }
 
@@ -283,7 +288,13 @@ def _build_openapi() -> dict[str, Any]:
         "service. GET /api/v1/categories and /api/v1/stats expose facets and "
         "health. POST /mcp-discovery/ is an ungated MCP streamable-http server "
         "with search, ask_services, get, list_categories, stats and register. "
-        "agent-tools.cloud itself is discovery-only; paid relay routes were retired."
+        "agent-tools.cloud itself is discovery-only; paid relay routes were retired. "
+        "Every indexed resource (x402 service, MCP server, A2A agent) carries a "
+        "liveness `health_status`: `ok` = answered a live probe and is callable; "
+        "`degraded` = reachable but needs caller auth/credentials or paywalled "
+        "(401/402/403); `down` = unreachable/5xx; `unknown` = not yet probed. "
+        "Filter any search with health= and read health_status/http_status/latency_ms "
+        "per result; results rank ok > degraded > unknown > down."
     )
 
     schema = get_openapi(

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import math
 import sqlite3
 import time
 import random
@@ -20,6 +21,12 @@ DEFAULT_DB_PATH = os.environ.get(
 )
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS meta (
+  key        TEXT PRIMARY KEY,
+  value      TEXT,
+  updated_at INTEGER
+);
+
 CREATE TABLE IF NOT EXISTS services (
   id              INTEGER PRIMARY KEY,
   slug            TEXT UNIQUE NOT NULL,
@@ -291,6 +298,19 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
     with connect(db_path) as c:
         c.executescript(SCHEMA)
         # idempotent migrations for older DBs that pre-date these columns
+        c.execute(
+            """CREATE TABLE IF NOT EXISTS mcp_health_history (
+                 id INTEGER PRIMARY KEY,
+                 server_id INTEGER NOT NULL,
+                 checked_at INTEGER NOT NULL,
+                 status TEXT NOT NULL,
+                 latency_ms INTEGER
+               )"""
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_mcp_hist_server "
+            "ON mcp_health_history(server_id, checked_at)"
+        )
         for ddl in (
             "ALTER TABLE services ADD COLUMN confidence REAL",
             "ALTER TABLE services ADD COLUMN tx_30d INTEGER",
@@ -305,6 +325,11 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
             "ALTER TABLE services ADD COLUMN payto_tx_30d INTEGER",
             "ALTER TABLE services ADD COLUMN payto_payers_30d INTEGER",
             "ALTER TABLE services ADD COLUMN payto_checked INTEGER",
+            "ALTER TABLE mcp_servers ADD COLUMN conformance TEXT",
+            "ALTER TABLE mcp_servers ADD COLUMN tool_count INTEGER",
+            "ALTER TABLE mcp_servers ADD COLUMN latency_p95_ms INTEGER",
+            "ALTER TABLE mcp_servers ADD COLUMN quality_score INTEGER",
+            "ALTER TABLE a2a_agents ADD COLUMN conformance TEXT",
         ):
             try:
                 c.execute(ddl)
@@ -989,7 +1014,11 @@ def a2a_stats(conn):
     x402 = cur.execute(
         "SELECT COUNT(*) AS n FROM a2a_agents WHERE x402_supported=1"
     ).fetchone()["n"]
-    return {"total": total, "healthy": healthy, "x402_capable": x402}
+    conformant = cur.execute(
+        "SELECT COUNT(*) AS n FROM a2a_agents WHERE conformance='pass'"
+    ).fetchone()["n"]
+    return {"total": total, "healthy": healthy, "x402_capable": x402,
+            "conformant": conformant}
 
 
 # ---------------------------------------------------------------------------
@@ -1003,7 +1032,7 @@ _MCP_COLS = [
     "slug", "name", "description", "homepage_url", "endpoint_url",
     "transport", "auth_method", "cost_hint", "source_code_url",
     "package_registry", "package_name", "github_stars", "tags",
-    "x402_supported", "source", "source_id", "source_url",
+    "x402_supported", "source", "source_id", "source_url", "kind",
     "health", "health_checked", "latency_ms", "http_status",
     "last_seen", "last_success_at", "confidence",
     "created_at", "updated_at",
@@ -1023,6 +1052,28 @@ def mcp_row_to_dict(row) -> dict:
     return d
 
 
+def get_meta(conn: sqlite3.Connection, key: str, default=None):
+    row = conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+    return row["value"] if row else default
+
+
+def set_meta(conn: sqlite3.Connection, key: str, value: str) -> None:
+    conn.execute(
+        "INSERT INTO meta(key, value, updated_at) VALUES(?,?,?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value, "
+        "updated_at=excluded.updated_at",
+        (key, value, int(time.time())),
+    )
+
+
+def delete_mcp_by_source(conn: sqlite3.Connection, source: str, source_id: str) -> int:
+    cur = conn.execute(
+        "DELETE FROM mcp_servers WHERE source=? AND source_id=?",
+        (source, source_id),
+    )
+    return cur.rowcount
+
+
 def upsert_mcp_server(conn: sqlite3.Connection, row: dict) -> tuple:
     """Insert/update an MCP server. Dedup on (source, source_id) then slug."""
     now = int(time.time())
@@ -1030,21 +1081,37 @@ def upsert_mcp_server(conn: sqlite3.Connection, row: dict) -> tuple:
     row["updated_at"] = now
     row["last_seen"] = now
     row["x402_supported"] = 1 if row.get("x402_supported") else 0
+    row["kind"] = "callable" if (row.get("endpoint_url") or "").strip() else "catalog"
     for k in _MCP_JSON_COLS:
         row[k] = _to_json(row.get(k))
 
     cur = conn.cursor()
+    _sel = ("SELECT id, created_at, health, health_checked, last_success_at, "
+            "source, source_id, confidence, x402_supported "
+            "FROM mcp_servers ")
     existing = None
+    cross_source = False
+    # 1) same source identity
     if row.get("source") and row.get("source_id"):
         existing = cur.execute(
-            "SELECT id, created_at, health, health_checked, last_success_at "
-            "FROM mcp_servers WHERE source=? AND source_id=?",
+            _sel + "WHERE source=? AND source_id=?",
             (row["source"], row["source_id"]),
         ).fetchone()
+    # 2) same callable endpoint, regardless of source (normalised: lower + no
+    #    trailing slash). Lets the same server discovered on multiple
+    #    directories collapse onto one row.
+    if existing is None and (row.get("endpoint_url") or "").strip():
+        ep = row["endpoint_url"].strip().lower().rstrip("/")
+        existing = cur.execute(
+            _sel + "WHERE lower(rtrim(endpoint_url, '/'))=?",
+            (ep,),
+        ).fetchone()
+        if existing is not None:
+            cross_source = True
+    # 3) same slug fallback
     if existing is None:
         existing = cur.execute(
-            "SELECT id, created_at, health, health_checked, last_success_at "
-            "FROM mcp_servers WHERE slug=?",
+            _sel + "WHERE slug=?",
             (row["slug"],),
         ).fetchone()
 
@@ -1057,6 +1124,21 @@ def upsert_mcp_server(conn: sqlite3.Connection, row: dict) -> tuple:
         return True, cur.lastrowid
 
     row["created_at"] = existing["created_at"]
+    # When the match was by endpoint across a different source, keep the
+    # original row's source identity stable (so re-crawls don't ping-pong the
+    # owning source) and only adopt the incoming metadata if it is at least as
+    # confident as what we already stored.
+    if cross_source:
+        # First-source-wins: a server discovered earlier under source A keeps
+        # source=A even when source B later finds the same endpoint, so the
+        # owning source does not ping-pong between crawlers on every run.
+        # We still enrich: adopt the higher confidence signal either way.
+        new_conf = row.get("confidence") or 0.0
+        old_conf = existing["confidence"] or 0.0
+        row["source"] = existing["source"]
+        row["source_id"] = existing["source_id"]
+        row["confidence"] = max(new_conf, old_conf)
+        row["slug"] = None  # keep existing slug (set below)
     # metadata-only refresh must not reset a previously probed health
     if row.get("health") is None:
         row["health"] = existing["health"]
@@ -1064,14 +1146,21 @@ def upsert_mcp_server(conn: sqlite3.Connection, row: dict) -> tuple:
         row["health_checked"] = existing["health_checked"]
     if row.get("last_success_at") is None:
         row["last_success_at"] = existing["last_success_at"]
-    set_clause = ",".join(f"{c}=?" for c in _MCP_COLS if c != "created_at")
-    params = [row.get(c) for c in _MCP_COLS if c != "created_at"]
+    # x402_supported is owned by directory.reverify_x402 (real 402 probe).
+    # A plain re-crawl must never downgrade a verified flag back to 0.
+    row["x402_supported"] = 1 if (row.get("x402_supported")
+                                  or existing["x402_supported"]) else 0
+    cols = [c for c in _MCP_COLS if c != "created_at"]
+    if row.get("slug") is None:
+        cols = [c for c in cols if c != "slug"]
+    set_clause = ",".join(f"{c}=?" for c in cols)
+    params = [row.get(c) for c in cols]
     params.append(existing["id"])
     cur.execute(f"UPDATE mcp_servers SET {set_clause} WHERE id=?", params)
     return False, int(existing["id"])
 
 
-def search_mcp(conn, q=None, health=None, x402_only=False, limit=50, offset=0):
+def search_mcp(conn, q=None, health=None, x402_only=False, kind=None, limit=50, offset=0):
     """Search standalone MCP servers. Ranks healthy + remotely callable first."""
     select_cols = ["m.*"]
     where: list[str] = []
@@ -1091,6 +1180,8 @@ def search_mcp(conn, q=None, health=None, x402_only=False, limit=50, offset=0):
         where.append("m.health=?"); params.append(health)
     if x402_only:
         where.append("m.x402_supported=1")
+    if kind:
+        where.append("m.kind=?"); params.append(kind)
     if where:
         sql.append("WHERE " + " AND ".join(where))
     sql.append(
@@ -1133,8 +1224,45 @@ def mcp_stats(conn):
     x402 = cur.execute(
         "SELECT COUNT(*) AS n FROM mcp_servers WHERE x402_supported=1"
     ).fetchone()["n"]
+    conformant = cur.execute(
+        "SELECT COUNT(*) AS n FROM mcp_servers WHERE conformance='pass'"
+    ).fetchone()["n"]
+    _p = cur.execute(
+        "SELECT AVG(latency_p95_ms) AS a FROM mcp_servers "
+        "WHERE latency_p95_ms IS NOT NULL"
+    ).fetchone()
+    avg_p95 = int(_p["a"]) if _p and _p["a"] is not None else None
     return {"total": total, "healthy": healthy, "remote_callable": remote,
-            "x402_capable": x402}
+            "x402_capable": x402, "conformant": conformant, "avg_p95_ms": avg_p95}
+
+
+def mcp_p95_latency(conn, server_id: int, days: int = 14):
+    """P95 of recent successful-probe latencies for one MCP server, or None."""
+    cutoff = int(time.time()) - days * 86400
+    vals = [r[0] for r in conn.execute(
+        "SELECT latency_ms FROM mcp_health_history "
+        "WHERE server_id=? AND checked_at>=? AND latency_ms IS NOT NULL "
+        "AND status='ok'", (server_id, cutoff)).fetchall()]
+    if not vals:
+        return None
+    vals.sort()
+    idx = max(0, math.ceil(0.95 * len(vals)) - 1)
+    return int(vals[idx])
+
+
+def mcp_quality_score(health, conformance, p95_ms):
+    """0..100 = availability(30) + conformance(30) + performance(40)."""
+    avail = 30 if health == "ok" else (12 if health == "degraded" else 0)
+    conf = 30 if conformance == "pass" else (12 if conformance == "partial" else 0)
+    if p95_ms is None:
+        perf = 0
+    elif p95_ms <= 300:
+        perf = 40
+    elif p95_ms >= 3000:
+        perf = 0
+    else:
+        perf = int(round(40 * (3000 - p95_ms) / (3000 - 300)))
+    return avail + conf + perf
 
 
 # Curated topic keywords used to bucket MCP servers (which carry no tags).

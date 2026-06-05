@@ -1,19 +1,19 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.AgentTools-Cloud/agent-tools-mcp",
-  "title": "agent-tools (x402 directory)",
-  "description": "Discover and call x402 paid services — search by intent, filter by price/chain.",
+  "title": "agent-tools (x402 + MCP + A2A directory)",
+  "description": "Discover x402 services, MCP servers and A2A agents by intent — agent-tools.cloud directory.",
   "repository": {
     "url": "https://github.com/AgentTools-Cloud/AgentToolsCollection",
     "source": "github"
   },
-  "version": "0.1.5",
+  "version": "0.2.0",
   "websiteUrl": "https://agent-tools.cloud",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "agent-tools-mcp",
-      "version": "0.1.5",
+      "version": "0.2.0",
       "transport": {
         "type": "stdio"
       }

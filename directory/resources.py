@@ -97,6 +97,7 @@ def normalize_mcp_server(row: dict) -> dict:
         "protocols": protocols,
         "endpoint_url": endpoint,
         "price_hint": None,
+        "kind": row.get("kind") or ("callable" if endpoint else "catalog"),
         "health_status": row.get("health") or "unknown",
         "confidence": row.get("confidence"),
         "call_hint": call_hint,

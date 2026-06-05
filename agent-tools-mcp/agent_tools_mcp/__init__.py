@@ -1,5 +1,5 @@
-"""agent-tools-mcp — Discover and call x402 paid services from any MCP agent.
+"""agent-tools-mcp — Discover agent-callable resources (x402 paid services, MCP servers, A2A agents) from any MCP agent.
 
 Homepage: https://agent-tools.cloud
 """
-__version__ = "0.1.5"
+__version__ = "0.2.0"

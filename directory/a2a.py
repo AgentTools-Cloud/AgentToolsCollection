@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
 from typing import Any
@@ -386,14 +387,18 @@ def crawl_seeds(seed_path: str) -> dict:
         client.close()
 
     if rows:
-        with db.writer() as c:
-            for row in rows:
-                is_new, _ = db.upsert_a2a_agent(c, row)
-                if is_new:
-                    inserted += 1
-                else:
-                    updated += 1
-            c.commit()
+        def _write_seeds():
+            ins = upd = 0
+            with db.writer() as c:
+                for row in rows:
+                    is_new, _ = db.upsert_a2a_agent(c, row)
+                    if is_new:
+                        ins += 1
+                    else:
+                        upd += 1
+                c.commit()
+            return ins, upd
+        inserted, updated = db.with_retry(_write_seeds)
     return {
         "seen": len(entries),
         "inserted": inserted,
@@ -485,20 +490,161 @@ def crawl_directories(max_hosts: int = 80) -> dict:
 
     inserted = updated = 0
     if rows:
-        with db.writer() as c:
-            for row in rows:
-                is_new, _ = db.upsert_a2a_agent(c, row)
-                if is_new:
-                    inserted += 1
-                else:
-                    updated += 1
-            c.commit()
+        def _write_dirs():
+            ins = upd = 0
+            with db.writer() as c:
+                for row in rows:
+                    is_new, _ = db.upsert_a2a_agent(c, row)
+                    if is_new:
+                        ins += 1
+                    else:
+                        upd += 1
+                c.commit()
+            return ins, upd
+        inserted, updated = db.with_retry(_write_dirs)
     return {
         "candidates": len(candidates),
         "resolved": len(rows),
         "inserted": inserted,
         "updated": updated,
     }
+
+
+A2AREGISTRY_API = "https://a2aregistry.org/api/agents"
+
+
+def crawl_a2aregistry(page_size: int = 100, max_pages: int = 20) -> dict:
+    """Index a2aregistry.org. Each /api/agents item already IS a full A2A Agent
+    Card (plus registry metadata), so we map it directly with card_to_row -- no
+    per-agent re-fetch needed."""
+    rows: list[dict] = []
+    seen_ids: set[str] = set()
+    with httpx.Client(timeout=TIMEOUT, follow_redirects=True,
+                      headers={"User-Agent": UA, "Accept": "application/json"}) as c:
+        for page in range(max_pages):
+            offset = page * page_size
+            try:
+                r = c.get(A2AREGISTRY_API, params={"limit": page_size, "offset": offset})
+                r.raise_for_status()
+                payload = r.json()
+            except (httpx.HTTPError, ValueError) as e:
+                log.warning("a2aregistry: fetch error at offset %d: %r", offset, e)
+                break
+            agents = payload.get("agents") if isinstance(payload, dict) else None
+            if not agents:
+                break
+            for a in agents:
+                if not isinstance(a, dict) or a.get("hidden"):
+                    continue
+                aid = str(a.get("id") or a.get("url") or "")
+                if not aid or aid in seen_ids:
+                    continue
+                seen_ids.add(aid)
+                card_url = a.get("wellKnownURI") or a.get("url")
+                if not card_url:
+                    continue
+                try:
+                    row = card_to_row(a, card_url, source="a2aregistry", source_id=aid)
+                except Exception as e:
+                    log.warning("a2aregistry: card_to_row failed for %s: %r", aid, e)
+                    continue
+                rows.append(row)
+            total = payload.get("total") or 0
+            if offset + len(agents) >= total or len(agents) < page_size:
+                break
+    log.info("a2aregistry: mapped %d agents", len(rows))
+
+    inserted = updated = 0
+    if rows:
+        def _write():
+            ins = upd = 0
+            with db.writer() as conn:
+                for row in rows:
+                    is_new, _ = db.upsert_a2a_agent(conn, row)
+                    ins += int(is_new); upd += int(not is_new)
+                conn.commit()
+            return ins, upd
+        inserted, updated = db.with_retry(_write)
+    return {"candidates": len(rows), "resolved": len(rows),
+            "inserted": inserted, "updated": updated}
+
+
+GITHUB_TOPIC_SEARCH = "https://api.github.com/search/repositories"
+
+
+def crawl_github_topic(topic: str = "a2a-protocol", max_repos: int = 100,
+                       max_hosts: int = 120) -> dict:
+    """Discover A2A agents from GitHub repos tagged with an A2A topic: take each
+    repo's homepage and probe it for a live Agent Card. Uses GITHUB_TOKEN from
+    the environment if present (raises the search rate limit), else unauth."""
+    headers = {"User-Agent": UA, "Accept": "application/vnd.github+json"}
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    homepages: list[str] = []
+    seen_hosts: set[str] = set()
+    per_page = min(100, max_repos)
+    pages = max(1, (max_repos + per_page - 1) // per_page)
+    with httpx.Client(timeout=TIMEOUT, follow_redirects=True, headers=headers) as c:
+        for page in range(1, pages + 1):
+            try:
+                r = c.get(GITHUB_TOPIC_SEARCH, params={
+                    "q": f"topic:{topic}", "per_page": per_page,
+                    "page": page, "sort": "stars", "order": "desc"})
+                if r.status_code == 403:
+                    log.warning("github topic: rate-limited (no token); stopping")
+                    break
+                r.raise_for_status()
+                items = r.json().get("items", [])
+            except (httpx.HTTPError, ValueError) as e:
+                log.warning("github topic: search error page %d: %r", page, e)
+                break
+            if not items:
+                break
+            for it in items:
+                hp = (it.get("homepage") or "").strip()
+                if not hp or not hp.lower().startswith("http"):
+                    continue
+                host = urlparse(hp).hostname or hp
+                if not host or host in seen_hosts:
+                    continue
+                # skip docs/spec hubs that are not themselves agents
+                if host in ("a2a-protocol.org", "github.com", "github.io"):
+                    continue
+                seen_hosts.add(host)
+                homepages.append(hp)
+            if len(items) < per_page:
+                break
+
+    homepages = homepages[:max_hosts]
+    log.info("github topic %s: probing %d candidate homepages", topic, len(homepages))
+
+    rows: list[dict] = []
+    with httpx.Client(timeout=TIMEOUT, follow_redirects=True,
+                      headers={"User-Agent": UA, "Accept": "application/json"}) as c:
+        for hp in homepages:
+            try:
+                card, card_url = fetch_agent_card(hp, client=c)
+            except Exception:
+                card, card_url = None, None
+            if card and card_url:
+                rows.append(card_to_row(card, card_url, source="github-topic"))
+    log.info("github topic %s: resolved %d live cards", topic, len(rows))
+
+    inserted = updated = 0
+    if rows:
+        def _write():
+            ins = upd = 0
+            with db.writer() as conn:
+                for row in rows:
+                    is_new, _ = db.upsert_a2a_agent(conn, row)
+                    ins += int(is_new); upd += int(not is_new)
+                conn.commit()
+            return ins, upd
+        inserted, updated = db.with_retry(_write)
+    return {"candidates": len(homepages), "resolved": len(rows),
+            "inserted": inserted, "updated": updated}
 
 
 def probe_a2a_health(card_url: str | None, endpoint_url: str | None = None) -> dict:
@@ -510,8 +656,10 @@ def probe_a2a_health(card_url: str | None, endpoint_url: str | None = None) -> d
     """
     targets = [t for t in (card_url, endpoint_url) if t]
     if not targets:
-        return {"status": "unknown", "latency_ms": None, "http_status": None}
-    last = {"status": "down", "latency_ms": None, "http_status": None}
+        return {"status": "unknown", "latency_ms": None, "http_status": None,
+                "conformance": None}
+    last = {"status": "down", "latency_ms": None, "http_status": None,
+            "conformance": None}
     try:
         with httpx.Client(timeout=httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0),
                           follow_redirects=True,
@@ -526,13 +674,21 @@ def probe_a2a_health(card_url: str | None, endpoint_url: str | None = None) -> d
                         try:
                             card = r.json()
                             if isinstance(card, dict) and (card.get("name") or card.get("skills")):
-                                return {"status": "ok", "latency_ms": dt, "http_status": sc}
+                                # Tier-2 conformance: a proper Agent Card declares
+                                # both a name and a non-empty skills array.
+                                skills = card.get("skills")
+                                conf = ("pass" if (card.get("name") and isinstance(skills, list) and skills)
+                                        else "partial")
+                                return {"status": "ok", "latency_ms": dt,
+                                        "http_status": sc, "conformance": conf}
                         except (ValueError, json.JSONDecodeError):
                             pass
                     if sc < 500:
-                        last = {"status": "degraded", "latency_ms": dt, "http_status": sc}
+                        last = {"status": "degraded", "latency_ms": dt,
+                                "http_status": sc, "conformance": "fail"}
                 except Exception:
                     continue
         return last
     except Exception:
-        return {"status": "down", "latency_ms": None, "http_status": None}
+        return {"status": "down", "latency_ms": None, "http_status": None,
+                "conformance": None}

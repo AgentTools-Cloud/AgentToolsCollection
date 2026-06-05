@@ -13,6 +13,18 @@
     </a>
   </div>
 
+  <p class="text-sm text-slate-500 max-w-3xl -mt-2 mb-6 leading-relaxed">
+    Aggregated from public x402 sources — <span class="text-slate-700">x402scan</span>,
+    <span class="text-slate-700">awesome-x402</span>,
+    <span class="text-slate-700">Coinbase CDP Bazaar</span>, pay-skills PRs — plus our own
+    crawling and provider self-submissions. Every entry is
+    <span class="text-slate-700">de-duplicated across sources</span>,
+    <span class="text-slate-700">liveness-probed</span> (health + on-chain payment demand),
+    and passed through ingestion filters (bare-IP / dead-host removal) before listing —
+    distilling tens of thousands of raw endpoints down to
+    <span class="font-semibold text-slate-700">{{ stats.total }}</span> verified services.
+  </p>
+
   <form id="filter-form"
         hx-get="/_partials/services"
         hx-trigger="change from:select, input delay:300ms from:input[name=q], submit"

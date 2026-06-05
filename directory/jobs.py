@@ -19,6 +19,11 @@ from pathlib import Path
 
 from . import a2a as a2a_mod
 from . import crawlers, db, mailer
+from . import agenstry as agenstry_mod
+
+# agenstry.com reverse-crawl: register its MCP page crawler as a source so
+# `python -m directory.jobs crawl-mcp agenstry` works like any other source.
+crawlers.MCP_CRAWLERS["agenstry"] = agenstry_mod.fetch_agenstry_mcp
 
 log = logging.getLogger("directory.jobs")
 SEED_FILE = Path(__file__).resolve().parent / "seed.json"
@@ -152,12 +157,38 @@ def cmd_crawl_mcp(only=None) -> int:
         run_id = _start_run(f"mcp:{name}")
         errors: list[str] = []
         added = updated = 0
+        deleted = 0
+        since = None
+        kwargs: dict = {}
+        if name == "mcp-registry":
+            with db.writer() as c:
+                since = db.get_meta(c, "mcp_registry:updated_since")
+            if since:
+                kwargs["updated_since"] = since
         try:
-            items = fn()
+            items = fn(**kwargs)
         except Exception as e:
             _finish_run(run_id, 0, 0, [f"fetch failed: {e!r}"], status="error")
             log.warning("mcp crawl %s fetch failed: %r", name, e)
             continue
+        max_updated = since
+        if name == "mcp-registry":
+            for it in items:
+                u = it.get("_updated_at")
+                if u and (max_updated is None or u > max_updated):
+                    max_updated = u
+            del_ids = [it["source_id"] for it in items
+                       if it.get("_status") and it["_status"] != "active"]
+            if del_ids:
+                def _del(ids=del_ids):
+                    n = 0
+                    with db.writer() as c:
+                        for sid in ids:
+                            n += db.delete_mcp_by_source(c, "mcp-registry", sid)
+                    return n
+                deleted = db.with_retry(_del)
+            items = [it for it in items
+                     if not (it.get("_status") and it["_status"] != "active")]
         batch_size = 100
         for start in range(0, len(items), batch_size):
             batch = items[start:start + batch_size]
@@ -167,6 +198,8 @@ def cmd_crawl_mcp(only=None) -> int:
                 with db.writer() as c:
                     for item in batch:
                         try:
+                            if not (item.get("endpoint_url") or "").strip():
+                                continue
                             created, _ = db.upsert_mcp_server(c, item)
                             b_add += int(created)
                             b_upd += int(not created)
@@ -177,8 +210,11 @@ def cmd_crawl_mcp(only=None) -> int:
             added += b_add; updated += b_upd; errors.extend(b_err)
         _finish_run(run_id, added, updated, errors,
                     status="ok" if not errors else "partial")
-        log.info("mcp crawl %s: added=%d updated=%d errors=%d",
-                 name, added, updated, len(errors))
+        if name == "mcp-registry" and max_updated:
+            with db.writer() as c:
+                db.set_meta(c, "mcp_registry:updated_since", max_updated)
+        log.info("mcp crawl %s: added=%d updated=%d deleted=%d errors=%d",
+                 name, added, updated, deleted, len(errors))
         total_added += added; total_updated += updated
     log.info("mcp crawl done. added=%d updated=%d", total_added, total_updated)
     if total_added:
@@ -206,8 +242,81 @@ def cmd_crawl_a2a() -> int:
                  d["candidates"], d["resolved"], d["inserted"], d["updated"])
     except Exception as e:
         errors.append(f"directories: {e!r}"); log.warning("a2a dir crawl failed: %r", e)
+    try:
+        g = agenstry_mod.crawl_agenstry_a2a()
+        added += g["inserted"]; updated += g["updated"]
+        log.info("a2a agenstry: candidates=%d resolved=%d inserted=%d updated=%d",
+                 g["candidates"], g["resolved"], g["inserted"], g["updated"])
+    except Exception as e:
+        errors.append(f"agenstry: {e!r}"); log.warning("a2a agenstry crawl failed: %r", e)
+    try:
+        rows = crawlers.fetch_chiark_a2a()
+        if rows:
+            def _write_chiark_a2a():
+                ins = upd = skipped = 0
+                with db.writer() as c:
+                    known = {
+                        (r[0] or "").lower().rstrip("/")
+                        for r in c.execute(
+                            "SELECT endpoint_url FROM a2a_agents WHERE source!='chiark'"
+                        ).fetchall()
+                    }
+                    for row in rows:
+                        ep = (row.get("endpoint_url") or "").lower().rstrip("/")
+                        if ep and ep in known:
+                            skipped += 1  # first-source-wins: another source has it
+                            continue
+                        is_new, _ = db.upsert_a2a_agent(c, row)
+                        ins += int(is_new); upd += int(not is_new)
+                    c.commit()
+                return ins, upd, skipped
+            ci, cu, cs = db.with_retry(_write_chiark_a2a)
+            added += ci; updated += cu
+            log.info("a2a chiark: resolved=%d inserted=%d updated=%d skipped=%d",
+                     len(rows), ci, cu, cs)
+    except Exception as e:
+        errors.append(f"chiark: {e!r}"); log.warning("a2a chiark crawl failed: %r", e)
+    try:
+        ar = a2a_mod.crawl_a2aregistry()
+        added += ar["inserted"]; updated += ar["updated"]
+        log.info("a2a a2aregistry: candidates=%d resolved=%d inserted=%d updated=%d",
+                 ar["candidates"], ar["resolved"], ar["inserted"], ar["updated"])
+    except Exception as e:
+        errors.append(f"a2aregistry: {e!r}"); log.warning("a2a a2aregistry crawl failed: %r", e)
+    try:
+        gh = a2a_mod.crawl_github_topic()
+        added += gh["inserted"]; updated += gh["updated"]
+        log.info("a2a github-topic: candidates=%d resolved=%d inserted=%d updated=%d",
+                 gh["candidates"], gh["resolved"], gh["inserted"], gh["updated"])
+    except Exception as e:
+        errors.append(f"github-topic: {e!r}"); log.warning("a2a github-topic crawl failed: %r", e)
     _finish_run(run_id, added, updated, errors,
                 status="ok" if not errors else "partial")
+    if added:
+        cmd_health_a2a(only_unknown=True)
+    return 0
+
+
+def cmd_crawl_agenstry() -> int:
+    """Reverse-crawl agenstry.com: live A2A agent cards + MCP server endpoints."""
+    run_id = _start_run("agenstry:crawl")
+    added = updated = 0
+    errors: list[str] = []
+    try:
+        a = agenstry_mod.crawl_agenstry_a2a()
+        added += a["inserted"]; updated += a["updated"]
+        log.info("agenstry a2a: candidates=%d resolved=%d inserted=%d updated=%d",
+                 a["candidates"], a["resolved"], a["inserted"], a["updated"])
+    except Exception as e:
+        errors.append(f"a2a: {e!r}"); log.warning("agenstry a2a crawl failed: %r", e)
+    _finish_run(run_id, added, updated, errors,
+                status="ok" if not errors else "partial")
+    # MCP via the standard MCP pipeline (upsert + health probe) for the
+    # newly-registered agenstry source.
+    try:
+        cmd_crawl_mcp("agenstry")
+    except Exception as e:
+        log.warning("agenstry mcp crawl failed: %r", e)
     if added:
         cmd_health_a2a(only_unknown=True)
     return 0
@@ -227,30 +336,42 @@ def cmd_health(only_unknown: bool = False) -> int:
             log.info("no new (unknown-health) services to probe")
         return 0
 
-    batch_size = 50
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _probe(r):
+        res = crawlers.probe_health(r["url"], r["well_known_url"])
+        h = res["status"]
+        x = 1 if res["x402"] else 0
+        now = int(time.time())
+        return (h,
+                (h, now, res["latency_ms"], res["http_status"], x, r["id"]),
+                (r["id"], now, h, res["latency_ms"], res["http_status"], x))
+
+    # Concurrent probes (network-I/O bound). 16 workers keeps this shared VPS
+    # responsive; sqlite writes stay single-thread below.
+    batch_size = 100
+    workers = 16
     for start in range(0, len(rows), batch_size):
         batch_rows = rows[start:start + batch_size]
         updates = []
         history = []
         now = int(time.time())
-        for r in batch_rows:
-            res = crawlers.probe_health(r["url"], r["well_known_url"])
-            h = res["status"]
-            x = 1 if res["x402"] else 0
-            updates.append((h, now, res["latency_ms"], res["http_status"], x, r["id"]))
-            history.append((r["id"], now, h, res["latency_ms"], res["http_status"], x))
-            if h == "ok":
-                n_ok += 1
-            elif h == "down":
-                n_down += 1
-            else:
-                n_degraded += 1
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            for h, upd, hist in ex.map(_probe, batch_rows):
+                updates.append(upd)
+                history.append(hist)
+                if h == "ok":
+                    n_ok += 1
+                elif h == "down":
+                    n_down += 1
+                else:
+                    n_degraded += 1
 
         def op(updates=updates, history=history):
             with db.writer() as c:
                 c.executemany(
                     "UPDATE services SET health=?, health_checked=?, latency_ms=?, "
-                    "http_status=?, x402_ok=? WHERE id=?",
+                    "http_status=?, x402_ok=max(COALESCE(x402_ok,0), ?) WHERE id=?",
                     updates,
                 )
                 c.executemany(
@@ -296,22 +417,39 @@ def cmd_health_a2a(only_unknown: bool = False) -> int:
     n_ok = n_deg = n_down = 0
     now = int(time.time())
     updates = []
-    for r in rows:
+
+    n_conf = 0
+
+    def _probe(r):
         res = a2a_mod.probe_a2a_health(r["card_url"], r["endpoint_url"])
         h = res["status"]
         last_ok = now if h == "ok" else None
-        updates.append((h, now, res["latency_ms"], last_ok, r["id"]))
-        n_ok += h == "ok"; n_deg += h == "degraded"; n_down += h == "down"
+        return h, res.get("conformance"), (h, now, res["latency_ms"],
+                                           res.get("conformance"), last_ok, r["id"])
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    workers = min(32, max(4, len(rows)))
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = [ex.submit(_probe, r) for r in rows]
+        for fut in as_completed(futs):
+            try:
+                h, conf, upd = fut.result()
+            except Exception:
+                continue
+            updates.append(upd)
+            n_ok += h == "ok"; n_deg += h == "degraded"; n_down += h == "down"
+            n_conf += conf == "pass"
 
     def op():
         with db.writer() as c:
             c.executemany(
                 "UPDATE a2a_agents SET health=?, health_checked=?, latency_ms=?, "
-                "last_success_at=COALESCE(?, last_success_at) WHERE id=?",
+                "conformance=?, last_success_at=COALESCE(?, last_success_at) WHERE id=?",
                 updates,
             )
     db.with_retry(op)
-    log.info("a2a health: ok=%d degraded=%d down=%d", n_ok, n_deg, n_down)
+    log.info("a2a health: ok=%d degraded=%d down=%d conformant=%d",
+             n_ok, n_deg, n_down, n_conf)
     return 0
 
 
@@ -324,49 +462,109 @@ def cmd_health_mcp(only_unknown: bool = False) -> int:
         rows = list(c.execute(sql).fetchall())
     if not rows:
         return 0
-    n_ok = n_deg = n_down = 0
+    n_ok = n_deg = n_down = n_conf = 0
     now = int(time.time())
-    batch_size = 50
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _probe(r):
+        res = crawlers.probe_mcp_health(r["endpoint_url"])
+        h = res["status"]
+        conf = res.get("conformance")
+        last_ok = now if h == "ok" else None
+        upd = (h, now, res["latency_ms"], res["http_status"],
+               conf, res.get("tool_count"), last_ok, r["id"])
+        return r["id"], h, conf, res["latency_ms"], upd
+
+    # Concurrent probes (network-I/O bound). 16 workers keeps this VPS — which
+    # is shared with other sites — responsive; sqlite writes stay single-thread.
+    batch_size = 100
+    workers = 16
     for start in range(0, len(rows), batch_size):
         batch = rows[start:start + batch_size]
         updates = []
-        for r in batch:
-            res = crawlers.probe_mcp_health(r["endpoint_url"])
-            h = res["status"]
-            last_ok = now if h == "ok" else None
-            updates.append((h, now, res["latency_ms"], res["http_status"], last_ok, r["id"]))
-            n_ok += h == "ok"; n_deg += h == "degraded"; n_down += h == "down"
+        hist = []
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            for sid, h, conf, lat, upd in ex.map(_probe, batch):
+                updates.append(upd)
+                hist.append((sid, now, h, lat))
+                n_ok += h == "ok"; n_deg += h == "degraded"; n_down += h == "down"
+                n_conf += conf == "pass"
 
-        def op(updates=updates):
+        def op(updates=updates, hist=hist):
             with db.writer() as c:
                 c.executemany(
                     "UPDATE mcp_servers SET health=?, health_checked=?, latency_ms=?, "
-                    "http_status=?, last_success_at=COALESCE(?, last_success_at) WHERE id=?",
+                    "http_status=?, conformance=?, tool_count=?, "
+                    "last_success_at=COALESCE(?, last_success_at) WHERE id=?",
                     updates,
                 )
+                c.executemany(
+                    "INSERT INTO mcp_health_history(server_id, checked_at, status, latency_ms) "
+                    "VALUES(?,?,?,?)",
+                    hist,
+                )
         db.with_retry(op)
-        log.info("mcp health progress: checked=%d/%d ok=%d degraded=%d down=%d",
-                 min(start + batch_size, len(rows)), len(rows), n_ok, n_deg, n_down)
-    log.info("mcp health: ok=%d degraded=%d down=%d", n_ok, n_deg, n_down)
+
+        # P95 + 0..100 quality score per server (over the just-written history)
+        def op2(batch=batch):
+            with db.writer() as c:
+                for r in batch:
+                    p95 = db.mcp_p95_latency(c, r["id"])
+                    srow = c.execute(
+                        "SELECT health, conformance FROM mcp_servers WHERE id=?",
+                        (r["id"],)).fetchone()
+                    score = db.mcp_quality_score(
+                        srow["health"], srow["conformance"], p95)
+                    c.execute(
+                        "UPDATE mcp_servers SET latency_p95_ms=?, quality_score=? WHERE id=?",
+                        (p95, score, r["id"]))
+        db.with_retry(op2)
+        log.info("mcp health progress: checked=%d/%d ok=%d degraded=%d down=%d conformant=%d",
+                 min(start + batch_size, len(rows)), len(rows), n_ok, n_deg, n_down, n_conf)
+
+    # prune history older than 30 days
+    def prune():
+        with db.writer() as c:
+            c.execute("DELETE FROM mcp_health_history WHERE checked_at < ?",
+                      (now - 30 * 86400,))
+    db.with_retry(prune)
+    log.info("mcp health: ok=%d degraded=%d down=%d conformant=%d",
+             n_ok, n_deg, n_down, n_conf)
     return 0
-    """First Base-mainnet (chainid 8453) USDC payTo address for a service."""
+
+
+def _paytos_for_row(payment_json):
+    """All supported-chain USDC (chain, payTo) pairs for a service.
+
+    Returns a list of (chain_key, payto) tuples for every accepts[] entry on a
+    chain we have a free indexer for (crawlers.EVM_USDC_INDEXERS). Previously
+    this was Base-only and its def line was lost in a prior edit, which broke the
+    on-chain job (NameError); restored here as multi-chain.
+    """
     if not payment_json:
-        return None
+        return []
     try:
         p = json.loads(payment_json) if isinstance(payment_json, str) else payment_json
     except Exception:
-        return None
+        return []
+    out, seen = [], set()
     for a in (p.get("accepts") or []):
-        net = (a.get("network") or "").lower()
-        if net in ("base", "eip155:8453"):
-            pt = a.get("pay_to") or a.get("payTo")
-            if pt and pt.startswith("0x"):
-                return pt.lower()
-    return None
+        chain = crawlers.network_to_chain(a.get("network"))
+        if not chain:
+            continue
+        pt = a.get("pay_to") or a.get("payTo")
+        if not (pt and pt.startswith("0x")):
+            continue
+        key = (chain, pt.lower())
+        if key not in seen:
+            seen.add(key)
+            out.append(key)
+    return out
 
 
 def cmd_onchain(limit=None, stale_days=3, refresh_all=False, rate=0.3) -> int:
-    """Signal C: measure real on-chain demand per service (Base USDC payTo)."""
+    """Signal C: measure real on-chain USDC demand per service across every
+    supported chain (Base, Ethereum, Optimism, Polygon, Arbitrum, Gnosis)."""
     now = int(time.time())
     stale_cutoff = now - stale_days * 86400
     with db.connect(read_only=True) as c:
@@ -375,45 +573,66 @@ def cmd_onchain(limit=None, stale_days=3, refresh_all=False, rate=0.3) -> int:
             "WHERE payment IS NOT NULL AND payment != ''"
         ).fetchall())
 
-    payto_services = {}
+    # service_id -> [(chain, payto)]; (chain, payto) -> [service_id]
+    service_keys = {}
+    key_services = {}
     for r in rows:
-        pt = _base_payto_for_row(r["payment"])
-        if not pt:
-            continue
         if not refresh_all and r["payto_checked"] and r["payto_checked"] > stale_cutoff:
             continue
-        payto_services.setdefault(pt, []).append(r["id"])
-
-    addrs = list(payto_services)
-    if limit:
-        addrs = addrs[:limit]
-    if not addrs:
-        log.info("onchain: no Base payTo addresses to refresh")
-        return 0
-    log.info("onchain: querying %d unique Base payTo addresses", len(addrs))
-
-    done = n_active = 0
-    for pt in addrs:
-        act = crawlers.fetch_payto_activity(pt)
-        if not act["ok"]:
-            time.sleep(rate)
+        keys = _paytos_for_row(r["payment"])
+        if not keys:
             continue
-        if act["tx"] > 0:
-            n_active += 1
-        sids = payto_services[pt]
-        def op(sids=sids, act=act, now=now):
-            with db.writer() as c:
-                c.executemany(
-                    "UPDATE services SET payto_tx_30d=?, payto_payers_30d=?, "
-                    "payto_checked=? WHERE id=?",
-                    [(act["tx"], act["payers"], now, sid) for sid in sids],
-                )
-        db.with_retry(op)
+        service_keys[r["id"]] = keys
+        for k in keys:
+            key_services.setdefault(k, []).append(r["id"])
+
+    work = list(key_services)
+    if limit:
+        work = work[:limit]
+        allowed = set(work)
+        # only write services fully covered by the limited work set
+        service_keys = {sid: ks for sid, ks in service_keys.items()
+                        if all(k in allowed for k in ks)}
+    if not work:
+        log.info("onchain: no payTo addresses to refresh")
+        return 0
+    by_chain = {}
+    for ch, _pt in work:
+        by_chain[ch] = by_chain.get(ch, 0) + 1
+    log.info("onchain: querying %d unique (chain,payTo) over %d chains: %s",
+             len(work), len(by_chain), by_chain)
+
+    # 1) query each unique (chain, payto) once
+    results = {}
+    done = 0
+    for key in work:
+        ch, pt = key
+        results[key] = crawlers.fetch_payto_activity(pt, chain=ch)
         done += 1
         if done % 50 == 0:
-            log.info("onchain progress: %d/%d addresses (active=%d)", done, len(addrs), n_active)
+            log.info("onchain progress: %d/%d addresses", done, len(work))
         time.sleep(rate)
-    log.info("onchain: refreshed %d addresses, %d with paying demand", done, n_active)
+
+    # 2) aggregate per service across its chains, then write once
+    n_active = n_written = 0
+    for sid, keys in service_keys.items():
+        accs = [results[k] for k in keys if k in results and results[k]["ok"]]
+        if not accs:
+            continue  # every query failed -> skip, avoid false zero
+        tx = sum(a["tx"] for a in accs)
+        payers = sum(a["payers"] for a in accs)
+        if tx > 0:
+            n_active += 1
+        def op(sid=sid, tx=tx, payers=payers, now=now):
+            with db.writer() as c:
+                c.execute(
+                    "UPDATE services SET payto_tx_30d=?, payto_payers_30d=?, "
+                    "payto_checked=? WHERE id=?",
+                    (tx, payers, now, sid),
+                )
+        db.with_retry(op)
+        n_written += 1
+    log.info("onchain: wrote %d services, %d with paying demand", n_written, n_active)
     return 0
 
 
@@ -575,6 +794,20 @@ def review_submission(sub_id: int, note_prefix: str = "auto-review") -> dict:
     vstatus = verdict.get("status")
     evidence = verdict.get("evidence") or []
     note = f"{note_prefix}: {vstatus} — {'; '.join(evidence)}"
+
+    # admin notification — fires on every verdict (on-submit AND timer-retry)
+    sname = p.get("name") or p.get("title") or url or f"submission #{sub_id}"
+    _verdict_label = {"verified": "listed", "rejected": "rejected"}.get(
+        vstatus, "pending")
+    mailer.send_admin_notification(
+        "x402 submission", sname, _verdict_label,
+        [("URL", url or "—"),
+         ("Contact", p.get("contact") or "—"),
+         ("Category", p.get("category") or "—"),
+         ("Source", p.get("_source") or "rest-submit"),
+         ("Evidence", "; ".join(evidence) or "—"),
+         ("Submission", f"#{sub_id}")])
+
     if vstatus == "verified":
         res = _approve(sub_id, note=note)
         if res:
@@ -677,6 +910,7 @@ def main(argv=None) -> int:
     p_crawl_mcp = sub.add_parser("crawl-mcp")
     p_crawl_mcp.add_argument("source", nargs="?", default=None)
     sub.add_parser("crawl-a2a")
+    sub.add_parser("crawl-agenstry")
     sub.add_parser("health")
     sub.add_parser("health-a2a")
     sub.add_parser("health-mcp")
@@ -707,6 +941,8 @@ def main(argv=None) -> int:
         return cmd_crawl_mcp(args.source)
     if args.cmd == "crawl-a2a":
         return cmd_crawl_a2a()
+    if args.cmd == "crawl-agenstry":
+        return cmd_crawl_agenstry()
     if args.cmd == "health":
         return cmd_health()
     if args.cmd == "health-a2a":

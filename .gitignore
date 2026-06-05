@@ -11,3 +11,7 @@ data/
 # env backups (never commit)
 .env.bak*
 .env.*.bak
+
+# source-file backups from patch workflow (never commit)
+*.bak
+*.bak.*

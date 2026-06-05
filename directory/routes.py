@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field, HttpUrl
 from starlette.concurrency import run_in_threadpool
@@ -17,6 +17,8 @@ from . import a2a as directory_a2a
 from . import crawlers as directory_crawlers
 from . import jobs as directory_jobs
 from . import resources as directory_resources
+from . import reverify_x402 as directory_reverify
+from . import mailer as directory_mailer
 from . import limits
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -26,6 +28,25 @@ BUILD_VERSION = "2026-06-04.17"
 TEMPLATES.env.globals["build_version"] = BUILD_VERSION
 
 router = APIRouter()
+
+# Single source of truth for the liveness vocabulary, surfaced on every
+# `health` filter (services / a2a / mcp) and echoed by the `health_status`
+# field on each result.
+HEALTH_DOC = (
+    "Filter by liveness from the most recent probe. One of: "
+    "`ok` — the endpoint answered a live probe (for MCP and A2A this is a "
+    "real `initialize` / agent-card handshake), so it is genuinely reachable "
+    "and callable; "
+    "`degraded` — reachable but the probe could not fully complete, e.g. "
+    "the server needs caller-supplied auth/credentials or returned 401/402/403 "
+    "(paywalled or BYO-key, such as a Smithery-hosted server or an x402 paid "
+    "tool), or it replied 4xx to a bare probe; "
+    "`down` — unreachable, timed out, or returned 5xx; "
+    "`unknown` — not probed yet. "
+    "Omit to include every status. Results are always ranked "
+    "ok > degraded > unknown > down. The same value is returned per result as "
+    "`health_status`, alongside `http_status` and `latency_ms`."
+)
 
 
 def _conn():
@@ -220,7 +241,7 @@ async def api_search(
     category: str | None = None,
     chain: str | None = Query(default=None, description='e.g. "base", "solana"'),
     region: str | None = None,
-    health: str | None = None,
+    health: str | None = Query(default=None, description=HEALTH_DOC),
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
 ):
@@ -313,7 +334,7 @@ async def api_categories():
 @router.get("/api/v1/a2a/search", tags=["a2a"])
 async def api_a2a_search(
     q: str | None = Query(default=None, max_length=800),
-    health: str | None = Query(default=None),
+    health: str | None = Query(default=None, description=HEALTH_DOC),
     x402_only: bool = Query(default=False),
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
@@ -347,7 +368,7 @@ async def api_a2a_stats():
 async def api_mcp_search(
     q: str | None = Query(default=None, max_length=800),
     chain: str | None = Query(default=None),
-    health: str | None = Query(default=None),
+    health: str | None = Query(default=None, description=HEALTH_DOC),
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
 ):
@@ -395,6 +416,10 @@ async def api_mcp_server(slug: str):
     with _conn() as c:
         mcp = db.get_mcp_by_slug(c, slug)
         if mcp:
+            # Hide crawl provenance from the public surface (same as the
+            # a2a/services detail endpoints) while keeping it in the DB.
+            for _k in ("source", "source_id", "source_url"):
+                mcp.pop(_k, None)
             return mcp
         row = db.get_by_slug(c, slug)
     if not row or not (row.get("mcp_url") or "").strip():
@@ -407,7 +432,7 @@ async def api_resources_search(
     q: str | None = Query(default=None, max_length=800),
     protocol: str | None = Query(default=None, pattern="^(x402|mcp|a2a)$"),
     chain: str | None = Query(default=None),
-    health: str | None = Query(default=None),
+    health: str | None = Query(default=None, description=HEALTH_DOC),
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
 ):
@@ -560,6 +585,13 @@ async def api_submit_mcp(request: Request, payload: McpSubmissionPayload):
     name = (payload.name or "").strip() or directory_crawlers._host_slug(endpoint).replace("-", " ").title()
     slug = directory_a2a._slugify(name) or directory_crawlers._host_slug(endpoint)
     probe = await run_in_threadpool(directory_crawlers.probe_mcp_health, endpoint)
+    # Also probe for x402: an MCP server can be a paid (402) endpoint, in which
+    # case it must ALSO land in the x402 services catalog (delivery=mcp).
+    x402 = await run_in_threadpool(
+        directory_reverify.verify_and_mirror, endpoint,
+        slug=slug, name=name,
+        description=(payload.description or "").strip() or None,
+        homepage=endpoint, delivery="mcp", source="manual", source_id=endpoint)
     row = {
         "slug": slug,
         "name": name,
@@ -567,7 +599,7 @@ async def api_submit_mcp(request: Request, payload: McpSubmissionPayload):
         "homepage_url": endpoint,
         "endpoint_url": endpoint,
         "transport": (payload.transport or "streamable-http").strip(),
-        "x402_supported": False,
+        "x402_supported": bool(x402.get("x402")),
         "source": "manual",
         "source_id": endpoint,
         "source_url": endpoint,
@@ -580,13 +612,26 @@ async def api_submit_mcp(request: Request, payload: McpSubmissionPayload):
     }
     with db.writer() as c:
         created, server_id = db.upsert_mcp_server(c, row)
+    await run_in_threadpool(
+        directory_mailer.send_admin_notification,
+        "MCP submission", name, "listed" if created else "updated",
+        [("Endpoint", endpoint),
+         ("Transport", (payload.transport or "streamable-http").strip()),
+         ("Contact", (payload.contact or "").strip() or "—"),
+         ("Health", probe.get("status")),
+         ("x402", "yes — mirrored to x402 catalog" if x402.get("x402") else "no"),
+         ("View", f"{directory_mailer.SITE}/mcp/servers/{slug}")])
     return {
         "status": "listed" if created else "updated",
         "slug": slug,
         "health": probe.get("status"),
+        "x402": bool(x402.get("x402")),
+        "x402_service_slug": x402.get("service_slug"),
         "view_url": f"/mcp/servers/{slug}",
         "message": ("Indexed your MCP server."
-                    if created else "This MCP server was already indexed; refreshed it."),
+                    if created else "This MCP server was already indexed; refreshed it.")
+        + (" Verified x402 payment support — also listed in the x402 services catalog."
+           if x402.get("x402") else ""),
     }
 
 
@@ -606,16 +651,40 @@ async def api_submit_a2a(request: Request, payload: A2ASubmissionPayload):
             },
         )
     row = directory_a2a.card_to_row(card, card_url, source="manual")
+    # Probe for x402: an A2A agent can be a paid (402) endpoint, in which case
+    # it must ALSO land in the x402 services catalog (delivery=a2a).
+    verify_target = row.get("endpoint_url") or url
+    x402 = await run_in_threadpool(
+        directory_reverify.verify_and_mirror, verify_target,
+        slug=row["slug"], name=row.get("name"),
+        description=row.get("description"),
+        homepage=row.get("homepage_url"), delivery="a2a",
+        source="manual", source_id=row.get("source_id"))
+    if x402.get("x402"):
+        # real 402 probe is authoritative; never downgrade card self-declaration
+        row["x402_supported"] = True
     with db.writer() as c:
         created, agent_id = db.upsert_a2a_agent(c, row)
     slug = row["slug"]
+    await run_in_threadpool(
+        directory_mailer.send_admin_notification,
+        "A2A submission", row.get("name") or slug, "listed" if created else "updated",
+        [("Card URL", card_url),
+         ("Endpoint", row.get("endpoint_url") or "—"),
+         ("Contact", (payload.contact or "").strip() or "—"),
+         ("x402", "yes — mirrored to x402 catalog" if x402.get("x402") else "no"),
+         ("View", f"{directory_mailer.SITE}/a2a/agents/{slug}")])
     return {
         "status": "listed" if created else "updated",
         "slug": slug,
         "name": row.get("name"),
+        "x402": bool(x402.get("x402")),
+        "x402_service_slug": x402.get("service_slug"),
         "view_url": f"/a2a/agents/{slug}",
         "message": ("Indexed your A2A agent from its Agent Card."
-                    if created else "This agent was already indexed; refreshed its card."),
+                    if created else "This agent was already indexed; refreshed its card.")
+        + (" Verified x402 payment support — also listed in the x402 services catalog."
+           if x402.get("x402") else ""),
     }
 
 
@@ -708,3 +777,75 @@ async def well_known():
             "/api/v1/services/{slug} for the service card before paying or calling."
         ),
     }
+
+
+@router.get("/sitemap.xml", include_in_schema=False)
+def sitemap_xml() -> Response:
+    """Dynamic sitemap listing every MCP server / A2A agent / x402 service
+    detail page plus the main landing pages, so search engines and AI crawlers
+    can discover the full directory."""
+    base = "https://agent-tools.cloud"
+    static_pages = [
+        ("/", "1.0", "daily"),
+        ("/mcp", "0.9", "daily"),
+        ("/a2a", "0.9", "daily"),
+        ("/x402", "0.9", "daily"),
+        ("/categories", "0.6", "weekly"),
+        ("/about", "0.4", "monthly"),
+    ]
+    parts = ['<?xml version="1.0" encoding="UTF-8"?>',
+             '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">']
+
+    def _url(loc, lastmod=None, priority=None, changefreq=None):
+        out = ["  <url>", f"    <loc>{loc}</loc>"]
+        if lastmod:
+            out.append(f"    <lastmod>{lastmod}</lastmod>")
+        if changefreq:
+            out.append(f"    <changefreq>{changefreq}</changefreq>")
+        if priority:
+            out.append(f"    <priority>{priority}</priority>")
+        out.append("  </url>")
+        return "\n".join(out)
+
+    def _iso(ts):
+        if not ts:
+            return None
+        try:
+            return time.strftime("%Y-%m-%d", time.gmtime(int(ts)))
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    for path, prio, freq in static_pages:
+        parts.append(_url(base + path, priority=prio, changefreq=freq))
+
+    with _conn() as c:
+        for slug, ts in c.execute(
+                "SELECT slug, updated_at FROM mcp_servers ORDER BY slug"):
+            parts.append(_url(f"{base}/mcp/servers/{slug}", _iso(ts), "0.7"))
+        for slug, ts in c.execute(
+                "SELECT slug, updated_at FROM a2a_agents ORDER BY slug"):
+            parts.append(_url(f"{base}/a2a/agents/{slug}", _iso(ts), "0.7"))
+        for slug, ts in c.execute(
+                "SELECT slug, updated_at FROM services ORDER BY slug"):
+            parts.append(_url(f"{base}/services/{slug}", _iso(ts), "0.7"))
+
+    parts.append("</urlset>")
+    xml = "\n".join(parts) + "\n"
+    return Response(content=xml, media_type="application/xml",
+                    headers={"Cache-Control": "public, max-age=3600"})
+
+
+@router.get("/robots.txt", include_in_schema=False)
+def robots_txt() -> Response:
+    """Welcome search engines and AI agents; point them at the sitemap."""
+    body = (
+        "# agent-tools.cloud - open directory of MCP servers, A2A agents and\n"
+        "# x402 services. Crawlers and AI agents are welcome to index and use\n"
+        "# the public catalogue and JSON API.\n"
+        "User-agent: *\n"
+        "Allow: /\n"
+        "\n"
+        "Sitemap: https://agent-tools.cloud/sitemap.xml\n"
+    )
+    return Response(content=body, media_type="text/plain",
+                    headers={"Cache-Control": "public, max-age=3600"})

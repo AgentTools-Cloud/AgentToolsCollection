@@ -96,15 +96,19 @@ async def _call_llm(prompt: str) -> dict[str, Any] | None:
             },
             {"role": "user", "content": prompt},
         ],
-        "temperature": 0.1,
-        "max_tokens": 2000,
-        "reasoning_effort": "off",
+        "temperature": 0.2,
+        "top_p": 0.8,
+        "presence_penalty": 1.5,
+        "top_k": 20,
+        "max_tokens": 2048,
+        "response_format": {"type": "json_object"},
+        "chat_template_kwargs": {"enable_thinking": False},
     }
     try:
         async with httpx.AsyncClient(
             base_url=base_url,
             headers={"Authorization": f"Bearer {api_key}"},
-            timeout=httpx.Timeout(connect=10.0, read=90.0, write=20.0, pool=20.0),
+            timeout=httpx.Timeout(connect=10.0, read=240.0, write=20.0, pool=20.0),
         ) as client:
             response = await client.post("/v1/chat/completions", json=body)
             response.raise_for_status()
@@ -121,7 +125,11 @@ async def _call_llm(prompt: str) -> dict[str, Any] | None:
 
 
 def _prompt(query: str, candidates: list[dict[str, Any]], limit: int) -> str:
-    compact = [cards.brief_for_llm(c) for c in candidates[:10]]
+    compact = []
+    for i, c in enumerate(candidates[:10]):
+        # idx is a stable numeric handle; LLMs echo a plain integer far more
+        # reliably than an opaque slug they tend to "reconstruct" from the host.
+        compact.append({"idx": i, **cards.brief_for_llm(c)})
     return (
         "User/agent intent:\n"
         f"{query}\n\n"
@@ -131,8 +139,11 @@ def _prompt(query: str, candidates: list[dict[str, Any]], limit: int) -> str:
         "{\"answer\":\"short paragraph\",\"recommendations\":[],"
         "\"follow_up_questions\":[]}\n"
         "Each recommendation item must be: "
-        "{\"slug\":\"candidate slug\",\"why\":\"why it matches\","
+        "{\"idx\":candidate idx integer,\"slug\":\"candidate slug\","
+        "\"why\":\"why it matches\","
         "\"confidence\":0.0,\"next_step\":\"what to do next\"}.\n"
+        "Set idx and slug to the EXACT values copied from the chosen candidate; "
+        "never invent or reformat them.\n"
         f"Select at most {limit} recommendations. If no candidate is suitable, "
         "return an empty recommendations array and explain why. Prefer healthy "
         "services with explicit resources/payment metadata and real tx_30d."
@@ -199,14 +210,60 @@ def _sanitize_llm_result(
     limit: int,
 ) -> dict[str, Any]:
     by_slug = {c.get("slug"): c for c in candidates if c.get("slug")}
+    by_idx = {i: c for i, c in enumerate(candidates)}
+
+    def _norm(s: str) -> str:
+        s = (s or "").strip().lower()
+        for suf in ("-scan", "-payskill", "-sentinel"):
+            if s.endswith(suf):
+                s = s[: -len(suf)]
+        return re.sub(r"[^a-z0-9]", "", s)
+
+    def _host(url: str) -> str:
+        m = re.sub(r"^[a-z]+://", "", (url or "").strip().lower())
+        return re.sub(r"[^a-z0-9]", "", m.split("/")[0])
+
+    # Fuzzy index: LLMs frequently reconstruct an opaque slug from the host
+    # (e.g. "weather-dx-hugen-tokyo-scan" -> "weather-dx.hugen.tokyo"), so match
+    # on a separator/suffix-insensitive key and on the candidate URL host too.
+    by_norm: dict[str, dict[str, Any]] = {}
+    for c in candidates:
+        cslug = c.get("slug")
+        if not cslug:
+            continue
+        for key in (_norm(cslug), _host(c.get("url"))):
+            if key and key not in by_norm:
+                by_norm[key] = c
+
+    def _as_idx(ref):
+        if isinstance(ref, bool):
+            return None
+        if isinstance(ref, int):
+            return ref
+        if isinstance(ref, str) and ref.strip().lstrip("-").isdigit():
+            return int(ref.strip())
+        return None
+
+    def _resolve(item):
+        # 1) numeric idx handle (most reliable), 2) exact slug, 3) fuzzy slug/host
+        ref = _as_idx(item.get("idx"))
+        if ref is None:
+            ref = _as_idx(item.get("ref"))
+        if ref is not None and ref in by_idx:
+            return by_idx[ref]
+        raw_slug = item.get("slug")
+        if raw_slug in by_slug:
+            return by_slug[raw_slug]
+        return by_norm.get(_norm(raw_slug)) or by_norm.get(_host(raw_slug))
+
     recs = []
     for item in raw.get("recommendations") or []:
         if not isinstance(item, dict):
             continue
-        slug = item.get("slug")
-        if slug not in by_slug:
+        card = _resolve(item)
+        if card is None:
             continue
-        card = by_slug[slug]
+        slug = card.get("slug")
         recs.append({
             "slug": slug,
             "name": card.get("name"),
