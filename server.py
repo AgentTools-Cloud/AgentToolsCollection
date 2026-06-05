@@ -57,8 +57,31 @@ app = FastAPI(
 
 # Free directory-discovery MCP (search/get/list_categories/stats) — ungated.
 app.mount("/mcp-discovery", wrap_with_client_capture(discover_mcp.streamable_http_app()))
+
+
+class _McpDiscoverySlashFix:
+    """Let `POST /mcp-discovery` (no trailing slash) reach the mounted MCP app
+    without a 307 redirect. Starlette's Mount would redirect the bare prefix to
+    `/mcp-discovery/`, but MCP clients that POST `initialize` frequently do not
+    re-send the body after a redirect, so external conformance probers (chiark,
+    etc.) see a failed handshake. We normalise the path in-place instead."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") == "http" and scope.get("path") == "/mcp-discovery":
+            scope = dict(scope)
+            scope["path"] = "/mcp-discovery/"
+            if scope.get("raw_path") in (b"/mcp-discovery", None):
+                scope["raw_path"] = b"/mcp-discovery/"
+        await self.app(scope, receive, send)
+
+
 # Outermost: instrument every request (incl. 402 challenges) for Prometheus.
 app.add_middleware(PrometheusMiddleware)
+# Above Prometheus: normalise the bare /mcp-discovery path before routing.
+app.add_middleware(_McpDiscoverySlashFix)
 
 
 # Build version — bump to bust browser/CDN HTML caches on each deploy.
