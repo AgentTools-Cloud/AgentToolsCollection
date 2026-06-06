@@ -1238,6 +1238,9 @@ def fetch_pulsemcp(max_pages: int = 200, per_page: int = 100,
                     "source_code_url": s.get("source_code_url"),
                     "package_registry": s.get("package_registry"),
                     "package_name": s.get("package_name"),
+                    "package_download_count": (
+                        s.get("package_download_count")
+                        if isinstance(s.get("package_download_count"), int) else None),
                     "github_stars": stars if isinstance(stars, int) else None,
                     "tags": None,
                     "x402_supported": _mcp_x402(desc, name, remote.get("cost")),
