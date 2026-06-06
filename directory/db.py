@@ -210,6 +210,8 @@ CREATE TABLE IF NOT EXISTS mcp_servers (
   package_download_count INTEGER,
   github_stars      INTEGER,
   tags              TEXT,
+  tools_json        TEXT,
+  tools_text        TEXT,
   x402_supported    INTEGER DEFAULT 0,
   source            TEXT NOT NULL,
   source_id         TEXT,
@@ -228,22 +230,22 @@ CREATE INDEX IF NOT EXISTS idx_mcp_source ON mcp_servers(source);
 CREATE INDEX IF NOT EXISTS idx_mcp_health ON mcp_servers(health);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS mcp_fts USING fts5(
-  name, description, tags,
+  name, description, tags, tools_text,
   content='mcp_servers', content_rowid='id', tokenize='porter unicode61'
 );
 CREATE TRIGGER IF NOT EXISTS mcp_ai AFTER INSERT ON mcp_servers BEGIN
-  INSERT INTO mcp_fts(rowid, name, description, tags)
-    VALUES (new.id, new.name, new.description, new.tags);
+  INSERT INTO mcp_fts(rowid, name, description, tags, tools_text)
+    VALUES (new.id, new.name, new.description, new.tags, new.tools_text);
 END;
 CREATE TRIGGER IF NOT EXISTS mcp_ad AFTER DELETE ON mcp_servers BEGIN
-  INSERT INTO mcp_fts(mcp_fts, rowid, name, description, tags)
-    VALUES('delete', old.id, old.name, old.description, old.tags);
+  INSERT INTO mcp_fts(mcp_fts, rowid, name, description, tags, tools_text)
+    VALUES('delete', old.id, old.name, old.description, old.tags, old.tools_text);
 END;
 CREATE TRIGGER IF NOT EXISTS mcp_au AFTER UPDATE ON mcp_servers BEGIN
-  INSERT INTO mcp_fts(mcp_fts, rowid, name, description, tags)
-    VALUES('delete', old.id, old.name, old.description, old.tags);
-  INSERT INTO mcp_fts(rowid, name, description, tags)
-    VALUES (new.id, new.name, new.description, new.tags);
+  INSERT INTO mcp_fts(mcp_fts, rowid, name, description, tags, tools_text)
+    VALUES('delete', old.id, old.name, old.description, old.tags, old.tools_text);
+  INSERT INTO mcp_fts(rowid, name, description, tags, tools_text)
+    VALUES (new.id, new.name, new.description, new.tags, new.tools_text);
 END;
 """
 
@@ -331,6 +333,8 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
             "ALTER TABLE mcp_servers ADD COLUMN latency_p95_ms INTEGER",
             "ALTER TABLE mcp_servers ADD COLUMN quality_score INTEGER",
             "ALTER TABLE mcp_servers ADD COLUMN package_download_count INTEGER",
+            "ALTER TABLE mcp_servers ADD COLUMN tools_json TEXT",
+            "ALTER TABLE mcp_servers ADD COLUMN tools_text TEXT",
             "ALTER TABLE a2a_agents ADD COLUMN conformance TEXT",
         ):
             try:
@@ -338,7 +342,51 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
             except sqlite3.OperationalError as e:
                 if "duplicate column" not in str(e).lower():
                     raise
+        _migrate_mcp_fts_tools(c)
         c.commit()
+
+
+def _migrate_mcp_fts_tools(c: sqlite3.Connection) -> None:
+    """Idempotently extend the MCP FTS index to cover per-tool text.
+
+    The original mcp_fts indexed name/description/tags only, so a server's
+    individual tool names were not searchable. This rebuilds the external
+    content FTS table (and its sync triggers) to add a `tools_text` column,
+    then repopulates from mcp_servers. Safe to run on every startup: it is a
+    no-op once the column is present.
+    """
+    row = c.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='mcp_fts'"
+    ).fetchone()
+    if row and "tools_text" in (row[0] or ""):
+        return  # already migrated
+    c.executescript(
+        """
+        DROP TRIGGER IF EXISTS mcp_ai;
+        DROP TRIGGER IF EXISTS mcp_ad;
+        DROP TRIGGER IF EXISTS mcp_au;
+        DROP TABLE IF EXISTS mcp_fts;
+        CREATE VIRTUAL TABLE mcp_fts USING fts5(
+          name, description, tags, tools_text,
+          content='mcp_servers', content_rowid='id', tokenize='porter unicode61'
+        );
+        CREATE TRIGGER mcp_ai AFTER INSERT ON mcp_servers BEGIN
+          INSERT INTO mcp_fts(rowid, name, description, tags, tools_text)
+            VALUES (new.id, new.name, new.description, new.tags, new.tools_text);
+        END;
+        CREATE TRIGGER mcp_ad AFTER DELETE ON mcp_servers BEGIN
+          INSERT INTO mcp_fts(mcp_fts, rowid, name, description, tags, tools_text)
+            VALUES('delete', old.id, old.name, old.description, old.tags, old.tools_text);
+        END;
+        CREATE TRIGGER mcp_au AFTER UPDATE ON mcp_servers BEGIN
+          INSERT INTO mcp_fts(mcp_fts, rowid, name, description, tags, tools_text)
+            VALUES('delete', old.id, old.name, old.description, old.tags, old.tools_text);
+          INSERT INTO mcp_fts(rowid, name, description, tags, tools_text)
+            VALUES (new.id, new.name, new.description, new.tags, new.tools_text);
+        END;
+        INSERT INTO mcp_fts(mcp_fts) VALUES('rebuild');
+        """
+    )
 
 
 @contextmanager
@@ -1052,6 +1100,15 @@ def mcp_row_to_dict(row) -> dict:
                 d[k] = json.loads(d[k])
             except (TypeError, json.JSONDecodeError):
                 pass
+    # tools_json holds the server's advertised tools [{name, description}];
+    # parsed here for display but kept out of _MCP_JSON_COLS so the crawl
+    # upsert path never serializes/overwrites it (only health probing does).
+    if d.get("tools_json"):
+        try:
+            d["tools"] = json.loads(d["tools_json"])
+        except (TypeError, json.JSONDecodeError):
+            pass
+    d.pop("tools_text", None)
     return d
 
 

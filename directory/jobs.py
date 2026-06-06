@@ -488,8 +488,19 @@ def cmd_health_mcp(only_unknown: bool = False) -> int:
         h = res["status"]
         conf = res.get("conformance")
         last_ok = now if h == "ok" else None
+        tools = res.get("tools")
+        # Only overwrite tool data when we actually got a list back (a failed
+        # tools/list returns None and must not wipe a prior good capture).
+        if isinstance(tools, list):
+            tools_json = json.dumps(tools, ensure_ascii=False)
+            tools_text = " ".join(
+                f"{t.get('name', '')} {t.get('description', '')}" for t in tools
+            ).strip()
+        else:
+            tools_json = None
+            tools_text = None
         upd = (h, now, res["latency_ms"], res["http_status"],
-               conf, res.get("tool_count"), last_ok, r["id"])
+               conf, res.get("tool_count"), tools_json, tools_text, last_ok, r["id"])
         return r["id"], h, conf, res["latency_ms"], upd
 
     # Concurrent probes (network-I/O bound). 16 workers keeps this VPS — which
@@ -512,6 +523,8 @@ def cmd_health_mcp(only_unknown: bool = False) -> int:
                 c.executemany(
                     "UPDATE mcp_servers SET health=?, health_checked=?, latency_ms=?, "
                     "http_status=?, conformance=?, tool_count=?, "
+                    "tools_json=COALESCE(?, tools_json), "
+                    "tools_text=COALESCE(?, tools_text), "
                     "last_success_at=COALESCE(?, last_success_at) WHERE id=?",
                     updates,
                 )
