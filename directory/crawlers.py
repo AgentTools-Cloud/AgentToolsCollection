@@ -1381,6 +1381,32 @@ def _mcp_parse_response(r):
         return None
 
 
+# Per-server caps so a padded multi-tool server can't bloat our row/index.
+_MAX_TOOLS = 60
+_MAX_TOOL_DESC = 160
+
+
+def _summarize_tools(tools: list) -> list:
+    """Reduce a tools/list array to [{name, description}], capped.
+
+    We keep every tool a server advertises (up to a sane cap) because each is
+    an independently callable capability the directory should index — a server
+    that exposes 24 tools is 24 discoverable capabilities, not one.
+    """
+    out = []
+    for t in tools[:_MAX_TOOLS]:
+        if not isinstance(t, dict):
+            continue
+        name = str(t.get("name") or "").strip()
+        if not name:
+            continue
+        desc = str(t.get("description") or "").strip().replace("\n", " ")
+        if len(desc) > _MAX_TOOL_DESC:
+            desc = desc[:_MAX_TOOL_DESC].rstrip() + "…"
+        out.append({"name": name, "description": desc})
+    return out
+
+
 def probe_mcp_health(endpoint: str) -> dict:
     """Probe an MCP streamable-http endpoint.
 
@@ -1394,7 +1420,7 @@ def probe_mcp_health(endpoint: str) -> dict:
     are alive, so those are 'degraded'.
     """
     base = {"status": "unknown", "latency_ms": None, "http_status": None,
-            "conformance": None, "tool_count": None}
+            "conformance": None, "tool_count": None, "tools": None}
     if not endpoint:
         return base
     # Smithery-hosted endpoints require the caller's own Smithery api_key.
@@ -1441,6 +1467,7 @@ def probe_mcp_health(endpoint: str) -> dict:
                        headers=h2)
             except Exception:
                 pass
+            tool_list = None
             try:
                 rt = c.post(endpoint, json={"jsonrpc": "2.0", "id": 2,
                                             "method": "tools/list", "params": {}},
@@ -1452,10 +1479,12 @@ def probe_mcp_health(endpoint: str) -> dict:
                         if isinstance(tools, list):
                             conformance = "pass"
                             tool_count = len(tools)
+                            tool_list = _summarize_tools(tools)
             except Exception:
                 pass
             return {"status": "ok", "latency_ms": dt, "http_status": sc,
-                    "conformance": conformance, "tool_count": tool_count}
+                    "conformance": conformance, "tool_count": tool_count,
+                    "tools": tool_list}
     except Exception:
         return {**base, "status": "down"}
 
