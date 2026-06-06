@@ -165,6 +165,19 @@ def cmd_crawl_mcp(only=None) -> int:
                 since = db.get_meta(c, "mcp_registry:updated_since")
             if since:
                 kwargs["updated_since"] = since
+        elif name == "pulsemcp":
+            # First run = full crawl (page through all ~16k newest-first); once
+            # done, flip a flag and switch to incremental "recent" crawls that
+            # stop after hitting a run of already-known servers. We key "known"
+            # on endpoint_url across ALL sources (not source="pulsemcp"), since
+            # cross-source dedup drifts the source column but endpoints are
+            # stable — otherwise the early-stop never triggers.
+            with db.writer() as c:
+                full_done = db.get_meta(c, "pulsemcp:full_done")
+                known = set(db.mcp_endpoint_urls(c)) if full_done else set()
+            if full_done:
+                kwargs["known_ids"] = known
+                kwargs["stop_after_known"] = 60  # ~4 pages of known remotes = caught up
         try:
             items = fn(**kwargs)
         except Exception as e:
@@ -213,6 +226,10 @@ def cmd_crawl_mcp(only=None) -> int:
         if name == "mcp-registry" and max_updated:
             with db.writer() as c:
                 db.set_meta(c, "mcp_registry:updated_since", max_updated)
+        if name == "pulsemcp" and not errors and "known_ids" not in kwargs:
+            # Completed a full crawl with no errors -> switch to incremental.
+            with db.writer() as c:
+                db.set_meta(c, "pulsemcp:full_done", "1")
         log.info("mcp crawl %s: added=%d updated=%d deleted=%d errors=%d",
                  name, added, updated, deleted, len(errors))
         total_added += added; total_updated += updated

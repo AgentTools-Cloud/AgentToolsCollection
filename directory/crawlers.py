@@ -1122,12 +1122,22 @@ def _mcp_x402(*texts: Any) -> bool:
     return False
 
 
-def fetch_pulsemcp(max_pages: int = 20, per_page: int = 100,
-                   remote_only: bool = True) -> list:
+def fetch_pulsemcp(max_pages: int = 200, per_page: int = 100,
+                   remote_only: bool = True, known_ids: set | None = None,
+                   stop_after_known: int = 0) -> list:
     """Import remotely-callable MCP servers from the PulseMCP directory.
 
     PulseMCP lists ~16k servers; we keep the ones that expose a remote
     endpoint (url_direct) so the directory stays a list of callable servers.
+
+    The v0beta API has no sort/updated_since params and no per-row timestamp,
+    but its default order is newest-first (offset 0 = most recently released).
+    So two modes share one code path:
+      * Full crawl (default): page through everything (max_pages*per_page).
+      * Incremental "recent" crawl: pass ``known_ids`` (source_ids already in
+        the DB) and ``stop_after_known`` > 0; we stop once we have seen that
+        many consecutive already-known servers, i.e. we have caught up to the
+        existing catalog and everything beyond is older/known.
 
     The v0beta API is being sunset and randomly rejects ~half of all
     requests with HTTP 410 (code=API_SUNSET). We retry each page with
@@ -1138,6 +1148,9 @@ def fetch_pulsemcp(max_pages: int = 20, per_page: int = 100,
     out: list[dict] = []
     seen: set[str] = set()
     consecutive_fail = 0
+    consecutive_known = 0
+    known_ids = known_ids or set()
+    stopped_early = False
     with httpx.Client(timeout=TIMEOUT, follow_redirects=True,
                       headers={"User-Agent": UA, "Accept": "application/json"}) as c:
         offset = 0
@@ -1190,6 +1203,18 @@ def fetch_pulsemcp(max_pages: int = 20, per_page: int = 100,
                 if source_id in seen:
                     continue
                 seen.add(source_id)
+                # Incremental mode: count consecutive already-known servers in
+                # newest-first order; once we have seen enough in a row we have
+                # caught up to the existing catalog and can stop early. Known is
+                # keyed on endpoint_url (stable across cross-source dedup).
+                if stop_after_known:
+                    if endpoint and endpoint in known_ids:
+                        consecutive_known += 1
+                        if consecutive_known >= stop_after_known:
+                            stopped_early = True
+                            break
+                    else:
+                        consecutive_known = 0
                 desc = (s.get("short_description")
                         or s.get("EXPERIMENTAL_ai_generated_description") or "").strip() or None
                 slug = _slugify(name) if name else _host_slug(endpoint or homepage or source_id)
@@ -1221,6 +1246,10 @@ def fetch_pulsemcp(max_pages: int = 20, per_page: int = 100,
                     "source_url": (s.get("url") or "").strip() or None,
                     "confidence": round(min(1.0, conf), 3),
                 })
+            if stopped_early:
+                log.info("pulsemcp: caught up (%d consecutive known) at "
+                         "offset=%d, stopping incremental crawl", consecutive_known, offset)
+                break
             offset += len(servers)
             total = data.get("total_count")
             if isinstance(total, int) and offset >= total:

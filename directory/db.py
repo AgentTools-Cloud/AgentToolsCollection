@@ -1074,6 +1074,28 @@ def delete_mcp_by_source(conn: sqlite3.Connection, source: str, source_id: str) 
     return cur.rowcount
 
 
+def mcp_source_ids(conn: sqlite3.Connection, source: str) -> list:
+    """Return all source_id values currently stored for a given MCP source."""
+    rows = conn.execute(
+        "SELECT source_id FROM mcp_servers WHERE source=? AND source_id IS NOT NULL",
+        (source,),
+    ).fetchall()
+    return [r[0] for r in rows]
+
+
+def mcp_endpoint_urls(conn: sqlite3.Connection) -> list:
+    """Return all non-empty endpoint_url values across all MCP servers.
+
+    Used as the "known" set for incremental crawls: endpoints are stable
+    primary keys even when cross-source dedup drifts the source column.
+    """
+    rows = conn.execute(
+        "SELECT endpoint_url FROM mcp_servers "
+        "WHERE endpoint_url IS NOT NULL AND endpoint_url != ''",
+    ).fetchall()
+    return [r[0] for r in rows]
+
+
 def upsert_mcp_server(conn: sqlite3.Connection, row: dict) -> tuple:
     """Insert/update an MCP server. Dedup on (source, source_id) then slug."""
     now = int(time.time())
