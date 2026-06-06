@@ -207,6 +207,7 @@ CREATE TABLE IF NOT EXISTS mcp_servers (
   source_code_url   TEXT,
   package_registry  TEXT,
   package_name      TEXT,
+  package_download_count INTEGER,
   github_stars      INTEGER,
   tags              TEXT,
   x402_supported    INTEGER DEFAULT 0,
@@ -329,6 +330,7 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
             "ALTER TABLE mcp_servers ADD COLUMN tool_count INTEGER",
             "ALTER TABLE mcp_servers ADD COLUMN latency_p95_ms INTEGER",
             "ALTER TABLE mcp_servers ADD COLUMN quality_score INTEGER",
+            "ALTER TABLE mcp_servers ADD COLUMN package_download_count INTEGER",
             "ALTER TABLE a2a_agents ADD COLUMN conformance TEXT",
         ):
             try:
@@ -1031,7 +1033,8 @@ def a2a_stats(conn):
 _MCP_COLS = [
     "slug", "name", "description", "homepage_url", "endpoint_url",
     "transport", "auth_method", "cost_hint", "source_code_url",
-    "package_registry", "package_name", "github_stars", "tags",
+    "package_registry", "package_name", "package_download_count",
+    "github_stars", "tags",
     "x402_supported", "source", "source_id", "source_url", "kind",
     "health", "health_checked", "latency_ms", "http_status",
     "last_seen", "last_success_at", "confidence",
@@ -1109,7 +1112,7 @@ def upsert_mcp_server(conn: sqlite3.Connection, row: dict) -> tuple:
 
     cur = conn.cursor()
     _sel = ("SELECT id, created_at, health, health_checked, last_success_at, "
-            "source, source_id, confidence, x402_supported "
+            "source, source_id, confidence, x402_supported, package_download_count "
             "FROM mcp_servers ")
     existing = None
     cross_source = False
@@ -1168,6 +1171,10 @@ def upsert_mcp_server(conn: sqlite3.Connection, row: dict) -> tuple:
         row["health_checked"] = existing["health_checked"]
     if row.get("last_success_at") is None:
         row["last_success_at"] = existing["last_success_at"]
+    # package_download_count is only provided by pulsemcp; don't let a re-crawl
+    # from another source (which never carries it) wipe a stored value.
+    if row.get("package_download_count") is None:
+        row["package_download_count"] = existing["package_download_count"]
     # x402_supported is owned by directory.reverify_x402 (real 402 probe).
     # A plain re-crawl must never downgrade a verified flag back to 0.
     row["x402_supported"] = 1 if (row.get("x402_supported")
