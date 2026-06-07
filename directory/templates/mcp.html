@@ -6,7 +6,7 @@
 <section class="mb-10">
   <div class="flex flex-wrap items-start justify-between gap-4 mb-3">
     <p class="text-slate-600 max-w-3xl">
-      Standalone MCP directory — {{ stats.total }} servers,
+      Standalone MCP directory — {{ stats.total }} servers across {{ stats.domains }} domains,
       each exposing a remote (streamable-http) endpoint and health-probed via a JSON-RPC <span class="mono">initialize</span> handshake.
     </p>
     <a href="/submit?type=mcp" class="btn-primary shrink-0">
@@ -19,8 +19,9 @@
     Aggregated from the <span class="text-slate-700">official MCP Registry</span>,
     <span class="text-slate-700">Smithery</span>, <span class="text-slate-700">PulseMCP</span>
     and other public registries, plus our own crawling and operator submissions. Every server is
-    <span class="text-slate-700">de-duplicated by endpoint</span> and
-    <span class="text-slate-700">health-probed via a live JSON-RPC <span class="mono">initialize</span> handshake</span>
+    <span class="text-slate-700">de-duplicated by endpoint</span>,
+    <span class="text-slate-700">health-probed via a live JSON-RPC <span class="mono">initialize</span> handshake</span>,
+    and <span class="text-slate-700">statically scanned for malware &amp; prompt-injection patterns in its advertised tools</span>
     before listing — yielding <span class="font-semibold text-slate-700">{{ stats.total }}</span>
     indexed servers, of which <span class="font-semibold text-slate-700">{{ stats.healthy }}</span>
     answered within the last 6 h.
@@ -43,24 +44,52 @@
 <section class="mb-10">
   <div class="grid grid-cols-2 sm:grid-cols-4 gap-4">
     <div class="stat-card">
-      <div class="text-sm text-slate-500">Servers indexed</div>
-      <div class="text-3xl font-bold mt-1">{{ stats.total }}</div>
-      <div class="text-xs text-slate-400 mt-3">remotely-callable</div>
+      <div class="text-sm text-slate-500">Indexed</div>
+      <div class="flex items-baseline gap-2 mt-1">
+        <span class="text-3xl font-bold">{{ stats.total }}</span>
+        <span class="text-sm text-slate-500">servers</span>
+      </div>
+      <div class="flex items-baseline gap-2 mt-1">
+        <span class="text-2xl font-bold text-slate-700">{{ stats.domains }}</span>
+        <span class="text-sm text-slate-500">domains</span>
+      </div>
+      {% if stats.new_7d %}<div class="text-xs text-emerald-600 mt-1">+{{ stats.new_7d }} new this week</div>{% endif %}
     </div>
     <div class="stat-card">
       <div class="text-sm text-slate-500">Healthy</div>
-      <div class="text-3xl font-bold mt-1 text-emerald-600">{{ stats.healthy }}</div>
-      <div class="text-xs text-slate-400 mt-3">initialize handshake &lt; 6 h</div>
+      <div class="flex items-baseline gap-2 mt-1">
+        <span class="text-3xl font-bold text-emerald-600">{{ stats.healthy }}</span>
+        <span class="text-sm text-slate-500">servers</span>
+      </div>
+      <div class="flex items-baseline gap-2 mt-1">
+        <span class="text-2xl font-bold text-emerald-600">{{ stats.healthy_domains }}</span>
+        <span class="text-sm text-slate-500">domains</span>
+      </div>
+      <div class="text-xs text-slate-400 mt-2">initialize handshake &lt; 6 h</div>
     </div>
     <div class="stat-card">
       <div class="text-sm text-slate-500">Conformant</div>
-      <div class="text-3xl font-bold mt-1 text-emerald-600">{{ stats.conformant }}</div>
-      <div class="text-xs text-slate-400 mt-3">tools/list verified{% if stats.avg_p95_ms %} · ~{{ stats.avg_p95_ms }}ms p95{% endif %}</div>
+      <div class="flex items-baseline gap-2 mt-1">
+        <span class="text-3xl font-bold text-emerald-600">{{ stats.conformant }}</span>
+        <span class="text-sm text-slate-500">servers</span>
+      </div>
+      <div class="flex items-baseline gap-2 mt-1">
+        <span class="text-2xl font-bold text-emerald-600">{{ stats.conformant_domains }}</span>
+        <span class="text-sm text-slate-500">domains</span>
+      </div>
+      <div class="text-xs text-slate-400 mt-2">tools/list verified{% if stats.avg_p95_ms %} · ~{{ stats.avg_p95_ms }}ms p95{% endif %}</div>
     </div>
     <div class="stat-card">
       <div class="text-sm text-slate-500">x402-capable</div>
-      <div class="text-3xl font-bold mt-1">{{ stats.x402_capable }}</div>
-      <div class="text-xs text-slate-400 mt-3">accepts x402 payment</div>
+      <div class="flex items-baseline gap-2 mt-1">
+        <span class="text-3xl font-bold">{{ stats.x402_capable }}</span>
+        <span class="text-sm text-slate-500">servers</span>
+      </div>
+      <div class="flex items-baseline gap-2 mt-1">
+        <span class="text-2xl font-bold text-slate-700">{{ stats.x402_domains }}</span>
+        <span class="text-sm text-slate-500">domains</span>
+      </div>
+      <div class="text-xs text-slate-400 mt-2">accepts x402 payment</div>
     </div>
   </div>
 </section>
