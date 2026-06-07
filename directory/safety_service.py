@@ -5,19 +5,22 @@ Used by BOTH surfaces so the logic lives in exactly one place:
   * the A2A skill  `directory.a2a` (`message/send` -> scan_mcp_safety)
 
 Strategy, keyed by endpoint URL:
-  * already in the directory  -> return our LATEST stored verdict (refreshed
-    hourly by the health job), plus any stored LLM reference.
+  * already in the directory  -> return our LATEST stored rule verdict (refreshed
+    hourly by the health job).
   * not yet indexed           -> probe the endpoint live, statically scan its
-    advertised tools + metadata, ALSO ask Qwen3-8B for a second-opinion
-    reference dimension, ADD it to the directory, and return the fresh verdict.
+    advertised tools + metadata, ADD it to the directory, and return the fresh
+    verdict.
 
 Two independent dimensions are reported:
   * `verdict`        - authoritative, from the deterministic static rules
-                       (`mcp_safety`). This is what gets stored/surfaced.
+                       (`mcp_safety`). This is what gets stored/surfaced and is
+                       what the hourly health job refreshes.
   * `llm_reference`  - advisory only, a Qwen3-8B read of the same advertised
-                       text. Never overrides the rule verdict; when it is *more*
-                       severe than the rules an `advisory` note is attached as a
-                       safety-net signal.
+                       text. The LLM is SLOW, so it runs ON-DEMAND only (only on
+                       a live user call, never in the hourly job) and is NEVER
+                       persisted. Never overrides the rule verdict; when it is
+                       *more* severe than the rules an `advisory` note is
+                       attached as a safety-net signal.
 
 Fully synchronous (httpx.Client + sqlite). Call it via ``asyncio.to_thread``
 from async code (MCP tool) or ``run_in_threadpool`` from the A2A route.
@@ -251,12 +254,14 @@ def scan_endpoint(endpoint_url: str, name: str = "", description: str = "",
                     reasons = json.loads(reasons)
                 except (TypeError, ValueError):
                     reasons = []
-        llm_ref = mcp.get("safety_llm")
-        if isinstance(llm_ref, str):
-            try:
-                llm_ref = json.loads(llm_ref)
-            except (TypeError, ValueError):
-                llm_ref = None
+        # The LLM second opinion is slow, so it is on-demand only and never
+        # persisted: run it live over the stored metadata for each user call.
+        llm_ref = None
+        if with_llm:
+            llm_ref = llm_reference(
+                mcp.get("name") or "", mcp.get("description") or "",
+                _tools_to_text(mcp.get("tools")),
+            )
         return {
             "verdict": stored, "score": score, "reasons": reasons or [],
             "llm_reference": llm_ref, "advisory": _advisory(stored, llm_ref),
@@ -281,8 +286,8 @@ def scan_endpoint(endpoint_url: str, name: str = "", description: str = "",
         name = host
     res = mcp_safety.scan_mcp(name=name, description=description, tools_text=scan_tools_text)
 
+    # LLM second opinion: on-demand only, never stored (it is slow).
     llm_ref = llm_reference(name, description, scan_tools_text) if with_llm else None
-    llm_json = json.dumps(llm_ref, ensure_ascii=False) if llm_ref else None
 
     # Only index endpoints we could actually reach OR for which the caller
     # supplied real metadata — don't pollute the directory with dead/garbage
@@ -312,13 +317,12 @@ def scan_endpoint(endpoint_url: str, name: str = "", description: str = "",
                     "UPDATE mcp_servers SET conformance=?, tool_count=?, "
                     "tools_json=COALESCE(?, tools_json), "
                     "tools_text=COALESCE(?, tools_text), "
-                    "safety_verdict=?, safety_score=?, safety_reasons=?, "
-                    "safety_llm=COALESCE(?, safety_llm) WHERE id=?",
+                    "safety_verdict=?, safety_score=?, safety_reasons=? WHERE id=?",
                     (probe.get("conformance"), probe.get("tool_count"),
                      tools_json, scan_tools_text or None,
                      res.verdict, res.score,
                      json.dumps(res.to_dict()["reasons"], ensure_ascii=False),
-                     llm_json, row_id),
+                     row_id),
                 )
             indexed = True
         except Exception as e:  # noqa: BLE001
