@@ -56,8 +56,9 @@ def own_agent_card(base_url: str = SITE) -> dict:
         "name": "Agent Tools Directory",
         "description": (
             "Discovery agent for the agentic economy. Searches a curated "
-            "directory of x402 paid APIs, A2A agents and MCP servers, and "
-            "recommends payable endpoints for a given intent."
+            "directory of x402 paid APIs, A2A agents and MCP servers, "
+            "recommends payable endpoints for a given intent, and scans MCP "
+            "servers for malware / prompt-injection before you connect."
         ),
         "url": f"{base}/a2a",
         "preferredTransport": "JSONRPC",
