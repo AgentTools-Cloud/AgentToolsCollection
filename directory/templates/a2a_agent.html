@@ -10,6 +10,15 @@
 <header class="mt-4 mb-6 flex flex-wrap items-start justify-between gap-4">
   <div class="min-w-0">
     <h1 class="text-3xl md:text-4xl font-extrabold tracking-tight">{{ a.name }}</h1>
+    {% if a.safety %}
+    <div class="mt-3 rounded-lg px-4 py-3 text-sm {% if a.safety.verdict == "malicious" %}bg-rose-50 text-rose-800 ring-1 ring-rose-200{% else %}bg-amber-50 text-amber-800 ring-1 ring-amber-200{% endif %}">
+      <div class="font-semibold">⚠ {% if a.safety.verdict == "malicious" %}Flagged by static safety scan — do not run install commands from this listing{% else %}Review recommended — static scan found suspicious patterns{% endif %}</div>
+      <ul class="mt-1 list-disc list-inside text-[13px] opacity-90">
+        {% for r in a.safety.reasons %}<li><span class="mono">{{ r.rule }}</span>: {{ r.snippet }}</li>{% endfor %}
+      </ul>
+      <div class="mt-1 text-[12px] opacity-70">Heuristic static scan of the public listing text. Advisory only.</div>
+    </div>
+    {% endif %}
     {% if a.provider_name %}
       <div class="text-slate-500 text-sm mt-1">{{ a.provider_name }}{% if a.provider_url %} · <a href="{{ a.provider_url }}" target="_blank" rel="noopener" class="text-blue-600 hover:underline">{{ a.provider_url }}</a>{% endif %}</div>
     {% endif %}

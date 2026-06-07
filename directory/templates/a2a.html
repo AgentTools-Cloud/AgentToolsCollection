@@ -43,23 +43,51 @@
   <div class="grid grid-cols-2 sm:grid-cols-4 gap-4">
     <div class="stat-card">
       <div class="text-sm text-slate-500">Agents indexed</div>
-      <div class="text-3xl font-bold mt-1">{{ stats.total }}</div>
-      <div class="text-xs text-slate-400 mt-3">public agent cards</div>
+      <div class="flex items-baseline gap-2 mt-1">
+        <span class="text-3xl font-bold">{{ stats.total }}</span>
+        <span class="text-sm text-slate-500">agents</span>
+      </div>
+      <div class="flex items-baseline gap-2 mt-1">
+        <span class="text-2xl font-bold text-slate-700">{{ stats.domains }}</span>
+        <span class="text-sm text-slate-500">domains</span>
+      </div>
+      <div class="text-xs text-slate-400 mt-1">public agent cards{% if stats.new_7d %} · <span class="text-emerald-600 font-semibold">+{{ stats.new_7d }} this week</span>{% endif %}</div>
     </div>
     <div class="stat-card">
       <div class="text-sm text-slate-500">Healthy</div>
-      <div class="text-3xl font-bold mt-1 text-emerald-600">{{ stats.healthy }}</div>
-      <div class="text-xs text-slate-400 mt-3">card reachable &lt; 6 h</div>
+      <div class="flex items-baseline gap-2 mt-1">
+        <span class="text-3xl font-bold text-emerald-600">{{ stats.healthy }}</span>
+        <span class="text-sm text-slate-500">agents</span>
+      </div>
+      <div class="flex items-baseline gap-2 mt-1">
+        <span class="text-2xl font-bold text-emerald-600">{{ stats.healthy_domains }}</span>
+        <span class="text-sm text-slate-500">domains</span>
+      </div>
+      <div class="text-xs text-slate-400 mt-1">card reachable &lt; 6 h</div>
     </div>
     <div class="stat-card">
       <div class="text-sm text-slate-500">Conformant</div>
-      <div class="text-3xl font-bold mt-1 text-emerald-600">{{ stats.conformant }}</div>
-      <div class="text-xs text-slate-400 mt-3">valid card + skills</div>
+      <div class="flex items-baseline gap-2 mt-1">
+        <span class="text-3xl font-bold text-emerald-600">{{ stats.conformant }}</span>
+        <span class="text-sm text-slate-500">agents</span>
+      </div>
+      <div class="flex items-baseline gap-2 mt-1">
+        <span class="text-2xl font-bold text-emerald-600">{{ stats.conformant_domains }}</span>
+        <span class="text-sm text-slate-500">domains</span>
+      </div>
+      <div class="text-xs text-slate-400 mt-1">valid card + skills</div>
     </div>
     <div class="stat-card">
       <div class="text-sm text-slate-500">x402-capable</div>
-      <div class="text-3xl font-bold mt-1">{{ stats.x402_capable }}</div>
-      <div class="text-xs text-slate-400 mt-3">accepts x402 payment</div>
+      <div class="flex items-baseline gap-2 mt-1">
+        <span class="text-3xl font-bold">{{ stats.x402_capable }}</span>
+        <span class="text-sm text-slate-500">agents</span>
+      </div>
+      <div class="flex items-baseline gap-2 mt-1">
+        <span class="text-2xl font-bold">{{ stats.x402_domains }}</span>
+        <span class="text-sm text-slate-500">domains</span>
+      </div>
+      <div class="text-xs text-slate-400 mt-1">accepts x402 payment</div>
     </div>
   </div>
 </section>

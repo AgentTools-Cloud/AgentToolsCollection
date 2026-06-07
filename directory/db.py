@@ -15,6 +15,32 @@ import random
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Callable
+from urllib.parse import urlparse
+
+try:
+    from . import mcp_safety as _mcp_safety
+except Exception:  # pragma: no cover
+    try:
+        import mcp_safety as _mcp_safety  # type: ignore
+    except Exception:
+        _mcp_safety = None
+
+
+def _safety_mark(name, description, tools_text):
+    """Static abuse scan -> attach a marker only for non-clean results.
+
+    Pure advisory: never blocks ingestion or display. Any failure is swallowed.
+    """
+    if _mcp_safety is None:
+        return None
+    try:
+        r = _mcp_safety.scan_mcp(name or "", description or "", tools_text or "")
+    except Exception:
+        return None
+    if r.verdict == "clean":
+        return None
+    return r.to_dict()
+
 
 DEFAULT_DB_PATH = os.environ.get(
     "AGENT_TOOLS_DB_PATH", "/opt/mcpserver/data/agent-tools.db"
@@ -335,6 +361,9 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
             "ALTER TABLE mcp_servers ADD COLUMN package_download_count INTEGER",
             "ALTER TABLE mcp_servers ADD COLUMN tools_json TEXT",
             "ALTER TABLE mcp_servers ADD COLUMN tools_text TEXT",
+            "ALTER TABLE mcp_servers ADD COLUMN safety_verdict TEXT",
+            "ALTER TABLE mcp_servers ADD COLUMN safety_score INTEGER",
+            "ALTER TABLE mcp_servers ADD COLUMN safety_reasons TEXT",
             "ALTER TABLE a2a_agents ADD COLUMN conformance TEXT",
         ):
             try:
@@ -921,6 +950,9 @@ def a2a_row_to_dict(row) -> dict:
                 d[k] = json.loads(d[k])
             except (TypeError, json.JSONDecodeError):
                 pass
+    _sf = _safety_mark(d.get("name"), d.get("description"), d.get("skill_names"))
+    if _sf:
+        d["safety"] = _sf
     return d
 
 
@@ -1067,8 +1099,38 @@ def a2a_stats(conn):
     conformant = cur.execute(
         "SELECT COUNT(*) AS n FROM a2a_agents WHERE conformance='pass'"
     ).fetchone()["n"]
+    new_7d = cur.execute(
+        "SELECT COUNT(*) AS n FROM a2a_agents "
+        "WHERE created_at >= strftime('%s', 'now', '-7 days')"
+    ).fetchone()["n"]
+
+    def _host(url):
+        h = urlparse(url).netloc.lower().split("@")[-1].split(":")[0]
+        return h[4:] if h.startswith("www.") else h
+    doms, dom_healthy, dom_conf, dom_x402 = set(), set(), set(), set()
+    for r in cur.execute(
+        "SELECT endpoint_url, card_url, homepage_url, provider_url, "
+        "health, conformance, x402_supported FROM a2a_agents"
+    ).fetchall():
+        host = None
+        for u in (r["endpoint_url"], r["card_url"], r["homepage_url"], r["provider_url"]):
+            if u:
+                host = _host(u if "//" in u else "https://" + u)
+                if host:
+                    break
+        if not host:
+            continue
+        doms.add(host)
+        if r["health"] == "ok":
+            dom_healthy.add(host)
+        if r["conformance"] == "pass":
+            dom_conf.add(host)
+        if r["x402_supported"] == 1:
+            dom_x402.add(host)
     return {"total": total, "healthy": healthy, "x402_capable": x402,
-            "conformant": conformant}
+            "conformant": conformant, "new_7d": new_7d,
+            "domains": len(doms), "healthy_domains": len(dom_healthy),
+            "conformant_domains": len(dom_conf), "x402_domains": len(dom_x402)}
 
 
 # ---------------------------------------------------------------------------
@@ -1108,6 +1170,9 @@ def mcp_row_to_dict(row) -> dict:
             d["tools"] = json.loads(d["tools_json"])
         except (TypeError, json.JSONDecodeError):
             pass
+    _sf = _safety_mark(d.get("name"), d.get("description"), d.get("tools_text"))
+    if _sf:
+        d["safety"] = _sf
     d.pop("tools_text", None)
     return d
 
@@ -1313,13 +1378,47 @@ def mcp_stats(conn):
     conformant = cur.execute(
         "SELECT COUNT(*) AS n FROM mcp_servers WHERE conformance='pass'"
     ).fetchone()["n"]
+    new_7d = cur.execute(
+        "SELECT COUNT(*) AS n FROM mcp_servers "
+        "WHERE created_at >= strftime('%s', 'now', '-7 days')"
+    ).fetchone()["n"]
+
+    # Distinct host domains per metric: a single domain can expose several MCP
+    # services (different paths), so every stat carries both a server count and
+    # a domain count. We bucket each metric's distinct domains in one pass.
+    def _host(url: str) -> str:
+        host = urlparse(url).netloc.lower().split("@")[-1].split(":")[0]
+        return host[4:] if host.startswith("www.") else host
+
+    dom_all, dom_healthy, dom_conf, dom_x402 = set(), set(), set(), set()
+    for r in cur.execute(
+        "SELECT endpoint_url AS u, health, conformance, x402_supported "
+        "FROM mcp_servers "
+        "WHERE endpoint_url IS NOT NULL AND endpoint_url != ''"
+    ).fetchall():
+        host = _host(r["u"])
+        if not host:
+            continue
+        dom_all.add(host)
+        if r["health"] == "ok":
+            dom_healthy.add(host)
+        if r["conformance"] == "pass":
+            dom_conf.add(host)
+        if r["x402_supported"] == 1:
+            dom_x402.add(host)
+
     _p = cur.execute(
         "SELECT AVG(latency_p95_ms) AS a FROM mcp_servers "
         "WHERE latency_p95_ms IS NOT NULL"
     ).fetchone()
     avg_p95 = int(_p["a"]) if _p and _p["a"] is not None else None
     return {"total": total, "healthy": healthy, "remote_callable": remote,
-            "x402_capable": x402, "conformant": conformant, "avg_p95_ms": avg_p95}
+            "conformant": conformant, "x402_capable": x402, "new_7d": new_7d,
+            "domains": len(dom_all),
+            "healthy_domains": len(dom_healthy),
+            "conformant_domains": len(dom_conf),
+            "x402_domains": len(dom_x402),
+            "avg_p95_ms": avg_p95}
 
 
 def mcp_p95_latency(conn, server_id: int, days: int = 14):
