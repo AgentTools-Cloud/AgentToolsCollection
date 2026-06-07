@@ -11,8 +11,11 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import hashlib
+import json
 import logging
 import os
+import time
 from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
@@ -21,9 +24,11 @@ from mcp.server.transport_security import TransportSecuritySettings
 from . import ask as directory_ask
 from . import a2a as directory_a2a
 from . import cards
+from . import crawlers as directory_crawlers
 from . import db as directory_db
 from . import jobs as directory_jobs
 from . import limits
+from . import mcp_safety
 from . import resources as directory_resources
 
 log = logging.getLogger("mcpserver.directory.mcp")
@@ -45,7 +50,11 @@ _INSTRUCTIONS = (
     "  3. `get(slug)` to fetch the service card: payment, call, quality,\n"
     "     resource samples, and ready-to-paste MCP/x402 call hints.\n"
     "  4. Use `list_categories` to discover the taxonomy and `stats` for\n"
-    "     directory size + health."
+    "     directory size + health.\n"
+    "  5. `scan_mcp_safety(endpoint_url)` screens an MCP server for malware /\n"
+    "     prompt-injection lures: returns our latest stored verdict if it is\n"
+    "     already indexed, otherwise probes + scans it live and adds it to the\n"
+    "     directory."
 )
 
 _TS = TransportSecuritySettings(enable_dns_rebinding_protection=False)
@@ -641,4 +650,192 @@ async def register(
     }
 
 
-log.info("directory MCP app built (db=%s, tools=6)", DB_PATH)
+# ---- Safety scanning ----------------------------------------------------------
+
+
+def _tools_to_text(tools) -> str:
+    """Flatten a list of {name, description} tool dicts into one scannable blob."""
+    return " ".join(
+        f"{t.get('name', '')} {t.get('description', '')}"
+        for t in (tools or []) if isinstance(t, dict)
+    ).strip()
+
+
+@discover_mcp.tool()
+async def scan_mcp_safety(
+    endpoint_url: str,
+    name: str = "",
+    description: str = "",
+    tools_text: str = "",
+    ctx: Context | None = None,
+) -> dict[str, Any]:
+    """Check an MCP server for malware / prompt-injection lures by its endpoint URL.
+
+    Give the server's streamable-http endpoint URL. Two paths:
+
+      * **Already in the agent-tools directory** → returns our LATEST stored
+        verdict. Every indexed server is re-scanned hourly, so you get a
+        consistent, continuously-refreshed answer without re-probing.
+      * **Not yet indexed** → we probe the endpoint live, statically scan its
+        advertised tools + metadata, ADD it to the directory, and return the
+        fresh verdict (so the next caller gets it instantly from cache).
+
+    The scan is static pattern-matching over the *advertised* text only — NO
+    code execution. It flags the social-engineering / RCE tricks listing-spam
+    servers use:
+
+      * `curl … | bash` and `base64 -d | sh` install lures
+      * `eval "$(curl …)"` / PowerShell `IEX(...DownloadString)` cradles
+      * base64 blobs that decode to a shell command
+      * bare-IP payload hosts and cheap throwaway TLDs
+      * prompt-injection / credential-exfiltration phrasing
+        ("ignore previous instructions", "send your .env / api key")
+
+    Security/defense products that merely *name* these attacks are not flagged.
+
+    Args:
+        endpoint_url: The MCP server's streamable-http URL (required). This is
+            the identity we look up / index by.
+        name: Optional advertised name (used when the server is new and gets
+            added; falls back to the URL host).
+        description: Optional description / README blurb (scanned when new).
+        tools_text: Optional tool names + descriptions; used only if the live
+            probe cannot fetch the server's tools/list.
+
+    Returns:
+        { verdict: "clean"|"suspicious"|"malicious", score: 0-100,
+          reasons: [{rule, weight, snippet}], slug, name, endpoint_url,
+          source: "stored" (existing) | "new_scan" (just added), indexed: bool }
+    """
+    endpoint_url = (endpoint_url or "").strip()
+    if not endpoint_url:
+        return {"error": "invalid_url", "message": "endpoint_url is required"}
+    if not (endpoint_url.startswith("http://") or endpoint_url.startswith("https://")):
+        return {"error": "invalid_url",
+                "message": "endpoint_url must start with http:// or https://"}
+    if len(endpoint_url) > 500:
+        return {"error": "invalid_url", "message": "endpoint_url too long (max 500)"}
+    name = (name or "").strip()
+    description = (description or "").strip()[:2000]
+    tools_text = (tools_text or "").strip()
+    ep = endpoint_url.lower().rstrip("/")
+
+    # ---- 1. Already indexed? return our latest stored verdict --------------
+    with _open() as conn:
+        row = conn.execute(
+            "SELECT * FROM mcp_servers WHERE lower(rtrim(endpoint_url, '/'))=?",
+            (ep,),
+        ).fetchone()
+        mcp = directory_db.mcp_row_to_dict(row) if row else None
+
+    if mcp is not None:
+        stored = mcp.get("safety_verdict")
+        if not stored:
+            # Indexed but not scanned yet → compute from stored metadata + persist.
+            res = mcp_safety.scan_mcp(
+                name=mcp.get("name") or "", description=mcp.get("description") or "",
+                tools_text=_tools_to_text(mcp.get("tools")),
+            )
+            stored, score, reasons = res.verdict, res.score, res.to_dict()["reasons"]
+            try:
+                with directory_db.writer(DB_PATH) as wc:
+                    wc.execute(
+                        "UPDATE mcp_servers SET safety_verdict=?, safety_score=?, "
+                        "safety_reasons=? WHERE id=?",
+                        (res.verdict, res.score,
+                         json.dumps(reasons, ensure_ascii=False), mcp.get("id")),
+                    )
+            except Exception as e:
+                log.warning("scan_mcp_safety persist (existing) failed: %r", e)
+        else:
+            score = mcp.get("safety_score")
+            reasons = mcp.get("safety_reasons")
+            if isinstance(reasons, str):
+                try:
+                    reasons = json.loads(reasons)
+                except (TypeError, ValueError):
+                    reasons = []
+        _log_call("scan_mcp_safety", ctx=ctx,
+                  args={"endpoint_url": endpoint_url, "outcome": "stored"},
+                  result_slug=stored)
+        return {
+            "verdict": stored, "score": score, "reasons": reasons or [],
+            "slug": mcp.get("slug"), "name": mcp.get("name"),
+            "endpoint_url": mcp.get("endpoint_url"),
+            "source": "stored", "indexed": True,
+            "last_scanned": mcp.get("health_checked"),
+        }
+
+    # ---- 2. New server: probe live, scan, add to the directory ------------
+    probe = await asyncio.to_thread(directory_crawlers.probe_mcp_health, endpoint_url)
+    probe_tools = probe.get("tools")
+    if isinstance(probe_tools, list):
+        tools_json = json.dumps(probe_tools, ensure_ascii=False)
+        scan_tools_text = _tools_to_text(probe_tools) or tools_text
+    else:
+        tools_json = None
+        scan_tools_text = tools_text
+
+    from urllib.parse import urlparse
+    host = urlparse(endpoint_url).hostname or "server"
+    if not name:
+        name = host
+    res = mcp_safety.scan_mcp(name=name, description=description, tools_text=scan_tools_text)
+
+    # Only index endpoints we could actually reach OR for which the caller
+    # supplied real metadata — don't pollute the directory with dead/garbage
+    # URLs that carry no signal.
+    reachable = probe.get("status") in ("ok", "degraded")
+    has_meta = bool(description or scan_tools_text)
+    slug = None
+    indexed = False
+    if reachable or has_meta:
+        base = (directory_crawlers._host_slug(endpoint_url) + "-"
+                + directory_crawlers._slugify(name)[:32]).strip("-")[:72]
+        # hash suffix keeps the slug unique per endpoint so the upsert's slug
+        # fallback can never clobber an unrelated server.
+        slug = f"{base or directory_crawlers._slugify(host)}-{hashlib.md5(ep.encode()).hexdigest()[:6]}"
+        row = {
+            "slug": slug, "name": name, "description": description or None,
+            "endpoint_url": endpoint_url, "transport": "streamable-http",
+            "source": "safety-scan", "source_id": ep, "source_url": endpoint_url,
+            "health": probe.get("status") or "unknown",
+            "health_checked": int(time.time()),
+            "latency_ms": probe.get("latency_ms"),
+            "http_status": probe.get("http_status"),
+            "confidence": 0.3, "tags": [],
+        }
+        try:
+            with directory_db.writer(DB_PATH) as wc:
+                _created, row_id = directory_db.upsert_mcp_server(wc, row)
+                wc.execute(
+                    "UPDATE mcp_servers SET conformance=?, tool_count=?, "
+                    "tools_json=COALESCE(?, tools_json), "
+                    "tools_text=COALESCE(?, tools_text), "
+                    "safety_verdict=?, safety_score=?, safety_reasons=? WHERE id=?",
+                    (probe.get("conformance"), probe.get("tool_count"),
+                     tools_json, scan_tools_text or None,
+                     res.verdict, res.score,
+                     json.dumps(res.to_dict()["reasons"], ensure_ascii=False), row_id),
+                )
+            indexed = True
+        except Exception as e:
+            log.warning("scan_mcp_safety index failed: %r", e)
+            slug = None
+
+    _log_call("scan_mcp_safety", ctx=ctx,
+              args={"endpoint_url": endpoint_url, "outcome": "new_scan",
+                    "indexed": indexed},
+              result_slug=res.verdict)
+    out = {
+        **res.to_dict(), "slug": slug, "name": name,
+        "endpoint_url": endpoint_url, "source": "new_scan", "indexed": indexed,
+        "health": probe.get("status"), "tool_count": probe.get("tool_count"),
+    }
+    if not indexed:
+        out["note"] = ("Endpoint unreachable and no metadata supplied — scanned "
+                       "but not added to the directory.")
+    return out
+
+
+log.info("directory MCP app built (db=%s, tools=11)", DB_PATH)

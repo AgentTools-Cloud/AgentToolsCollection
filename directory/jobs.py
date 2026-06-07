@@ -20,6 +20,7 @@ from pathlib import Path
 from . import a2a as a2a_mod
 from . import crawlers, db, mailer
 from . import agenstry as agenstry_mod
+from . import mcp_safety
 
 # agenstry.com reverse-crawl: register its MCP page crawler as a source so
 # `python -m directory.jobs crawl-mcp agenstry` works like any other source.
@@ -472,7 +473,8 @@ def cmd_health_a2a(only_unknown: bool = False) -> int:
 
 def cmd_health_mcp(only_unknown: bool = False) -> int:
     """Liveness-probe indexed MCP servers via an `initialize` request."""
-    sql = "SELECT id, endpoint_url FROM mcp_servers WHERE endpoint_url IS NOT NULL AND endpoint_url != ''"
+    sql = ("SELECT id, endpoint_url, name, description, tools_text FROM mcp_servers "
+           "WHERE endpoint_url IS NOT NULL AND endpoint_url != ''")
     if only_unknown:
         sql += " AND (health IS NULL OR health='' OR health='unknown')"
     with db.connect(read_only=True) as c:
@@ -480,6 +482,7 @@ def cmd_health_mcp(only_unknown: bool = False) -> int:
     if not rows:
         return 0
     n_ok = n_deg = n_down = n_conf = 0
+    n_flagged = 0
     now = int(time.time())
     from concurrent.futures import ThreadPoolExecutor
 
@@ -499,9 +502,19 @@ def cmd_health_mcp(only_unknown: bool = False) -> int:
         else:
             tools_json = None
             tools_text = None
+        # Static malware/abuse scan over advertised metadata (no network, no
+        # exec). Scan the freshest tools_text we have (this probe's, else the
+        # stored one) together with name+description.
+        scan = mcp_safety.scan_mcp(
+            name=r["name"] or "",
+            description=r["description"] or "",
+            tools_text=(tools_text if tools_text is not None else (r["tools_text"] or "")),
+        )
+        safety_reasons = json.dumps(scan.to_dict()["reasons"], ensure_ascii=False)
         upd = (h, now, res["latency_ms"], res["http_status"],
-               conf, res.get("tool_count"), tools_json, tools_text, last_ok, r["id"])
-        return r["id"], h, conf, res["latency_ms"], upd
+               conf, res.get("tool_count"), tools_json, tools_text,
+               scan.verdict, scan.score, safety_reasons, last_ok, r["id"])
+        return r["id"], h, conf, res["latency_ms"], scan, upd
 
     # Concurrent probes (network-I/O bound). 16 workers keeps this VPS — which
     # is shared with other sites — responsive; sqlite writes stay single-thread.
@@ -512,11 +525,16 @@ def cmd_health_mcp(only_unknown: bool = False) -> int:
         updates = []
         hist = []
         with ThreadPoolExecutor(max_workers=workers) as ex:
-            for sid, h, conf, lat, upd in ex.map(_probe, batch):
+            for sid, h, conf, lat, scan, upd in ex.map(_probe, batch):
                 updates.append(upd)
                 hist.append((sid, now, h, lat))
                 n_ok += h == "ok"; n_deg += h == "degraded"; n_down += h == "down"
                 n_conf += conf == "pass"
+                if scan.verdict != "clean":
+                    n_flagged += 1
+                    log.warning("mcp safety: server id=%s verdict=%s score=%d rules=%s",
+                                sid, scan.verdict, scan.score,
+                                ",".join(f.rule for f in scan.reasons))
 
         def op(updates=updates, hist=hist):
             with db.writer() as c:
@@ -525,6 +543,7 @@ def cmd_health_mcp(only_unknown: bool = False) -> int:
                     "http_status=?, conformance=?, tool_count=?, "
                     "tools_json=COALESCE(?, tools_json), "
                     "tools_text=COALESCE(?, tools_text), "
+                    "safety_verdict=?, safety_score=?, safety_reasons=?, "
                     "last_success_at=COALESCE(?, last_success_at) WHERE id=?",
                     updates,
                 )
@@ -558,8 +577,8 @@ def cmd_health_mcp(only_unknown: bool = False) -> int:
             c.execute("DELETE FROM mcp_health_history WHERE checked_at < ?",
                       (now - 30 * 86400,))
     db.with_retry(prune)
-    log.info("mcp health: ok=%d degraded=%d down=%d conformant=%d",
-             n_ok, n_deg, n_down, n_conf)
+    log.info("mcp health: ok=%d degraded=%d down=%d conformant=%d safety_flagged=%d",
+             n_ok, n_deg, n_down, n_conf, n_flagged)
     return 0
 
 
