@@ -98,6 +98,54 @@ _SHELLISH = re.compile(
 # cheap/abused TLDs commonly used for throwaway payload/phishing hosts
 _CHEAP_TLD = re.compile(r"https?://[^\s/]+\.(?:click|top|xyz|gq|cf|tk|ml|work|rest|sbs|cyou)\b", re.I)
 
+# --- MCP tool-poisoning rules (distilled + tightened from Cisco mcp-scanner's
+# coercive_injection.yara, Apache-2.0). These target the *advertised tool
+# description* attack surface — coercive directives an MCP server embeds to
+# hijack an agent's tool-calling — NOT source code. Source-code-oriented rules
+# (command/SQL/code injection) were deliberately dropped: on natural-language
+# tool descriptions they fire on words like "and", "function(", "del" and are
+# almost all false positives.
+
+# Coercive execution-order hijack: "always use this tool first", "before
+# calling any other tool you must use this", "required to run this tool first".
+# Requires the directive to bind to THIS tool AND a precedence word, so a plain
+# "use this tool to ..." does not trip it.
+_TOOL_POISON_COERCION = re.compile(
+    r"\balways\s+(?:consult|use|run|execute|invoke|call|trigger)\s+this\s+(?:tool|function|command)\s+(?:immediately|first|before|prior)\b"
+    r"|\bbefore\s+(?:executing|invoking|running|using|calling)\s+any\s+other\s+(?:tool|function|command|action)\b"
+    r"|\b(?:you|user)\s+(?:must|need to|have to|are required to)\s+(?:use|execute|run|invoke|call)\s+this\s+(?:tool|function|command)\b"
+    r"|\b(?:required|mandatory|essential)\s+to\s+(?:execute|use|run|invoke|call)\s+(?:this|the current)\s+(?:tool|function|command)\s+(?:first|before|initially|prior)\b"
+    r"|\bthis\s+tool\s+will\s+not\s+work\s+unless\b"
+    r"|\bsidenote\W+(?:required|otherwise)\b[^\n]{0,60}\btool\b",
+    re.I,
+)
+# Hidden / out-of-band instructions aimed at the agent: <IMPORTANT>…</IMPORTANT>
+# wrappers, "do not mention/tell the user", "tell the user only".
+_HIDDEN_INSTRUCTION = re.compile(
+    r"<\s*(?:important|critical|urgent|system|secret)\s*>[^\n]{0,200}(?:read|pass|send|execute|call|use|add)\b"
+    r"|\bdo\s+not\s+(?:mention|tell|reveal|disclose|inform)\s+(?:the\s+)?user\b"
+    r"|\btell\s+(?:the\s+)?user\s+only\b"
+    r"|\b(?:hidden|secret)[_\s](?:parameter|argument|instruction|directive)\b",
+    re.I,
+)
+# Data-exfiltration coercion (tightened): explicit "list all api keys", "include
+# secrets/credentials/system prompt in your response", "base64 encode the
+# credentials", "send the conversation history".
+_DATA_EXFIL_COERCION = re.compile(
+    r"\blist\s+all\s+(?:api\s+)?keys?\b"
+    r"|\bshow\s+(?:me\s+)?(?:all\s+)?passwords?\b"
+    r"|\binclude\s+[^\n]{0,40}\b(?:secrets?|passwords?|credentials?|tokens?|system\s+prompt|conversation\s+history)\b[^\n]{0,20}\bin\s+(?:your\s+)?response\b"
+    r"|\bbase64\s+encode\s+[^\n]{0,30}\bcredentials?\b"
+    r"|\bsend\s+[^\n]{0,40}\bconversation\s+history\b",
+    re.I,
+)
+# Coercion to read & forward sensitive credential files (.key/.pem/.ssh/.aws/.env).
+_SENSITIVE_FILE_COERCION = re.compile(
+    r"\b(?:read|parse|cat|dump|load)\s+(?:and\s+(?:pass|send|forward)\s+)?(?:the\s+)?contents?\s+of\s+[^\n]{0,40}\.(?:key|pem|ssh|aws|env)\b"
+    r"|\b(?:pass|send|upload|forward)\s+(?:the\s+)?contents?\s+of\s+[^\n]{0,40}(?:~/\.ssh|\.aws/credentials|\.env|id_rsa)\b",
+    re.I,
+)
+
 
 @dataclass
 class Finding:
@@ -162,12 +210,20 @@ def scan_text(text: str, defensive: bool = False) -> list[Finding]:
         ("eval_download", 75, _EVAL_DOWNLOAD),
         ("powershell_cradle", 70, _PS_CRADLE),
         ("prompt_injection", 60, _INJECTION),
+        ("tool_poisoning_coercion", 55, _TOOL_POISON_COERCION),
+        ("hidden_instruction", 50, _HIDDEN_INSTRUCTION),
+        ("data_exfil_coercion", 60, _DATA_EXFIL_COERCION),
+        ("sensitive_file_coercion", 65, _SENSITIVE_FILE_COERCION),
     ):
         m = pat.search(text)
         if m:
             # A defensive/security product legitimately *names* the attacks it
-            # detects — suppress the injection rule when defense framing is near.
-            if rule == "prompt_injection" and (defensive or _DEFENSE_CONTEXT.search(text)):
+            # detects — suppress the description-level injection/coercion rules
+            # when defense framing is near (RCE rules below stay strict).
+            if rule in ("prompt_injection", "tool_poisoning_coercion",
+                        "hidden_instruction", "data_exfil_coercion",
+                        "sensitive_file_coercion") and (
+                    defensive or _DEFENSE_CONTEXT.search(text)):
                 continue
             out.append(Finding(rule, weight, _snippet(text, m)))
 
