@@ -28,6 +28,10 @@
     <p class="text-sm mt-2">Discovery entry-points: <a class="text-blue-600 hover:underline mono" href="/.well-known/agent-tools.json">/.well-known/agent-tools.json</a> · <a class="text-blue-600 hover:underline mono" href="/.well-known/mcp.json">/.well-known/mcp.json</a></p>
   </div>
   <div>
+    <h2 class="text-lg font-semibold mb-2">Static safety scanning</h2>
+    <p class="text-sm">Every indexed MCP server is re-scanned each hour for known malware and abuse patterns — pipe-to-shell install lures, base64 / <code class="mono bg-slate-100 px-1 rounded">eval</code> download cradles, bare-IP command-and-control URLs and prompt-injection phrasing in its advertised tool metadata. Each server carries a <span class="mono">clean</span> / <span class="mono">suspicious</span> / <span class="mono">malicious</span> verdict with the matched rules. Scanning is static only — we never execute server code.</p>
+  </div>
+  <div>
     <h2 class="text-lg font-semibold mb-2">Sources</h2>
     <ul class="text-sm space-y-1">
       <li>· <a class="text-blue-600 hover:underline" href="https://github.com/Merit-Systems/awesome-x402">awesome-x402</a></li>
