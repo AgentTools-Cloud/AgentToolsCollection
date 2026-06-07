@@ -22,6 +22,7 @@ Also listed on [Smithery](https://smithery.ai/servers/kangletian/agent-tools-x40
 | `GET /api/v1/categories`, `/api/v1/stats` | free | Directory facets and aggregate stats |
 | `POST /api/v1/submit` | free, rate-limited | Pending service submission with dedupe |
 | `POST /mcp-discovery/` | free | **MCP streamable-http** discovery server |
+| `POST /a2a` | free | **A2A JSON-RPC** agent (`message/send`): directory search + MCP safety scan |
 | `GET /healthz` | free | Liveness |
 | `GET /v1/models` | free | Upstream model listing (read-only) |
 | `GET /.well-known/agent-tools.json` | free | Agent discovery manifest |
@@ -40,12 +41,26 @@ ask_services(intent, top_k=5, category=None, max_price_usd=None, use_llm=True)
 get(slug)
 list_categories()
 stats()
+search_mcp_servers(intent, top_k=5, chain=None, require_healthy=False)
+get_mcp_server(slug)
+search_a2a_agents(intent, top_k=5, x402_only=False)
+search_resources(intent, protocol=None, top_k=10)
+scan_mcp_safety(endpoint_url, name="", description="", tools_text="")
 register(url, name=None, description=None, mcp_url=None, category=None)
 ```
 
 `search` accepts natural-language intent and ranks by FTS5 + popularity +
 health. Each result carries a `match_reason` and a `confidence` score.
 `ask_services` uses the same retrieval-first / LLM-rerank flow as `/api/v1/ask`.
+
+`scan_mcp_safety` vets an MCP server (by endpoint URL) for malware /
+prompt-injection lures before you connect: an already-indexed server returns our
+latest stored verdict, an unknown one is probed live, scanned, and added to the
+directory. The verdict comes from deterministic static rules (no code execution);
+each live call also runs a frontier-LLM second opinion as an advisory dimension.
+It is also exposed as an A2A skill on `POST /a2a`. The hosted server carries the
+full tool set above; the stdio `agent-tools-mcp` PyPI package ships the core
+search tools only.
 
 ## Deploy
 
@@ -69,6 +84,7 @@ See [`.env.example`](.env.example). Required:
 
 - `UPSTREAM_BASE_URL` / `UPSTREAM_API_KEY` — used by `/v1/models`
 - `AGENT_TOOLS_ASK_BASE_URL` / `AGENT_TOOLS_ASK_API_KEY` / `AGENT_TOOLS_ASK_MODEL` — LLM backend for `/api/v1/ask`
+- `AGENT_TOOLS_SAFETY_BASE_URL` / `AGENT_TOOLS_SAFETY_API_KEY` / `AGENT_TOOLS_SAFETY_MODEL` — optional override for the `scan_mcp_safety` advisory LLM (falls back to the `AGENT_TOOLS_ASK_*` backend)
 - `AGENT_TOOLS_DB_PATH` — SQLite path for the directory
 - `AGENT_TOOLS_ASK_RATE_LIMIT_PER_MINUTE` / `AGENT_TOOLS_ASK_RATE_LIMIT_PER_DAY` — public ask abuse limits
 - `METRICS_BEARER_TOKEN` — optional remote access token for `/metrics`; without it metrics are local-only
