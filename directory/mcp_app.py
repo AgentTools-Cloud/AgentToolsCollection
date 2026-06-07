@@ -662,12 +662,12 @@ async def scan_mcp_safety(
     Give the server's streamable-http endpoint URL. Two paths:
 
       * **Already in the agent-tools directory** → returns our LATEST stored
-        verdict. Every indexed server is re-scanned hourly, so you get a
+        rule verdict. Every indexed server is re-scanned hourly, so you get a
         consistent, continuously-refreshed answer without re-probing.
       * **Not yet indexed** → we probe the endpoint live, statically scan its
-        advertised tools + metadata, ALSO ask Qwen3-8B for a second-opinion
-        reference, ADD it to the directory, and return the fresh verdict (so the
-        next caller gets it instantly from cache).
+        advertised tools + metadata, ADD it to the directory, and return the
+        fresh verdict (so the next caller gets the rule verdict instantly from
+        cache).
 
     Two dimensions are reported. `verdict` is authoritative and comes from
     deterministic static rules — pure pattern-matching over the *advertised*
@@ -681,10 +681,12 @@ async def scan_mcp_safety(
       * prompt-injection / credential-exfiltration phrasing
         ("ignore previous instructions", "send your .env / api key")
 
-    `llm_reference` is an advisory second opinion from Qwen3-8B over the same
-    text (it never overrides the rule verdict). When the LLM is *more* severe
-    than the rules an `advisory` note is attached as a safety-net signal.
-    Security/defense products that merely *name* these attacks are not flagged.
+    `llm_reference` is an advisory Qwen3-8B second opinion over the same text.
+    Because the LLM is slow it is computed LIVE on this call only and is never
+    stored (the hourly job never runs it), so it may be null on timeout. It
+    never overrides the rule verdict; when it is *more* severe than the rules an
+    `advisory` note is attached as a safety-net signal. Security/defense
+    products that merely *name* these attacks are not flagged.
 
     Args:
         endpoint_url: The MCP server's streamable-http URL (required). This is
