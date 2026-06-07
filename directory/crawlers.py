@@ -1879,3 +1879,108 @@ MCP_CRAWLERS["chiark"] = fetch_chiark
 
 # glama removed: catalog-only, all endpoint_url=null, not callable by agents (2026-06-04)
 # MCP_CRAWLERS["glama"] = fetch_glama
+
+
+# --- mcp-catalog.com (community-curated, Supabase-backed) -----------------
+# A small but high-signal directory: every entry has a real callable endpoint
+# (/mcp or /sse), maintained mostly by the official vendors (Cloudflare, GitHub,
+# Notion, Stripe, ...). Data is served from a public Supabase PostgREST table;
+# the anon key below is the site's own public client key (embedded in its JS),
+# read-only. We re-derive it at runtime so a key rotation doesn't break us.
+MCP_CATALOG_PAGE = "https://mcp-catalog.com/catalog"
+MCP_CATALOG_SUPABASE = "https://zscusvbjclywtnfilbne.supabase.co"
+
+
+def _mcp_catalog_anon_key() -> str | None:
+    """Re-derive the public Supabase anon key from the site's JS bundle so a
+    key rotation is picked up automatically (falls back to None on failure)."""
+    try:
+        with httpx.Client(timeout=TIMEOUT, headers={"User-Agent": UA}) as c:
+            html = c.get(MCP_CATALOG_PAGE).text
+            blob = html
+            for src in re.findall(r'<script[^>]+src="([^"]+)"', html):
+                u = src if src.startswith("http") else "https://mcp-catalog.com" + src
+                try:
+                    blob += c.get(u).text
+                except Exception:
+                    continue
+        keys = re.findall(
+            r"eyJ[A-Za-z0-9_-]{20,}\.eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}", blob)
+        return max(keys, key=len) if keys else None
+    except Exception as e:
+        log.warning("mcp-catalog: anon key derive failed: %r", e)
+        return None
+
+
+def fetch_mcp_catalog() -> list:
+    """Pull mcp-catalog.com's curated MCP servers (Supabase REST) as rows."""
+    key = _mcp_catalog_anon_key()
+    if not key:
+        log.warning("mcp-catalog: no anon key, skipping")
+        return []
+    out: list = []
+    seen_ep: set = set()
+    hdr = {"User-Agent": UA, "Accept": "application/json",
+           "apikey": key, "Authorization": f"Bearer {key}"}
+    try:
+        with httpx.Client(timeout=TIMEOUT, headers=hdr) as c:
+            r = c.get(f"{MCP_CATALOG_SUPABASE}/rest/v1/servers",
+                      params={"select": "*", "order": "created_at.desc"})
+            if r.status_code != 200:
+                log.warning("mcp-catalog: HTTP %d", r.status_code)
+                return []
+            rows = r.json()
+    except Exception as e:
+        log.warning("mcp-catalog: fetch error: %r", e)
+        return []
+    if not isinstance(rows, list):
+        return []
+    for it in rows:
+        if not isinstance(it, dict):
+            continue
+        ep = (it.get("url") or "").strip()
+        if not ep or not ep.lower().startswith("http"):
+            continue
+        ep_key = ep.lower().rstrip("/")
+        if ep_key in seen_ep:
+            continue
+        seen_ep.add(ep_key)
+        name = it.get("name") or _host_slug(ep)
+        low = ep.lower()
+        transport = "sse" if low.endswith("/sse") else (
+            "streamable-http" if "/mcp" in low or low.rstrip("/").endswith("mcp") else None)
+        auth_raw = (it.get("authentication") or "").strip()
+        auth_method = None
+        if auth_raw and auth_raw.lower() not in ("open", "none", "public"):
+            auth_method = "required"
+        cat = (it.get("category") or "").strip()
+        maint = (it.get("maintainer") or "").strip()
+        tools = it.get("tools") if isinstance(it.get("tools"), list) else []
+        tool_names = [t.get("name") for t in tools
+                      if isinstance(t, dict) and t.get("name")]
+        desc_bits = []
+        if cat:
+            desc_bits.append(cat)
+        if maint:
+            desc_bits.append(f"maintained by {maint}")
+        if tool_names:
+            desc_bits.append(f"{len(tool_names)} tools: " + ", ".join(tool_names[:8]))
+        tags = [t for t in [cat] if t]
+        out.append({
+            "slug": _host_slug(ep) + "-mcpcatalog",
+            "name": name,
+            "description": " · ".join(desc_bits) or None,
+            "endpoint_url": ep,
+            "homepage_url": it.get("website") or ep,
+            "transport": transport,
+            "auth_method": auth_method,
+            "tags": tags,
+            "source": "mcp-catalog",
+            "source_id": str(it.get("id") or ep_key),
+            "source_url": MCP_CATALOG_PAGE,
+        })
+    log.info("mcp-catalog: collected %d unique-endpoint servers", len(out))
+    return out
+
+
+MCP_CRAWLERS["mcp-catalog"] = fetch_mcp_catalog
