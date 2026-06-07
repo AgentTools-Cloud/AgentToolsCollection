@@ -124,4 +124,16 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST \
 
 ## License
 
-MIT
+The agent-tools.cloud **server and directory code** in this repository is
+licensed under the **[PolyForm Noncommercial License 1.0.0](LICENSE)** — you may
+use, modify, and share it for any **noncommercial** purpose; commercial use is
+not permitted.
+
+The standalone MCP client package in [`agent-tools-mcp/`](agent-tools-mcp/)
+(published to PyPI as `agent-tools-mcp`) is licensed separately under
+**[Apache-2.0](agent-tools-mcp/LICENSE)**, so any agent — including commercial
+ones — can install and call the hosted service freely.
+
+Using the hosted service at agent-tools.cloud is governed by its terms of
+service, not this code license.
+
