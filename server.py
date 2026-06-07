@@ -114,7 +114,7 @@ _HOMEPAGE_HTML = """<!doctype html>
 <meta charset="utf-8">
 <title>agent-tools.cloud — x402 directory + MCP discovery</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="description" content="agent-tools.cloud is a free directory and MCP discovery server for x402 paid endpoints. The previously hosted paid Qwen relay and verticals were retired on 2026-05-25.">
+<meta name="description" content="agent-tools.cloud is a free directory and discovery layer for x402 paid APIs, MCP servers and A2A agents, with a built-in safety scanner that checks any MCP server for malware and prompt-injection before you connect. The previously hosted paid Qwen relay and verticals were retired on 2026-05-25.">
 <meta name="robots" content="noindex, nofollow">
 <style>
 :root { color-scheme: light dark; }
@@ -175,7 +175,8 @@ async def well_known_x402(request: Request) -> dict[str, Any]:
     host = (request.headers.get("host") or "").split(":", 1)[0].lower() or "agent-tools.cloud"
     description = (
         "Free MCP discovery server for x402 paid services across the ecosystem. "
-        "Search 2000+ x402 endpoints, ask for recommendations, get service cards, browse categories. "
+        "Search 2000+ x402 endpoints, ask for recommendations, get service cards, browse categories, "
+        "and scan any MCP server for malware / prompt-injection before connecting. "
         "The paid relay previously hosted here has been retired; this host is "
         "now directory + discovery only."
     )
@@ -209,8 +210,9 @@ async def well_known_mcp(request: Request) -> dict[str, Any]:
         "description": (
             "Free MCP discovery server for the agentic economy. "
             "Searches a curated directory of x402 paid APIs, MCP servers and A2A agents, "
-            "and recommends payable/callable endpoints for a given intent. "
-            "Same tools also available as a stdio MCP via `uvx agent-tools-mcp`."
+            "recommends payable/callable endpoints for a given intent, "
+            "and scans MCP servers for malware / prompt-injection before you connect. "
+            "Core search tools are also available as a stdio MCP via `uvx agent-tools-mcp`."
         ),
         "version": "0.2.0",
         "homepage": "https://agent-tools.cloud",
@@ -304,6 +306,7 @@ def _build_openapi() -> dict[str, Any]:
         "Free directory and discovery layer for x402 paid APIs and MCP services. "
         "Agents can search the indexed ecosystem, ask for intent-level recommendations, "
         "retrieve service cards with payment/call/quality metadata, browse categories, "
+        "scan any MCP server for malware / prompt-injection before connecting, "
         "submit services for review, or connect via the ungated MCP discovery server at "
         "/mcp-discovery. The previously hosted paid Qwen relay and crypto verticals were "
         "retired on 2026-05-25; this host no longer serves paid endpoints."
@@ -315,7 +318,8 @@ def _build_openapi() -> dict[str, Any]:
         "agent-readable service card before paying or calling an external "
         "service. GET /api/v1/categories and /api/v1/stats expose facets and "
         "health. POST /mcp-discovery/ is an ungated MCP streamable-http server "
-        "with search, ask_services, get, list_categories, stats and register. "
+        "with search, ask_services, get, list_categories, stats, scan_mcp_safety "
+        "(malware / prompt-injection check for any MCP endpoint) and register. "
         "agent-tools.cloud itself is discovery-only; paid relay routes were retired. "
         "Every indexed resource (x402 service, MCP server, A2A agent) carries a "
         "liveness `health_status`: `ok` = answered a live probe and is callable; "
