@@ -680,8 +680,16 @@ async def scan_mcp_safety(
       * bare-IP payload hosts and cheap throwaway TLDs
       * prompt-injection / credential-exfiltration phrasing
         ("ignore previous instructions", "send your .env / api key")
+      * MCP tool-poisoning coercion — descriptions that hijack an agent's
+        tool-calling ("always call this tool first", "before using any other
+        tool you must…"), hidden `<IMPORTANT>` instructions, "list all API
+        keys / include secrets in your response", and coercion to read &
+        forward `.key`/`.pem`/`.ssh`/`.env` files
 
-    `llm_reference` is an advisory Qwen3-8B second opinion over the same text.
+    Source-code-oriented rules (SQL / command / code injection) are deliberately
+    not applied to natural-language descriptions, to avoid false positives.
+
+    `llm_reference` is an advisory frontier-LLM second opinion over the same text.
     Because the LLM is slow it is computed LIVE on this call only and is never
     stored (the hourly job never runs it), so it may be null on timeout. It
     never overrides the rule verdict; when it is *more* severe than the rules an

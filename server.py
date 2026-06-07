@@ -239,7 +239,7 @@ async def well_known_mcp(request: Request) -> dict[str, Any]:
             {"name": "get_mcp_server", "description": "Get the full card for one MCP server by slug."},
             {"name": "search_a2a_agents", "description": "Find A2A agents you can delegate a task to."},
             {"name": "search_resources", "description": "Unified search across x402 services, MCP servers and A2A agents."},
-            {"name": "scan_mcp_safety", "description": "Check an MCP server (by endpoint URL) for malware / prompt-injection: returns our stored verdict if indexed, else probes + scans + indexes it."},
+            {"name": "scan_mcp_safety", "description": "Check an MCP server (by endpoint URL) for malware / prompt-injection / tool-poisoning: returns our stored verdict if indexed, else probes + scans + indexes it."},
             {"name": "register", "description": "Self-register an x402 / MCP service for human review."},
         ],
     }

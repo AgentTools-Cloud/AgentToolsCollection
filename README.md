@@ -56,8 +56,16 @@ health. Each result carries a `match_reason` and a `confidence` score.
 `scan_mcp_safety` vets an MCP server (by endpoint URL) for malware /
 prompt-injection lures before you connect: an already-indexed server returns our
 latest stored verdict, an unknown one is probed live, scanned, and added to the
-directory. The verdict comes from deterministic static rules (no code execution);
-each live call also runs a frontier-LLM second opinion as an advisory dimension.
+directory. The verdict comes from deterministic static rules (no code execution)
+over the server's advertised name + description + tool docs. Rules cover
+pipe-to-shell / base64-eval / PowerShell install cradles, bare-IP payload hosts,
+prompt-injection phrasing, and MCP **tool-poisoning** coercion — "always call
+this tool first", "before using any other tool you must…", hidden
+`<IMPORTANT>` instructions, "list all API keys / include secrets in your
+response", and coercion to read & forward `.key`/`.pem`/`.ssh`/`.env` files.
+Source-code-oriented rules (SQL/command/code injection) are intentionally not
+applied to natural-language descriptions to avoid false positives. Each live
+call also runs a frontier-LLM second opinion as an advisory dimension.
 It is also exposed as an A2A skill on `POST /a2a`. The hosted server carries the
 full tool set above; the stdio `agent-tools-mcp` PyPI package ships the core
 search tools only.
