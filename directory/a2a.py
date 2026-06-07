@@ -117,6 +117,21 @@ def own_agent_card(base_url: str = SITE) -> dict:
                 "tags": ["x402", "recommendation", "payments"],
                 "examples": ["I need to pay for on-demand OCR, what should I use?"],
             },
+            {
+                "id": "scan_mcp_safety",
+                "name": "Scan MCP server safety",
+                "description": (
+                    "Check an MCP server (by streamable-http endpoint URL) for "
+                    "malware / prompt-injection lures. Returns our stored verdict "
+                    "if it is already indexed, otherwise probes + statically scans "
+                    "it, adds a Qwen3-8B advisory second opinion, and indexes it."
+                ),
+                "tags": ["mcp", "security", "safety", "malware", "scan"],
+                "examples": [
+                    "is https://example.com/mcp safe to connect to?",
+                    "scan https://foo.bar/mcp for malware",
+                ],
+            },
         ],
     }
 
@@ -154,6 +169,41 @@ def _agent_message(text: str, data: Any = None) -> dict:
     }
 
 
+# Safety-scan intent: a request to vet an MCP server. Triggered either by an
+# explicit structured data part ({skill: scan_mcp_safety, endpoint_url: ...}) or
+# by free text that pairs a URL with a security-intent keyword.
+_SCAN_URL_RE = re.compile(r"https?://\S+", re.I)
+_SCAN_INTENT_RE = re.compile(
+    r"\b(scan|safety|safe|malicious|malware|unsafe|phish|audit|vet|"
+    r"trustworthy|legit|suspicious)\b",
+    re.I,
+)
+
+
+def _safety_scan_request(message: dict, text: str) -> dict | None:
+    """Return scan kwargs if this message is a safety-scan request, else None."""
+    # 1. explicit structured request via a data part
+    for p in (message.get("parts") or []):
+        if isinstance(p, dict) and p.get("kind") == "data" and isinstance(p.get("data"), dict):
+            d = p["data"]
+            skill = str(d.get("skill") or d.get("id") or d.get("intent") or "").lower()
+            url = d.get("endpoint_url") or d.get("url")
+            if url and ("safety" in skill or "scan" in skill or "malic" in skill):
+                return {
+                    "endpoint_url": str(url),
+                    "name": str(d.get("name") or ""),
+                    "description": str(d.get("description") or ""),
+                    "tools_text": str(d.get("tools_text") or ""),
+                }
+    # 2. free text: a URL paired with a security-intent keyword
+    if text and _SCAN_INTENT_RE.search(text):
+        m = _SCAN_URL_RE.search(text)
+        if m:
+            return {"endpoint_url": m.group(0).rstrip(".,);]}'\""),
+                    "name": "", "description": "", "tools_text": ""}
+    return None
+
+
 def handle_jsonrpc(payload: dict) -> dict:
     """Minimal JSON-RPC handler. Supports `message/send` only."""
     if not isinstance(payload, dict):
@@ -166,6 +216,30 @@ def handle_jsonrpc(payload: dict) -> dict:
     params = payload.get("params") or {}
     message = params.get("message") or {}
     text = _extract_text(message)
+
+    # Safety-scan skill: vet an MCP server by endpoint URL via the shared core.
+    scan_req = _safety_scan_request(message, text)
+    if scan_req is not None:
+        from . import safety_service
+        try:
+            verdict = safety_service.scan_endpoint(**scan_req)
+        except Exception:
+            log.exception("a2a message/send: safety scan failed")
+            return _jsonrpc_result(
+                req_id, _agent_message("Safety scan failed.", data={"error": "scan_failed"}))
+        v = verdict.get("verdict")
+        if v:
+            summary = (
+                f"Safety verdict for {verdict.get('endpoint_url')}: {v} "
+                f"(score {verdict.get('score')}; source {verdict.get('source')})."
+            )
+            adv = verdict.get("advisory")
+            if adv:
+                summary += " " + adv
+        else:
+            summary = f"Could not scan: {verdict.get('message') or verdict.get('error')}"
+        return _jsonrpc_result(req_id, _agent_message(summary, data=verdict))
+
     if not text:
         return _jsonrpc_error(req_id, -32602, "params.message must contain a text part")
 

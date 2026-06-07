@@ -257,6 +257,7 @@ async def well_known_agent_card(request: Request) -> dict[str, Any]:
 @app.post("/a2a", tags=["a2a"])
 async def a2a_jsonrpc(request: Request):
     """Minimal A2A JSON-RPC endpoint (message/send)."""
+    from fastapi.concurrency import run_in_threadpool
     from directory import a2a as directory_a2a
 
     try:
@@ -267,7 +268,10 @@ async def a2a_jsonrpc(request: Request):
              "error": {"code": -32700, "message": "Parse error"}},
             status_code=400,
         )
-    return JSONResponse(directory_a2a.handle_jsonrpc(payload))
+    # handle_jsonrpc is synchronous and may do blocking work (a safety scan can
+    # probe a remote endpoint + call the LLM), so run it off the event loop.
+    result = await run_in_threadpool(directory_a2a.handle_jsonrpc, payload)
+    return JSONResponse(result)
 
 
 
