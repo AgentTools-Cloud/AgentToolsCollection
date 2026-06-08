@@ -122,6 +122,11 @@ _CACHEABLE_DETAIL = ("/mcp/servers/", "/a2a/agents/", "/services/")
 @app.middleware("http")
 async def _no_cache_html(request: Request, call_next):
     resp = await call_next(request)
+    # Lightweight security headers on every response (HSTS is handled at the
+    # Cloudflare edge). These are cheap, widely-recommended defaults.
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    resp.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
     ctype = resp.headers.get("content-type", "")
     if ctype.startswith("text/html"):
         path = request.url.path
@@ -143,6 +148,68 @@ async def _no_cache_html(request: Request, call_next):
 @app.get("/health")
 async def healthz() -> dict[str, str]:
     return {"status": "ok"}
+
+
+_FAVICON_SVG = (
+    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'>"
+    "<rect width='32' height='32' rx='7' fill='#2563eb'/>"
+    "<text x='16' y='23' font-family='Arial,sans-serif' font-size='20' "
+    "font-weight='700' fill='white' text-anchor='middle'>A</text></svg>"
+)
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    from fastapi.responses import Response as _Resp
+    return _Resp(content=_FAVICON_SVG, media_type="image/svg+xml",
+                 headers={"Cache-Control": "public, max-age=604800"})
+
+
+_LLMS_TXT = """# agent-tools.cloud
+
+> Open, agent-readable discovery directory of x402 paid services, MCP servers
+> and A2A agents. Crawled, health-checked and safety-scanned. Free to search
+> and use, no signup, no API key. We are a catalogue only — we do not host,
+> operate, broker or take payment for listed third-party services.
+
+## Use it programmatically
+
+- Unified search: GET /api/v1/search?q=...
+- MCP servers: GET /api/v1/mcp/search?q=...  | details: /api/v1/mcp/servers/{slug}
+- A2A agents:  GET /api/v1/a2a/search?q=...  | details: /api/v1/a2a/agents/{slug}
+- x402 services: GET /api/v1/services/{slug}
+- LLM-ranked recommendation: GET /api/v1/ask?q=...
+- Directory stats: GET /api/v1/stats
+- OpenAPI: /openapi.json
+
+## MCP discovery endpoint
+
+- Streamable-HTTP MCP server: https://agent-tools.cloud/mcp-discovery/
+  Tools: search, get, search_mcp_servers, get_mcp_server, search_a2a_agents,
+  search_resources, ask_services, list_categories, stats, scan_mcp_safety.
+
+## Discovery manifests
+
+- /.well-known/mcp.json
+- /.well-known/agent-tools.json
+- /.well-known/agent-card.json
+- /.well-known/x402
+- /sitemap.xml
+
+## Notes for agents
+
+- All search/read endpoints are free and unauthenticated.
+- Listings include a heuristic safety verdict (malware / prompt-injection /
+  tool-poisoning advisory) — advisory only, verify before connecting.
+- Terms: /terms  ·  Privacy: /privacy  ·  Contact: contact@agent-tools.cloud
+"""
+
+
+@app.get("/llms.txt", include_in_schema=False)
+async def llms_txt():
+    from fastapi.responses import Response as _Resp
+    return _Resp(content=_LLMS_TXT, media_type="text/plain; charset=utf-8",
+                 headers={"Cache-Control": "public, max-age=3600"})
 
 
 _HOMEPAGE_HTML = """<!doctype html>

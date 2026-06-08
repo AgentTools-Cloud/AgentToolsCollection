@@ -7,6 +7,7 @@
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232563eb'/%3E%3Ctext x='16' y='23' font-family='Inter,Arial,sans-serif' font-size='20' font-weight='700' fill='white' text-anchor='middle'%3EA%3C/text%3E%3C/svg%3E">
   <title>{% block title %}Agent Tools — x402 · MCP · A2A discovery directory{% endblock %}</title>
   <meta name="description" content="{% block desc %}Agent-readable directory and discovery layer for x402 services, MCP servers, and A2A agents. Search, ask for LLM-ranked recommendations, inspect cards, and submit new entries.{% endblock %}">
+  <link rel="canonical" href="https://agent-tools.cloud{{ request.url.path }}">
   <link rel="alternate" type="application/json" title="agent-tools discovery" href="/.well-known/agent-tools.json">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -31,6 +32,7 @@
     .search-shell { display:flex; align-items:center; gap:10px; background:#fff; border:1px solid #e2e8f0; border-radius:14px; padding:14px 18px; }
     .search-shell:focus-within { border-color:#94a3b8; box-shadow:0 0 0 4px rgba(148,163,184,.15); }
   </style>
+  {% block head_extra %}{% endblock %}
 </head>
 <body class="bg-slate-50 text-slate-900 min-h-screen flex flex-col">
   <header class="border-b border-slate-200 bg-white">
