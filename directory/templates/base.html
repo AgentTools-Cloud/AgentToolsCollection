@@ -72,5 +72,22 @@
         </div>
     </div>
   </footer>
+  <script>
+  // Real-browser view beacon. Bots don't run JS, so only human page opens are
+  // recorded. POST /api/v1/track/view is never CDN-cached (the detail HTML is).
+  function atTrackView(kind, slug){
+    try{
+      var payload = JSON.stringify({kind:kind, slug:slug, ref:document.referrer||null});
+      if(navigator.sendBeacon){
+        navigator.sendBeacon('/api/v1/track/view',
+          new Blob([payload], {type:'application/json'}));
+      }else{
+        fetch('/api/v1/track/view', {method:'POST', keepalive:true,
+          headers:{'Content-Type':'application/json'}, body:payload});
+      }
+    }catch(e){}
+  }
+  </script>
+  {% block track %}{% endblock %}
 </body>
 </html>

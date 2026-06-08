@@ -145,6 +145,18 @@ CREATE TABLE IF NOT EXISTS tool_calls (
 CREATE INDEX IF NOT EXISTS idx_tool_calls_ts   ON tool_calls(ts);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_tool ON tool_calls(tool);
 
+CREATE TABLE IF NOT EXISTS page_views (
+  id          INTEGER PRIMARY KEY,
+  ts          INTEGER NOT NULL,
+  kind        TEXT NOT NULL,
+  slug        TEXT NOT NULL,
+  ref         TEXT,
+  client_ip   TEXT,
+  ua          TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_page_views_ts   ON page_views(ts);
+CREATE INDEX IF NOT EXISTS idx_page_views_slug ON page_views(kind, slug);
+
 CREATE TABLE IF NOT EXISTS rate_limits (
     key          TEXT NOT NULL,
     window_start INTEGER NOT NULL,
@@ -743,6 +755,17 @@ def log_tool_call(conn, tool, args=None, result_n=None, result_slug=None,
         "client_name, client_ip) VALUES (?, ?, ?, ?, ?, ?, ?)",
         (int(time.time()), tool, _to_json(args) if args is not None else None,
          result_n, result_slug, client_name, client_ip),
+    )
+    conn.commit()
+
+
+def log_page_view(conn, kind, slug, ref=None, client_ip=None, ua=None):
+    """Record a real-browser detail-page view (fired by a JS beacon, so bots
+    that don't execute JS never reach here)."""
+    conn.execute(
+        "INSERT INTO page_views (ts, kind, slug, ref, client_ip, ua) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (int(time.time()), kind, slug, ref, client_ip, ua),
     )
     conn.commit()
 

@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block title %}{{ svc.name_zh or svc.name }} — agent-tools.cloud{% endblock %}
 {% block desc %}{{ (svc.description_zh or svc.description or svc.name)|truncate(140) }}{% endblock %}
+{% block track %}<script>atTrackView('service', {{ svc.slug|tojson }});</script>{% endblock %}
 {% block content %}
 <a href="/" class="text-sm text-slate-500 hover:text-blue-600 inline-flex items-center gap-1">
   <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
