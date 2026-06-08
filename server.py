@@ -88,12 +88,25 @@ app.add_middleware(_McpDiscoverySlashFix)
 BUILD_VERSION = "2026-06-04.17"
 
 
+# Detail pages are stable, numerous (10k+ MCP/A2A/x402 cards) and hammered by
+# crawlers one-by-one — let the CDN cache them. Landing/list pages change with
+# the live catalogue and are the real-visitor entry points, so keep them
+# no-cache (full revalidate → counted by site-stats).
+_CACHEABLE_DETAIL = ("/mcp/servers/", "/a2a/agents/", "/services/")
+
+
 @app.middleware("http")
 async def _no_cache_html(request: Request, call_next):
     resp = await call_next(request)
     ctype = resp.headers.get("content-type", "")
     if ctype.startswith("text/html"):
-        resp.headers["Cache-Control"] = "no-cache, must-revalidate"
+        path = request.url.path
+        if resp.status_code == 200 and path.startswith(_CACHEABLE_DETAIL):
+            # stable card → CDN-cacheable; SWR keeps it fresh-ish cheaply
+            resp.headers["Cache-Control"] = (
+                "public, max-age=600, stale-while-revalidate=3600")
+        else:
+            resp.headers["Cache-Control"] = "no-cache, must-revalidate"
         resp.headers["X-Build-Version"] = BUILD_VERSION
     return resp
 
