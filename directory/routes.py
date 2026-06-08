@@ -143,6 +143,16 @@ async def about_page(request: Request):
     return TEMPLATES.TemplateResponse(request, "about.html", {"request": request})
 
 
+@router.get("/terms", response_class=HTMLResponse, include_in_schema=False)
+async def terms_page(request: Request):
+    return TEMPLATES.TemplateResponse(request, "terms.html", {"request": request})
+
+
+@router.get("/privacy", response_class=HTMLResponse, include_in_schema=False)
+async def privacy_page(request: Request):
+    return TEMPLATES.TemplateResponse(request, "privacy.html", {"request": request})
+
+
 @router.get("/mcp", response_class=HTMLResponse, include_in_schema=False)
 async def mcp_page(
     request: Request,
@@ -826,6 +836,8 @@ def sitemap_xml() -> Response:
         ("/x402", "0.9", "daily"),
         ("/categories", "0.6", "weekly"),
         ("/about", "0.4", "monthly"),
+        ("/terms", "0.2", "yearly"),
+        ("/privacy", "0.2", "yearly"),
     ]
     parts = ['<?xml version="1.0" encoding="UTF-8"?>',
              '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">']

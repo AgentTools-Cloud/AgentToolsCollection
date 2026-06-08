@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}Privacy Policy — agent-tools.cloud{% endblock %}
+{% block desc %}Privacy Policy for agent-tools.cloud — what limited data the open directory collects and why.{% endblock %}
+{% block content %}
+<section class="max-w-3xl mb-8">
+  <h1 class="text-3xl md:text-4xl font-extrabold tracking-tight">Privacy Policy</h1>
+  <p class="text-slate-500 mt-2 text-sm">Last updated: 8 June 2026</p>
+</section>
+
+<div class="max-w-3xl space-y-6 text-sm text-slate-600 leading-relaxed">
+  <div>
+    <h2 class="text-lg font-semibold text-slate-800 mb-2">1. The short version</h2>
+    <p>agent-tools.cloud is a public directory. There are no user accounts, no logins, and no tracking cookies. We collect only the minimal technical data needed to run the service, measure aggregate traffic, and keep it secure. We do not sell data and we do not run third-party advertising trackers.</p>
+  </div>
+
+  <div>
+    <h2 class="text-lg font-semibold text-slate-800 mb-2">2. What we collect</h2>
+    <ul class="list-disc list-inside space-y-1.5">
+      <li><span class="font-medium">Server logs</span> — standard web-server records: IP address, timestamp, requested URL, status code, referrer and user-agent. Used for operations, security, abuse prevention and aggregate traffic statistics.</li>
+      <li><span class="font-medium">Page-view counts</span> — when a real browser opens a service detail page, a small script records that the page was viewed (page type, slug, referrer, IP, user-agent). This measures which listings people find useful. Automated agents that don't run scripts are not counted.</li>
+      <li><span class="font-medium">Rate-limit counters</span> — short-lived per-IP counters to prevent abuse of the API.</li>
+    </ul>
+  </div>
+
+  <div>
+    <h2 class="text-lg font-semibold text-slate-800 mb-2">3. What we do not collect</h2>
+    <p>No accounts, no passwords, no tracking/advertising cookies, no cross-site profiling, no sale of personal data. We don't ask for personal information to use the directory. If you submit a service, the contact email you provide is used only to notify you about that submission.</p>
+  </div>
+
+  <div>
+    <h2 class="text-lg font-semibold text-slate-800 mb-2">4. Cloudflare</h2>
+    <p>The site is served through Cloudflare, which processes requests as a CDN and security layer and may log technical request data on our behalf. See Cloudflare's privacy documentation for details on their edge processing.</p>
+  </div>
+
+  <div>
+    <h2 class="text-lg font-semibold text-slate-800 mb-2">5. Retention</h2>
+    <p>Logs and view records are kept only as long as useful for operations, security and trend analysis, then rotated or aggregated. We don't build long-term profiles of individuals.</p>
+  </div>
+
+  <div>
+    <h2 class="text-lg font-semibold text-slate-800 mb-2">6. Third-party services</h2>
+    <p>When you connect to a service listed in the directory, that interaction is governed by that third party's own privacy practices, not ours. We are only the catalogue.</p>
+  </div>
+
+  <div>
+    <h2 class="text-lg font-semibold text-slate-800 mb-2">7. Contact</h2>
+    <p>Privacy questions or data requests: <a href="mailto:contact@agent-tools.cloud" class="text-blue-600 hover:underline">contact@agent-tools.cloud</a>.</p>
+  </div>
+</div>
+{% endblock %}
