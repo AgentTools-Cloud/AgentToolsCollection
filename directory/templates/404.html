@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Not found — agent-tools.cloud{% endblock %}
+{% block desc %}This page doesn't exist. Search the directory of x402 services, MCP servers and A2A agents instead.{% endblock %}
+{% block content %}
+<div class="max-w-xl mx-auto text-center py-16">
+  <div class="text-7xl font-extrabold tracking-tight text-slate-300">404</div>
+  <h1 class="mt-4 text-2xl font-bold text-slate-800">This page doesn't exist</h1>
+  <p class="mt-3 text-slate-500">
+    The service or page you're looking for isn't here. It may have been removed,
+    renamed, or never existed. Try searching the directory instead.
+  </p>
+
+  <form action="/x402" method="get" class="mt-8">
+    <div class="search-shell">
+      <svg class="w-5 h-5 text-slate-400 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.3-4.3"/></svg>
+      <input name="q" type="text" placeholder="Search x402 / MCP / A2A…"
+             class="flex-1 outline-none bg-transparent text-slate-800 placeholder:text-slate-400" autofocus>
+      <button type="submit" class="btn-primary">Search</button>
+    </div>
+  </form>
+
+  <div class="mt-8 flex flex-wrap justify-center gap-3">
+    <a href="/" class="pill">Home</a>
+    <a href="/x402" class="pill">x402 Services</a>
+    <a href="/mcp" class="pill">MCP Servers</a>
+    <a href="/a2a" class="pill">A2A Agents</a>
+    <a href="/categories" class="pill">Categories</a>
+  </div>
+</div>
+{% endblock %}
