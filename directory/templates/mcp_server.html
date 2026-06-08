@@ -1,6 +1,15 @@
 {% extends "base.html" %}
 {% block title %}{{ m.name }} — MCP server — agent-tools.cloud{% endblock %}
 {% block desc %}{{ (m.description or m.name)|truncate(140) }}{% endblock %}
+{% block head_extra %}<script type="application/ld+json">{{ {
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "applicationCategory": "DeveloperApplication",
+  "name": m.name,
+  "description": (m.description or m.name),
+  "url": "https://agent-tools.cloud/mcp/servers/" + m.slug,
+  "offers": {"@type": "Offer", "price": "0", "priceCurrency": "USD"}
+}|tojson }}</script>{% endblock %}
 {% block track %}<script>atTrackView('mcp', {{ m.slug|tojson }});</script>{% endblock %}
 {% block content %}
 <a href="/mcp" class="text-sm text-slate-500 hover:text-blue-600 inline-flex items-center gap-1">
