@@ -279,6 +279,37 @@ class AskPayload(BaseModel):
     use_llm: bool = True
 
 
+_VIEW_KINDS = {"mcp", "a2a", "service"}
+
+
+@router.post("/api/v1/track/view", tags=["directory"], include_in_schema=False)
+async def track_view(request: Request):
+    """Record a real-browser view of a detail page.
+
+    Fired by a tiny JS beacon in the detail-page templates, so crawlers that
+    don't run JS never trigger it — the counts are real human views. This
+    endpoint is POST + under /api/, so Cloudflare never caches it (always hits
+    origin) even though the detail HTML itself is CDN-cached.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    kind = str(body.get("kind") or "")[:16]
+    slug = str(body.get("slug") or "")[:200]
+    ref = (str(body.get("ref"))[:300] if body.get("ref") else None)
+    if kind not in _VIEW_KINDS or not slug:
+        return Response(status_code=204)
+    ua = (request.headers.get("user-agent") or "")[:300]
+    client_ip = limits.client_ip_from_request(request)
+    try:
+        with db.writer() as c:
+            db.log_page_view(c, kind, slug, ref=ref, client_ip=client_ip, ua=ua)
+    except Exception:
+        pass
+    return Response(status_code=204)
+
+
 @router.post("/api/v1/ask", tags=["directory"])
 async def api_ask(request: Request, payload: AskPayload):
     """Ask for the best x402/MCP services for an intent.
