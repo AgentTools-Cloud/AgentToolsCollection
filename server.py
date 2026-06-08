@@ -55,6 +55,30 @@ app = FastAPI(
     title="mcpserver", version="0.2.0", lifespan=lifespan, openapi_url=None
 )
 
+
+@app.exception_handler(404)
+async def _not_found(request: Request, exc):
+    """Friendly HTML 404 for browser page requests; keep JSON for API clients.
+
+    Programmatic clients (anything under /api/, .json endpoints, the MCP/A2A
+    surfaces, or callers that don't accept HTML) still get a plain JSON 404.
+    """
+    from directory.routes import TEMPLATES
+    path = request.url.path
+    accepts_html = "text/html" in request.headers.get("accept", "")
+    is_api = (
+        path.startswith("/api/")
+        or path.startswith("/mcp-discovery")
+        or path.startswith("/.well-known/")
+        or path.endswith(".json")
+        or path in ("/a2a", "/metrics", "/healthz", "/health")
+    )
+    if accepts_html and not is_api:
+        return TEMPLATES.TemplateResponse(
+            request, "404.html", {"build_version": BUILD_VERSION}, status_code=404)
+    return JSONResponse({"detail": "Not Found"}, status_code=404)
+
+
 # Free directory-discovery MCP (search/get/list_categories/stats) — ungated.
 app.mount("/mcp-discovery", wrap_with_client_capture(discover_mcp.streamable_http_app()))
 
