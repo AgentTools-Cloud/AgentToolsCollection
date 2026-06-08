@@ -835,7 +835,7 @@ def sitemap_xml() -> Response:
     parts.append("</urlset>")
     xml = "\n".join(parts) + "\n"
     return Response(content=xml, media_type="application/xml",
-                    headers={"Cache-Control": "no-cache, must-revalidate"})
+                    headers={"Cache-Control": "public, max-age=3600"})
 
 
 @router.get("/robots.txt", include_in_schema=False)
@@ -851,4 +851,4 @@ def robots_txt() -> Response:
         "Sitemap: https://agent-tools.cloud/sitemap.xml\n"
     )
     return Response(content=body, media_type="text/plain",
-                    headers={"Cache-Control": "no-cache, must-revalidate"})
+                    headers={"Cache-Control": "public, max-age=3600"})
