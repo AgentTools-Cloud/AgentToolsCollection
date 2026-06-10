@@ -1014,15 +1014,17 @@ def upsert_a2a_agent(conn: sqlite3.Connection, row: dict) -> tuple:
 
     cur = conn.cursor()
     existing = None
+    existing_by_source_id = False
     if row.get("source") and row.get("source_id"):
         existing = cur.execute(
-            "SELECT id, created_at, health, health_checked, last_success_at "
+            "SELECT id, slug, created_at, health, health_checked, last_success_at "
             "FROM a2a_agents WHERE source=? AND source_id=?",
             (row["source"], row["source_id"]),
         ).fetchone()
+        existing_by_source_id = existing is not None
     if existing is None:
         existing = cur.execute(
-            "SELECT id, created_at, health, health_checked, last_success_at "
+            "SELECT id, slug, created_at, health, health_checked, last_success_at "
             "FROM a2a_agents WHERE slug=?",
             (row["slug"],),
         ).fetchone()
@@ -1036,6 +1038,11 @@ def upsert_a2a_agent(conn: sqlite3.Connection, row: dict) -> tuple:
         return True, cur.lastrowid
 
     row["created_at"] = existing["created_at"]
+    # A stable (source, source_id) identity should keep its public slug. Some
+    # crawlers derive slug from mutable Agent Card names; changing it can collide
+    # with another indexed agent and break the whole crawl batch.
+    if existing_by_source_id:
+        row["slug"] = existing["slug"]
     # metadata-only refresh must not reset a previously probed health
     if row.get("health") is None:
         row["health"] = existing["health"]
