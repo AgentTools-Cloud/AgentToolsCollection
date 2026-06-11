@@ -1388,7 +1388,7 @@ def _mcp_keepalive_health(score: dict | None, auth_posture: str | None) -> str |
     if uptime_f is not None and uptime_f < 50:
         return "down"
     if status_i in (401, 402, 403) or (auth_posture and auth_posture not in ("none", "unknown")):
-        return "degraded"
+        return "ok"
     if status_i is not None and 200 <= status_i < 300:
         return "ok"
     if status_i is not None and status_i < 500:
@@ -1605,9 +1605,10 @@ def probe_mcp_health(endpoint: str) -> dict:
     advertises). Returns {status, latency_ms, http_status, conformance,
     tool_count}. ``conformance`` is 'pass' (tools/list returned a tools array),
     'partial' (initialize ok but tools/list failed/errored), 'fail' (initialize
-    reachable but not a clean 2xx) or None (not probed). A reachable endpoint
-    answering < 500 is up; MCP servers often reply 400/406 to a bare probe yet
-    are alive, so those are 'degraded'.
+    reachable but not a clean 2xx) or None (not probed). Auth challenges
+    (401/402/403) mean the remote MCP server is reachable and intentionally
+    credential-gated, so health is 'ok' while conformance remains 'fail'.
+    Other reachable non-5xx protocol/method errors are 'degraded'.
     """
     base = {"status": "unknown", "latency_ms": None, "http_status": None,
             "conformance": None, "tool_count": None, "tools": None}
@@ -1641,6 +1642,9 @@ def probe_mcp_health(endpoint: str) -> dict:
             sc = r.status_code
             if sc >= 500:
                 return {**base, "status": "down", "latency_ms": dt, "http_status": sc}
+            if sc in (401, 402, 403):
+                return {**base, "status": "ok", "latency_ms": dt,
+                        "http_status": sc, "conformance": "fail"}
             if sc >= 300:
                 return {**base, "status": "degraded", "latency_ms": dt,
                         "http_status": sc, "conformance": "fail"}
