@@ -7,6 +7,7 @@ import logging
 import random
 import re
 import time
+from datetime import datetime, timezone
 
 import yaml
 from typing import Any
@@ -1113,6 +1114,8 @@ ALL_CRAWLERS = {
 
 _PULSEMCP_API = "https://api.pulsemcp.com/v0beta/servers"
 _MCP_REGISTRY_API = "https://registry.modelcontextprotocol.io/v0/servers"
+_MCP_KEEPALIVE_API = "https://holyai.me/mcp-keepalive/api/servers"
+_MCP_KEEPALIVE_DETAIL_API = "https://holyai.me/mcp-keepalive/api/server/{safe_name}"
 
 
 def _mcp_x402(*texts: Any) -> bool:
@@ -1358,9 +1361,196 @@ def fetch_mcp_registry(updated_since: str | None = None,
     return out
 
 
+def _mcp_keepalive_ts(raw: Any) -> int | None:
+    if not raw:
+        return None
+    try:
+        text = str(raw).replace("Z", "+00:00")
+        return int(datetime.fromisoformat(text).astimezone(timezone.utc).timestamp())
+    except Exception:
+        return None
+
+
+def _mcp_keepalive_health(score: dict | None, auth_posture: str | None) -> str | None:
+    score = score or {}
+    status = score.get("last_status")
+    uptime = score.get("uptime_pct")
+    try:
+        status_i = int(status) if status is not None else None
+    except (TypeError, ValueError):
+        status_i = None
+    try:
+        uptime_f = float(uptime) if uptime is not None else None
+    except (TypeError, ValueError):
+        uptime_f = None
+    if status_i is not None and status_i >= 500:
+        return "down"
+    if uptime_f is not None and uptime_f < 50:
+        return "down"
+    if status_i in (401, 402, 403) or (auth_posture and auth_posture not in ("none", "unknown")):
+        return "degraded"
+    if status_i is not None and 200 <= status_i < 300:
+        return "ok"
+    if status_i is not None and status_i < 500:
+        return "degraded"
+    if uptime_f is not None and uptime_f >= 90:
+        return "ok"
+    return None
+
+
+def fetch_mcp_keepalive(max_pages: int = 20, per_page: int = 100,
+                        detail_limit: int | None = None,
+                        page_sleep: float = 0.2,
+                        detail_sleep: float = 0.03) -> list:
+    """Import high-quality live MCP endpoints from holyai.me/mcp-keepalive.
+
+    mcp-keepalive mirrors the official MCP registry and probes every remote
+    endpoint every 15 minutes, publishing health, auth posture, latency, and
+    per-remote detail JSON. The list endpoint does not include endpoint URLs,
+    so we fetch detail records for a bounded number of alive, grade-sorted
+    entries. The default is intentionally conservative; set
+    MCP_KEEPALIVE_DETAIL_LIMIT to widen the reverse crawl.
+    """
+    if detail_limit is None:
+        try:
+            detail_limit = int(os.environ.get("MCP_KEEPALIVE_DETAIL_LIMIT", "500"))
+        except ValueError:
+            detail_limit = 500
+    detail_limit = max(0, detail_limit)
+    out: list[dict] = []
+    seen_ep: set[str] = set()
+    seen_detail: set[str] = set()
+    headers = {"User-Agent": UA, "Accept": "application/json"}
+    with httpx.Client(timeout=TIMEOUT, follow_redirects=True, headers=headers) as c:
+        offset = 0
+        while offset < max_pages * per_page and len(seen_detail) < detail_limit:
+            try:
+                r = c.get(_MCP_KEEPALIVE_API, params={
+                    "limit": per_page,
+                    "offset": offset,
+                    "status": "alive",
+                    "sort": "grade",
+                    "dir": "desc",
+                })
+                r.raise_for_status()
+                data = r.json()
+            except (httpx.HTTPError, ValueError) as e:
+                log.warning("mcp-keepalive page offset=%d failed: %r", offset, e)
+                break
+            servers = data.get("servers") if isinstance(data, dict) else None
+            if not servers:
+                break
+            for summary in servers:
+                if len(seen_detail) >= detail_limit:
+                    break
+                if not isinstance(summary, dict):
+                    continue
+                safe_name = (summary.get("safe_name") or "").strip()
+                if not safe_name or safe_name in seen_detail:
+                    continue
+                seen_detail.add(safe_name)
+                try:
+                    detail_url = _MCP_KEEPALIVE_DETAIL_API.format(safe_name=safe_name)
+                    dr = c.get(detail_url)
+                    dr.raise_for_status()
+                    detail = dr.json()
+                except (httpx.HTTPError, ValueError) as e:
+                    log.warning("mcp-keepalive detail %s failed: %r", safe_name, e)
+                    continue
+                name = (detail.get("name") or summary.get("name") or safe_name).strip()
+                title = (detail.get("title") or summary.get("title") or name).strip()
+                desc = (detail.get("description") or summary.get("description") or "").strip()
+                repo = detail.get("repository_url") or summary.get("repository_url")
+                source_url = "https://holyai.me" + (detail.get("permalink") or summary.get("detail_url") or "")
+                remotes = detail.get("remotes") or []
+                if not isinstance(remotes, list):
+                    continue
+                for remote in remotes:
+                    if not isinstance(remote, dict):
+                        continue
+                    endpoint = (remote.get("url") or "").strip()
+                    if not endpoint or not endpoint.lower().startswith("http"):
+                        continue
+                    ep_key = endpoint.lower().rstrip("/")
+                    if ep_key in seen_ep:
+                        continue
+                    seen_ep.add(ep_key)
+                    score = remote.get("score") if isinstance(remote.get("score"), dict) else {}
+                    auth = (score.get("auth_posture") or summary.get("auth_posture") or "").strip() or None
+                    health = _mcp_keepalive_health(score, auth)
+                    checked = _mcp_keepalive_ts(score.get("last_probe_at") or summary.get("last_probe_at"))
+                    http_status = score.get("last_status") or summary.get("last_status")
+                    latency = score.get("p50_ms") or summary.get("p50_ms")
+                    confidence = 0.5
+                    try:
+                        confidence = max(0.0, min(1.0, float(score.get("score", summary.get("score", 50))) / 100.0))
+                    except (TypeError, ValueError):
+                        pass
+                    bits = []
+                    if desc:
+                        bits.append(desc)
+                    grade = score.get("grade") or summary.get("grade")
+                    uptime = score.get("uptime_pct") or summary.get("uptime_pct")
+                    if grade:
+                        bits.append(f"mcp-keepalive grade {grade}")
+                    if uptime is not None:
+                        bits.append(f"uptime {uptime}%")
+                    if latency is not None:
+                        bits.append(f"p50 {latency}ms")
+                    if auth:
+                        bits.append(f"auth {auth}")
+                    protocol = score.get("mcp_protocol") or summary.get("mcp_protocol")
+                    tags = ["mcp-keepalive"]
+                    if grade:
+                        tags.append(f"grade:{grade}")
+                    if auth:
+                        tags.append(f"auth:{auth}")
+                    if protocol:
+                        tags.append(f"protocol:{protocol}")
+                    out.append({
+                        "slug": f"{_slugify(title or name)}-{_host_slug(endpoint)}"[:80],
+                        "name": title or name,
+                        "description": "; ".join(bits) or None,
+                        "homepage_url": repo or source_url,
+                        "endpoint_url": endpoint,
+                        "transport": remote.get("transport") or summary.get("transport_declared"),
+                        "auth_method": None if auth in (None, "none", "unknown") else auth,
+                        "cost_hint": None,
+                        "source_code_url": repo,
+                        "package_registry": "mcp-registry",
+                        "package_name": name,
+                        "github_stars": None,
+                        "tags": tags,
+                        "x402_supported": _mcp_x402(desc, title, name),
+                        "source": "mcp-keepalive",
+                        "source_id": f"{name}:{endpoint}",
+                        "source_url": source_url,
+                        "confidence": round(confidence, 3),
+                        "health": health,
+                        "health_checked": checked,
+                        "latency_ms": latency if isinstance(latency, int) else None,
+                        "http_status": http_status if isinstance(http_status, int) else None,
+                        "last_success_at": checked if health == "ok" else None,
+                    })
+                if detail_sleep:
+                    time.sleep(detail_sleep)
+            offset += len(servers)
+            total = data.get("total") if isinstance(data, dict) else None
+            if isinstance(total, int) and offset >= total:
+                break
+            if len(servers) < per_page:
+                break
+            if page_sleep:
+                time.sleep(page_sleep)
+    log.info("mcp-keepalive: collected %d remotes from %d server details",
+             len(out), len(seen_detail))
+    return out
+
+
 MCP_CRAWLERS = {
     "pulsemcp": fetch_pulsemcp,
     "mcp-registry": fetch_mcp_registry,
+    "mcp-keepalive": fetch_mcp_keepalive,
 }
 
 
