@@ -34,6 +34,72 @@ def _price_hint(price_min, price_max, currency: str | None = "USDC") -> dict | N
     return {"usd": val, "currency": cur}
 
 
+# Raw auth strings that don't actually gate access.
+_OPEN_AUTH = {"", "none", "open", "public", "public-discovery", "[]", "null"}
+# cost_hint values that mean "no charge".
+_FREE_COST = {"free", "free_tier", "free_trial"}
+_PAID_COST = {"paid", "pay-per-event", "pay_per_event", "subscription", "per-event"}
+
+
+def _access_model(x402, auth=None, cost_hint=None, price_hint: dict | None = None) -> dict:
+    """Who provisions access + whether/how it costs — the discovery facts an
+    agent needs before calling. Mirrors db._access_case() for the tier.
+
+      model: 'open' | 'human_key' | 'agent_pays'
+      registration_required: must a human sign up / provision a credential?
+      agent_can_self_serve: can an agent use it with no human in the loop?
+      paid: True / False / None(unknown)
+      billing: 'x402-per-call' | 'per-event' | 'subscription' | 'paid'
+               | 'per-call-usd' | 'free' | None(unknown)
+    """
+    _a = str(auth).lower() if auth else ""
+    has_x402 = bool(x402) or ("x402" in _a)
+    key_gated = bool(auth) and _a.strip() not in _OPEN_AUTH
+    cost = str(cost_hint).strip().lower() if cost_hint else ""
+
+    if has_x402:
+        model, label = "agent_pays", "Agent-pays — settles each call on-chain (x402); no human account needed"
+    elif key_gated:
+        model, label = "human_key", "Human key — a person must provision an API key / OAuth first"
+    else:
+        model, label = "open", "Open — no credentials, an agent can call directly"
+
+    if has_x402:
+        paid = True
+    elif cost in _FREE_COST:
+        paid = False
+    elif cost in _PAID_COST or price_hint:
+        paid = True
+    else:
+        paid = None
+
+    if has_x402:
+        billing = "x402-per-call"
+    elif cost in ("pay-per-event", "pay_per_event", "per-event"):
+        billing = "per-event"
+    elif cost == "subscription":
+        billing = "subscription"
+    elif cost == "paid":
+        billing = "paid"
+    elif cost in _FREE_COST:
+        billing = "free"
+    elif price_hint:
+        billing = "per-call-usd"
+    else:
+        billing = None
+
+    return {
+        "model": model,
+        "label": label,
+        "registration_required": model == "human_key",
+        "agent_can_self_serve": model in ("open", "agent_pays"),
+        "paid": paid,
+        "billing": billing,
+        "auth": auth if auth else None,
+        "price_hint": price_hint,
+    }
+
+
 def _short_call_hint(template: dict) -> dict:
     """Trim cards.build_call_template down to a compact discovery hint."""
     hint: dict[str, Any] = {}
@@ -68,6 +134,10 @@ def normalize_service(row: dict, as_mcp: bool = False) -> dict:
         "endpoint_url": (mcp_url if as_mcp else row.get("url")) or row.get("url"),
         "price_hint": _price_hint(row.get("price_min"), row.get("price_max"),
                                   row.get("currency")),
+        "access": _access_model(
+            True, auth=None, cost_hint=None,
+            price_hint=_price_hint(row.get("price_min"), row.get("price_max"),
+                                   row.get("currency"))),
         "health_status": row.get("health") or "unknown",
         "confidence": row.get("confidence"),
         "call_hint": _short_call_hint(cards.build_call_template(row)),
@@ -97,6 +167,9 @@ def normalize_mcp_server(row: dict) -> dict:
         "protocols": protocols,
         "endpoint_url": endpoint,
         "price_hint": None,
+        "access": _access_model(row.get("x402_supported"),
+                                auth=row.get("auth_method"),
+                                cost_hint=row.get("cost_hint")),
         "kind": row.get("kind") or ("callable" if endpoint else "catalog"),
         "health_status": row.get("health") or "unknown",
         "confidence": row.get("confidence"),
@@ -118,6 +191,10 @@ def normalize_a2a(row: dict) -> dict:
         "protocols": protocols,
         "endpoint_url": row.get("endpoint_url"),
         "price_hint": ({"usd": price, "currency": "USDC"} if price is not None else None),
+        "access": _access_model(
+            row.get("x402_supported"), auth=row.get("auth_schemes"),
+            cost_hint=None,
+            price_hint=({"usd": price, "currency": "USDC"} if price is not None else None)),
         "health_status": row.get("health") or "unknown",
         "confidence": row.get("confidence"),
         "call_hint": {
