@@ -2178,3 +2178,127 @@ def fetch_mcp_catalog() -> list:
 
 
 MCP_CRAWLERS["mcp-catalog"] = fetch_mcp_catalog
+
+
+# ---------------------------------------------------------------------------
+# Apify Store — Actors in the MCP_SERVERS category that run as standby HTTP MCP
+# servers (added 2026-06-13). The public Store API (no auth) lists ~560 Actors
+# tagged MCP_SERVERS, but only those with Standby enabled expose a callable MCP
+# endpoint at their standbyUrl (https://<user>--<name>.apify.actor); the rest
+# are ordinary scrapers that merely tagged themselves into the category. Standby
+# state lives only in the per-Actor detail, so we list candidates then fetch
+# each detail and keep the ones advertising a real standbyUrl. Endpoints need
+# the caller's own Apify API token, so probe_mcp_health reads them as auth-gated
+# reachable (401 -> ok, conformance fail).
+# ---------------------------------------------------------------------------
+APIFY_STORE_API = "https://api.apify.com/v2/store"
+APIFY_ACT_API = "https://api.apify.com/v2/acts/{user}~{name}"
+APIFY_MCP_CATEGORY = "MCP_SERVERS"
+APIFY_STORE_URL = "https://apify.com/store/categories/mcp-servers"
+
+
+def _apify_row(it: dict, det: dict, user: str, name: str, endpoint: str) -> dict:
+    title = (det.get("title") or it.get("title") or name).strip()
+    desc = (det.get("description") or it.get("description") or "").strip().replace("\n", " ")
+    if len(desc) > 240:
+        desc = desc[:240].rstrip() + "\u2026"
+    stats = it.get("stats") or det.get("stats") or {}
+    runs = stats.get("totalRuns")
+    pricing = (it.get("currentPricingInfo") or {}).get("pricingModel")
+    cost = {"FREE": "free", "PAY_PER_EVENT": "pay-per-event"}.get(
+        pricing, (pricing or "").lower().replace("_", "-") or None)
+    cats = [c for c in (det.get("categories") or it.get("categories") or [])
+            if c and c != APIFY_MCP_CATEGORY]
+    meta = []
+    if runs:
+        meta.append(f"{runs:,} runs")
+    rr = it.get("actorReviewRating")
+    if rr:
+        meta.append(f"rating {round(rr, 1)}")
+    parts = [p for p in [desc] if p]
+    if meta:
+        parts.append(" \u00b7 ".join(meta))
+    homepage = it.get("url") or f"https://apify.com/{user}/{name}"
+    return {
+        "slug": _slugify(f"{user}-{name}") + "-apify",
+        "name": title,
+        "description": " \u2014 ".join(parts) or None,
+        "endpoint_url": endpoint,
+        "homepage_url": homepage,
+        "transport": "streamable-http",
+        "auth_method": "apify_token",
+        "cost_hint": cost,
+        "source_code_url": homepage,
+        "tags": ["apify"] + cats[:6],
+        "x402_supported": 0,
+        "source": "apify",
+        "source_id": f"{user}/{name}",
+        "source_url": APIFY_STORE_URL,
+        "confidence": 0.9,
+    }
+
+
+def fetch_apify_mcp(max_pages: int = 40, per_page: int = 100,
+                    page_sleep: float = 0.15) -> list:
+    """Pull Apify Store MCP_SERVERS Actors that expose a standby MCP endpoint."""
+    candidates: list = []
+    seen: set = set()
+    hdr = {"User-Agent": UA, "Accept": "application/json"}
+    try:
+        with httpx.Client(timeout=TIMEOUT, headers=hdr) as c:
+            for page in range(max_pages):
+                r = c.get(APIFY_STORE_API, params={
+                    "limit": per_page, "offset": page * per_page,
+                    "category": APIFY_MCP_CATEGORY})
+                if r.status_code != 200:
+                    log.warning("apify: store HTTP %d at offset %d",
+                                r.status_code, page * per_page)
+                    break
+                items = ((r.json() or {}).get("data") or {}).get("items") or []
+                if not items:
+                    break
+                for it in items:
+                    u = (it.get("username") or "").strip()
+                    n = (it.get("name") or "").strip()
+                    if not u or not n:
+                        continue
+                    k = f"{u}/{n}"
+                    if k in seen:
+                        continue
+                    seen.add(k)
+                    candidates.append((u, n, it))
+                time.sleep(page_sleep)
+    except Exception as e:
+        log.warning("apify: store list error: %r", e)
+        return []
+
+    out: list = []
+    seen_ep: set = set()
+    try:
+        with httpx.Client(timeout=TIMEOUT, headers=hdr) as c:
+            for u, n, it in candidates:
+                try:
+                    rd = c.get(APIFY_ACT_API.format(user=u, name=n))
+                    if rd.status_code != 200:
+                        continue
+                    det = (rd.json() or {}).get("data") or {}
+                except Exception:
+                    continue
+                su = (det.get("standbyUrl") or "").strip()
+                st = det.get("actorStandby") or {}
+                if not su or not su.lower().startswith("http") or not st.get("isEnabled"):
+                    continue
+                ep_key = su.lower().rstrip("/")
+                if ep_key in seen_ep:
+                    continue
+                seen_ep.add(ep_key)
+                out.append(_apify_row(it, det, u, n, su))
+    except Exception as e:
+        log.warning("apify: detail fetch error: %r", e)
+
+    log.info("apify: %d MCP_SERVERS candidates -> %d standby MCP servers",
+             len(candidates), len(out))
+    return out
+
+
+MCP_CRAWLERS["apify"] = fetch_apify_mcp
