@@ -2,6 +2,7 @@
 {% block title %}MCP Servers — agent-tools.cloud{% endblock %}
 {% block desc %}Directory of {{ stats.total }} remotely-callable MCP servers, continuously aggregated and health-probed via JSON-RPC initialize.{% endblock %}
 {% block content %}
+{% from "_macros.html" import leaderboard %}
 
 <section class="mb-10">
   <div class="flex flex-wrap items-start justify-between gap-4 mb-3">
@@ -94,6 +95,12 @@
   </div>
 </section>
 
+{% if leaders %}
+<section class="mb-8">
+  {{ leaderboard(leaders, "mcp") }}
+</section>
+{% endif %}
+
 <section>
   <div class="flex flex-wrap items-end justify-between gap-4 mb-4">
     <div>
@@ -101,6 +108,10 @@
       <p class="text-sm text-slate-500 mt-1">Continuously aggregated · refreshed every 6 h.</p>
     </div>
     <div class="flex items-center gap-2 text-sm">
+      <div class="inline-flex rounded-lg border border-slate-200 overflow-hidden text-sm" role="group">
+        <button type="button" hx-get="/_partials/mcp?view=cards" hx-target="#mcp-grid" hx-swap="innerHTML" hx-include="[name=q],[name=health],[name=access],[name=category],[name=chain]" class="px-3 py-1.5 bg-slate-900 text-white" onclick="this.classList.add('bg-slate-900','text-white');this.nextElementSibling.classList.remove('bg-slate-900','text-white')">Cards</button>
+        <button type="button" hx-get="/_partials/mcp?view=table" hx-target="#mcp-grid" hx-swap="innerHTML" hx-include="[name=q],[name=health],[name=access],[name=category],[name=chain]" class="px-3 py-1.5 bg-white text-slate-600" onclick="this.classList.add('bg-slate-900','text-white');this.previousElementSibling.classList.remove('bg-slate-900','text-white')">Table</button>
+      </div>
       <a href="/api/v1/mcp/stats" class="pill mono text-xs">/api/v1/mcp/stats</a>
     </div>
   </div>

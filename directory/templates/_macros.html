@@ -13,3 +13,65 @@
     <span class="badge bg-emerald-50 text-emerald-700 ring-1 ring-emerald-100" title="Open: callable with no credentials">🔓 open</span>
   {%- endif -%}
 {%- endmacro %}
+
+
+{#- Letter-grade badge (A / B+ / B / C+ / C / D / E), colour-coded. -#}
+{% macro grade_badge(grade) -%}
+  {%- set g = grade or 'E' -%}
+  {%- if g == 'A' -%}{% set cls = 'bg-emerald-600 text-white' %}
+  {%- elif g in ('B+','B') -%}{% set cls = 'bg-emerald-100 text-emerald-800 ring-1 ring-emerald-200' %}
+  {%- elif g in ('C+','C') -%}{% set cls = 'bg-amber-100 text-amber-800 ring-1 ring-amber-200' %}
+  {%- else -%}{% set cls = 'bg-slate-200 text-slate-600' %}
+  {%- endif -%}
+  <span class="inline-flex items-center justify-center min-w-[28px] px-1.5 py-0.5 rounded-md text-xs font-bold {{ cls }}">{{ g }}</span>
+{%- endmacro %}
+
+{#- Score pill, e.g. 8.26 -#}
+{% macro score_pill(score) -%}
+  <span class="mono text-sm font-semibold text-slate-800">{{ "%.2f"|format(score or 0) }}</span>
+{%- endmacro %}
+
+{#- Top-rated leaderboard table. `kind` in (mcp, a2a, x402); rows are
+   db.top_rated() output (already carrying score/grade). -#}
+{% macro leaderboard(rows, kind) -%}
+  {%- set prefix = {'mcp':'/mcp/servers/','a2a':'/a2a/agents/','x402':'/services/'}[kind] -%}
+  <div class="bg-white border border-slate-200 rounded-2xl overflow-hidden">
+    <div class="flex items-center justify-between px-5 py-3 border-b border-slate-100">
+      <h3 class="text-xs font-semibold tracking-wider text-slate-500 uppercase">Top rated</h3>
+      <span class="text-xs text-slate-400">by quality score · health · trust signals</span>
+    </div>
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead>
+          <tr class="text-left text-[11px] uppercase tracking-wider text-slate-400">
+            <th class="px-5 py-2 font-medium w-8">#</th>
+            <th class="px-2 py-2 font-medium">Tool</th>
+            <th class="px-2 py-2 font-medium w-16">Grade</th>
+            <th class="px-2 py-2 font-medium w-16">Score</th>
+            <th class="px-2 py-2 font-medium hidden md:table-cell">Category</th>
+            <th class="px-5 py-2 font-medium hidden sm:table-cell">Access</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-slate-50">
+          {% for r in rows %}
+          {%- set cat = r.category or (r.tags[0] if r.tags) or '—' -%}
+          {%- if kind == 'x402' -%}{% set ax = 1 %}{% set au = none %}
+          {%- elif kind == 'a2a' -%}{% set ax = r.x402_supported %}{% set au = r.auth_schemes %}
+          {%- else -%}{% set ax = r.x402_supported %}{% set au = r.auth_method %}{%- endif -%}
+          <tr class="hover:bg-slate-50/60">
+            <td class="px-5 py-3 text-slate-400 mono">{{ loop.index }}</td>
+            <td class="px-2 py-3">
+              <a href="{{ prefix }}{{ r.slug }}" class="font-semibold text-slate-900 hover:text-blue-600">{{ r.name }}</a>
+              {% if r.description %}<div class="text-xs text-slate-500 line-clamp-1 max-w-md">{{ r.description }}</div>{% endif %}
+            </td>
+            <td class="px-2 py-3">{{ grade_badge(r.grade) }}</td>
+            <td class="px-2 py-3">{{ score_pill(r.score) }}</td>
+            <td class="px-2 py-3 hidden md:table-cell text-slate-500 text-xs">{{ cat }}</td>
+            <td class="px-5 py-3 hidden sm:table-cell">{{ access_badge(ax, au) }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+{%- endmacro %}

@@ -92,16 +92,20 @@ async def x402_page(
     chain: str | None = Query(default=None),
     region: str | None = Query(default=None),
     health: str | None = Query(default=None),
+    view: str | None = Query(default=None),
 ):
     with _conn() as c:
-        services = db.search(c, q=q, category=category, chain=chain,
-                             region=region, health=health, limit=60)
+        services = db.attach_ratings("x402", db.search(
+            c, q=q, category=category, chain=chain,
+            region=region, health=health, limit=60))
         cats = db.list_categories(c)
         s = db.stats(c)
+        leaders = db.top_rated(c, "x402", 10)
     return TEMPLATES.TemplateResponse(request, "index.html", {
             "request": request, "services": services, "categories": cats,
             "stats": s, "q": q or "", "active_category": category,
             "active_chain": chain, "active_region": region, "active_health": health,
+            "leaders": leaders, "view": view,
         },
     )
 
@@ -160,15 +164,18 @@ async def mcp_page(
     health: str | None = Query(default=None),
     x402: str | None = Query(default=None),
     access: str | None = Query(default=None),
+    view: str | None = Query(default=None),
 ):
     with _conn() as c:
-        servers = db.search_mcp(c, q=q, health=health, x402_only=bool(x402),
-                                access=access, limit=60)
+        servers = db.attach_ratings("mcp", db.search_mcp(
+            c, q=q, health=health, x402_only=bool(x402),
+            access=access, limit=60))
         s = db.mcp_stats(c)
+        leaders = db.top_rated(c, "mcp", 10)
     return TEMPLATES.TemplateResponse(request, "mcp.html", {
             "request": request, "servers": servers, "stats": s, "q": q or "",
             "active_health": health, "active_x402": bool(x402),
-            "active_access": access,
+            "active_access": access, "leaders": leaders, "view": view,
         },
     )
 
@@ -189,11 +196,12 @@ async def mcp_partial(
     health: str | None = Query(default=None),
     x402: str | None = Query(default=None),
     access: str | None = Query(default=None),
+    view: str | None = Query(default=None),
 ):
     with _conn() as c:
-        servers = db.search_mcp(c, q=q, health=health, x402_only=bool(x402),
-                                access=access, limit=60)
-    return TEMPLATES.TemplateResponse(request, "_mcp_grid.html", {"request": request, "servers": servers})
+        servers = db.attach_ratings("mcp", db.search_mcp(
+            c, q=q, health=health, x402_only=bool(x402), access=access, limit=60))
+    return TEMPLATES.TemplateResponse(request, "_mcp_grid.html", {"request": request, "servers": servers, "view": view})
 
 
 @router.get("/a2a", response_class=HTMLResponse, include_in_schema=False)
@@ -203,15 +211,18 @@ async def a2a_page(
     health: str | None = Query(default=None),
     x402: str | None = Query(default=None),
     access: str | None = Query(default=None),
+    view: str | None = Query(default=None),
 ):
     with _conn() as c:
-        agents = db.search_a2a(c, q=q, health=health, x402_only=bool(x402),
-                               access=access, limit=60)
+        agents = db.attach_ratings("a2a", db.search_a2a(
+            c, q=q, health=health, x402_only=bool(x402),
+            access=access, limit=60))
         s = db.a2a_stats(c)
+        leaders = db.top_rated(c, "a2a", 10)
     return TEMPLATES.TemplateResponse(request, "a2a.html", {
             "request": request, "agents": agents, "stats": s, "q": q or "",
             "active_health": health, "active_x402": bool(x402),
-            "active_access": access,
+            "active_access": access, "leaders": leaders, "view": view,
         },
     )
 
@@ -232,16 +243,18 @@ async def a2a_partial(
     health: str | None = Query(default=None),
     x402: str | None = Query(default=None),
     access: str | None = Query(default=None),
+    view: str | None = Query(default=None),
 ):
     with _conn() as c:
-        agents = db.search_a2a(c, q=q, health=health, x402_only=bool(x402),
-                               access=access, limit=60)
-    return TEMPLATES.TemplateResponse(request, "_a2a_grid.html", {"request": request, "agents": agents})
+        agents = db.attach_ratings("a2a", db.search_a2a(
+            c, q=q, health=health, x402_only=bool(x402), access=access, limit=60))
+    return TEMPLATES.TemplateResponse(request, "_a2a_grid.html", {"request": request, "agents": agents, "view": view})
 
 
 @router.get("/_partials/services", response_class=HTMLResponse, include_in_schema=False)
 async def services_partial(
     request: Request,
+    view: str | None = Query(default=None),
     q: str | None = Query(default=None),
     category: str | None = Query(default=None),
     chain: str | None = Query(default=None),
@@ -249,9 +262,10 @@ async def services_partial(
     health: str | None = Query(default=None),
 ):
     with _conn() as c:
-        services = db.search(c, q=q, category=category, chain=chain,
-                             region=region, health=health, limit=60)
-    return TEMPLATES.TemplateResponse(request, "_service_grid.html", {"request": request, "services": services}
+        services = db.attach_ratings("x402", db.search(
+            c, q=q, category=category, chain=chain,
+            region=region, health=health, limit=60))
+    return TEMPLATES.TemplateResponse(request, "_service_grid.html", {"request": request, "services": services, "view": view}
     )
 
 

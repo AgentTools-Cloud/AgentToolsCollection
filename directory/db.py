@@ -1519,6 +1519,84 @@ def mcp_quality_score(health, conformance, p95_ms):
     return avail + conf + perf
 
 
+# ---------------------------------------------------------------------------
+# Unified rating: one 0-100 score + letter grade across all three resource
+# types, so every page can show a "Top Rated" leaderboard and grade column.
+#   MCP  -> existing quality_score (availability + conformance + performance)
+#   A2A  -> availability(40) + conformance(30) + trust/confidence(30)
+#   x402 -> availability(40) + trust/confidence(30) + on-chain demand(30)
+# All three are availability-first and reuse signals we already probe/compute,
+# mirroring the chiark-style quality model. No new crawl.
+# ---------------------------------------------------------------------------
+_GRADE_BANDS = ((80, "A"), (70, "B+"), (60, "B"), (50, "C+"), (40, "C"), (25, "D"))
+
+
+def grade_letter(score100) -> str:
+    s = score100 or 0
+    for lo, g in _GRADE_BANDS:
+        if s >= lo:
+            return g
+    return "E"
+
+
+def _score_a2a(health, conformance, confidence) -> float:
+    avail = 40 if health == "ok" else (16 if health == "degraded" else 0)
+    conf = 30 if conformance == "pass" else (12 if conformance == "partial" else 0)
+    trust = 30.0 * min(1.0, max(0.0, float(confidence or 0)))
+    return round(avail + conf + trust, 1)
+
+
+def _score_x402(health, confidence, tx_30d) -> float:
+    import math
+    avail = {"ok": 40, "degraded": 18, "unknown": 9}.get(health, 0)
+    trust = 30.0 * min(1.0, max(0.0, float(confidence or 0)))
+    tx = tx_30d or 0
+    demand = 30.0 * min(1.0, math.log10(tx + 1) / 4.0) if tx > 0 else 0.0
+    return round(avail + trust + demand, 1)
+
+
+def rate_row(kind: str, row) -> tuple:
+    """Return (score_0_100, grade_letter) for a resource row dict/Row."""
+    d = row if isinstance(row, dict) else dict(row)
+    if kind == "mcp":
+        s = float(d.get("quality_score") or 0)
+    elif kind == "a2a":
+        s = _score_a2a(d.get("health"), d.get("conformance"), d.get("confidence"))
+    else:  # x402
+        s = _score_x402(d.get("health"), d.get("confidence"),
+                        d.get("tx_30d") or d.get("payto_tx_30d"))
+    return s, grade_letter(s)
+
+
+def attach_ratings(kind: str, rows: list) -> list:
+    """Annotate each row dict in-place with score (0-10, 1dp) + grade letter."""
+    for d in rows:
+        s100, g = rate_row(kind, d)
+        d["score"] = round(s100 / 10.0, 1)
+        d["score100"] = s100
+        d["grade"] = g
+    return rows
+
+
+def top_rated(conn, kind: str, limit: int = 10) -> list:
+    """Highest-rated healthy resources of a type, annotated with score+grade."""
+    if kind == "mcp":
+        raw = conn.execute(
+            "SELECT * FROM mcp_servers WHERE health='ok' "
+            "ORDER BY quality_score DESC, confidence DESC, updated_at DESC "
+            "LIMIT ?", (limit,)).fetchall()
+        rows = [mcp_row_to_dict(r) for r in raw]
+        return attach_ratings("mcp", rows)
+    if kind == "a2a":
+        raw = conn.execute("SELECT * FROM a2a_agents WHERE health='ok'").fetchall()
+        rows = attach_ratings("a2a", [a2a_row_to_dict(r) for r in raw])
+    else:  # x402
+        raw = conn.execute("SELECT * FROM services WHERE health='ok'").fetchall()
+        rows = attach_ratings("x402", [dict(r) for r in raw])
+    rows.sort(key=lambda d: d.get("score100") or 0, reverse=True)
+    return rows[:limit]
+
+
 # Curated topic keywords used to bucket MCP servers (which carry no tags).
 # Each keyword is also a working full-text search term, so a category link
 # (/mcp?q=<keyword>) returns exactly the servers counted here.

@@ -1,4 +1,29 @@
-{% if services %}
+{% from "_macros.html" import access_badge, grade_badge, score_pill %}
+{% if services and view == 'table' %}
+<div class="bg-white border border-slate-200 rounded-2xl overflow-x-auto">
+  <table class="w-full text-sm">
+    <thead><tr class="text-left text-[11px] uppercase tracking-wider text-slate-400 border-b border-slate-100">
+      <th class="px-4 py-2.5 font-medium">Service</th>
+      <th class="px-2 py-2.5 font-medium w-16">Grade</th>
+      <th class="px-2 py-2.5 font-medium w-16">Score</th>
+      <th class="px-2 py-2.5 font-medium hidden md:table-cell">Category</th>
+      <th class="px-4 py-2.5 font-medium hidden sm:table-cell w-28">Price</th>
+    </tr></thead>
+    <tbody class="divide-y divide-slate-50">
+      {% for svc in services %}
+      <tr class="hover:bg-slate-50/60">
+        <td class="px-4 py-2.5"><a href="/services/{{ svc.slug }}" class="font-semibold text-slate-900 hover:text-blue-600">{{ svc.name_zh or svc.name }}</a>
+          {% if svc.description %}<div class="text-xs text-slate-500 line-clamp-1 max-w-md">{{ svc.description_zh or svc.description }}</div>{% endif %}</td>
+        <td class="px-2 py-2.5">{{ grade_badge(svc.grade) }}</td>
+        <td class="px-2 py-2.5">{{ score_pill(svc.score) }}</td>
+        <td class="px-2 py-2.5 hidden md:table-cell text-xs text-slate-500">{{ svc.category or '—' }}</td>
+        <td class="px-4 py-2.5 hidden sm:table-cell mono text-xs text-slate-600">{% if svc.price_min is not none %}${{ "%.4f"|format(svc.price_min) }}{% else %}—{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% elif services %}
 <ul class="grid grid-cols-1 md:grid-cols-2 gap-4">
   {% for svc in services %}
   <li class="svc-card p-5">
@@ -25,6 +50,7 @@
       {{ svc.description_zh or svc.description or "—" }}
     </p>
     <div class="mt-4 flex flex-wrap items-center gap-2 text-xs">
+      {% if svc.grade %}{{ grade_badge(svc.grade) }}<span class="mono text-[11px] text-slate-400">{{ "%.1f"|format(svc.score or 0) }}</span>{% endif %}
       {% if svc.category %}<span class="badge bg-blue-50 text-blue-700 ring-1 ring-blue-100">{{ svc.category }}</span>{% endif %}
       {% if svc.chains %}{% for chain in svc.chains %}<span class="badge bg-slate-50 text-slate-600 ring-1 ring-slate-200">{{ chain }}</span>{% endfor %}{% endif %}
       {% if svc.price_min is not none %}

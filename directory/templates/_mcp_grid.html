@@ -1,5 +1,29 @@
-{% from "_macros.html" import access_badge %}
-{% if servers %}
+{% from "_macros.html" import access_badge, grade_badge, score_pill %}
+{% if servers and view == 'table' %}
+<div class="bg-white border border-slate-200 rounded-2xl overflow-x-auto">
+  <table class="w-full text-sm">
+    <thead><tr class="text-left text-[11px] uppercase tracking-wider text-slate-400 border-b border-slate-100">
+      <th class="px-4 py-2.5 font-medium">Server</th>
+      <th class="px-2 py-2.5 font-medium w-16">Grade</th>
+      <th class="px-2 py-2.5 font-medium w-16">Score</th>
+      <th class="px-2 py-2.5 font-medium hidden sm:table-cell">Access</th>
+      <th class="px-4 py-2.5 font-medium hidden md:table-cell w-20">Health</th>
+    </tr></thead>
+    <tbody class="divide-y divide-slate-50">
+      {% for m in servers %}
+      <tr class="hover:bg-slate-50/60">
+        <td class="px-4 py-2.5"><a href="/mcp/servers/{{ m.slug }}" class="font-semibold text-slate-900 hover:text-blue-600">{{ m.name }}</a>
+          {% if m.description %}<div class="text-xs text-slate-500 line-clamp-1 max-w-md">{{ m.description }}</div>{% endif %}</td>
+        <td class="px-2 py-2.5">{{ grade_badge(m.grade) }}</td>
+        <td class="px-2 py-2.5">{{ score_pill(m.score) }}</td>
+        <td class="px-2 py-2.5 hidden sm:table-cell">{{ access_badge(m.x402_supported, m.auth_method) }}</td>
+        <td class="px-4 py-2.5 hidden md:table-cell text-xs {{ 'text-emerald-600' if m.health=='ok' else 'text-slate-400' }}">● {{ m.health or 'unknown' }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% elif servers %}
 <ul class="grid grid-cols-1 md:grid-cols-2 gap-4">
   {% for m in servers %}
   <li class="svc-card p-5">
@@ -27,6 +51,7 @@
     </p>
     <div class="mt-4 flex flex-wrap items-center gap-2 text-xs">
       {% if m.safety %}{% if m.safety.verdict == "malicious" %}<span class="badge bg-rose-50 text-rose-700 ring-1 ring-rose-200" title="Static scan flagged a possible RCE/phishing payload — verify before use">⚠ flagged</span>{% elif m.safety.verdict == "suspicious" %}<span class="badge bg-amber-50 text-amber-700 ring-1 ring-amber-200" title="Static scan found suspicious patterns — review">⚠ review</span>{% endif %}{% endif %}
+      {% if m.grade %}{{ grade_badge(m.grade) }}<span class="mono text-[11px] text-slate-400">{{ "%.1f"|format(m.score or 0) }}</span>{% endif %}
       {{ access_badge(m.x402_supported, m.auth_method) }}
       {% if m.transport %}<span class="badge bg-blue-50 text-blue-700 ring-1 ring-blue-100">{{ m.transport }}</span>{% endif %}
       {% if m.auth_method %}<span class="badge bg-slate-50 text-slate-600 ring-1 ring-slate-200">{{ m.auth_method }}</span>{% endif %}
