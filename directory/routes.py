@@ -159,13 +159,16 @@ async def mcp_page(
     q: str | None = Query(default=None),
     health: str | None = Query(default=None),
     x402: str | None = Query(default=None),
+    access: str | None = Query(default=None),
 ):
     with _conn() as c:
-        servers = db.search_mcp(c, q=q, health=health, x402_only=bool(x402), limit=60)
+        servers = db.search_mcp(c, q=q, health=health, x402_only=bool(x402),
+                                access=access, limit=60)
         s = db.mcp_stats(c)
     return TEMPLATES.TemplateResponse(request, "mcp.html", {
             "request": request, "servers": servers, "stats": s, "q": q or "",
             "active_health": health, "active_x402": bool(x402),
+            "active_access": access,
         },
     )
 
@@ -185,9 +188,11 @@ async def mcp_partial(
     q: str | None = Query(default=None),
     health: str | None = Query(default=None),
     x402: str | None = Query(default=None),
+    access: str | None = Query(default=None),
 ):
     with _conn() as c:
-        servers = db.search_mcp(c, q=q, health=health, x402_only=bool(x402), limit=60)
+        servers = db.search_mcp(c, q=q, health=health, x402_only=bool(x402),
+                                access=access, limit=60)
     return TEMPLATES.TemplateResponse(request, "_mcp_grid.html", {"request": request, "servers": servers})
 
 
@@ -197,13 +202,16 @@ async def a2a_page(
     q: str | None = Query(default=None),
     health: str | None = Query(default=None),
     x402: str | None = Query(default=None),
+    access: str | None = Query(default=None),
 ):
     with _conn() as c:
-        agents = db.search_a2a(c, q=q, health=health, x402_only=bool(x402), limit=60)
+        agents = db.search_a2a(c, q=q, health=health, x402_only=bool(x402),
+                               access=access, limit=60)
         s = db.a2a_stats(c)
     return TEMPLATES.TemplateResponse(request, "a2a.html", {
             "request": request, "agents": agents, "stats": s, "q": q or "",
             "active_health": health, "active_x402": bool(x402),
+            "active_access": access,
         },
     )
 
@@ -223,9 +231,11 @@ async def a2a_partial(
     q: str | None = Query(default=None),
     health: str | None = Query(default=None),
     x402: str | None = Query(default=None),
+    access: str | None = Query(default=None),
 ):
     with _conn() as c:
-        agents = db.search_a2a(c, q=q, health=health, x402_only=bool(x402), limit=60)
+        agents = db.search_a2a(c, q=q, health=health, x402_only=bool(x402),
+                               access=access, limit=60)
     return TEMPLATES.TemplateResponse(request, "_a2a_grid.html", {"request": request, "agents": agents})
 
 

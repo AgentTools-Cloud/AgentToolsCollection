@@ -102,19 +102,33 @@
   </div>
   <form
         hx-get="/_partials/a2a"
-        hx-trigger="change from:select"
+        hx-trigger="change"
         hx-target="#a2a-grid"
         hx-swap="innerHTML"
         hx-push-url="true"
         hx-include="[name=q]"
-        class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-5">
-    <select name="health" class="px-3 py-2.5 bg-white border border-slate-200 rounded-xl text-sm focus:outline-none focus:border-slate-400">
+        class="mb-5 space-y-3">
+    <div class="flex flex-wrap gap-2">
+      {% set _tiers = [('', 'All access', stats.total), ('open', 'Open', stats.access_open), ('key', 'Human key', stats.access_key), ('x402', 'Agent-pays · x402', stats.access_x402)] %}
+      {% for _v, _label, _n in _tiers %}
+      <label class="cursor-pointer select-none">
+        <input type="radio" name="access" value="{{ _v }}" class="peer sr-only"
+               {% if (active_access or '') == _v %}checked{% endif %}>
+        <span class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-sm border bg-white text-slate-600 border-slate-200 hover:border-slate-400 peer-checked:bg-slate-900 peer-checked:text-white peer-checked:border-slate-900 transition-colors">
+          {{ _label }}
+          <span class="mono text-xs opacity-60">{{ _n }}</span>
+        </span>
+      </label>
+      {% endfor %}
+    </div>
+    <select name="health" class="w-full md:w-64 px-3 py-2.5 bg-white border border-slate-200 rounded-xl text-sm focus:outline-none focus:border-slate-400">
       <option value="">All health</option>
       <option value="ok" {% if active_health == 'ok' %}selected{% endif %}>Healthy</option>
       <option value="degraded" {% if active_health == 'degraded' %}selected{% endif %}>Degraded</option>
       <option value="down" {% if active_health == 'down' %}selected{% endif %}>Down</option>
       <option value="unknown" {% if active_health == 'unknown' %}selected{% endif %}>Unknown</option>
     </select>
+    <p class="text-xs text-slate-400 leading-relaxed">Access model &mdash; <span class="text-slate-500">Open</span>: callable with no credentials · <span class="text-slate-500">Human key</span>: a person must provision an API key/OAuth first · <span class="text-slate-500">Agent-pays</span>: agent settles each call on-chain (x402)</p>
   </form>
 
   <div id="a2a-grid">

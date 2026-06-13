@@ -1058,7 +1058,7 @@ def upsert_a2a_agent(conn: sqlite3.Connection, row: dict) -> tuple:
 
 
 def search_a2a(conn, q=None, health=None, x402_only=False,
-               limit=50, offset=0):
+               access=None, limit=50, offset=0):
     """Search A2A agents. Ranks healthy + x402-capable + confident first."""
     select_cols = ["a.*"]
     where: list[str] = []
@@ -1080,6 +1080,8 @@ def search_a2a(conn, q=None, health=None, x402_only=False,
         where.append("a.health=?"); params.append(health)
     if x402_only:
         where.append("a.x402_supported=1")
+    if access in ("open", "key", "x402"):
+        where.append(_access_case("a", "a2a") + "=?"); params.append(access)
     if where:
         sql.append("WHERE " + " AND ".join(where))
     sql.append(
@@ -1157,8 +1159,13 @@ def a2a_stats(conn):
             dom_conf.add(host)
         if r["x402_supported"] == 1:
             dom_x402.add(host)
+    _acc = {r["t"]: r["n"] for r in cur.execute(
+        "SELECT " + _access_case("a2a_agents", "a2a") + " AS t, COUNT(*) AS n "
+        "FROM a2a_agents GROUP BY t").fetchall()}
     return {"total": total, "healthy": healthy, "x402_capable": x402,
             "conformant": conformant, "new_7d": new_7d,
+            "access_open": _acc.get("open", 0), "access_key": _acc.get("key", 0),
+            "access_x402": _acc.get("x402", 0),
             "domains": len(doms), "healthy_domains": len(dom_healthy),
             "conformant_domains": len(dom_conf), "x402_domains": len(dom_x402)}
 
@@ -1341,7 +1348,32 @@ def upsert_mcp_server(conn: sqlite3.Connection, row: dict) -> tuple:
     return False, int(existing["id"])
 
 
-def search_mcp(conn, q=None, health=None, x402_only=False, kind=None, limit=50, offset=0):
+def _access_case(alias, kind):
+    """SQL CASE -> access tier: 'x402' (agent self-pays per call) / 'key'
+    (a human must provision an API key/OAuth first) / 'open' (no credentials).
+    Encodes the directory's 'who provisions access' axis."""
+    a = alias
+    if kind == "mcp":
+        return (
+            f"CASE WHEN {a}.x402_supported=1 THEN 'x402' "
+            f"WHEN {a}.auth_method IS NOT NULL "
+            f"AND lower(trim({a}.auth_method)) NOT IN "
+            f"('','open','none','public','public-discovery') THEN 'key' "
+            f"ELSE 'open' END"
+        )
+    return (
+        f"CASE WHEN {a}.x402_supported=1 OR ({a}.auth_schemes IS NOT NULL "
+        f"AND lower({a}.auth_schemes) LIKE '%x402%') THEN 'x402' "
+        f"WHEN {a}.auth_schemes IS NOT NULL AND ("
+        f"lower({a}.auth_schemes) LIKE '%key%' OR lower({a}.auth_schemes) LIKE '%bearer%' "
+        f"OR lower({a}.auth_schemes) LIKE '%oauth%' OR lower({a}.auth_schemes) LIKE '%token%' "
+        f"OR lower({a}.auth_schemes) LIKE '%auth%' OR lower({a}.auth_schemes) LIKE '%secret%' "
+        f"OR lower({a}.auth_schemes) LIKE '%credential%') THEN 'key' ELSE 'open' END"
+    )
+
+
+def search_mcp(conn, q=None, health=None, x402_only=False, kind=None,
+               access=None, limit=50, offset=0):
     """Search standalone MCP servers. Ranks healthy + remotely callable first."""
     select_cols = ["m.*"]
     where: list[str] = []
@@ -1361,6 +1393,8 @@ def search_mcp(conn, q=None, health=None, x402_only=False, kind=None, limit=50, 
         where.append("m.health=?"); params.append(health)
     if x402_only:
         where.append("m.x402_supported=1")
+    if access in ("open", "key", "x402"):
+        where.append(_access_case("m", "mcp") + "=?"); params.append(access)
     if kind:
         where.append("m.kind=?"); params.append(kind)
     if where:
@@ -1442,8 +1476,13 @@ def mcp_stats(conn):
         "WHERE latency_p95_ms IS NOT NULL"
     ).fetchone()
     avg_p95 = int(_p["a"]) if _p and _p["a"] is not None else None
+    _acc = {r["t"]: r["n"] for r in cur.execute(
+        "SELECT " + _access_case("mcp_servers", "mcp") + " AS t, COUNT(*) AS n "
+        "FROM mcp_servers GROUP BY t").fetchall()}
     return {"total": total, "healthy": healthy, "remote_callable": remote,
             "conformant": conformant, "x402_capable": x402, "new_7d": new_7d,
+            "access_open": _acc.get("open", 0), "access_key": _acc.get("key", 0),
+            "access_x402": _acc.get("x402", 0),
             "domains": len(dom_all),
             "healthy_domains": len(dom_healthy),
             "conformant_domains": len(dom_conf),
