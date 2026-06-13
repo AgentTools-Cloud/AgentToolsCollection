@@ -1,3 +1,4 @@
+{% from "_macros.html" import access_badge %}
 {% if servers %}
 <ul class="grid grid-cols-1 md:grid-cols-2 gap-4">
   {% for m in servers %}
@@ -26,6 +27,7 @@
     </p>
     <div class="mt-4 flex flex-wrap items-center gap-2 text-xs">
       {% if m.safety %}{% if m.safety.verdict == "malicious" %}<span class="badge bg-rose-50 text-rose-700 ring-1 ring-rose-200" title="Static scan flagged a possible RCE/phishing payload — verify before use">⚠ flagged</span>{% elif m.safety.verdict == "suspicious" %}<span class="badge bg-amber-50 text-amber-700 ring-1 ring-amber-200" title="Static scan found suspicious patterns — review">⚠ review</span>{% endif %}{% endif %}
+      {{ access_badge(m.x402_supported, m.auth_method) }}
       {% if m.transport %}<span class="badge bg-blue-50 text-blue-700 ring-1 ring-blue-100">{{ m.transport }}</span>{% endif %}
       {% if m.auth_method %}<span class="badge bg-slate-50 text-slate-600 ring-1 ring-slate-200">{{ m.auth_method }}</span>{% endif %}
       {% if m.github_stars %}<span class="ml-auto mono text-[12px] text-slate-700 bg-slate-50 ring-1 ring-slate-200 rounded-md px-2 py-1">★ {{ m.github_stars }}</span>{% endif %}

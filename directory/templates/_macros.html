@@ -1,0 +1,15 @@
+{#- Unified access-model badge. Mirrors db._access_case():
+     x402 = agent self-pays per call · key = a human must provision a
+     credential first · open = no credentials. `auth` is the raw
+     auth_method (MCP) or auth_schemes list/str (A2A), shown for context. -#}
+{% macro access_badge(x402, auth) -%}
+  {%- set _a = (auth | string) | lower -%}
+  {%- set _is_key = (auth and _a not in ('', 'none', 'open', 'public', 'public-discovery', '[]', 'null')) -%}
+  {%- if x402 or ('x402' in _a) -%}
+    <span class="badge bg-violet-50 text-violet-700 ring-1 ring-violet-200" title="Agent-pays: the agent settles each call on-chain (x402) — no human account needed">⚡ agent-pays · x402</span>
+  {%- elif _is_key -%}
+    <span class="badge bg-amber-50 text-amber-700 ring-1 ring-amber-200" title="Human key: a person must provision an API key / OAuth before an agent can call this">🔑 human key</span>
+  {%- else -%}
+    <span class="badge bg-emerald-50 text-emerald-700 ring-1 ring-emerald-100" title="Open: callable with no credentials">🔓 open</span>
+  {%- endif -%}
+{%- endmacro %}
