@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_macros.html" import leaderboard, grade_badge %}
 {% block content %}
 
 <section class="py-6 md:py-10">
@@ -97,6 +98,82 @@
       Browse agents →
     </div>
   </a>
+</section>
+
+<section class="mt-12">
+  <div class="flex flex-wrap items-end justify-between gap-4 mb-4">
+    <div>
+      <h2 class="text-2xl font-bold tracking-tight">Directory health &amp; quality, at a glance</h2>
+      <p class="text-sm text-slate-500 mt-1">A synthesized read on what's actually usable right now — refreshed continuously (scores recomputed on every hourly liveness probe; leaderboards ranked live on each request).</p>
+    </div>
+  </div>
+
+  {% set tot = stats.total + mcp_stats.total + a2a_stats.total %}
+  {% set hea = stats.healthy + mcp_stats.healthy + a2a_stats.healthy %}
+  {% set hpct = (100 * hea / tot)|round|int if tot else 0 %}
+  {% set fresh = mcp_stats.new_7d + a2a_stats.new_7d %}
+  {% set agent_native = stats.total + mcp_stats.access_x402 + a2a_stats.access_x402 %}
+  <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+    <div class="stat-card">
+      <div class="text-sm text-slate-500">Verified live</div>
+      <div class="text-3xl font-bold mt-1 text-emerald-600">{{ hpct }}%</div>
+      <div class="text-xs text-slate-400 mt-2">{{ hea }} of {{ tot }} passed the last liveness probe</div>
+    </div>
+    <div class="stat-card">
+      <div class="text-sm text-slate-500">Top-graded (A / B+)</div>
+      <div class="text-3xl font-bold mt-1">{{ grade_mix.mcp.a_plus + grade_mix.a2a.a_plus + grade_mix.x402.a_plus }}</div>
+      <div class="text-xs text-slate-400 mt-2">high availability + conformance + trust signals</div>
+    </div>
+    <div class="stat-card">
+      <div class="text-sm text-slate-500">Agent-payable (x402)</div>
+      <div class="text-3xl font-bold mt-1">{{ stats.total + mcp_stats.access_x402 + a2a_stats.access_x402 }}</div>
+      <div class="text-xs text-slate-400 mt-2">settle per-call on-chain, no human signup</div>
+    </div>
+    <div class="stat-card">
+      <div class="text-sm text-slate-500">New this week</div>
+      <div class="text-3xl font-bold mt-1">+{{ fresh }}</div>
+      <div class="text-xs text-slate-400 mt-2">freshly discovered MCP + A2A endpoints</div>
+    </div>
+  </div>
+
+  <div class="svc-card p-5 md:p-6 bg-slate-50/60 mb-8 text-sm text-slate-600 leading-relaxed">
+    <span class="font-semibold text-slate-900">The read:</span>
+    Of <span class="font-semibold text-slate-800">{{ tot }}</span> indexed entries,
+    <span class="font-semibold text-emerald-700">{{ hpct }}%</span> answered their last liveness probe.
+    Quality skews high on the <span class="font-semibold text-slate-800">MCP</span> side
+    ({{ grade_mix.mcp.share }}% of healthy servers grade A/B+, conformance-verified via a real
+    <span class="mono">tools/list</span> handshake), and on <span class="font-semibold text-slate-800">A2A</span>
+    ({{ grade_mix.a2a.share }}% A/B+). The <span class="font-semibold text-slate-800">x402</span> side is
+    graded on on-chain demand, so high grades are rarer and mean real paying traffic — the few A-grade
+    services are the ones agents are actually paying. Roughly
+    <span class="font-semibold text-slate-800">{{ mcp_stats.access_open }}</span> MCP servers are callable
+    with no credentials at all; <span class="font-semibold text-slate-800">{{ mcp_stats.access_key }}</span>
+    need a human to provision a key first. Scores recompute hourly; rankings are live.
+  </div>
+
+  <div class="grid grid-cols-1 lg:grid-cols-3 gap-5">
+    <div>
+      <div class="flex items-center justify-between mb-2">
+        <h3 class="text-sm font-semibold text-slate-700">Top MCP servers</h3>
+        <a href="/mcp" class="text-xs text-blue-600 hover:underline">View all →</a>
+      </div>
+      {{ leaderboard(top_mcp, "mcp") }}
+    </div>
+    <div>
+      <div class="flex items-center justify-between mb-2">
+        <h3 class="text-sm font-semibold text-slate-700">Top A2A agents</h3>
+        <a href="/a2a" class="text-xs text-blue-600 hover:underline">View all →</a>
+      </div>
+      {{ leaderboard(top_a2a, "a2a") }}
+    </div>
+    <div>
+      <div class="flex items-center justify-between mb-2">
+        <h3 class="text-sm font-semibold text-slate-700">Top x402 services</h3>
+        <a href="/x402" class="text-xs text-blue-600 hover:underline">View all →</a>
+      </div>
+      {{ leaderboard(top_x402, "x402") }}
+    </div>
+  </div>
 </section>
 
 <section class="mt-12 svc-card p-6 md:p-8 bg-slate-50/60">

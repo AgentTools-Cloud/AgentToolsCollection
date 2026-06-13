@@ -1578,6 +1578,38 @@ def attach_ratings(kind: str, rows: list) -> list:
     return rows
 
 
+def grade_mix_all(conn) -> dict:
+    """A/B+ share per type, computed in SQL from stored signals (no per-row
+    scoring). MCP uses quality_score; a2a/x402 reuse the same band logic the
+    Python scorer uses, expressed inline so the homepage stays fast."""
+    cur = conn.cursor()
+    out = {}
+    # MCP: quality_score already stored. A/B+ == score >= 70.
+    r = cur.execute(
+        "SELECT COUNT(*) n, SUM(CASE WHEN quality_score>=70 THEN 1 ELSE 0 END) ap "
+        "FROM mcp_servers WHERE health='ok'").fetchone()
+    n, ap = (r["n"] or 0), (r["ap"] or 0)
+    out["mcp"] = {"a_plus": ap, "share": round(100 * ap / n) if n else 0}
+    # A2A: score = 40(health ok) + 30(conformance pass) + 30*confidence.
+    #   A/B+ (>=70) needs ok + (pass + conf>=0) OR ok + conf>=1; with health ok
+    #   that's conformance='pass' OR confidence>=1.0. Approximate via SQL.
+    r = cur.execute(
+        "SELECT COUNT(*) n, SUM(CASE WHEN (40 + (CASE conformance WHEN 'pass' THEN 30 "
+        "WHEN 'partial' THEN 12 ELSE 0 END) + 30*COALESCE(confidence,0))>=70 THEN 1 ELSE 0 END) ap "
+        "FROM a2a_agents WHERE health='ok'").fetchone()
+    n, ap = (r["n"] or 0), (r["ap"] or 0)
+    out["a2a"] = {"a_plus": ap, "share": round(100 * ap / n) if n else 0}
+    # x402: score = 40(ok) + 30*confidence + 30*min(1, log10(tx+1)/4).
+    r = cur.execute(
+        "SELECT COUNT(*) n, SUM(CASE WHEN (40 + 30*COALESCE(confidence,0) + "
+        "30*MIN(1.0, (CASE WHEN COALESCE(tx_30d,0)>0 THEN "
+        "(LN(COALESCE(tx_30d,0)+1)/LN(10))/4.0 ELSE 0 END)))>=70 THEN 1 ELSE 0 END) ap "
+        "FROM services WHERE health='ok'").fetchone()
+    n, ap = (r["n"] or 0), (r["ap"] or 0)
+    out["x402"] = {"a_plus": ap, "share": round(100 * ap / n) if n else 0}
+    return out
+
+
 def top_rated(conn, kind: str, limit: int = 10) -> list:
     """Highest-rated healthy resources of a type, annotated with score+grade."""
     if kind == "mcp":
@@ -1588,13 +1620,19 @@ def top_rated(conn, kind: str, limit: int = 10) -> list:
         rows = [mcp_row_to_dict(r) for r in raw]
         return attach_ratings("mcp", rows)
     if kind == "a2a":
-        raw = conn.execute("SELECT * FROM a2a_agents WHERE health='ok'").fetchall()
-        rows = attach_ratings("a2a", [a2a_row_to_dict(r) for r in raw])
-    else:  # x402
-        raw = conn.execute("SELECT * FROM services WHERE health='ok'").fetchall()
-        rows = attach_ratings("x402", [dict(r) for r in raw])
-    rows.sort(key=lambda d: d.get("score100") or 0, reverse=True)
-    return rows[:limit]
+        raw = conn.execute(
+            "SELECT * FROM a2a_agents WHERE health='ok' ORDER BY "
+            "(40 + (CASE conformance WHEN 'pass' THEN 30 WHEN 'partial' THEN 12 "
+            "ELSE 0 END) + 30*COALESCE(confidence,0)) DESC, confidence DESC, "
+            "updated_at DESC LIMIT ?", (limit,)).fetchall()
+        return attach_ratings("a2a", [a2a_row_to_dict(r) for r in raw])
+    # x402
+    raw = conn.execute(
+        "SELECT * FROM services WHERE health='ok' ORDER BY "
+        "(40 + 30*COALESCE(confidence,0) + 30*MIN(1.0, (CASE WHEN COALESCE(tx_30d,0)>0 "
+        "THEN (LN(COALESCE(tx_30d,0)+1)/LN(10))/4.0 ELSE 0 END))) DESC, "
+        "tx_30d DESC, confidence DESC, updated_at DESC LIMIT ?", (limit,)).fetchall()
+    return attach_ratings("x402", [dict(r) for r in raw])
 
 
 # Curated topic keywords used to bucket MCP servers (which carry no tags).
