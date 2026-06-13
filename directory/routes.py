@@ -78,8 +78,14 @@ async def home(request: Request):
         s = db.stats(c)
         ms = db.mcp_stats(c)
         a2s = db.a2a_stats(c)
+        top_mcp = db.top_rated(c, "mcp", 5)
+        top_a2a = db.top_rated(c, "a2a", 5)
+        top_x402 = db.top_rated(c, "x402", 5)
+        mix = db.grade_mix_all(c)
     return TEMPLATES.TemplateResponse(request, "home.html", {
             "request": request, "stats": s, "mcp_stats": ms, "a2a_stats": a2s,
+            "top_mcp": top_mcp, "top_a2a": top_a2a, "top_x402": top_x402,
+            "grade_mix": mix,
         },
     )
 
