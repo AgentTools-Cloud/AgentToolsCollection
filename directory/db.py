@@ -1504,19 +1504,28 @@ def mcp_p95_latency(conn, server_id: int, days: int = 14):
     return int(vals[idx])
 
 
-def mcp_quality_score(health, conformance, p95_ms):
-    """0..100 = availability(30) + conformance(30) + performance(40)."""
-    avail = 30 if health == "ok" else (12 if health == "degraded" else 0)
-    conf = 30 if conformance == "pass" else (12 if conformance == "partial" else 0)
+def mcp_quality_score(health, conformance, p95_ms, confidence=None):
+    """0..88 = availability(25) + conformance(25) + performance(30, continuous)
+    + trust(8).
+
+    Performance is continuous so the many healthy sub-300ms servers no longer
+    all tie at full marks: full 30 at p95<=50ms, linearly down to 0 at
+    >=2000ms (no p95 data => 0). Trust scales the registry/cross-source
+    confidence (0..1). A perfect score therefore needs ok + pass + very low
+    latency + high confidence, which is rare instead of the default.
+    """
+    avail = 25 if health == "ok" else (10 if health == "degraded" else 0)
+    conf = 25 if conformance == "pass" else (10 if conformance == "partial" else 0)
     if p95_ms is None:
-        perf = 0
-    elif p95_ms <= 300:
-        perf = 40
-    elif p95_ms >= 3000:
-        perf = 0
+        perf = 0.0
+    elif p95_ms <= 50:
+        perf = 30.0
+    elif p95_ms >= 2000:
+        perf = 0.0
     else:
-        perf = int(round(40 * (3000 - p95_ms) / (3000 - 300)))
-    return avail + conf + perf
+        perf = 30.0 * (2000 - p95_ms) / (2000 - 50)
+    trust = 8.0 * min(1.0, max(0.0, float(confidence or 0)))
+    return round(avail + conf + perf + trust, 2)
 
 
 # ---------------------------------------------------------------------------
@@ -1572,7 +1581,7 @@ def attach_ratings(kind: str, rows: list) -> list:
     """Annotate each row dict in-place with score (0-10, 1dp) + grade letter."""
     for d in rows:
         s100, g = rate_row(kind, d)
-        d["score"] = round(s100 / 10.0, 1)
+        d["score"] = round(s100 / 10.0, 2)
         d["score100"] = s100
         d["grade"] = g
     return rows
