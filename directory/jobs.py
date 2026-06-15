@@ -560,10 +560,10 @@ def cmd_health_mcp(only_unknown: bool = False) -> int:
                 for r in batch:
                     p95 = db.mcp_p95_latency(c, r["id"])
                     srow = c.execute(
-                        "SELECT health, conformance FROM mcp_servers WHERE id=?",
+                        "SELECT health, conformance, confidence FROM mcp_servers WHERE id=?",
                         (r["id"],)).fetchone()
                     score = db.mcp_quality_score(
-                        srow["health"], srow["conformance"], p95)
+                        srow["health"], srow["conformance"], p95, srow["confidence"])
                     c.execute(
                         "UPDATE mcp_servers SET latency_p95_ms=?, quality_score=? WHERE id=?",
                         (p95, score, r["id"]))
