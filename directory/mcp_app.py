@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import json
 import logging
 import os
 from typing import Any
@@ -98,6 +99,86 @@ def _extract_peer_ip(scope: dict) -> str | None:
     return None
 
 
+# ---- MCP method-level telemetry ---------------------------------------------
+#
+# nginx only logs `POST /mcp-discovery/` — the JSON-RPC method lives in the
+# request body, so it cannot tell an `initialize`/`tools/list` handshake apart
+# from a real `tools/call`. We peek the (small, capped) body here and bump a
+# daily per-method counter. Bounded rows (days x methods); best-effort, never
+# affects request handling.
+
+_MCP_PEEK_CAP = 256 * 1024  # never buffer more than this just to read the method
+
+
+def _methods_from_body(body: bytes) -> list[str]:
+    if not body:
+        return []
+    try:
+        data = json.loads(body)
+    except Exception:
+        return []
+    items = data if isinstance(data, list) else [data]
+    out = []
+    for it in items:
+        if isinstance(it, dict):
+            m = it.get("method")
+            if isinstance(m, str) and m:
+                out.append(m)
+    return out
+
+
+def _record_mcp_methods(body: bytes) -> None:
+    """Best-effort: bump the daily counter for each JSON-RPC method in `body`.
+    Never raises — telemetry must not affect the MCP request."""
+    methods = _methods_from_body(body)
+    if not methods:
+        return
+    try:
+        with directory_db.writer(DB_PATH) as wc:
+            for m in methods:
+                directory_db.bump_mcp_method(wc, m)
+    except Exception as e:
+        log.debug("mcp method telemetry skipped: %r", e)
+
+
+async def _peek_and_replay(receive):
+    """Buffer the request body (capped), record method telemetry, and return a
+    receive() that replays the buffered ASGI events then defers to the original.
+    Bounded so a large POST never blows memory; if the cap is hit we skip the
+    telemetry and still replay everything read."""
+    messages: list[dict] = []
+    total = 0
+    capped = False
+    while True:
+        message = await receive()
+        messages.append(message)
+        if message.get("type") == "http.request":
+            total += len(message.get("body", b"") or b"")
+            if total > _MCP_PEEK_CAP:
+                capped = True
+                break
+            if not message.get("more_body"):
+                break
+        else:
+            break
+    if not capped:
+        body = b"".join(
+            m.get("body", b"") or b""
+            for m in messages
+            if m.get("type") == "http.request"
+        )
+        _record_mcp_methods(body)
+    queue = iter(messages)
+
+    async def replay():
+        try:
+            return next(queue)
+        except StopIteration:
+            return await receive()
+
+    return replay
+
+
 def wrap_with_client_capture(app):
     """ASGI middleware: stash the per-request client IP into a ContextVar.
 
@@ -108,6 +189,8 @@ def wrap_with_client_capture(app):
             ip = _extract_peer_ip(scope)
             token = _current_client_ip.set(ip)
             try:
+                if scope.get("type") == "http" and scope.get("method") == "POST":
+                    receive = await _peek_and_replay(receive)
                 await app(scope, receive, send)
             finally:
                 _current_client_ip.reset(token)
