@@ -145,6 +145,13 @@ CREATE TABLE IF NOT EXISTS tool_calls (
 CREATE INDEX IF NOT EXISTS idx_tool_calls_ts   ON tool_calls(ts);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_tool ON tool_calls(tool);
 
+CREATE TABLE IF NOT EXISTS mcp_method_stats (
+  day     TEXT NOT NULL,
+  method  TEXT NOT NULL,
+  n       INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (day, method)
+);
+
 CREATE TABLE IF NOT EXISTS page_views (
   id          INTEGER PRIMARY KEY,
   ts          INTEGER NOT NULL,
@@ -757,6 +764,21 @@ def log_tool_call(conn, tool, args=None, result_n=None, result_slug=None,
          result_n, result_slug, client_name, client_ip),
     )
     conn.commit()
+
+
+def bump_mcp_method(conn, method, day=None, n=1):
+    """Increment the daily counter for an MCP JSON-RPC method seen at the
+    /mcp-discovery entry. Lightweight telemetry: bounded rows (days x methods),
+    no per-request row growth. Caller commits (via writer())."""
+    if not method:
+        return
+    if day is None:
+        day = time.strftime("%Y-%m-%d", time.gmtime())
+    conn.execute(
+        "INSERT INTO mcp_method_stats (day, method, n) VALUES (?, ?, ?) "
+        "ON CONFLICT(day, method) DO UPDATE SET n = n + excluded.n",
+        (day, str(method)[:64], int(n)),
+    )
 
 
 def log_page_view(conn, kind, slug, ref=None, client_ip=None, ua=None):
