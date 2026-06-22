@@ -812,7 +812,7 @@ def cmd_approve(sub_id: int, note: str | None = None) -> int:
     return 0
 
 
-def review_submission(sub_id: int, note_prefix: str = "auto-review") -> dict:
+def review_submission(sub_id: int, note_prefix: str = "auto-review", notify_pending: bool = False) -> dict:
     """Auto-review a single pending submission via x402 verification.
 
     verified  -> approve + publish immediately
@@ -844,18 +844,22 @@ def review_submission(sub_id: int, note_prefix: str = "auto-review") -> dict:
     evidence = verdict.get("evidence") or []
     note = f"{note_prefix}: {vstatus} — {'; '.join(evidence)}"
 
-    # admin notification — fires on every verdict (on-submit AND timer-retry)
+    # admin notification — only on terminal verdicts (listed/rejected) or the
+    # first review (on-submit / mcp-register). A pending submission is retried
+    # every 30 min by the timer; re-notifying each retry floods the admin
+    # inbox, so suppress notifications for repeated "pending" verdicts.
     sname = p.get("name") or p.get("title") or url or f"submission #{sub_id}"
     _verdict_label = {"verified": "listed", "rejected": "rejected"}.get(
         vstatus, "pending")
-    mailer.send_admin_notification(
-        "x402 submission", sname, _verdict_label,
-        [("URL", url or "—"),
-         ("Contact", p.get("contact") or "—"),
-         ("Category", p.get("category") or "—"),
-         ("Source", p.get("_source") or "rest-submit"),
-         ("Evidence", "; ".join(evidence) or "—"),
-         ("Submission", f"#{sub_id}")])
+    if vstatus in ("verified", "rejected") or notify_pending:
+        mailer.send_admin_notification(
+            "x402 submission", sname, _verdict_label,
+            [("URL", url or "—"),
+             ("Contact", p.get("contact") or "—"),
+             ("Category", p.get("category") or "—"),
+             ("Source", p.get("_source") or "rest-submit"),
+             ("Evidence", "; ".join(evidence) or "—"),
+             ("Submission", f"#{sub_id}")])
 
     if vstatus == "verified":
         res = _approve(sub_id, note=note)
