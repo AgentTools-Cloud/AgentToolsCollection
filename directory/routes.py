@@ -600,7 +600,7 @@ async def api_submit(request: Request, payload: SubmissionPayload):
     # stays pending and is retried automatically by the crawl timer.
     try:
         review = await run_in_threadpool(
-            directory_jobs.review_submission, sub_id, "auto-review (on-submit)")
+            directory_jobs.review_submission, sub_id, "auto-review (on-submit)", True)
     except Exception:
         review = {"status": "pending", "submission_id": sub_id}
     rstatus = review.get("status")

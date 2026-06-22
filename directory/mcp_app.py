@@ -695,7 +695,7 @@ async def register(
     # publish / reject / retry accordingly.
     try:
         review = await asyncio.to_thread(
-            directory_jobs.review_submission, sub_id, "auto-review (mcp-register)")
+            directory_jobs.review_submission, sub_id, "auto-review (mcp-register)", True)
     except Exception as e:
         log.warning("register auto-review failed: %r", e)
         review = {"status": "pending", "submission_id": sub_id}
