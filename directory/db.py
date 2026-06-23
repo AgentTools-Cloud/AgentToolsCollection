@@ -469,6 +469,14 @@ def upsert_service(conn: sqlite3.Connection, row: dict) -> tuple:
     row["payment"] = _to_json(row.get("payment"))
     row["call_info"] = _to_json(row.get("call_info"))
     row["quality"] = _to_json(row.get("quality"))
+    # facilitator is a scalar identifier (preset name / URL); some pay-skills
+    # PAY.md frontmatter carries a nested x402 facilitator object that sqlite
+    # cannot bind. Coerce any stray dict/list to a string.
+    _fac = row.get("facilitator")
+    if isinstance(_fac, dict):
+        row["facilitator"] = _fac.get("url") or _fac.get("name") or _fac.get("id") or _to_json(_fac)
+    elif isinstance(_fac, (list, tuple)):
+        row["facilitator"] = _to_json(_fac)
 
     cur = conn.cursor()
     existing = None
