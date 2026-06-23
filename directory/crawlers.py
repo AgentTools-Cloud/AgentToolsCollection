@@ -1550,7 +1550,9 @@ def fetch_mcp_keepalive(max_pages: int = 20, per_page: int = 100,
 MCP_CRAWLERS = {
     "pulsemcp": fetch_pulsemcp,
     "mcp-registry": fetch_mcp_registry,
-    "mcp-keepalive": fetch_mcp_keepalive,
+    # mcp-keepalive (holyai.me) is dead: host unreachable (connection timeout),
+    # 0 contributions for weeks. Disabled 2026-06-23; re-enable if it returns.
+    # "mcp-keepalive": fetch_mcp_keepalive,
 }
 
 
