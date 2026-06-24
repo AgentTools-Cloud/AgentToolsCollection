@@ -857,6 +857,7 @@ def review_submission(sub_id: int, note_prefix: str = "auto-review", notify_pend
             [("URL", url or "—"),
              ("Contact", p.get("contact") or "—"),
              ("Category", p.get("category") or "—"),
+             ("Description", p.get("description") or "—"),
              ("Source", p.get("_source") or "rest-submit"),
              ("Evidence", "; ".join(evidence) or "—"),
              ("Submission", f"#{sub_id}")])
