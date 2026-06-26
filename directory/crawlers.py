@@ -1098,11 +1098,78 @@ def fetch_pay_skills_prs() -> list:
     return out
 
 
+X402_FUCHSS_LEADERBOARD = "https://x402.fuchss.app/trust/leaderboard"
+
+
+def fetch_x402_fuchss() -> list:
+    """x402.fuchss.app free Top-25 trust leaderboard -> service entries.
+
+    x402.fuchss.app is an x402 endpoint trust-scoring service that probes the
+    whole x402 ecosystem 24/7. Its free /trust/leaderboard returns the most
+    reliable endpoints with a deterministic trust score (0-100, A-F grade) and
+    confidence. We host-aggregate them and carry the confidence forward. Most
+    already exist via x402scan/cdp-bazaar (cross-source dedup is by endpoint),
+    so this source mainly keeps the highest-trust endpoints fresh and catches
+    new entrants as the leaderboard shifts.
+    """
+    from urllib.parse import urlparse
+    out = []
+    seen = set()
+    try:
+        with httpx.Client(timeout=TIMEOUT, headers={"User-Agent": UA}) as c:
+            r = c.get(X402_FUCHSS_LEADERBOARD)
+            r.raise_for_status()
+            data = r.json()
+    except Exception as e:  # noqa: BLE001
+        log.warning("x402-fuchss leaderboard fetch failed: %r", e)
+        return out
+    top = data.get("top") or []
+    for item in top:
+        resource = (item.get("resource") or "").strip()
+        if not resource:
+            continue
+        try:
+            p = urlparse(resource)
+        except Exception:
+            continue
+        if p.scheme not in ("http", "https") or not p.hostname:
+            continue
+        origin = f"{p.scheme}://{p.netloc}"
+        host = p.hostname
+        if host in seen:
+            continue
+        seen.add(host)
+        grade = item.get("grade")
+        score = item.get("score")
+        conf = item.get("confidence")
+        out.append({
+            "slug": _host_slug(origin) + "-fuchss",
+            "name": host,
+            "url": origin,
+            "description": (
+                f"x402 endpoint - trust grade {grade} ({score}/100) "
+                f"per x402.fuchss.app leaderboard"
+            ),
+            "category": "general",
+            "chains": [],
+            "well_known_url": origin + "/.well-known/x402",
+            "confidence": conf if isinstance(conf, (int, float)) else None,
+            "resource_samples": [{"url": resource, "kind": "x402-resource"}],
+            "source": "x402-fuchss",
+            "source_id": host,
+            "tags": ["trust-leaderboard"],
+            "region": "global",
+        })
+    log.info("x402-fuchss: leaderboard %d endpoints -> %d hosts", len(top), len(out))
+    return out
+
+
 ALL_CRAWLERS = {
     "awesome-x402": fetch_awesome_x402,
     "cdp-bazaar": fetch_cdp_bazaar,
     "x402scan": fetch_x402scan,
     "pay-skills-pr": fetch_pay_skills_prs,
+    "x402-fuchss": fetch_x402_fuchss,
 }
 
 
