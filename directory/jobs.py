@@ -67,6 +67,44 @@ def _finish_run(run_id: int, added: int, updated: int, errors: list[str], status
     db.with_retry(op)
 
 
+QUARANTINE_DAYS = 30
+
+
+def _maintain_down_since(table: str) -> None:
+    """Track consecutive-down start time. Clear on recovery, set on new down.
+
+    Idempotent bulk maintenance run after each health pass. A row whose
+    down_since is older than QUARANTINE_DAYS is considered "quarantined" and is
+    skipped by the normal high-frequency health pass (probed once/day instead).
+    """
+    _now = int(time.time())
+
+    def op():
+        with db.writer() as c:
+            c.execute(
+                f"UPDATE {table} SET down_since=NULL "
+                f"WHERE health!='down' AND down_since IS NOT NULL"
+            )
+            c.execute(
+                f"UPDATE {table} SET down_since=? "
+                f"WHERE health='down' AND down_since IS NULL",
+                (_now,),
+            )
+    db.with_retry(op)
+
+
+def cmd_health_quarantined() -> int:
+    """Daily low-frequency probe of quarantined (down > QUARANTINE_DAYS) entries.
+
+    Anything that recovers has its down_since cleared by _maintain_down_since and
+    rejoins the normal high-frequency pool automatically.
+    """
+    cmd_health(quarantined_only=True)
+    cmd_health_a2a(quarantined_only=True)
+    cmd_health_mcp(quarantined_only=True)
+    return 0
+
+
 def _run_one(name):
     fn = crawlers.ALL_CRAWLERS[name]
     errors = []
@@ -345,13 +383,19 @@ def cmd_crawl_agenstry() -> int:
     return 0
 
 
-def cmd_health(only_unknown: bool = False) -> int:
+def cmd_health(only_unknown: bool = False, quarantined_only: bool = False) -> int:
     n_ok = n_down = n_degraded = 0
-    sql = "SELECT id, url, well_known_url FROM services"
-    if only_unknown:
-        # crawler inserts leave health NULL (bypasses the column DEFAULT), so
-        # treat NULL / '' / 'unknown' all as "never probed yet".
-        sql += " WHERE health IS NULL OR health='' OR health='unknown'"
+    _qc = int(time.time()) - QUARANTINE_DAYS * 86400
+    if quarantined_only:
+        sql = ("SELECT id, url, well_known_url FROM services "
+               f"WHERE down_since IS NOT NULL AND down_since <= {_qc}")
+    else:
+        sql = ("SELECT id, url, well_known_url FROM services "
+               f"WHERE (down_since IS NULL OR down_since > {_qc})")
+        if only_unknown:
+            # crawler inserts leave health NULL (bypasses the column DEFAULT), so
+            # treat NULL / '' / 'unknown' all as "never probed yet".
+            sql += " AND (health IS NULL OR health='' OR health='unknown')"
     with db.connect(read_only=True) as c:
         rows = list(c.execute(sql).fetchall())
     if not rows:
@@ -414,9 +458,10 @@ def cmd_health(only_unknown: bool = False) -> int:
             c.execute("DELETE FROM health_history WHERE checked_at < ?", (cutoff,))
     db.with_retry(_prune)
 
+    _maintain_down_since("services")
     log.info("health: ok=%d degraded=%d down=%d", n_ok, n_degraded, n_down)
     # The single agent-tools-health timer also refreshes A2A + MCP liveness.
-    if not only_unknown:
+    if not only_unknown and not quarantined_only:
         try:
             cmd_health_a2a()
         except Exception as e:
@@ -428,11 +473,17 @@ def cmd_health(only_unknown: bool = False) -> int:
     return 0
 
 
-def cmd_health_a2a(only_unknown: bool = False) -> int:
+def cmd_health_a2a(only_unknown: bool = False, quarantined_only: bool = False) -> int:
     """Liveness-probe indexed A2A agents (card / endpoint reachability)."""
-    sql = "SELECT id, card_url, endpoint_url FROM a2a_agents"
-    if only_unknown:
-        sql += " WHERE health IS NULL OR health='' OR health='unknown'"
+    _qc = int(time.time()) - QUARANTINE_DAYS * 86400
+    if quarantined_only:
+        sql = ("SELECT id, card_url, endpoint_url FROM a2a_agents "
+               f"WHERE down_since IS NOT NULL AND down_since <= {_qc}")
+    else:
+        sql = ("SELECT id, card_url, endpoint_url FROM a2a_agents "
+               f"WHERE (down_since IS NULL OR down_since > {_qc})")
+        if only_unknown:
+            sql += " AND (health IS NULL OR health='' OR health='unknown')"
     with db.connect(read_only=True) as c:
         rows = list(c.execute(sql).fetchall())
     if not rows:
@@ -471,17 +522,23 @@ def cmd_health_a2a(only_unknown: bool = False) -> int:
                 updates,
             )
     db.with_retry(op)
+    _maintain_down_since("a2a_agents")
     log.info("a2a health: ok=%d degraded=%d down=%d conformant=%d",
              n_ok, n_deg, n_down, n_conf)
     return 0
 
 
-def cmd_health_mcp(only_unknown: bool = False) -> int:
+def cmd_health_mcp(only_unknown: bool = False, quarantined_only: bool = False) -> int:
     """Liveness-probe indexed MCP servers via an `initialize` request."""
+    _qc = int(time.time()) - QUARANTINE_DAYS * 86400
     sql = ("SELECT id, endpoint_url, name, description, tools_text FROM mcp_servers "
            "WHERE endpoint_url IS NOT NULL AND endpoint_url != ''")
-    if only_unknown:
-        sql += " AND (health IS NULL OR health='' OR health='unknown')"
+    if quarantined_only:
+        sql += f" AND (down_since IS NOT NULL AND down_since <= {_qc})"
+    else:
+        sql += f" AND (down_since IS NULL OR down_since > {_qc})"
+        if only_unknown:
+            sql += " AND (health IS NULL OR health='' OR health='unknown')"
     with db.connect(read_only=True) as c:
         rows = list(c.execute(sql).fetchall())
     if not rows:
@@ -582,6 +639,7 @@ def cmd_health_mcp(only_unknown: bool = False) -> int:
             c.execute("DELETE FROM mcp_health_history WHERE checked_at < ?",
                       (now - 30 * 86400,))
     db.with_retry(prune)
+    _maintain_down_since("mcp_servers")
     log.info("mcp health: ok=%d degraded=%d down=%d conformant=%d safety_flagged=%d",
              n_ok, n_deg, n_down, n_conf, n_flagged)
     return 0
@@ -978,6 +1036,7 @@ def main(argv=None) -> int:
     sub.add_parser("crawl-a2a")
     sub.add_parser("crawl-agenstry")
     sub.add_parser("health")
+    sub.add_parser("health-quarantined")
     sub.add_parser("health-a2a")
     sub.add_parser("health-mcp")
     sub.add_parser("stats")
@@ -1011,6 +1070,8 @@ def main(argv=None) -> int:
         return cmd_crawl_agenstry()
     if args.cmd == "health":
         return cmd_health()
+    if args.cmd == "health-quarantined":
+        return cmd_health_quarantined()
     if args.cmd == "health-a2a":
         return cmd_health_a2a()
     if args.cmd == "health-mcp":

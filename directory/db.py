@@ -384,6 +384,9 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
             "ALTER TABLE mcp_servers ADD COLUMN safety_score INTEGER",
             "ALTER TABLE mcp_servers ADD COLUMN safety_reasons TEXT",
             "ALTER TABLE a2a_agents ADD COLUMN conformance TEXT",
+            "ALTER TABLE services ADD COLUMN down_since INTEGER",
+            "ALTER TABLE mcp_servers ADD COLUMN down_since INTEGER",
+            "ALTER TABLE a2a_agents ADD COLUMN down_since INTEGER",
         ):
             try:
                 c.execute(ddl)
