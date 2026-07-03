@@ -580,42 +580,77 @@ for _g in _SYNONYM_GROUPS:
         _SYNONYM_MAP[_t.lower()] = _g
 
 
-def _expand_fts_query(q: str) -> str | None:
-    """Turn a free-text query into an FTS5 MATCH expression with synonyms.
+_FTS_STOPWORDS = {
+    "a", "an", "and", "api", "for", "in", "key", "of", "pack",
+    "quota", "the", "to", "with", "mini", "compatible", "service",
+}
 
-    Strategy: lowercase, split on whitespace, drop FTS-special chars from
-    each token; per token look up the synonym group and emit `(a OR b OR c)`
-    (the group always contains the original token). Groups are joined with
-    space which is FTS5 AND. Single bare tokens get a trailing `*` for
-    prefix match. Returns None if nothing usable remains.
-    """
+
+def _query_tokens(q: str) -> list[str]:
     if not q:
-        return None
-    # Remove FTS operator chars and quoting; keep CJK + word chars + space.
+        return []
     cleaned = []
     for ch in q.lower():
-        if ch.isalnum() or ch == " " or "\u4e00" <= ch <= "\u9fff":
+        if ch.isalnum() or ch == " " or "一" <= ch <= "鿿":
             cleaned.append(ch)
         else:
             cleaned.append(" ")
-    tokens = [t for t in "".join(cleaned).split() if t]
+    return [t for t in "".join(cleaned).split() if t]
+
+
+def _expand_fts_query(q: str) -> str | None:
+    """Turn a free-text query into a strict FTS5 MATCH expression.
+
+    Tokens are AND-ed for precision; callers can fall back to
+    _expand_fts_query_relaxed() when a long natural-language query returns 0.
+    """
+    tokens = _query_tokens(q)
     if not tokens:
         return None
     groups: list[str] = []
     for t in tokens:
         syns = _SYNONYM_MAP.get(t)
         if syns:
-            # quote each synonym to keep CJK / multiword safe inside FTS5
             quoted = [f'"{s}"' for s in syns]
             groups.append("(" + " OR ".join(quoted) + ")")
         elif len(tokens) == 1:
-            # single bare token → prefix match
             groups.append(f"{t}*")
         else:
             groups.append(f'"{t}"')
-    # FTS5 only allows implicit AND between bare tokens; once any group is
-    # parenthesized or quoted, the parser requires explicit AND.
     return " AND ".join(groups)
+
+
+def _expand_fts_query_relaxed(q: str) -> str | None:
+    """Recall-oriented FTS query for long agent intent strings.
+
+    Keeps distinctive tokens, expands known synonyms, and ORs terms so one
+    wrong model/version word does not zero out otherwise relevant services.
+    """
+    tokens = _query_tokens(q)
+    terms: list[str] = []
+    seen: set[str] = set()
+    for t in tokens:
+        if len(t) < 3 and not any(ch.isdigit() for ch in t):
+            continue
+        if t in _FTS_STOPWORDS:
+            continue
+        syns = _SYNONYM_MAP.get(t) or [t]
+        for s in syns:
+            sl = str(s).lower().strip()
+            if not sl or sl in seen:
+                continue
+            seen.add(sl)
+            if " " in sl:
+                terms.append(f'"{sl}"')
+            elif len(sl) >= 4:
+                terms.append(f"{sl}*")
+            else:
+                terms.append(f'"{sl}"')
+        if len(terms) >= 12:
+            break
+    if len(terms) < 2:
+        return None
+    return " OR ".join(terms)
 
 
 def _match_reason(row: dict, q: str | None) -> list[str]:
@@ -715,6 +750,43 @@ def search(conn, q=None, category=None, chain=None, region=None, health=None,
     sql_parts.append("LIMIT ? OFFSET ?")
     params.extend([limit, offset])
     rows = conn.execute(" ".join(sql_parts), params).fetchall()
+    if not rows and q and fts_query is not None:
+        relaxed = _expand_fts_query_relaxed(q)
+        if relaxed:
+            select_cols = [
+                "s.*",
+                "snippet(services_fts, -1, '[[', ']]', '…', 12) AS match_snippet",
+            ]
+            sql_parts = ["SELECT " + ", ".join(select_cols) + " FROM services s"]
+            sql_parts.append("JOIN services_fts f ON f.rowid = s.id")
+            where = ["services_fts MATCH ?"]
+            params = [relaxed]
+            if category:
+                where.append("s.category=?"); params.append(category)
+            if chain:
+                where.append("s.chains LIKE ?"); params.append(f'%"{chain}"%')
+            if region:
+                where.append("s.region=?"); params.append(region)
+            if health:
+                where.append("s.health=?"); params.append(health)
+            if min_confidence is not None:
+                where.append("s.confidence >= ?"); params.append(float(min_confidence))
+            if has_mcp:
+                where.append("s.mcp_url IS NOT NULL AND s.mcp_url != ''")
+            sql_parts.append("WHERE " + " AND ".join(where))
+            sql_parts.append(
+                "ORDER BY bm25(services_fts), "
+                "CASE s.health WHEN 'ok' THEN 0 WHEN 'degraded' THEN 1 "
+                "WHEN 'unknown' THEN 2 WHEN 'down' THEN 3 ELSE 4 END ASC, "
+                "(s.health='ok' AND COALESCE(s.tx_30d,0) > 0) DESC, "
+                "(s.confidence IS NOT NULL) DESC, "
+                "s.confidence DESC, "
+                "COALESCE(s.tx_30d, 0) DESC, "
+                "s.updated_at DESC"
+            )
+            sql_parts.append("LIMIT ? OFFSET ?")
+            params.extend([limit, offset])
+            rows = conn.execute(" ".join(sql_parts), params).fetchall()
     out: list[dict] = []
     for r in rows:
         d = row_to_dict(r)
