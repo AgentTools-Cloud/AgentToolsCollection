@@ -21,6 +21,7 @@ from . import a2a as a2a_mod
 from . import crawlers, db, mailer
 from . import agenstry as agenstry_mod
 from . import paygent as paygent_mod
+from . import flows as flows_mod
 from . import mcp_safety
 
 # agenstry.com reverse-crawl: register its MCP page crawler as a source so
@@ -30,6 +31,10 @@ crawlers.MCP_CRAWLERS["agenstry"] = agenstry_mod.fetch_agenstry_mcp
 # paygent.net reverse-crawl: register its x402 payment index (x402/mpp/l402)
 # as an x402 source; crawl runs via ALL_CRAWLERS -> cmd_crawl -> upsert_service.
 crawlers.ALL_CRAWLERS["paygent-discover"] = paygent_mod.fetch_paygent_discover
+
+# flows.litprotocol.com reverse-crawl: robots-compliant discovery only
+# (sitemap + /.well-known/x402 + /f/ OpenGraph); never touches disallowed /api/.
+crawlers.ALL_CRAWLERS["flows-litprotocol"] = flows_mod.fetch_flows_litprotocol
 
 log = logging.getLogger("directory.jobs")
 SEED_FILE = Path(__file__).resolve().parent / "seed.json"
