@@ -1169,7 +1169,6 @@ ALL_CRAWLERS = {
     "cdp-bazaar": fetch_cdp_bazaar,
     "x402scan": fetch_x402scan,
     "pay-skills-pr": fetch_pay_skills_prs,
-    "x402-fuchss": fetch_x402_fuchss,
 }
 
 
