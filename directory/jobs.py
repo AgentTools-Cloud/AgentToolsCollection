@@ -21,8 +21,6 @@ from . import a2a as a2a_mod
 from . import crawlers, db, mailer
 from . import agenstry as agenstry_mod
 from . import paygent as paygent_mod
-from . import flows as flows_mod
-from . import reverse_sources as reverse_mod
 from . import mcp_safety
 
 # agenstry.com reverse-crawl: register its MCP page crawler as a source so
@@ -32,16 +30,6 @@ crawlers.MCP_CRAWLERS["agenstry"] = agenstry_mod.fetch_agenstry_mcp
 # paygent.net reverse-crawl: register its x402 payment index (x402/mpp/l402)
 # as an x402 source; crawl runs via ALL_CRAWLERS -> cmd_crawl -> upsert_service.
 crawlers.ALL_CRAWLERS["paygent-discover"] = paygent_mod.fetch_paygent_discover
-
-# flows.litprotocol.com reverse-crawl: robots-compliant discovery only
-# (sitemap + /.well-known/x402 + /f/ OpenGraph); never touches disallowed /api/.
-crawlers.ALL_CRAWLERS["flows-litprotocol"] = flows_mod.fetch_flows_litprotocol
-
-# Reverse-discovery sources seen crawling agent-tools.cloud. x402 rows are
-# service metadata; MCP/A2A rows are public metadata only, then health jobs
-# perform the normal initialize/tools-list or Agent Card conformance checks.
-crawlers.ALL_CRAWLERS["reverse-x402"] = reverse_mod.fetch_reverse_x402
-crawlers.MCP_CRAWLERS["reverse-discovery"] = reverse_mod.fetch_reverse_mcp
 
 log = logging.getLogger("directory.jobs")
 SEED_FILE = Path(__file__).resolve().parent / "seed.json"
@@ -323,14 +311,6 @@ def cmd_crawl_a2a() -> int:
     except Exception as e:
         errors.append(f"agenstry: {e!r}"); log.warning("a2a agenstry crawl failed: %r", e)
     try:
-        r = reverse_mod.crawl_reverse_a2a()
-        added += r["inserted"]; updated += r["updated"]
-        log.info("a2a reverse-discovery: candidates=%d resolved=%d inserted=%d updated=%d skipped=%d",
-                 r["candidates"], r["resolved"], r["inserted"], r["updated"], r["skipped"])
-    except Exception as e:
-        errors.append(f"reverse-discovery: {e!r}")
-        log.warning("a2a reverse-discovery crawl failed: %r", e)
-    try:
         rows = crawlers.fetch_chiark_a2a()
         if rows:
             def _write_chiark_a2a():
@@ -374,25 +354,6 @@ def cmd_crawl_a2a() -> int:
     _finish_run(run_id, added, updated, errors,
                 status="ok" if not errors else "partial")
     if added:
-        cmd_health_a2a(only_unknown=True)
-    return 0
-
-
-def cmd_crawl_a2a_reverse() -> int:
-    """Refresh the small set of reverse-discovered A2A Agent Cards."""
-    run_id = _start_run("a2a:reverse-discovery")
-    errors: list[str] = []
-    try:
-        r = reverse_mod.crawl_reverse_a2a()
-    except Exception as e:
-        errors.append(f"reverse-discovery: {e!r}")
-        _finish_run(run_id, 0, 0, errors, status="error")
-        log.warning("a2a reverse-discovery crawl failed: %r", e)
-        return 0
-    _finish_run(run_id, r["inserted"], r["updated"], errors, status="ok")
-    log.info("a2a reverse-discovery: candidates=%d resolved=%d inserted=%d updated=%d skipped=%d",
-             r["candidates"], r["resolved"], r["inserted"], r["updated"], r["skipped"])
-    if r["inserted"]:
         cmd_health_a2a(only_unknown=True)
     return 0
 
@@ -1073,7 +1034,6 @@ def main(argv=None) -> int:
     p_crawl_mcp = sub.add_parser("crawl-mcp")
     p_crawl_mcp.add_argument("source", nargs="?", default=None)
     sub.add_parser("crawl-a2a")
-    sub.add_parser("crawl-a2a-reverse")
     sub.add_parser("crawl-agenstry")
     sub.add_parser("health")
     sub.add_parser("health-quarantined")
@@ -1106,8 +1066,6 @@ def main(argv=None) -> int:
         return cmd_crawl_mcp(args.source)
     if args.cmd == "crawl-a2a":
         return cmd_crawl_a2a()
-    if args.cmd == "crawl-a2a-reverse":
-        return cmd_crawl_a2a_reverse()
     if args.cmd == "crawl-agenstry":
         return cmd_crawl_agenstry()
     if args.cmd == "health":
