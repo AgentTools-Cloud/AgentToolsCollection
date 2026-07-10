@@ -29,6 +29,20 @@ def _allowed_model() -> str:
     return allowed[0] if allowed else "Qwen/Qwen3.6-35B-A3B"
 
 
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, "") or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, "") or default)
+    except (TypeError, ValueError):
+        return default
+
+
 def _fallback(query: str, candidates: list[dict[str, Any]], limit: int, reason: str) -> dict[str, Any]:
     recs = []
     for card in candidates[:limit]:
@@ -100,15 +114,16 @@ async def _call_llm(prompt: str) -> dict[str, Any] | None:
         "top_p": 0.8,
         "presence_penalty": 1.5,
         "top_k": 20,
-        "max_tokens": 2048,
+        "max_tokens": max(128, min(_env_int("AGENT_TOOLS_ASK_MAX_TOKENS", 768), 2048)),
         "response_format": {"type": "json_object"},
         "chat_template_kwargs": {"enable_thinking": False},
     }
     try:
+        read_timeout = max(5.0, min(_env_float("AGENT_TOOLS_ASK_READ_TIMEOUT", 45.0), 90.0))
         async with httpx.AsyncClient(
             base_url=base_url,
             headers={"Authorization": f"Bearer {api_key}"},
-            timeout=httpx.Timeout(connect=10.0, read=240.0, write=20.0, pool=20.0),
+            timeout=httpx.Timeout(connect=10.0, read=read_timeout, write=20.0, pool=20.0),
         ) as client:
             response = await client.post("/v1/chat/completions", json=body)
             response.raise_for_status()
