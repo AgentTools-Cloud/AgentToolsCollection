@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN" class="h-full">
+<html lang="en" class="h-full">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -7,7 +7,29 @@
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232563eb'/%3E%3Ctext x='16' y='23' font-family='Inter,Arial,sans-serif' font-size='20' font-weight='700' fill='white' text-anchor='middle'%3EA%3C/text%3E%3C/svg%3E">
   <title>{% block title %}Agent Tools — x402 · MCP · A2A discovery directory{% endblock %}</title>
   <meta name="description" content="{% block desc %}Agent-readable directory and discovery layer for x402 services, MCP servers, and A2A agents. Search, ask for LLM-ranked recommendations, inspect cards, and submit new entries.{% endblock %}">
+  <meta name="robots" content="index,follow">
   <link rel="canonical" href="https://agent-tools.cloud{{ request.url.path }}">
+  <meta property="og:site_name" content="agent-tools.cloud">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="{% block og_title %}Agent Tools — x402 · MCP · A2A discovery directory{% endblock %}">
+  <meta property="og:description" content="{% block og_desc %}Search a live directory of x402 APIs, MCP servers, and A2A agents for agentic workflows.{% endblock %}">
+  <meta property="og:url" content="https://agent-tools.cloud{{ request.url.path }}">
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="{% block twitter_title %}Agent Tools — x402 · MCP · A2A discovery directory{% endblock %}">
+  <meta name="twitter:description" content="{% block twitter_desc %}Search a live directory of x402 APIs, MCP servers, and A2A agents for agentic workflows.{% endblock %}">
+  <script type="application/ld+json">{{ {
+    "@context": "https://schema.org",
+    "@type": "WebSite",
+    "name": "agent-tools.cloud",
+    "alternateName": "Agent Tools",
+    "url": "https://agent-tools.cloud/",
+    "description": "Open discovery directory for x402 services, MCP servers, and A2A agents.",
+    "potentialAction": {
+      "@type": "SearchAction",
+      "target": "https://agent-tools.cloud/api/v1/resources/search?q={search_term_string}",
+      "query-input": "required name=search_term_string"
+    }
+  } | tojson }}</script>
   <link rel="alternate" type="application/json" title="agent-tools discovery" href="/.well-known/agent-tools.json">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
