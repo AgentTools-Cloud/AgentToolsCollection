@@ -855,9 +855,14 @@ async def well_known():
 
 @router.get("/sitemap.xml", include_in_schema=False)
 def sitemap_xml() -> Response:
-    """Dynamic sitemap listing every MCP server / A2A agent / x402 service
-    detail page plus the main landing pages, so search engines and AI crawlers
-    can discover the full directory."""
+    """Dynamic sitemap for the canonical public pages.
+
+    Keep this intentionally selective. The directory contains thousands of
+    machine-generated detail pages, many with similar metadata and some churn as
+    upstream registries change. A smaller sitemap gives search engines the main
+    product pages plus a sample of healthy, high-signal detail pages instead of
+    presenting the whole database as equally index-worthy.
+    """
     base = "https://agent-tools.cloud"
     static_pages = [
         ("/", "1.0", "daily"),
@@ -896,13 +901,22 @@ def sitemap_xml() -> Response:
 
     with _conn() as c:
         for slug, ts in c.execute(
-                "SELECT slug, updated_at FROM mcp_servers ORDER BY slug"):
+                  "SELECT slug, updated_at FROM mcp_servers "
+                  "WHERE health='ok' "
+                  "ORDER BY COALESCE(quality_score, 0) DESC, updated_at DESC "
+                  "LIMIT 300"):
             parts.append(_url(f"{base}/mcp/servers/{slug}", _iso(ts), "0.7"))
         for slug, ts in c.execute(
-                "SELECT slug, updated_at FROM a2a_agents ORDER BY slug"):
+                  "SELECT slug, updated_at FROM a2a_agents "
+                  "WHERE health='ok' "
+                  "ORDER BY COALESCE(confidence, 0) DESC, updated_at DESC "
+                  "LIMIT 200"):
             parts.append(_url(f"{base}/a2a/agents/{slug}", _iso(ts), "0.7"))
         for slug, ts in c.execute(
-                "SELECT slug, updated_at FROM services ORDER BY slug"):
+                  "SELECT slug, updated_at FROM services "
+                  "WHERE health='ok' "
+                  "ORDER BY COALESCE(tx_30d, 0) DESC, COALESCE(confidence, 0) DESC, updated_at DESC "
+                  "LIMIT 200"):
             parts.append(_url(f"{base}/services/{slug}", _iso(ts), "0.7"))
 
     parts.append("</urlset>")
