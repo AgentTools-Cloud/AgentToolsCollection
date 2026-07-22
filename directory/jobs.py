@@ -117,6 +117,20 @@ def _run_one(name):
         _finish_run(run_id, 0, 0, errors, status="error")
         return 0, 0, errors
 
+    if name == "paygent-discover":
+        with db.connect(read_only=True) as c:
+            claimed_origins = {
+                db._canonical_origin(row[0])
+                for row in c.execute(
+                    "SELECT url FROM services WHERE source != ?",
+                    ("paygent-discover",),
+                ).fetchall()
+            }
+        items = [
+            item for item in items
+            if db._canonical_origin(item.get("url") or "") not in claimed_origins
+        ]
+
     # Write in short batches instead of holding a writer transaction while a
     # full source is processed. This keeps the website responsive and avoids
     # timer jobs fighting each other for a long sqlite write lock.

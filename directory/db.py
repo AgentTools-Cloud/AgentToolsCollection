@@ -492,6 +492,12 @@ def upsert_service(conn: sqlite3.Connection, row: dict) -> tuple:
         existing = cur.execute(
             "SELECT id, created_at, health, health_checked FROM services WHERE slug=?", (row["slug"],)
         ).fetchone()
+    if existing is None and row.get("source") == "paygent-discover" and row.get("url"):
+        existing = cur.execute(
+            "SELECT id, created_at, health, health_checked FROM services "
+            "WHERE source=? AND rtrim(lower(url), '/')=? ORDER BY id LIMIT 1",
+            ("paygent-discover", row["url"].rstrip("/").lower()),
+        ).fetchone()
 
     cols = [
         "slug", "name", "name_zh", "url", "description", "description_zh",
