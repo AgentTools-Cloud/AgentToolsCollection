@@ -23,6 +23,7 @@ directory.reverify_x402 (never inferred from text).
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 from urllib.parse import urlparse
 
@@ -36,6 +37,7 @@ _API = "https://discover-api.paygent.net/v1/services"
 _PAGE = 100
 _MAX_PAGES = 60  # safety cap (60*100 = 6000)
 _PAYMENT_KINDS = {"x402", "mpp", "l402"}
+_MAX_RESOURCE_SAMPLES = 50
 
 
 def _map(item: dict, seen: set) -> dict | None:
@@ -85,11 +87,63 @@ def _map(item: dict, seen: set) -> dict | None:
         "source_id": sid,
         "tags": tags,
         "region": "global",
+        "_paygent_score": composite if isinstance(composite, (int, float)) else -1,
     }
 
 
+def _aggregate_origins(rows: list[dict]) -> list[dict]:
+    """Collapse Paygent's resource-level rows into origin-level services."""
+    grouped: dict[str, dict] = {}
+    for row in rows:
+        origin = (row.get("url") or "").rstrip("/")
+        if not origin:
+            continue
+        resource_samples = row.get("resource_samples") or []
+        current = grouped.get(origin)
+        if current is None:
+            current = dict(row)
+            current["url"] = origin
+            current["resource_samples"] = []
+            current["resource_count"] = 0
+            current["_resource_keys"] = set()
+            current["_tag_values"] = []
+            current["_chain_values"] = []
+            grouped[origin] = current
+        elif row.get("_paygent_score", -1) > current.get("_paygent_score", -1):
+            for field in ("name", "description", "confidence", "currency"):
+                current[field] = row.get(field)
+            current["_paygent_score"] = row.get("_paygent_score", -1)
+
+        for sample in resource_samples:
+            key = (sample.get("url"), sample.get("kind"))
+            if key in current["_resource_keys"]:
+                continue
+            current["_resource_keys"].add(key)
+            current["resource_count"] += 1
+            if len(current["resource_samples"]) < _MAX_RESOURCE_SAMPLES:
+                current["resource_samples"].append(sample)
+        for tag in row.get("tags") or []:
+            if tag not in current["_tag_values"]:
+                current["_tag_values"].append(tag)
+        for chain in row.get("chains") or []:
+            if chain not in current["_chain_values"]:
+                current["_chain_values"].append(chain)
+
+    out = []
+    for origin, row in grouped.items():
+        digest = hashlib.sha256(origin.lower().encode()).hexdigest()[:8]
+        row["slug"] = f"{_host_slug(origin)}-pg-{digest}"
+        row["source_id"] = f"origin:{origin.lower()}"
+        row["tags"] = row.pop("_tag_values")
+        row["chains"] = row.pop("_chain_values")
+        row.pop("_resource_keys", None)
+        row.pop("_paygent_score", None)
+        out.append(row)
+    return sorted(out, key=lambda row: row["url"])
+
+
 def fetch_paygent_discover() -> list:
-    out: list = []
+    resources: list = []
     seen: set = set()
     total_seen = 0
     try:
@@ -104,11 +158,15 @@ def fetch_paygent_discover() -> list:
                 for item in results:
                     row = _map(item, seen)
                     if row:
-                        out.append(row)
+                        resources.append(row)
                 if len(results) < _PAGE:
                     break
     except Exception as e:  # noqa: BLE001
         log.warning("paygent-discover fetch failed: %r", e)
-        return out
-    log.info("paygent-discover: scanned %d catalogue entries -> %d payment services", total_seen, len(out))
+        return _aggregate_origins(resources)
+    out = _aggregate_origins(resources)
+    log.info(
+        "paygent-discover: scanned %d catalogue entries -> %d payment resources -> %d origin services",
+        total_seen, len(resources), len(out),
+    )
     return out
