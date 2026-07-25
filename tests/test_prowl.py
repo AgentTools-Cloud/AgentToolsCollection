@@ -34,6 +34,41 @@ class _Client:
 class ProwlCrawlerTests(unittest.TestCase):
     def test_public_list_sources_are_scheduled(self):
         self.assertIs(crawlers.MCP_CRAWLERS["prowl"], prowl.fetch_prowl_mcp)
+        self.assertIs(
+            crawlers.ALL_CRAWLERS["flows-litprotocol"],
+            jobs.flows_mod.fetch_flows_litprotocol,
+        )
+        self.assertIs(crawlers.ALL_CRAWLERS["x402-fuchss"], crawlers.fetch_x402_fuchss)
+
+    def test_resource_list_dedup_preserves_new_same_host_resource(self):
+        items = [
+            {
+                "source_id": "known",
+                "url": "https://example.com",
+                "resource_samples": [{"url": "https://example.com/a"}],
+            },
+            {
+                "source_id": "duplicate",
+                "url": "https://example.com",
+                "resource_samples": [{"url": "https://example.com/a/"}],
+            },
+            {
+                "source_id": "new-resource",
+                "url": "https://example.com",
+                "resource_samples": [{"url": "https://example.com/b"}],
+            },
+        ]
+        with patch.object(jobs.db, "connect") as connect:
+            connect.return_value.__enter__.return_value.execute.return_value.fetchall.return_value = [
+                {
+                    "source": "test-source",
+                    "source_id": "known",
+                    "url": "https://example.com",
+                    "resource_samples": '[{"url":"https://example.com/a"}]',
+                }
+            ]
+            kept = jobs._filter_claimed_resource_items(items, "test-source")
+        self.assertEqual([item["source_id"] for item in kept], ["known", "new-resource"])
 
     def test_manifest_endpoints_are_concrete_and_deduplicated(self):
         endpoints = prowl._manifest_endpoints({
