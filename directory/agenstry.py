@@ -41,6 +41,8 @@ TIMEOUT = httpx.Timeout(connect=10.0, read=20.0, write=10.0, pool=10.0)
 
 # Anonymous clients are limited to 50 rows; larger pages require an API key.
 _API_PAGE = 50
+_API_RETRY_DELAYS = (5.0, 20.0, 60.0)
+_API_TRANSIENT_STATUSES = {408, 425, 429, 500, 502, 503, 504}
 
 
 def _slugify(text: str) -> str:
@@ -163,50 +165,62 @@ def _api_row_to_mcp(rec: dict) -> dict | None:
 
 
 def fetch_agenstry_mcp(max_pages: int = 6000, workers: int = 12) -> list:
-    """MCP crawler: pull every *alive* agenstry MCP server via its JSON API.
+    """Pull Agenstry's anonymous window of live MCP servers.
 
     Matches the MCP_CRAWLERS contract (returns a list of row dicts; jobs
     upserts them via db.upsert_mcp_server, which dedups by endpoint across
     sources so overlap with existing servers just refreshes them).
 
-    `max_pages` caps the number of records (not HTTP pages) for trials.
+    Agenstry now limits anonymous requests to 50 rows and ignores offset/page
+    parameters. Fetch the public window once instead of repeatedly requesting
+    the same page until its rate limiter returns 429. Existing rows remain in
+    our catalog and continue through independent health checks.
     """
     out: list[dict] = []
     seen_eps: set[str] = set()
-    offset = 0
     with httpx.Client(timeout=TIMEOUT, follow_redirects=True,
                       headers={"User-Agent": UA, "Accept": "application/json"}) as c:
-        while offset < max_pages:
-            for attempt in range(2):
-                try:
-                    r = c.get(f"{API_BASE}/mcp-servers",
-                              params={"alive": "true", "limit": _API_PAGE, "offset": offset})
-                    r.raise_for_status()
-                    data = r.json()
-                    break
-                except Exception as e:
-                    if attempt == 0:
-                        log.warning("agenstry mcp api offset=%d failed, retrying: %r",
-                                    offset, e)
-                        time.sleep(1.0)
-                        continue
-                    raise RuntimeError(
-                        f"agenstry mcp api offset={offset} failed after retry: {e!r}"
-                    ) from e
-            results = data.get("results") or []
-            if not results:
-                break
-            for rec in results:
-                row = _api_row_to_mcp(rec)
-                if not row:
+        last_error = None
+        for attempt in range(len(_API_RETRY_DELAYS) + 1):
+            try:
+                r = c.get(f"{API_BASE}/mcp-servers",
+                          params={"alive": "true", "limit": _API_PAGE})
+                if r.status_code in _API_TRANSIENT_STATUSES:
+                    last_error = RuntimeError(f"HTTP {r.status_code}")
+                    if attempt < len(_API_RETRY_DELAYS):
+                        delay = _API_RETRY_DELAYS[attempt]
+                        log.warning(
+                            "agenstry mcp api returned %d, retrying in %.0fs",
+                            r.status_code, delay,
+                        )
+                        time.sleep(delay)
                     continue
-                ep = row["endpoint_url"].lower()
-                if ep in seen_eps:
-                    continue
-                seen_eps.add(ep)
-                out.append(row)
-            if len(results) < _API_PAGE:
+                r.raise_for_status()
+                data = r.json()
                 break
-            offset += _API_PAGE
-    log.info("agenstry mcp: pulled %d alive servers via api", len(out))
+            except (httpx.TransportError, ValueError) as e:
+                last_error = e
+                if attempt < len(_API_RETRY_DELAYS):
+                    delay = _API_RETRY_DELAYS[attempt]
+                    log.warning("agenstry mcp api failed, retrying in %.0fs: %r",
+                                delay, e)
+                    time.sleep(delay)
+                    continue
+            except Exception as e:
+                raise RuntimeError(f"agenstry mcp api failed: {e!r}") from e
+        else:
+            raise RuntimeError(
+                f"agenstry mcp api failed after retries: {last_error!r}"
+            ) from last_error
+    results = data.get("results") or []
+    for rec in results:
+        row = _api_row_to_mcp(rec)
+        if not row:
+            continue
+        ep = row["endpoint_url"].lower()
+        if ep in seen_eps:
+            continue
+        seen_eps.add(ep)
+        out.append(row)
+    log.info("agenstry mcp: refreshed %d servers from anonymous 50-row window", len(out))
     return out
