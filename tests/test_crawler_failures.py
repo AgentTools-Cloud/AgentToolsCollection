@@ -41,7 +41,7 @@ class _Client:
 class CrawlerFailureTests(unittest.TestCase):
     def test_agenstry_retries_once(self):
         client = _Client([
-            _Response(401),
+            _Response(429),
             _Response(200, {"results": []}),
         ])
         with (
@@ -51,15 +51,32 @@ class CrawlerFailureTests(unittest.TestCase):
             self.assertEqual(agenstry.fetch_agenstry_mcp(), [])
         self.assertEqual(client.calls, 2)
         self.assertEqual(client.requests[0][1]["params"]["limit"], 50)
+        self.assertNotIn("offset", client.requests[0][1]["params"])
 
     def test_agenstry_failure_surfaces_after_retry(self):
-        client = _Client([_Response(401), _Response(401)])
+        client = _Client([_Response(429)] * 4)
         with (
             patch.object(agenstry.httpx, "Client", return_value=client),
             patch.object(agenstry.time, "sleep"),
         ):
-            with self.assertRaisesRegex(RuntimeError, "failed after retry"):
+            with self.assertRaisesRegex(RuntimeError, "failed after retries"):
                 agenstry.fetch_agenstry_mcp()
+
+    def test_agenstry_non_transient_failure_is_immediate(self):
+        client = _Client([_Response(401)])
+        with (
+            patch.object(agenstry.httpx, "Client", return_value=client),
+            patch.object(agenstry.time, "sleep"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "HTTP 401"):
+                agenstry.fetch_agenstry_mcp()
+        self.assertEqual(client.calls, 1)
+
+    def test_agenstry_full_window_is_not_paginated(self):
+        client = _Client([_Response(200, {"results": [{}] * 50})])
+        with patch.object(agenstry.httpx, "Client", return_value=client):
+            self.assertEqual(agenstry.fetch_agenstry_mcp(), [])
+        self.assertEqual(client.calls, 1)
 
     def test_x402scan_failure_surfaces(self):
         client = _Client([OSError("upstream unavailable")])
