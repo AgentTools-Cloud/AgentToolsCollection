@@ -117,7 +117,6 @@ def fetch_flows_litprotocol() -> list:
                 if len(out) >= _MAX_FLOWS:
                     break
     except Exception as e:  # noqa: BLE001
-        log.warning("flows-litprotocol fetch failed: %r", e)
-        return out
+        raise RuntimeError(f"flows-litprotocol fetch failed: {e!r}") from e
     log.info("flows-litprotocol: %d flows ingested (skipped e2e-echo tests)", len(out))
     return out

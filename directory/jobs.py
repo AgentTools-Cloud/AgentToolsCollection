@@ -20,6 +20,7 @@ from pathlib import Path
 from . import a2a as a2a_mod
 from . import crawlers, db, mailer
 from . import agenstry as agenstry_mod
+from . import flows as flows_mod
 from . import paygent as paygent_mod
 from . import prowl as prowl_mod
 from . import mcp_safety
@@ -32,6 +33,8 @@ crawlers.MCP_CRAWLERS["prowl"] = prowl_mod.fetch_prowl_mcp
 # paygent.net reverse-crawl: register its x402 payment index (x402/mpp/l402)
 # as an x402 source; crawl runs via ALL_CRAWLERS -> cmd_crawl -> upsert_service.
 crawlers.ALL_CRAWLERS["paygent-discover"] = paygent_mod.fetch_paygent_discover
+crawlers.ALL_CRAWLERS["flows-litprotocol"] = flows_mod.fetch_flows_litprotocol
+crawlers.ALL_CRAWLERS["x402-fuchss"] = crawlers.fetch_x402_fuchss
 
 log = logging.getLogger("directory.jobs")
 SEED_FILE = Path(__file__).resolve().parent / "seed.json"
@@ -70,6 +73,64 @@ def _finish_run(run_id: int, added: int, updated: int, errors: list[str], status
 
 
 QUARANTINE_DAYS = 30
+_RESOURCE_LIST_SOURCES = {"flows-litprotocol", "x402-fuchss"}
+
+
+def _resource_key(value) -> str:
+    return str(value or "").strip().lower().rstrip("/")
+
+
+def _item_resource_keys(item: dict) -> set[str]:
+    return {
+        key
+        for sample in (item.get("resource_samples") or [])
+        if isinstance(sample, dict)
+        if (key := _resource_key(sample.get("url")))
+    }
+
+
+def _filter_claimed_resource_items(items: list[dict], source: str) -> list[dict]:
+    """Skip cross-source duplicates while preserving distinct same-host APIs."""
+    known_source_ids: set[str] = set()
+    claimed_resources: set[str] = set()
+    with db.connect(read_only=True) as conn:
+        for row in conn.execute(
+            "SELECT source, source_id, url, resource_samples FROM services"
+        ).fetchall():
+            if row["source"] == source and row["source_id"]:
+                known_source_ids.add(str(row["source_id"]))
+            url_key = _resource_key(row["url"])
+            if url_key:
+                claimed_resources.add(url_key)
+            try:
+                samples = json.loads(row["resource_samples"] or "[]")
+            except (TypeError, json.JSONDecodeError):
+                samples = []
+            for sample in samples:
+                if not isinstance(sample, dict):
+                    continue
+                sample_key = _resource_key(sample.get("url"))
+                if sample_key:
+                    claimed_resources.add(sample_key)
+
+    kept: list[dict] = []
+    skipped = 0
+    for item in items:
+        source_id = str(item.get("source_id") or "")
+        if source_id and source_id in known_source_ids:
+            kept.append(item)
+            continue
+        resources = _item_resource_keys(item)
+        if resources:
+            if resources.issubset(claimed_resources):
+                skipped += 1
+                continue
+        elif _resource_key(item.get("url")) in claimed_resources:
+            skipped += 1
+            continue
+        kept.append(item)
+    log.info("%s resource dedup: kept=%d skipped=%d", source, len(kept), skipped)
+    return kept
 
 
 def _maintain_down_since(table: str) -> None:
@@ -118,6 +179,9 @@ def _run_one(name):
         errors.append(f"fetch failed: {e!r}")
         _finish_run(run_id, 0, 0, errors, status="error")
         return 0, 0, errors
+
+    if name in _RESOURCE_LIST_SOURCES:
+        items = _filter_claimed_resource_items(items, name)
 
     if name == "paygent-discover":
         with db.connect(read_only=True) as c:

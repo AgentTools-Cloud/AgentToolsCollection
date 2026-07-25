@@ -1119,8 +1119,7 @@ def fetch_x402_fuchss() -> list:
             r.raise_for_status()
             data = r.json()
     except Exception as e:  # noqa: BLE001
-        log.warning("x402-fuchss leaderboard fetch failed: %r", e)
-        return out
+        raise RuntimeError(f"x402-fuchss leaderboard fetch failed: {e!r}") from e
     top = data.get("top") or []
     for item in top:
         resource = (item.get("resource") or "").strip()
