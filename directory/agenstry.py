@@ -24,6 +24,7 @@ from __future__ import annotations
 import concurrent.futures as cf
 import logging
 import re
+import time
 from urllib.parse import urlparse
 
 import httpx
@@ -38,8 +39,8 @@ API_BASE = "https://agenstry.com/api"
 UA = "agent-tools.cloud-crawler/0.1 (+https://agent-tools.cloud)"
 TIMEOUT = httpx.Timeout(connect=10.0, read=20.0, write=10.0, pool=10.0)
 
-# agenstry's list API caps page size at 100.
-_API_PAGE = 100
+# Anonymous clients are limited to 50 rows; larger pages require an API key.
+_API_PAGE = 50
 
 
 def _slugify(text: str) -> str:
@@ -176,14 +177,22 @@ def fetch_agenstry_mcp(max_pages: int = 6000, workers: int = 12) -> list:
     with httpx.Client(timeout=TIMEOUT, follow_redirects=True,
                       headers={"User-Agent": UA, "Accept": "application/json"}) as c:
         while offset < max_pages:
-            try:
-                r = c.get(f"{API_BASE}/mcp-servers",
-                          params={"alive": "true", "limit": _API_PAGE, "offset": offset})
-                r.raise_for_status()
-                data = r.json()
-            except Exception as e:
-                log.warning("agenstry mcp api offset=%d failed: %r", offset, e)
-                break
+            for attempt in range(2):
+                try:
+                    r = c.get(f"{API_BASE}/mcp-servers",
+                              params={"alive": "true", "limit": _API_PAGE, "offset": offset})
+                    r.raise_for_status()
+                    data = r.json()
+                    break
+                except Exception as e:
+                    if attempt == 0:
+                        log.warning("agenstry mcp api offset=%d failed, retrying: %r",
+                                    offset, e)
+                        time.sleep(1.0)
+                        continue
+                    raise RuntimeError(
+                        f"agenstry mcp api offset={offset} failed after retry: {e!r}"
+                    ) from e
             results = data.get("results") or []
             if not results:
                 break

@@ -410,16 +410,14 @@ def fetch_x402scan() -> list:
             r.raise_for_status()
             payload = r.json()
     except Exception as e:
-        log.warning("x402scan: tRPC fetch failed: %r", e)
-        return []
+        raise RuntimeError(f"x402scan tRPC fetch failed: {e!r}") from e
 
     origins = (
         payload.get("result", {}).get("data", {}).get("json")
         if isinstance(payload, dict) else None
     )
     if not isinstance(origins, list):
-        log.warning("x402scan: unexpected payload shape")
-        return []
+        raise RuntimeError("x402scan returned an unexpected payload shape")
 
     rows = []
     for origin in origins:
@@ -2137,7 +2135,8 @@ def fetch_chiark_a2a() -> list:
     return out
 
 
-MCP_CRAWLERS["chiark"] = fetch_chiark
+# chiark.ai retired its API with HTTP 410 in July 2026. Keep the parser for
+# historical/manual use, but do not poll a permanently retired source.
 
 # glama removed: catalog-only, all endpoint_url=null, not callable by agents (2026-06-04)
 # MCP_CRAWLERS["glama"] = fetch_glama
@@ -2178,8 +2177,7 @@ def fetch_mcp_catalog() -> list:
     """Pull mcp-catalog.com's curated MCP servers (Supabase REST) as rows."""
     key = _mcp_catalog_anon_key()
     if not key:
-        log.warning("mcp-catalog: no anon key, skipping")
-        return []
+        raise RuntimeError("mcp-catalog public anon key is unavailable")
     out: list = []
     seen_ep: set = set()
     hdr = {"User-Agent": UA, "Accept": "application/json",
@@ -2189,14 +2187,14 @@ def fetch_mcp_catalog() -> list:
             r = c.get(f"{MCP_CATALOG_SUPABASE}/rest/v1/servers",
                       params={"select": "*", "order": "created_at.desc"})
             if r.status_code != 200:
-                log.warning("mcp-catalog: HTTP %d", r.status_code)
-                return []
+                raise RuntimeError(f"mcp-catalog returned HTTP {r.status_code}")
             rows = r.json()
     except Exception as e:
-        log.warning("mcp-catalog: fetch error: %r", e)
-        return []
+        if isinstance(e, RuntimeError):
+            raise
+        raise RuntimeError(f"mcp-catalog fetch failed: {e!r}") from e
     if not isinstance(rows, list):
-        return []
+        raise RuntimeError("mcp-catalog returned an unexpected payload shape")
     for it in rows:
         if not isinstance(it, dict):
             continue

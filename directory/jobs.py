@@ -324,33 +324,8 @@ def cmd_crawl_a2a() -> int:
                  g["candidates"], g["resolved"], g["inserted"], g["updated"])
     except Exception as e:
         errors.append(f"agenstry: {e!r}"); log.warning("a2a agenstry crawl failed: %r", e)
-    try:
-        rows = crawlers.fetch_chiark_a2a()
-        if rows:
-            def _write_chiark_a2a():
-                ins = upd = skipped = 0
-                with db.writer() as c:
-                    known = {
-                        (r[0] or "").lower().rstrip("/")
-                        for r in c.execute(
-                            "SELECT endpoint_url FROM a2a_agents WHERE source!='chiark'"
-                        ).fetchall()
-                    }
-                    for row in rows:
-                        ep = (row.get("endpoint_url") or "").lower().rstrip("/")
-                        if ep and ep in known:
-                            skipped += 1  # first-source-wins: another source has it
-                            continue
-                        is_new, _ = db.upsert_a2a_agent(c, row)
-                        ins += int(is_new); upd += int(not is_new)
-                    c.commit()
-                return ins, upd, skipped
-            ci, cu, cs = db.with_retry(_write_chiark_a2a)
-            added += ci; updated += cu
-            log.info("a2a chiark: resolved=%d inserted=%d updated=%d skipped=%d",
-                     len(rows), ci, cu, cs)
-    except Exception as e:
-        errors.append(f"chiark: {e!r}"); log.warning("a2a chiark crawl failed: %r", e)
+    # chiark.ai retired its API with HTTP 410 in July 2026. Existing rows stay
+    # in the directory and continue through health checks; only polling stops.
     try:
         ar = a2a_mod.crawl_a2aregistry()
         added += ar["inserted"]; updated += ar["updated"]
