@@ -834,7 +834,8 @@ def cmd_submissions(status: str = "pending", limit: int = 50) -> int:
     return 0
 
 
-def _approve(sub_id: int, note: str | None = None) -> dict | None:
+def _approve(sub_id: int, note: str | None = None,
+             payment: dict | None = None) -> dict | None:
     """Core approve logic: copy a pending submission into services + mark it
     approved + health-probe + notify. Returns a dict describing the listed
     service, or None if the submission could not be approved."""
@@ -861,6 +862,14 @@ def _approve(sub_id: int, note: str | None = None) -> dict | None:
         return None
     host = urlparse(url).hostname or url
     name = p.get("name") or host
+    fixed_price = p.get("price_usdc")
+    detected_price = (payment or {}).get("max_amount_usdc")
+    price_min = p.get("price_min_usdc")
+    price_max = p.get("price_max_usdc")
+    if price_min is None:
+        price_min = fixed_price if fixed_price is not None else detected_price
+    if price_max is None:
+        price_max = fixed_price if fixed_price is not None else detected_price
     service = {
         "slug": _slugify(host) + "-sub" + str(sub_id),
         "name": name,
@@ -868,8 +877,9 @@ def _approve(sub_id: int, note: str | None = None) -> dict | None:
         "description": p.get("description"),
         "category": _slugify(p.get("category") or "general"),
         "chains": p.get("chains") or [],
-        "price_min": p.get("price_min_usdc"),
-        "price_max": p.get("price_max_usdc"),
+        "price_min": price_min,
+        "price_max": price_max,
+        "currency": "USDC" if price_min is not None or price_max is not None else None,
         "mcp_url": p.get("mcp_url"),
         "source": "submission",
         "source_id": f"sub:{sub_id}",
@@ -981,7 +991,7 @@ def review_submission(sub_id: int, note_prefix: str = "auto-review", notify_pend
              ("Submission", f"#{sub_id}")])
 
     if vstatus == "verified":
-        res = _approve(sub_id, note=note)
+        res = _approve(sub_id, note=note, payment=verdict.get("payment"))
         if res:
             return {"status": "listed", "submission_id": sub_id,
                     "slug": res["slug"], "evidence": evidence}

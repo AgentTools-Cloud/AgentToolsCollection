@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import random
@@ -800,6 +801,13 @@ def _extract_payment(obj: Any) -> dict[str, Any] | None:
                 if isinstance(ep, dict) and isinstance(ep.get("accepts"), list) and ep["accepts"]:
                     accepts = ep["accepts"]
                     break
+        # Bazaar discovery responses wrap resources in items[]. Each item has
+        # its own accepts[] array.
+        if accepts is None and isinstance(obj.get("items"), list):
+            for item in obj["items"]:
+                if isinstance(item, dict) and isinstance(item.get("accepts"), list) and item["accepts"]:
+                    accepts = item["accepts"]
+                    break
     if not isinstance(accepts, list) or not accepts:
         return None
     first = accepts[0] if isinstance(accepts[0], dict) else {}
@@ -812,14 +820,39 @@ def _extract_payment(obj: Any) -> dict[str, Any] | None:
             break
     amount_raw = (first.get("maxAmountRequired") or first.get("amount")
                   or first.get("price"))
+    price_usdc = _bazaar_price_usd(first)
     return {
         "scheme": first.get("scheme"),
         "network": first.get("network") or first.get("chain"),
         "asset": first.get("asset") or first.get("currency") or "USDC",
-        "max_amount_usdc": _max_amount_to_usd(amount_raw),
+        "amount_raw": amount_raw,
+        "max_amount_usdc": price_usdc,
+        "currency": "USDC" if price_usdc is not None else None,
         "pay_to": first.get("payTo") or first.get("pay_to"),
         "facilitator": first.get("facilitator") or (obj.get("facilitator") if isinstance(obj, dict) else None),
     }
+
+
+def _decode_payment_required_header(headers: Any) -> dict[str, Any] | None:
+    """Decode an x402 v2 PAYMENT-REQUIRED header, case-insensitively."""
+    value = None
+    if headers:
+        try:
+            value = headers.get("PAYMENT-REQUIRED") or headers.get("payment-required")
+        except AttributeError:
+            value = None
+    if not value:
+        return None
+    try:
+        encoded = str(value).strip()
+        encoded += "=" * (-len(encoded) % 4)
+        decoded = base64.b64decode(encoded, altchars=b"-_", validate=True)
+        obj = json.loads(decoded)
+    except (ValueError, TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(obj, dict) or obj.get("x402Version") != 2:
+        return None
+    return obj
 
 
 def verify_x402(url: str, well_known: str | None = None) -> dict[str, Any]:
@@ -889,10 +922,15 @@ def verify_x402(url: str, well_known: str | None = None) -> dict[str, Any]:
                 continue
             if r.status_code == 402:
                 body_ok = False
+                header_obj = _decode_payment_required_header(r.headers)
+                if header_obj is not None and _looks_like_x402(header_obj):
+                    body_ok = True
+                    payment = payment or _extract_payment(header_obj)
                 try:
                     obj = json.loads(r.content[:_MAX_BODY])
-                    body_ok = _looks_like_x402(obj)
-                    if body_ok:
+                    parsed_body = _looks_like_x402(obj)
+                    body_ok = body_ok or parsed_body
+                    if parsed_body:
                         payment = payment or _extract_payment(obj)
                 except (ValueError, json.JSONDecodeError):
                     obj = None
