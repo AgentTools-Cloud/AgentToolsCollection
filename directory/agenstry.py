@@ -96,14 +96,16 @@ def crawl_agenstry_a2a(max_hosts: int = 4000, workers: int = 12) -> dict:
 
     def _probe(dom: str):
         base = f"https://{dom}"
+        # card_to_row stays inside the try: a single malformed card must not
+        # abort ex.map and take the whole source down with it.
         try:
             with httpx.Client(timeout=TIMEOUT, follow_redirects=True,
                               headers={"User-Agent": UA, "Accept": "application/json"}) as c:
                 card, card_url = a2a_mod.fetch_agent_card(base, client=c)
-        except Exception:
-            return None
-        if card and card_url:
-            return a2a_mod.card_to_row(card, card_url, source="agenstry", source_id=dom)
+            if card and card_url:
+                return a2a_mod.card_to_row(card, card_url, source="agenstry", source_id=dom)
+        except Exception as e:
+            log.warning("agenstry a2a: skipping %s: %r", dom, e)
         return None
 
     with cf.ThreadPoolExecutor(max_workers=workers) as ex:

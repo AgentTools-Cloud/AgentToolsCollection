@@ -372,6 +372,29 @@ def _detect_x402(card: dict) -> tuple[bool, str | None]:
     return ("x402" in blob), payto
 
 
+def _auth_scheme_names(card: dict) -> list[str] | None:
+    """Scheme labels from an Agent Card.
+
+    The spec says securitySchemes is a name->scheme object, but some agents
+    publish a bare list of scheme objects instead.
+    """
+    sec = card.get("securitySchemes")
+    if isinstance(sec, dict):
+        names = [str(k) for k in sec.keys()]
+    elif isinstance(sec, list):
+        names = []
+        for item in sec:
+            if isinstance(item, dict):
+                label = item.get("type") or item.get("scheme") or item.get("name")
+                if label:
+                    names.append(str(label))
+            elif isinstance(item, str) and item.strip():
+                names.append(item.strip())
+    else:
+        return None
+    return names or None
+
+
 def card_to_row(card: dict, card_url: str, source: str = "manual",
                 source_id: str | None = None, slug: str | None = None) -> dict:
     """Normalise an A2A Agent Card into an a2a_agents row dict."""
@@ -405,7 +428,7 @@ def card_to_row(card: dict, card_url: str, source: str = "manual",
         "capabilities": caps,
         "default_input_modes": card.get("defaultInputModes"),
         "default_output_modes": card.get("defaultOutputModes"),
-        "auth_schemes": list((card.get("securitySchemes") or {}).keys()) or None,
+        "auth_schemes": _auth_scheme_names(card),
         "x402_supported": x402_supported,
         "price_hint_usd": None,
         "payto": payto,
