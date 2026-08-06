@@ -583,7 +583,7 @@ def probe_health(url, well_known=None):
     last = {"status": "down", "latency_ms": None, "http_status": None, "x402": False}
     try:
         with httpx.Client(timeout=httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0),
-                          headers={"User-Agent": UA}) as c:
+                          headers={"User-Agent": UA, "Accept": "application/json"}) as c:
             for t in targets:
                 if not t:
                     continue
@@ -594,9 +594,66 @@ def probe_health(url, well_known=None):
                         r = c.get(t)
                     dt = int((time.monotonic() - t0) * 1000)
                     sc = r.status_code
+                    # A healthy descriptor is useful fallback evidence, but it
+                    # must not short-circuit probing the callable resource.
+                    # POST-only x402 services commonly expose GET 200 on their
+                    # well-known document while the canonical endpoint's
+                    # expected health signal is POST 402.
+                    if well_known and t == well_known and sc < 400:
+                        last = {"status": "ok", "latency_ms": dt,
+                                "http_status": sc, "x402": False}
+                        continue
                     if sc < 400 or sc == 402:
                         return {"status": "ok", "latency_ms": dt,
                                 "http_status": sc, "x402": sc == 402}
+                    if sc in (401, 403, 429):
+                        last = {"status": "degraded", "latency_ms": dt,
+                                "http_status": sc, "x402": False}
+                except Exception:
+                    continue
+
+            # POST-only x402 resources often reject or drop HEAD/GET. Only send
+            # a POST when the same origin's machine-readable descriptor
+            # explicitly advertises that exact resource, method, and probe body.
+            parsed = urlparse(url)
+            origin = f"{parsed.scheme}://{parsed.netloc}"
+            wk_targets = ([well_known] if well_known else []) + [
+                origin + "/.well-known/x402",
+                origin + "/.well-known/x402.json",
+            ]
+            seen_wk = set()
+            normalized_url = url.rstrip("/")
+            for wk in wk_targets:
+                if not wk or wk in seen_wk:
+                    continue
+                seen_wk.add(wk)
+                try:
+                    descriptor = c.get(wk)
+                    if descriptor.status_code != 200:
+                        continue
+                    obj = descriptor.json()
+                    endpoints = obj.get("endpoints") if isinstance(obj, dict) else None
+                    if not isinstance(endpoints, list):
+                        continue
+                    advertised = next((
+                        ep for ep in endpoints
+                        if isinstance(ep, dict)
+                        and str(ep.get("resource") or "").rstrip("/") == normalized_url
+                        and str(ep.get("method") or "").upper() == "POST"
+                        and isinstance(ep.get("probe_body", {}), dict)
+                    ), None)
+                    if advertised is None:
+                        continue
+                    t0 = time.monotonic()
+                    r = c.post(url, json=advertised.get("probe_body", {}))
+                    dt = int((time.monotonic() - t0) * 1000)
+                    sc = r.status_code
+                    if sc == 402:
+                        return {"status": "ok", "latency_ms": dt,
+                                "http_status": sc, "x402": True}
+                    if sc < 400:
+                        return {"status": "ok", "latency_ms": dt,
+                                "http_status": sc, "x402": False}
                     if sc in (401, 403, 429):
                         last = {"status": "degraded", "latency_ms": dt,
                                 "http_status": sc, "x402": False}

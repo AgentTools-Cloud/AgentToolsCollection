@@ -116,7 +116,10 @@ def build_service_card(row: dict[str, Any]) -> dict[str, Any]:
         "openapi_url": row.get("openapi_url"),
         "well_known_url": row.get("well_known_url"),
         "resource_count": row.get("resource_count"),
-        "resource_samples": resource_samples[:20] if isinstance(resource_samples, list) else [],
+        # Origin-aggregated listings may publish dozens of canonical resources.
+        # The database ingestion cap is 50; expose the same bounded set so an
+        # agent can discover every advertised endpoint from the canonical card.
+        "resource_samples": resource_samples[:50] if isinstance(resource_samples, list) else [],
         "template": build_call_template(row),
         **{k: v for k, v in call_info.items() if k != "resource_samples"},
     })
