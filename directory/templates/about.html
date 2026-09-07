@@ -36,6 +36,137 @@
     <p class="text-sm">Every indexed MCP server is re-scanned each hour for known malware and abuse patterns — pipe-to-shell install lures, base64 / <code class="mono bg-slate-100 px-1 rounded">eval</code> download cradles, bare-IP command-and-control URLs and prompt-injection phrasing in its advertised tool metadata. It also detects MCP <span class="font-medium">tool-poisoning</span> coercion — descriptions that try to hijack an agent's tool-calling (“always call this tool first”, “before using any other tool you must…”), hidden <code class="mono bg-slate-100 px-1 rounded">&lt;IMPORTANT&gt;</code> instructions, demands to list API keys or include secrets in a response, and coercion to read &amp; forward <code class="mono bg-slate-100 px-1 rounded">.key</code>/<code class="mono bg-slate-100 px-1 rounded">.pem</code>/<code class="mono bg-slate-100 px-1 rounded">.ssh</code>/<code class="mono bg-slate-100 px-1 rounded">.env</code> files. Each server carries a <span class="mono">clean</span> / <span class="mono">suspicious</span> / <span class="mono">malicious</span> verdict with the matched rules. Scanning is static only — we never execute server code.</p>
     <p class="text-sm mt-2">You can also scan <em>any</em> MCP endpoint on demand, before you connect: call the <code class="mono bg-slate-100 px-1 rounded">scan_mcp_safety</code> tool on the MCP server at <a class="text-blue-600 hover:underline mono" href="/mcp-discovery">/mcp-discovery</a>, or send its URL to our A2A agent at <code class="mono bg-slate-100 px-1 rounded">/a2a</code>. If the server is already indexed you get our latest stored verdict instantly; if not, we probe it live, scan it, and add it to the directory. Each on-demand call also runs a <span class="font-medium">frontier large model</span> second-opinion as an advisory dimension alongside the deterministic rules.</p>
   </div>
+  <div id="grading">
+    <h2 class="text-lg font-semibold mb-2">Grading</h2>
+    <p class="text-sm">Every listing carries a 0–100 score and a letter grade, built
+    only from signals we measure ourselves. We do not re-export another directory's
+    rating.</p>
+
+    <h3 class="text-sm font-semibold mt-4 mb-1">x402 services</h3>
+    <table class="text-sm w-full">
+      <tbody class="align-top">
+        <tr class="border-b border-slate-100">
+          <td class="py-1.5 pr-3 font-medium w-32">Availability</td><td class="py-1.5 pr-3 mono w-10">40</td>
+          <td class="py-1.5">Endpoint probe: <span class="mono">ok</span> 100%,
+            <span class="mono">degraded</span> 45%, <span class="mono">unknown</span> 22%,
+            <span class="mono">down</span> 0.</td>
+        </tr>
+        <tr class="border-b border-slate-100">
+          <td class="py-1.5 pr-3 font-medium">Payability</td><td class="py-1.5 pr-3 mono">20</td>
+          <td class="py-1.5">Real HTTP 402 challenge 15, <code class="mono bg-slate-100 px-1 rounded">/.well-known/x402</code>
+            descriptor 5, payment address 5, settlement network 3, price 2 — of 30, scaled to 20.</td>
+        </tr>
+        <tr>
+          <td class="py-1.5 pr-3 font-medium">Demand</td><td class="py-1.5 pr-3 mono">40</td>
+          <td class="py-1.5">30-day USDC receipts at the <span class="mono">payTo</span> address,
+            read from the chain. Distinct payers carry two thirds, transfer count one third;
+            both on a log scale. Chains with no free indexer (currently Sui) leave this blank
+            rather than zero.</td>
+        </tr>
+      </tbody>
+    </table>
+    <p class="text-sm mt-2">A service whose endpoint is <span class="mono">down</span> is held
+      at D regardless of the other two components.</p>
+
+    <h3 class="text-sm font-semibold mt-4 mb-1">MCP servers</h3>
+    <table class="text-sm w-full">
+      <tbody class="align-top">
+        <tr class="border-b border-slate-100">
+          <td class="py-1.5 pr-3 font-medium w-32">Availability</td><td class="py-1.5 pr-3 mono w-10">25</td>
+          <td class="py-1.5"><span class="mono">ok</span> 25, <span class="mono">degraded</span> 10.</td>
+        </tr>
+        <tr class="border-b border-slate-100">
+          <td class="py-1.5 pr-3 font-medium">Conformance</td><td class="py-1.5 pr-3 mono">25</td>
+          <td class="py-1.5">JSON-RPC <code class="mono bg-slate-100 px-1 rounded">initialize</code>
+            + <code class="mono bg-slate-100 px-1 rounded">tools/list</code>: pass 25, partial 10.</td>
+        </tr>
+        <tr class="border-b border-slate-100">
+          <td class="py-1.5 pr-3 font-medium">Performance</td><td class="py-1.5 pr-3 mono">30</td>
+          <td class="py-1.5">Full marks at p95 ≤ 50 ms, falling linearly to 0 at ≥ 2000 ms.
+            No latency data scores 0.</td>
+        </tr>
+        <tr>
+          <td class="py-1.5 pr-3 font-medium">Descriptor</td><td class="py-1.5 pr-3 mono">20</td>
+          <td class="py-1.5">Advertises its tools 8, tool metadata captured 5,
+            source or package published 4, transport declared 3.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p class="text-sm mt-2">A server flagged by our safety scan is held down regardless
+      of the four components above: <span class="mono">suspicious</span> caps at C,
+      <span class="mono">malicious</span> at E. The matched rules are shown on the
+      server's page.</p>
+
+    <h3 class="text-sm font-semibold mt-4 mb-1">A2A agents</h3>
+    <table class="text-sm w-full">
+      <tbody class="align-top">
+        <tr class="border-b border-slate-100">
+          <td class="py-1.5 pr-3 font-medium w-32">Availability</td><td class="py-1.5 pr-3 mono w-10">35</td>
+          <td class="py-1.5">Agent card fetched and parsed: <span class="mono">ok</span> 35,
+            <span class="mono">degraded</span> 14.</td>
+        </tr>
+        <tr class="border-b border-slate-100">
+          <td class="py-1.5 pr-3 font-medium">Conformance</td><td class="py-1.5 pr-3 mono">25</td>
+          <td class="py-1.5">pass 25, partial 10.</td>
+        </tr>
+        <tr class="border-b border-slate-100">
+          <td class="py-1.5 pr-3 font-medium">Card detail</td><td class="py-1.5 pr-3 mono">20</td>
+          <td class="py-1.5">Skills declared 8, three or more skills 4, callable endpoint 6,
+            capabilities 4, protocol version 3, auth scheme 3, documentation 2 — of 30, scaled to 20.</td>
+        </tr>
+        <tr>
+          <td class="py-1.5 pr-3 font-medium">Performance</td><td class="py-1.5 pr-3 mono">20</td>
+          <td class="py-1.5">Full marks at ≤ 150 ms, falling linearly to 0 at ≥ 1500 ms.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3 class="text-sm font-semibold mt-4 mb-1">Grade bands</h3>
+    <p class="text-sm">Bands are set per resource type, so a grade means "top of its own kind"
+      — the three scorers measure different things and are not directly comparable.</p>
+    <table class="text-sm mt-2 w-full">
+      <thead><tr class="text-left text-slate-500 border-b border-slate-200">
+        <th class="py-1 pr-3 font-medium">Type</th><th class="py-1 pr-3 font-medium mono">A</th>
+        <th class="py-1 pr-3 font-medium mono">B+</th><th class="py-1 pr-3 font-medium mono">B</th>
+        <th class="py-1 pr-3 font-medium mono">C+</th><th class="py-1 pr-3 font-medium mono">C</th>
+        <th class="py-1 font-medium mono">D</th>
+      </tr></thead>
+      <tbody class="mono">
+        <tr class="border-b border-slate-100"><td class="py-1.5 pr-3">x402</td><td class="py-1.5 pr-3">88</td><td class="py-1.5 pr-3">80</td><td class="py-1.5 pr-3">62</td><td class="py-1.5 pr-3">53</td><td class="py-1.5 pr-3">43</td><td class="py-1.5">12</td></tr>
+        <tr class="border-b border-slate-100"><td class="py-1.5 pr-3">MCP</td><td class="py-1.5 pr-3">95</td><td class="py-1.5 pr-3">88</td><td class="py-1.5 pr-3">72</td><td class="py-1.5 pr-3">56</td><td class="py-1.5 pr-3">40</td><td class="py-1.5">20</td></tr>
+        <tr><td class="py-1.5 pr-3">A2A</td><td class="py-1.5 pr-3">98</td><td class="py-1.5 pr-3">96</td><td class="py-1.5 pr-3">92</td><td class="py-1.5 pr-3">85</td><td class="py-1.5 pr-3">66</td><td class="py-1.5">60</td></tr>
+      </tbody>
+    </table>
+    <p class="text-sm mt-2">Anything below the D threshold is E.</p>
+
+    <h3 class="text-sm font-semibold mt-4 mb-1">Re-scanning</h3>
+    <p class="text-sm">Availability is re-probed every 4 hours, on-chain demand daily, and
+      payment metadata on each verification pass. Grades recompute automatically after every
+      pass — there is nothing to request. Each x402 listing page shows its own breakdown with
+      the timestamps of the last two checks, and says why a component reads zero. The most
+      common cause is that we could not extract a payment address from your 402 response or
+      descriptor; publishing <code class="mono bg-slate-100 px-1 rounded">accepts[]</code>
+      with <span class="mono">payTo</span>, <span class="mono">network</span> and an amount
+      fixes both that and the payability component.</p>
+  </div>
+
+  <div id="claim">
+    <h2 class="text-lg font-semibold mb-2">Claiming a listing you operate</h2>
+    <p class="text-sm">Almost everything here was crawled, so most listings describe
+      someone who never asked to be indexed. If one of them is yours, you can take it
+      over and correct it: sign in with GitHub, then publish a token we issue on the
+      host that serves the listing &mdash; in a descriptor you already publish, in a
+      well-known file, or as a DNS TXT record.</p>
+    <p class="text-sm mt-2">Nothing is required of you. Listings stay up either way and
+      submitting one does not need an account. A verified claim gets an
+      <b>Owner verified</b> badge, lets you edit the descriptive fields, and adds 3
+      points to the grade. <b>Measured fields &mdash; availability, grade, latency,
+      conformance, on-chain demand &mdash; are not editable by anyone.</b></p>
+    <p class="text-sm mt-2"><a class="text-blue-600 hover:underline" href="/docs/claim">How
+      to claim a listing &rarr;</a></p>
+  </div>
+
   <div>
     <h2 class="text-lg font-semibold mb-2">Sources</h2>
     <ul class="text-sm space-y-1">

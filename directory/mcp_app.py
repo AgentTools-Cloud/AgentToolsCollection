@@ -60,6 +60,8 @@ discover_mcp = FastMCP(
     instructions=_INSTRUCTIONS,
     streamable_http_path="/",
     transport_security=_TS,
+    # uvicorn runs 2 workers; a stateful session would live in only one of them
+    stateless_http=True,
 )
 
 
@@ -127,16 +129,40 @@ def _methods_from_body(body: bytes) -> list[str]:
     return out
 
 
+def _client_info_from_body(body: bytes) -> str | None:
+    """clientInfo name/version out of an `initialize` request body."""
+    if not body:
+        return None
+    try:
+        data = json.loads(body)
+    except Exception:
+        return None
+    for it in (data if isinstance(data, list) else [data]):
+        if not isinstance(it, dict) or it.get("method") != "initialize":
+            continue
+        info = (it.get("params") or {}).get("clientInfo") or {}
+        name = info.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        ver = info.get("version")
+        return f"{name}/{ver}" if ver else name
+    return None
+
+
 def _record_mcp_methods(body: bytes) -> None:
-    """Best-effort: bump the daily counter for each JSON-RPC method in `body`.
+    """Best-effort: bump the daily counter for each JSON-RPC method in `body`,
+    and remember the caller's clientInfo when this is an `initialize`.
     Never raises — telemetry must not affect the MCP request."""
     methods = _methods_from_body(body)
-    if not methods:
+    client_name = _client_info_from_body(body)
+    if not methods and not client_name:
         return
     try:
         with directory_db.writer(DB_PATH) as wc:
             for m in methods:
                 directory_db.bump_mcp_method(wc, m)
+            if client_name:
+                directory_db.remember_mcp_client(wc, _current_client_ip.get(), client_name)
     except Exception as e:
         log.debug("mcp method telemetry skipped: %r", e)
 
@@ -199,16 +225,31 @@ def wrap_with_client_capture(app):
     return wrapped
 
 
-def _client_name_from_ctx(ctx: Context | None) -> str | None:
-    """Read MCP-level clientInfo name/version from the session."""
-    if ctx is None:
+def _remembered_client_name() -> str | None:
+    """clientInfo recorded at `initialize` time, looked up by peer IP."""
+    ip = _current_client_ip.get()
+    if not ip:
         return None
+    try:
+        with _open() as c:
+            return directory_db.recent_mcp_client(c, ip)
+    except Exception:
+        return None
+
+
+def _client_name_from_ctx(ctx: Context | None) -> str | None:
+    """Read MCP-level clientInfo name/version from the session.
+
+    Stateless transport: the session never carries it, so fall back to what the
+    `initialize` request recorded."""
+    if ctx is None:
+        return _remembered_client_name()
     try:
         params = ctx.session.client_params
     except Exception:
         return None
     if params is None or params.clientInfo is None:
-        return None
+        return _remembered_client_name()
     info = params.clientInfo
     name = getattr(info, "name", None) or "unknown"
     ver = getattr(info, "version", None)
@@ -639,7 +680,11 @@ async def register(
                   result_n=0, result_slug=existing.get("slug"))
         return {
             "status": "already_listed",
-            "message": "A service with this URL is already in the directory.",
+            "message": (
+                "A service with this URL is already in the directory. Submitting "
+                "it again will not change it: verify domain ownership to edit."),
+            "claim_url": "https://agent-tools.cloud/account",
+            "claim_docs": "https://agent-tools.cloud/docs/claim",
             "slug": existing.get("slug"),
             "url": existing.get("url"),
         }
@@ -648,7 +693,8 @@ async def register(
                   args={"url": url, "outcome": "already_pending"}, result_n=0)
         return {
             "status": "already_pending",
-            "message": "A submission for this URL is already submitted and auto-verifying.",
+            "message": (
+                "A submission for this URL is already submitted and auto-verifying."),
             "submission_id": pending.get("id"),
         }
 

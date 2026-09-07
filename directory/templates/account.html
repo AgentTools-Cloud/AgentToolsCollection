@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+{% block title %}Your account — Agent Tools{% endblock %}
+{% block content %}
+<div class="max-w-3xl">
+
+  <div class="flex items-center gap-3 mb-8">
+    {% if user.avatar_url %}
+      <img src="{{ user.avatar_url }}" alt="" class="w-10 h-10 rounded-full">
+    {% endif %}
+    <div>
+      <div class="text-lg font-semibold">{{ user.login }}</div>
+      <div class="text-sm text-slate-500">
+        {{ user.email or 'no verified email on file' }} · signed in with GitHub
+      </div>
+    </div>
+    <a href="/auth/logout" class="ml-auto text-sm text-slate-500 hover:text-slate-800">Sign out</a>
+  </div>
+
+  {% if issued %}
+  <div class="rounded-lg border border-green-300 bg-green-50 p-5 mb-8">
+    <h2 class="font-semibold mb-2">Publish this token on <span class="mono">{{ issued.host }}</span></h2>
+    <p class="text-xs text-slate-600 mb-3">Shown once. Copy it now.</p>
+    <div class="mono text-sm bg-white border border-green-200 rounded p-2 mb-3 break-all">{{ issued.token }}</div>
+    <div class="text-sm text-slate-700">{{ issued.instruction }}</div>
+    <form method="post" action="/account/domains/{{ issued.id }}/verify" class="mt-3">
+      <input type="hidden" name="token" value="{{ issued.token }}">
+      <button class="rounded bg-slate-900 text-white px-3 py-1.5 text-sm">I have published it — verify</button>
+    </form>
+  </div>
+  {% endif %}
+
+  <div class="rounded-lg border border-slate-200 bg-white p-5 mb-8">
+    <h2 class="font-semibold mb-1">Verified domains</h2>
+    <p class="text-sm text-slate-500 mb-4">
+      Signing in identifies you. Editing a listing needs proof that you control
+      the host it runs on — that proof is a token you publish on that host.
+      <a class="text-blue-600 hover:underline" href="/docs/claim">How it works &rarr;</a>
+    </p>
+
+    {% if verified %}
+      <table class="w-full text-sm">
+        <thead class="text-slate-400 text-xs uppercase tracking-wide">
+          <tr class="text-left">
+            <th class="pb-2">Host</th><th class="pb-2">Method</th>
+            <th class="pb-2">Verified</th><th class="pb-2 text-right">Listings</th>
+          </tr>
+        </thead>
+        <tbody>
+        {% for d in verified %}
+          <tr class="border-t border-slate-100">
+            <td class="py-2 mono">{{ d.host }}</td>
+            <td class="py-2 text-slate-500">{{ d.method }}</td>
+            <td class="py-2 text-slate-500">{{ d.verified_ago or '—' }}</td>
+            <td class="py-2 text-right">{{ d.listing_count }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <p class="text-sm text-slate-500">You have not verified any domain yet.</p>
+    {% endif %}
+  </div>
+
+  {% if pending %}
+  <div class="rounded-lg border border-amber-200 bg-amber-50 p-5 mb-8">
+    <h2 class="font-semibold mb-3">Pending verification</h2>
+    {% for d in pending %}
+      <div class="text-sm mb-4">
+        <div class="mono font-medium">{{ d.host }}</div>
+        <div class="text-slate-600 mt-1">
+          Method: <span class="mono">{{ d.method }}</span>{% if d.fail_count %} · {{ d.fail_count }} failed check(s){% endif %}
+        </div>
+        <form method="post" action="/account/domains/{{ d.id }}/verify" class="mt-2 flex gap-2">
+          <input type="text" name="token" placeholder="paste the token you were shown"
+                 class="flex-1 rounded border border-slate-300 px-2 py-1 mono text-xs">
+          <button class="rounded bg-slate-900 text-white px-3 py-1 text-xs">Check now</button>
+        </form>
+      </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  <div class="rounded-lg border border-slate-200 bg-white p-5">
+    <h2 class="font-semibold mb-3">Claim a domain</h2>
+    {% if error %}<p class="text-sm text-red-600 mb-3">{{ error }}</p>{% endif %}
+    <form method="post" action="/account/domains" class="flex flex-col gap-3">
+      <input type="text" name="host" placeholder="api.example.com" required
+             class="rounded border border-slate-300 px-3 py-2 mono text-sm">
+      <select name="method" class="rounded border border-slate-300 px-3 py-2 text-sm">
+        <option value="descriptor">Add a field to my existing /.well-known descriptor (easiest)</option>
+        <option value="wellknown_file">Serve /.well-known/agent-tools-verify.txt</option>
+        <option value="dns_txt">Add a DNS TXT record</option>
+      </select>
+      <button class="self-start rounded bg-blue-600 text-white px-4 py-2 text-sm font-medium">Get a token</button>
+    </form>
+    <p class="text-xs text-slate-500 mt-3">
+      Hosts that serve listings by unrelated authors (shared gateways) cannot be
+      self-claimed — email us instead.
+    </p>
+  </div>
+
+</div>
+{% endblock %}

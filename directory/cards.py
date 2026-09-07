@@ -85,8 +85,11 @@ def build_call_template(row: dict[str, Any]) -> dict[str, Any]:
 def build_service_card(row: dict[str, Any]) -> dict[str, Any]:
     """Build an agent-readable card while preserving legacy top-level fields."""
     base = dict(row)
+    # Provenance is public (2026-08-18): keep the aggregated `sources` list and
+    # drop only the internal dedup keys.
     base.pop("source", None)
     base.pop("source_id", None)
+    base["sources"] = row.get("sources") or []
     payment = row.get("payment") if isinstance(row.get("payment"), dict) else {}
     call_info = row.get("call_info") if isinstance(row.get("call_info"), dict) else {}
     quality = row.get("quality") if isinstance(row.get("quality"), dict) else {}

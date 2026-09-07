@@ -20,6 +20,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 
 from directory import db as directory_db
 from directory.routes import router as directory_router
+from directory.auth import router as auth_router
 from directory.mcp_app import discover_mcp, wrap_with_client_capture
 from metrics import PrometheusMiddleware, metrics_endpoint
 
@@ -130,7 +131,11 @@ async def _no_cache_html(request: Request, call_next):
     ctype = resp.headers.get("content-type", "")
     if ctype.startswith("text/html"):
         path = request.url.path
-        if resp.status_code == 200 and path.startswith(_CACHEABLE_DETAIL):
+        if "atc_session" in request.headers.get("cookie", ""):
+            # Belt and braces: nothing rendered for a signed-in visitor may
+            # ever enter a shared cache, whatever the page would otherwise be.
+            resp.headers["Cache-Control"] = "private, no-store"
+        elif resp.status_code == 200 and path.startswith(_CACHEABLE_DETAIL):
             # stable card → CDN-cacheable; SWR keeps it fresh-ish cheaply
             resp.headers["Cache-Control"] = (
                 "public, max-age=600, stale-while-revalidate=3600")
@@ -146,7 +151,7 @@ async def _no_cache_html(request: Request, call_next):
 
 @app.get("/healthz")
 @app.get("/health")
-async def healthz() -> dict[str, str]:
+def healthz() -> dict[str, str]:
     return {"status": "ok"}
 
 
@@ -159,7 +164,7 @@ _FAVICON_SVG = (
 
 
 @app.get("/favicon.ico", include_in_schema=False)
-async def favicon():
+def favicon():
     from fastapi.responses import Response as _Resp
     return _Resp(content=_FAVICON_SVG, media_type="image/svg+xml",
                  headers={"Cache-Control": "public, max-age=604800"})
@@ -206,7 +211,7 @@ _LLMS_TXT = """# agent-tools.cloud
 
 
 @app.get("/llms.txt", include_in_schema=False)
-async def llms_txt():
+def llms_txt():
     from fastapi.responses import Response as _Resp
     return _Resp(content=_LLMS_TXT, media_type="text/plain; charset=utf-8",
                  headers={"Cache-Control": "public, max-age=3600"})
@@ -275,7 +280,7 @@ a { color: #2c7be5; }
 
 
 @app.get("/.well-known/x402")
-async def well_known_x402(request: Request) -> dict[str, Any]:
+def well_known_x402(request: Request) -> dict[str, Any]:
     host = (request.headers.get("host") or "").split(":", 1)[0].lower() or "agent-tools.cloud"
     description = (
         "Free MCP discovery server for x402 paid services across the ecosystem. "
@@ -284,7 +289,7 @@ async def well_known_x402(request: Request) -> dict[str, Any]:
         "The paid relay previously hosted here has been retired; this host is "
         "now directory + discovery only."
     )
-    return {
+    descriptor: dict[str, Any] = {
         "name": host,
         "description": description,
         "version": "0.4",
@@ -301,10 +306,16 @@ async def well_known_x402(request: Request) -> dict[str, Any]:
         "models": sorted(ALLOWED_MODELS),
         "source": "https://github.com/JoursBleu/mcpserver",
     }
+    # What every listed operator does to prove they control the host:
+    # publish the token we issued inside the descriptor they already serve.
+    token = os.getenv("AGENT_TOOLS_VERIFY_TOKEN")
+    if token:
+        descriptor["agentToolsVerify"] = token
+    return descriptor
 
 
 @app.get("/.well-known/mcp.json", tags=["discovery"])
-async def well_known_mcp(request: Request) -> dict[str, Any]:
+def well_known_mcp(request: Request) -> dict[str, Any]:
     """Lightweight MCP discovery doc — points clients to stdio + streamable-http."""
     host = (request.headers.get("host") or "agent-tools.cloud").split(":", 1)[0].lower()
     scheme = "https" if request.url.scheme == "https" else "http"
@@ -351,7 +362,7 @@ async def well_known_mcp(request: Request) -> dict[str, Any]:
 
 @app.get("/.well-known/agent-card.json", tags=["discovery"])
 @app.get("/.well-known/agent.json", tags=["discovery"])
-async def well_known_agent_card(request: Request) -> dict[str, Any]:
+def well_known_agent_card(request: Request) -> dict[str, Any]:
     """A2A Agent Card for agent-tools.cloud itself."""
     from directory import a2a as directory_a2a
 
@@ -445,12 +456,13 @@ def _build_openapi() -> dict[str, Any]:
     return schema
 
 
+app.include_router(auth_router)
 app.include_router(directory_router)
 app.add_api_route("/metrics", metrics_endpoint, include_in_schema=False, methods=["GET"])
 
 
 @app.get("/openapi.json", include_in_schema=False)
-async def openapi_endpoint(request: Request):
+def openapi_endpoint(request: Request):
     return JSONResponse(_build_openapi())
 
 

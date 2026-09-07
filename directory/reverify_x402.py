@@ -12,6 +12,8 @@ Run: python -m directory.reverify_x402 [--targets mcp,a2a] [--workers 24]
 """
 from __future__ import annotations
 
+import json
+import os
 import argparse
 import re as _re
 import sys
@@ -23,12 +25,38 @@ from . import crawlers, db
 
 # Map payment network identifiers to friendly chain names.
 _NETWORKS = {
+    "sui": "sui", "sui:mainnet": "sui",
     "eip155:8453": "base", "8453": "base", "base": "base",
     "eip155:84532": "base-sepolia", "84532": "base-sepolia",
     "eip155:1": "ethereum", "1": "ethereum", "ethereum": "ethereum",
     "eip155:137": "polygon", "137": "polygon", "polygon": "polygon",
     "solana": "solana",
 }
+
+
+# How long a verified listing's descriptor may go unread. Operators fix their
+# manifests and nothing here noticed until they emailed.
+_DESCRIPTOR_TTL = int(os.environ.get("AGENT_TOOLS_DESCRIPTOR_TTL", 7 * 86400))
+
+
+def _price_span(samples):
+    """(min, max) USD across a descriptor's advertised resources.
+
+    A multi-tier service declares one amount per tier; the single accept that
+    verify_x402 returns only ever sees the first of them.
+    """
+    if not isinstance(samples, list):
+        return None, None
+    prices = []
+    for s in samples:
+        if not isinstance(s, dict):
+            continue
+        for acc in (s.get("accepts") or []):
+            if isinstance(acc, dict):
+                v = crawlers._bazaar_price_usd(acc)
+                if v is not None:
+                    prices.append(v)
+    return (min(prices), max(prices)) if prices else (None, None)
 
 
 def _slugify(text: str) -> str:
@@ -195,6 +223,28 @@ def _gather(conn, targets, limit, only_unverified):
                 "source": r["source"], "source_id": r["source_id"],
                 "delivery": "a2a", "was": r["x402_supported"] or 0,
             })
+    if "services" in targets:
+        # Native x402 submissions live directly in `services`; the mcp/a2a
+        # mirror never touches them, so verify them in place. Three reasons to
+        # probe: never verified, no payTo on file, or the descriptor has not
+        # been re-read in a while -- operators fix their manifests and nothing
+        # here noticed until they emailed.
+        stale_before = int(time.time()) - _DESCRIPTOR_TTL
+        sql = ("SELECT id, slug, name, url, well_known_url FROM services "
+               "WHERE url IS NOT NULL AND url != '' AND health='ok' "
+               "AND (COALESCE(x402_ok,0)=0 OR payment IS NULL OR payment='' "
+               "     OR COALESCE(updated_at,0) < ?) "
+               "ORDER BY COALESCE(updated_at,0) ASC")
+        rows = conn.execute(sql, (stale_before,)).fetchall()
+        for r in rows:
+            tasks.append({
+                "table": "services", "id": r["id"], "slug": r["slug"],
+                "name": r["name"], "description": None,
+                "endpoint": r["url"], "homepage": None,
+                "well_known": r["well_known_url"],
+                "category": None, "source": None, "source_id": None,
+                "delivery": "x402", "was": 0,
+            })
     if limit:
         tasks = tasks[:limit]
     return tasks
@@ -202,10 +252,19 @@ def _gather(conn, targets, limit, only_unverified):
 
 def _probe(task):
     try:
-        verdict = crawlers.verify_x402(task["endpoint"])
+        verdict = crawlers.verify_x402(task["endpoint"], task.get("well_known"))
     except Exception as e:  # never let one bad host kill the pool
         verdict = {"status": "error", "evidence": [repr(e)], "payment": None}
     task["verdict"] = verdict
+    # How many resources a descriptor advertises is independent of whether the
+    # payment probe succeeded, and fetch_well_known is memoised, so this costs
+    # a cache hit rather than another request.
+    if task["table"] == "services":
+        try:
+            task["resources"] = crawlers.fetch_wellknown_resources(
+                task["endpoint"], task.get("well_known")) or {}
+        except Exception:
+            task["resources"] = {}
     return task
 
 
@@ -219,8 +278,11 @@ def reverify(targets=("mcp", "a2a"), workers=24, limit=None,
     print(f"[reverify] probing {total} endpoints "
           f"(targets={','.join(targets)}, workers={workers})", flush=True)
 
-    verified = []   # tasks whose verdict == verified
+    verified = []   # mcp/a2a tasks whose verdict == verified (mirrored below)
     flag_updates = {"mcp_servers": [], "a2a_agents": []}
+    service_ok_ids = []   # native x402 services proven this pass
+    service_payments = []  # (payment_json, id) for rows missing payment
+    service_resources = []  # (count, samples, ts, id) regardless of payment
     done = 0
     n_ver = 0
     with ThreadPoolExecutor(max_workers=workers) as ex:
@@ -229,10 +291,35 @@ def reverify(targets=("mcp", "a2a"), workers=24, limit=None,
             t = fut.result()
             done += 1
             is_ver = t["verdict"]["status"] == "verified"
-            flag_updates[t["table"]].append((1 if is_ver else 0, t["id"]))
-            if is_ver:
-                n_ver += 1
-                verified.append(t)
+            if t["table"] == "services":
+                # sticky badge: only ever set x402_ok, never revoke
+                if is_ver:
+                    service_ok_ids.append(t["id"])
+                    n_ver += 1
+                _res = t.get("resources") or {}
+                if _res.get("resource_count") is not None:
+                    service_resources.append((
+                        _res.get("resource_count"),
+                        json.dumps(_res.get("resource_samples"), ensure_ascii=False)
+                        if _res.get("resource_samples") else None,
+                        int(time.time()), t["id"]))
+                pay = t["verdict"].get("payment") or None
+                if pay and pay.get("pay_to"):
+                    res = t.get("resources") or {}
+                    lo, hi = _price_span(res.get("resource_samples"))
+                    if lo is None:
+                        lo = hi = pay.get("max_amount_usdc")
+                    service_payments.append((
+                        json.dumps(pay, ensure_ascii=False),
+                        res.get("resource_count"),
+                        json.dumps(res.get("resource_samples"), ensure_ascii=False)
+                        if res.get("resource_samples") else None,
+                        lo, hi, int(time.time()), t["id"]))
+            else:
+                flag_updates[t["table"]].append((1 if is_ver else 0, t["id"]))
+                if is_ver:
+                    n_ver += 1
+                    verified.append(t)
             if done % 500 == 0 or done == total:
                 print(f"[reverify] {done}/{total} probed, verified={n_ver}",
                       flush=True)
@@ -253,6 +340,56 @@ def reverify(targets=("mcp", "a2a"), workers=24, limit=None,
           f"mcp={len(flag_updates['mcp_servers'])} "
           f"a2a={len(flag_updates['a2a_agents'])}", flush=True)
 
+    # 1b. native x402 services: sticky x402_ok=1 on verified (set-only)
+    for start in range(0, len(service_ok_ids), 500):
+        chunk = service_ok_ids[start:start + 500]
+
+        def op(chunk=chunk):
+            with db.writer() as c:
+                c.executemany(
+                    "UPDATE services SET x402_ok=1 WHERE id=?",
+                    [(i,) for i in chunk])
+        db.with_retry(op)
+    if service_ok_ids:
+        print(f"[reverify] native x402 services tagged: "
+              f"{len(service_ok_ids)}", flush=True)
+
+    # 1b2. descriptor resource counts, independent of payment. Gating this
+    # on a payTo left most listings frozen at whatever the first crawl saw.
+    for start in range(0, len(service_resources), 500):
+        chunk = service_resources[start:start + 500]
+
+        def op(chunk=chunk):
+            with db.writer() as c:
+                c.executemany(
+                    "UPDATE services SET resource_count=?, "
+                    "resource_samples=COALESCE(?, resource_samples), "
+                    "updated_at=? WHERE id=?", chunk)
+        db.with_retry(op)
+    if service_resources:
+        print(f"[reverify] resource counts refreshed: "
+              f"{len(service_resources)}", flush=True)
+
+    # 1c. write back what the descriptor says now. This refreshes rather than
+    # fills: a listing approved with a mistyped price kept showing it forever,
+    # because nothing ever re-read the manifest that contradicted it.
+    for start in range(0, len(service_payments), 500):
+        chunk = service_payments[start:start + 500]
+
+        def op(chunk=chunk):
+            with db.writer() as c:
+                c.executemany(
+                    "UPDATE services SET payment=?, "
+                    "resource_count=COALESCE(?, resource_count), "
+                    "resource_samples=COALESCE(?, resource_samples), "
+                    "price_min=COALESCE(?, price_min), "
+                    "price_max=COALESCE(?, price_max), "
+                    "updated_at=? WHERE id=?", chunk)
+        db.with_retry(op)
+    if service_payments:
+        print(f"[reverify] payment metadata recorded: "
+              f"{len(service_payments)}", flush=True)
+
     # 2. mirror verified endpoints into services (x402) table
     svc_new = svc_skip = 0
     for t in verified:
@@ -269,7 +406,8 @@ def reverify(targets=("mcp", "a2a"), workers=24, limit=None,
           f"inserted={svc_new} skipped_dupe={svc_skip}", flush=True)
 
     return {"probed": total, "verified": n_ver,
-            "services_inserted": svc_new, "services_skipped": svc_skip}
+            "services_inserted": svc_new, "services_skipped": svc_skip,
+            "native_services_tagged": len(service_ok_ids)}
 
 
 def main(argv=None):

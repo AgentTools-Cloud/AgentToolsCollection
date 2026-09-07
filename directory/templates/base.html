@@ -77,6 +77,12 @@
         <a href="https://hub.agent-tools.cloud/list" target="_blank" rel="noopener" class="h-full flex items-center border-b-2 whitespace-nowrap tab-link text-blue-600 font-medium" title="Wrap your API / MCP / A2A into a paid x402 endpoint">Monetize&nbsp;↗</a>
         <a href="/about" class="h-full flex items-center border-b-2 whitespace-nowrap {% if p == '/about' %}tab-active{% else %}tab-link{% endif %}">About</a>
         <a href="/openapi.json" class="h-full flex items-center border-b-2 whitespace-nowrap tab-link">API</a>
+        <a href="/auth/github/login" id="atc-signin"
+           class="h-full flex items-center border-b-2 whitespace-nowrap tab-link"
+           title="Sign in to claim and edit your own listings">Sign in</a>
+        <a href="/account" id="atc-account"
+           class="hidden h-full items-center gap-1.5 border-b-2 whitespace-nowrap tab-link"
+           title="Your account"><img id="atc-avatar" alt="" class="hidden w-5 h-5 rounded-full"><span id="atc-login"></span></a>
       </nav>
     </div>
   </header>
@@ -146,5 +152,29 @@
   }
   </script>
   {% block track %}{% endblock %}
+<script>
+// Detail pages are CDN-cached, so anything visitor-specific is fetched instead
+// of rendered: /api/v1/me is no-store and never shared.
+(function () {
+  fetch("/api/v1/me", { credentials: "same-origin" })
+    .then(function (r) { return r.json(); })
+    .then(function (me) {
+      if (me.signed_in) {
+        var acct = document.getElementById("atc-account");
+        var img = document.getElementById("atc-avatar");
+        document.getElementById("atc-login").textContent = me.login || "Account";
+        if (me.avatar_url) { img.src = me.avatar_url; img.classList.remove("hidden"); }
+        acct.classList.remove("hidden");
+        acct.classList.add("flex");
+        document.getElementById("atc-signin").classList.add("hidden");
+      }
+      var box = document.querySelector("[data-edit-host]");
+      if (box && me.signed_in && (me.hosts || []).indexOf(box.getAttribute("data-edit-host")) >= 0) {
+        box.classList.remove("hidden");
+      }
+    })
+    .catch(function () {});
+})();
+</script>
 </body>
 </html>

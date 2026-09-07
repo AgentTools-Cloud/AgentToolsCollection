@@ -1,0 +1,202 @@
+{% extends "base.html" %}
+{% block title %}Claim and edit your listing — Agent Tools{% endblock %}
+{% block head_extra %}
+<meta name="description" content="How to claim a listing on agent-tools.cloud: prove control of the host with a token published in your descriptor, a well-known file, or a DNS TXT record, then edit the descriptive fields.">
+<link rel="canonical" href="https://agent-tools.cloud/docs/claim">
+{% endblock %}
+{% block content %}
+<div class="max-w-3xl space-y-8 text-slate-700">
+
+  <div>
+    <h1 class="text-2xl font-bold tracking-tight text-slate-900">Claim and edit your listing</h1>
+    <p class="text-sm mt-3">Almost everything in this directory was crawled from
+      public registries and endpoints. That means most listings describe someone who
+      never asked to be here, using whatever metadata the upstream source happened to
+      carry. If one of them is yours, this page is how you take it over and fix it.</p>
+  </div>
+
+  <div class="rounded-lg border border-slate-200 bg-white p-5">
+    <h2 class="font-semibold text-slate-900 mb-2">You are not required to do anything</h2>
+    <ul class="text-sm space-y-1.5">
+      <li>· Listings stay up whether or not you claim them.</li>
+      <li>· <a class="text-blue-600 hover:underline" href="/submit">Submitting</a> a
+        new service does not need an account.</li>
+      <li>· We never charge for placement, ranking, or removal.</li>
+    </ul>
+    <p class="text-sm mt-3">Claiming is worth it only if you want to correct what the
+      listing says. What it gets you:</p>
+    <ul class="text-sm space-y-1.5 mt-2">
+      <li>· An <b>Owner verified</b> badge on every listing on that host.</li>
+      <li>· The ability to edit the descriptive fields yourself, immediately.</li>
+      <li>· <b>+3 points</b> on the grade — someone is accountable for the listing.</li>
+      <li>· New submissions from that host skip our manual review queue.</li>
+    </ul>
+  </div>
+
+  <div>
+    <h2 class="text-lg font-semibold text-slate-900 mb-2">How it works</h2>
+    <p class="text-sm">We ask you to publish a token on the host that serves the
+      listing. That is the entire proof. <b>We do not accept an email, a GitHub
+      repository, or a support request as evidence of ownership</b> — none of them show
+      that you can change what the endpoint actually serves, and that is the only thing
+      this directory measures.</p>
+
+    <ol class="text-sm mt-4 space-y-3">
+      <li><b>1.</b> Sign in with GitHub at
+        <a class="text-blue-600 hover:underline" href="/account">/account</a>.
+        We read your account id and verified email address. Nothing else, and no write
+        access.</li>
+      <li><b>2.</b> Enter the host — for example <span class="mono">api.example.com</span>.
+        We issue a one-time token that looks like
+        <span class="mono">atc_R7xK2mQ9pL4vB8nT6wZ3yF5c</span>. It is shown once.</li>
+      <li><b>3.</b> Publish it using one of the three methods below.</li>
+      <li><b>4.</b> Click verify. We fetch it from the public internet and the claim
+        goes live.</li>
+    </ol>
+  </div>
+
+  <div>
+    <h2 class="text-lg font-semibold text-slate-900 mb-3">Three ways to publish the token</h2>
+
+    <div class="rounded-lg border border-slate-200 bg-white p-5 mb-4">
+      <h3 class="font-semibold text-slate-900">1. Add a field to a descriptor you already serve</h3>
+      <p class="text-sm mt-1">Best for x402 services and A2A agents — <b>no new file</b>.
+        We look for a <span class="mono">agentToolsVerify</span> key anywhere in the JSON
+        served at any of:</p>
+      <pre class="text-xs bg-slate-50 border border-slate-200 rounded p-3 mt-2 overflow-x-auto mono">/.well-known/x402
+/.well-known/agent-card.json
+/.well-known/agent.json</pre>
+      <p class="text-sm mt-2">So an x402 descriptor becomes:</p>
+      <pre class="text-xs bg-slate-50 border border-slate-200 rounded p-3 mt-2 overflow-x-auto mono">{
+  "name": "Example API",
+  "accepts": [ ... ],
+  "agentToolsVerify": "atc_R7xK2mQ9pL4vB8nT6wZ3yF5c"
+}</pre>
+      <p class="text-xs text-slate-500 mt-2">Unknown keys are ignored by x402 and A2A
+        clients, so this is safe to leave in place — and it has to stay, see
+        <a class="text-blue-600 hover:underline" href="#recheck">re-checks</a>.</p>
+    </div>
+
+    <div class="rounded-lg border border-slate-200 bg-white p-5 mb-4">
+      <h3 class="font-semibold text-slate-900">2. Serve a well-known file</h3>
+      <p class="text-sm mt-1">Best for MCP servers, which have no standard static
+        descriptor. Serve the token as plain text at:</p>
+      <pre class="text-xs bg-slate-50 border border-slate-200 rounded p-3 mt-2 overflow-x-auto mono">https://&lt;your-host&gt;/.well-known/agent-tools-verify.txt</pre>
+      <p class="text-sm mt-2">The file only has to <i>contain</i> the token, so a single
+        line is enough:</p>
+      <pre class="text-xs bg-slate-50 border border-slate-200 rounded p-3 mt-2 overflow-x-auto mono">printf 'atc_R7xK2mQ9pL4vB8nT6wZ3yF5c\n' \
+  &gt; /var/www/example/.well-known/agent-tools-verify.txt</pre>
+      <p class="text-xs text-slate-500 mt-2">If your web root already serves
+        <span class="mono">/.well-known/</span> — most do, for ACME — this needs no
+        configuration change at all.</p>
+    </div>
+
+    <div class="rounded-lg border border-slate-200 bg-white p-5">
+      <h3 class="font-semibold text-slate-900">3. Add a DNS TXT record</h3>
+      <p class="text-sm mt-1">Best when you control the domain but not the HTTP response
+        — managed platforms, serverless hosts, anything you cannot drop a file onto.</p>
+      <table class="w-full text-sm mt-3">
+        <tbody>
+          <tr class="border-t border-slate-100"><td class="py-1.5 pr-4 text-slate-500 w-28">Type</td><td class="py-1.5 mono">TXT</td></tr>
+          <tr class="border-t border-slate-100"><td class="py-1.5 pr-4 text-slate-500">Name</td><td class="py-1.5 mono">_agent-tools.&lt;your-host&gt;</td></tr>
+          <tr class="border-t border-slate-100"><td class="py-1.5 pr-4 text-slate-500">Value</td><td class="py-1.5 mono">atc-verify=atc_R7xK2mQ9pL4vB8nT6wZ3yF5c</td></tr>
+        </tbody>
+      </table>
+      <p class="text-xs text-slate-500 mt-2">Other TXT records on the same name are fine
+        — we look for ours among them. Allow a few minutes for propagation before
+        clicking verify.</p>
+    </div>
+  </div>
+
+  <div>
+    <h2 class="text-lg font-semibold text-slate-900 mb-2">What a claim covers</h2>
+    <p class="text-sm">All three methods prove control of a <b>host</b>, not of one
+      listing. One verification therefore covers every listing on that host across all
+      three resource types. If you run twelve MCP servers under
+      <span class="mono">api.example.com</span>, you verify once.</p>
+  </div>
+
+  <div>
+    <h2 class="text-lg font-semibold text-slate-900 mb-2">What you can edit</h2>
+    <table class="w-full text-sm">
+      <thead class="text-slate-500">
+        <tr class="text-left"><th class="py-1 pr-4">Listing type</th><th class="py-1">Editable fields</th></tr>
+      </thead>
+      <tbody>
+        <tr class="border-t border-slate-100"><td class="py-1.5 pr-4">x402 service</td><td class="py-1.5 mono text-xs">name, description, category</td></tr>
+        <tr class="border-t border-slate-100"><td class="py-1.5 pr-4">MCP server</td><td class="py-1.5 mono text-xs">name, description, homepage_url</td></tr>
+        <tr class="border-t border-slate-100"><td class="py-1.5 pr-4">A2A agent</td><td class="py-1.5 mono text-xs">name, description, homepage_url, documentation_url, provider_name</td></tr>
+      </tbody>
+    </table>
+
+    <div class="rounded-lg border border-amber-200 bg-amber-50 p-4 mt-4">
+      <p class="text-sm"><b>Measured fields are not editable by anyone, including us
+        through this path.</b> Availability, grade, latency, protocol conformance, tool
+        count, safety verdict and on-chain demand all come from our own probes.</p>
+      <p class="text-sm mt-2">A directory whose subjects can edit the measurement is
+        worth nothing to the agents reading it. If a measured value looks wrong, it is
+        either a real fault or a bug in our probe — tell us and we will look at the
+        probe, not at the number.</p>
+    </div>
+
+    <p class="text-sm mt-4">Your edits also survive re-crawls. Upstream registry metadata
+      is usually the thing you were correcting, so once you change a field we stop
+      overwriting it from the crawler.</p>
+    <p class="text-sm mt-2">Every change is recorded against your account in the
+      listing's public edit history — who changed which field, from what, and when.
+      That record is the main reason this can be self-service.</p>
+  </div>
+
+  <div id="recheck">
+    <h2 class="text-lg font-semibold text-slate-900 mb-2">Leave the token in place</h2>
+    <p class="text-sm">We re-check it every 4 hours. After <b>three consecutive
+      misses</b> the claim is revoked and the badge comes down. Domains change hands, and
+      a badge nobody re-checks is just a date. Edits you already made are kept — the
+      content was fine, what changes is who may edit it next.</p>
+    <p class="text-sm mt-2">If a claim is revoked by mistake, republish the token and
+      verify again. Nothing is held against you.</p>
+  </div>
+
+  <div>
+    <h2 class="text-lg font-semibold text-slate-900 mb-2">If someone else already claimed the host</h2>
+    <p class="text-sm">We do not refuse it. Whoever can publish our token on the host
+      today holds the claim — that is the whole premise, and refusing a transfer would
+      only leave the directory pointing at someone who no longer controls the domain.
+      The previous holder is emailed when a claim moves.</p>
+    <p class="text-sm mt-2">If you receive that email and did not expect it, check who
+      else can publish on that host.</p>
+  </div>
+
+  <div>
+    <h2 class="text-lg font-semibold text-slate-900 mb-2">Listings on shared platforms</h2>
+    <p class="text-sm">Some hosts serve listings written by unrelated authors:
+      <span class="mono">server.smithery.ai</span>, <span class="mono">glama.ai</span>,
+      <span class="mono">github.com</span>, <span class="mono">www.npmjs.com</span>.
+      There the author of a listing cannot change the response, and the platform that
+      can is not the author. Granting whole-host control to whoever proves it would hand
+      one party the ability to edit everyone else's entries, so self-service claims are
+      closed on those hosts.</p>
+    <p class="text-sm mt-2">If one of those listings is yours, email
+      <a class="text-blue-600 hover:underline" href="mailto:admin@agent-tools.cloud">admin@agent-tools.cloud</a>
+      and we will handle it by hand.</p>
+  </div>
+
+  <div>
+    <h2 class="text-lg font-semibold text-slate-900 mb-2">Privacy</h2>
+    <p class="text-sm">We store your GitHub account id, login name, avatar URL and
+      verified email address. The email is used to contact you about your claims — for
+      instance if one is transferred away — and for nothing else. Signing in grants no
+      permissions on its own; every edit right comes from a verified host. See
+      <a class="text-blue-600 hover:underline" href="/privacy">/privacy</a>.</p>
+  </div>
+
+  <div class="rounded-lg border border-slate-200 bg-white p-5">
+    <h2 class="font-semibold text-slate-900 mb-2">Start</h2>
+    <p class="text-sm"><a class="text-blue-600 hover:underline" href="/account">Sign in and claim a host →</a></p>
+    <p class="text-sm mt-2 text-slate-500">Questions, corrections, or anything the above
+      does not cover:
+      <a class="text-blue-600 hover:underline" href="mailto:admin@agent-tools.cloud">admin@agent-tools.cloud</a>.</p>
+  </div>
+
+</div>
+{% endblock %}

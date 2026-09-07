@@ -152,6 +152,12 @@ CREATE TABLE IF NOT EXISTS mcp_method_stats (
   PRIMARY KEY (day, method)
 );
 
+CREATE TABLE IF NOT EXISTS mcp_client_seen (
+  ip           TEXT PRIMARY KEY,
+  client_name  TEXT,
+  ts           REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS page_views (
   id          INTEGER PRIMARY KEY,
   ts          INTEGER NOT NULL,
@@ -172,6 +178,17 @@ CREATE TABLE IF NOT EXISTS rate_limits (
     PRIMARY KEY (key, window_start)
 );
 CREATE INDEX IF NOT EXISTS idx_rate_limits_updated ON rate_limits(updated_at);
+
+CREATE TABLE IF NOT EXISTS service_paytos (
+    service_id  INTEGER NOT NULL,
+    chain       TEXT    NOT NULL,
+    address     TEXT    NOT NULL,
+    first_seen  INTEGER,
+    last_seen   INTEGER,
+    PRIMARY KEY (service_id, chain, address)
+);
+CREATE INDEX IF NOT EXISTS idx_service_paytos_last
+    ON service_paytos(last_seen);
 
 CREATE TABLE IF NOT EXISTS health_history (
   id          INTEGER PRIMARY KEY,
@@ -292,6 +309,90 @@ CREATE TRIGGER IF NOT EXISTS mcp_au AFTER UPDATE ON mcp_servers BEGIN
   INSERT INTO mcp_fts(rowid, name, description, tags, tools_text)
     VALUES (new.id, new.name, new.description, new.tags, new.tools_text);
 END;
+
+-- Every directory that vouched for a listing. The row's own `source` column is
+-- only the first/owning one; a server indexed by several upstreams keeps one
+-- row per upstream here so the public card can list them all.
+CREATE TABLE IF NOT EXISTS listing_sources (
+  kind        TEXT NOT NULL,          -- 'x402' | 'mcp' | 'a2a'
+  listing_id  INTEGER NOT NULL,
+  source      TEXT NOT NULL,
+  source_id   TEXT,
+  source_url  TEXT,
+  first_seen  INTEGER NOT NULL,
+  last_seen   INTEGER NOT NULL,
+  PRIMARY KEY (kind, listing_id, source)
+);
+CREATE INDEX IF NOT EXISTS idx_listing_sources_listing
+  ON listing_sources(kind, listing_id);
+CREATE INDEX IF NOT EXISTS idx_listing_sources_source
+  ON listing_sources(source);
+
+-- Identity and authorisation are deliberately separate: a GitHub login proves
+-- who you are, only a token published on the listed host proves you control
+-- the endpoint. Edit rights come from domain_ownership, never from users.
+CREATE TABLE IF NOT EXISTS users (
+  id             INTEGER PRIMARY KEY,
+  provider       TEXT NOT NULL,          -- 'github'
+  provider_uid   TEXT NOT NULL,          -- stable numeric id; logins can be renamed
+  login          TEXT,
+  avatar_url     TEXT,
+  email          TEXT,                   -- provider-verified address, contact only
+  email_verified INTEGER NOT NULL DEFAULT 0,
+  status         TEXT NOT NULL DEFAULT 'active',   -- 'active' | 'blocked'
+  created_at     INTEGER NOT NULL,
+  last_login_at  INTEGER
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_users_provider
+  ON users(provider, provider_uid);
+
+CREATE TABLE IF NOT EXISTS domain_ownership (
+  id           INTEGER PRIMARY KEY,
+  user_id      INTEGER NOT NULL REFERENCES users(id),
+  host         TEXT NOT NULL,
+  scope_path   TEXT,                     -- NULL = whole host
+  method       TEXT NOT NULL,            -- 'inline' | 'wellknown_file' | 'dns_txt'
+  token_hash   TEXT NOT NULL,            -- sha256 of the issued token
+  status       TEXT NOT NULL,            -- 'pending' | 'verified' | 'revoked'
+  created_at   INTEGER NOT NULL,
+  verified_at  INTEGER,
+  last_checked INTEGER,
+  fail_count   INTEGER NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_domain_scope
+  ON domain_ownership(host, IFNULL(scope_path, ''))
+  WHERE status = 'verified';
+CREATE INDEX IF NOT EXISTS idx_domain_user ON domain_ownership(user_id, status);
+CREATE INDEX IF NOT EXISTS idx_domain_host ON domain_ownership(host, status);
+
+-- Public audit trail. Owner edits and our own corrections both land here.
+CREATE TABLE IF NOT EXISTS listing_edits (
+  id           INTEGER PRIMARY KEY,
+  kind         TEXT NOT NULL,            -- 'x402' | 'mcp' | 'a2a'
+  listing_id   INTEGER NOT NULL,
+  user_id      INTEGER,                  -- NULL = staff edit
+  ownership_id INTEGER,
+  field        TEXT NOT NULL,
+  old_value    TEXT,
+  new_value    TEXT,
+  applied_at   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_listing_edits_listing
+  ON listing_edits(kind, listing_id, applied_at);
+
+-- Hosts whose paths belong to different operators (shared gateways). Whole-host
+-- verification must be refused there: the author cannot change the response and
+-- the platform that can is not the author.
+CREATE TABLE IF NOT EXISTS shared_hosts (
+  host          TEXT PRIMARY KEY,
+  path_count    INTEGER NOT NULL,
+  listing_count INTEGER NOT NULL,
+  -- 'shared'  = paths belong to unrelated authors, refuse whole-host claims
+  -- 'single_operator' = one operator owns every path, whole-host claims are fine
+  -- 'unreviewed' = auto-detected, not judged yet; treated as 'shared'
+  verdict       TEXT NOT NULL DEFAULT 'unreviewed',
+  updated_at    INTEGER NOT NULL
+);
 """
 
 
@@ -373,6 +474,8 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
             "ALTER TABLE services ADD COLUMN payto_tx_30d INTEGER",
             "ALTER TABLE services ADD COLUMN payto_payers_30d INTEGER",
             "ALTER TABLE services ADD COLUMN payto_checked INTEGER",
+            "ALTER TABLE services ADD COLUMN quality_score REAL",
+            "ALTER TABLE a2a_agents ADD COLUMN quality_score REAL",
             "ALTER TABLE mcp_servers ADD COLUMN conformance TEXT",
             "ALTER TABLE mcp_servers ADD COLUMN tool_count INTEGER",
             "ALTER TABLE mcp_servers ADD COLUMN latency_p95_ms INTEGER",
@@ -383,10 +486,20 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
             "ALTER TABLE mcp_servers ADD COLUMN safety_verdict TEXT",
             "ALTER TABLE mcp_servers ADD COLUMN safety_score INTEGER",
             "ALTER TABLE mcp_servers ADD COLUMN safety_reasons TEXT",
+        "ALTER TABLE mcp_servers ADD COLUMN protocol_version TEXT",
             "ALTER TABLE a2a_agents ADD COLUMN conformance TEXT",
             "ALTER TABLE services ADD COLUMN down_since INTEGER",
             "ALTER TABLE mcp_servers ADD COLUMN down_since INTEGER",
             "ALTER TABLE a2a_agents ADD COLUMN down_since INTEGER",
+            "ALTER TABLE shared_hosts ADD COLUMN verdict TEXT "
+            "NOT NULL DEFAULT 'unreviewed'",
+            "ALTER TABLE domain_ownership ADD COLUMN token TEXT",
+            "ALTER TABLE services ADD COLUMN owner_verified INTEGER",
+            "ALTER TABLE mcp_servers ADD COLUMN owner_verified INTEGER",
+            "ALTER TABLE a2a_agents ADD COLUMN owner_verified INTEGER",
+            "ALTER TABLE services ADD COLUMN owner_edited TEXT",
+            "ALTER TABLE mcp_servers ADD COLUMN owner_edited TEXT",
+            "ALTER TABLE a2a_agents ADD COLUMN owner_edited TEXT",
         ):
             try:
                 c.execute(ddl)
@@ -461,8 +574,79 @@ def _to_json(value: Any) -> str | None:
     return json.dumps(value, ensure_ascii=False)
 
 
+def _record_source(conn: sqlite3.Connection, kind: str, listing_id, src: tuple) -> None:
+    """Remember that `src` vouched for this listing. Additive: never removes."""
+    source, source_id, source_url = src
+    if not source or not listing_id:
+        return
+    now = int(time.time())
+    try:
+        conn.execute(
+            "INSERT INTO listing_sources "
+            "(kind, listing_id, source, source_id, source_url, first_seen, last_seen) "
+            "VALUES (?,?,?,?,?,?,?) "
+            "ON CONFLICT(kind, listing_id, source) DO UPDATE SET "
+            "last_seen=excluded.last_seen, "
+            "source_id=COALESCE(excluded.source_id, listing_sources.source_id), "
+            "source_url=COALESCE(excluded.source_url, listing_sources.source_url)",
+            (kind, int(listing_id), str(source), source_id, source_url, now, now))
+    except sqlite3.Error:
+        # Provenance is additive metadata; never fail a listing write over it.
+        pass
+
+
+def sources_for(conn: sqlite3.Connection, kind: str, listing_id) -> list:
+    """Every source that vouched for one listing, earliest first."""
+    rows = conn.execute(
+        "SELECT source, source_id, source_url, first_seen, last_seen "
+        "FROM listing_sources WHERE kind=? AND listing_id=? "
+        "ORDER BY first_seen, source",
+        (kind, int(listing_id))).fetchall()
+    return [dict(r) for r in rows]
+
+
+def sources_for_many(conn: sqlite3.Connection, kind: str, ids) -> dict:
+    """Bulk variant for list pages: {listing_id: [sources, ...]}."""
+    wanted = [int(i) for i in ids if i is not None]
+    if not wanted:
+        return {}
+    out: dict = {}
+    for start in range(0, len(wanted), 400):
+        chunk = wanted[start:start + 400]
+        marks = ",".join("?" * len(chunk))
+        for r in conn.execute(
+            "SELECT listing_id, source, source_id, source_url, first_seen, last_seen "
+            f"FROM listing_sources WHERE kind=? AND listing_id IN ({marks}) "
+            "ORDER BY first_seen, source", [kind] + chunk):
+            d = dict(r)
+            out.setdefault(d.pop("listing_id"), []).append(d)
+    return out
+
+
+def listing_sources(conn: sqlite3.Connection, kind: str, listing_id: int) -> list:
+    """All directories this listing was found in, oldest first."""
+    rows = conn.execute(
+        "SELECT source, source_url, first_seen, last_seen FROM listing_sources "
+        "WHERE kind=? AND listing_id=? ORDER BY first_seen, source",
+        (kind, listing_id),
+    ).fetchall()
+    return [{"source": r["source"], "source_url": r["source_url"],
+             "first_seen": r["first_seen"], "last_seen": r["last_seen"]}
+            for r in rows]
+
+
+def attach_sources(conn: sqlite3.Connection, kind: str, rows: list) -> list:
+    """Attach the public `sources` list to each row (listing provenance)."""
+    for row in rows:
+        if isinstance(row, dict) and row.get("id"):
+            row["sources"] = listing_sources(conn, kind, int(row["id"]))
+    return rows
+
+
 def upsert_service(conn: sqlite3.Connection, row: dict) -> tuple:
     now = int(time.time())
+    # Capture provenance before dedup logic can rewrite it (first-source-wins).
+    _src = (row.get("source"), row.get("source_id"), row.get("source_url"))
     row.setdefault("created_at", now)
     row["updated_at"] = now
     row["last_seen"] = now
@@ -485,16 +669,16 @@ def upsert_service(conn: sqlite3.Connection, row: dict) -> tuple:
     existing = None
     if row.get("source") and row.get("source_id"):
         existing = cur.execute(
-            "SELECT id, created_at, health, health_checked FROM services WHERE source=? AND source_id=?",
+            "SELECT * FROM services WHERE source=? AND source_id=?",
             (row["source"], row["source_id"]),
         ).fetchone()
     if existing is None:
         existing = cur.execute(
-            "SELECT id, created_at, health, health_checked FROM services WHERE slug=?", (row["slug"],)
+            "SELECT * FROM services WHERE slug=?", (row["slug"],)
         ).fetchone()
     if existing is None and row.get("source") == "paygent-discover" and row.get("url"):
         existing = cur.execute(
-            "SELECT id, created_at, health, health_checked FROM services "
+            "SELECT * FROM services "
             "WHERE source=? AND rtrim(lower(url), '/')=? ORDER BY id LIMIT 1",
             ("paygent-discover", row["url"].rstrip("/").lower()),
         ).fetchone()
@@ -516,20 +700,27 @@ def upsert_service(conn: sqlite3.Connection, row: dict) -> tuple:
             f"INSERT INTO services ({','.join(cols)}) VALUES ({placeholders})",
             [row.get(c) for c in cols],
         )
-        return True, cur.lastrowid
+        new_id = cur.lastrowid
+        _record_source(conn, "x402", new_id, _src)
+        return True, new_id
     else:
         row["created_at"] = existing["created_at"]
-        # Crawlers refresh discovery metadata; health probes own health fields.
-        # Preserve health on metadata-only upserts so a crawl does not reset
-        # hundreds of previously checked services back to unknown.
-        if "health" not in row or row.get("health") is None:
-            row["health"] = existing["health"]
-        if "health_checked" not in row or row.get("health_checked") is None:
-            row["health_checked"] = existing["health_checked"]
+        # Crawlers refresh discovery metadata; probes own the measured fields.
+        # A crawl that simply has nothing to say about a field must not blank
+        # what a probe established -- that is how 252 on-chain tx counts and,
+        # worse, freshly backfilled payTo addresses were being wiped every
+        # six hours.
+        for field in ("health", "health_checked", "tx_30d", "payment",
+                      "resource_count", "resource_samples", "well_known_url",
+                      "confidence"):
+            if row.get(field) is None:
+                row[field] = existing[field]
+        _restore_owner_edits(row, existing)
         set_clause = ",".join(f"{c}=?" for c in cols if c != "created_at")
         params = [row.get(c) for c in cols if c != "created_at"]
         params.append(existing["id"])
         cur.execute(f"UPDATE services SET {set_clause} WHERE id=?", params)
+        _record_source(conn, "x402", existing["id"], _src)
         return False, int(existing["id"])
 
 
@@ -806,7 +997,11 @@ def search(conn, q=None, category=None, chain=None, region=None, health=None,
 
 def get_by_slug(conn, slug):
     row = conn.execute("SELECT * FROM services WHERE slug=?", (slug,)).fetchone()
-    return row_to_dict(row) if row else None
+    if not row:
+        return None
+    out = row_to_dict(row)
+    out["sources"] = listing_sources(conn, "x402", int(out["id"]))
+    return out
 
 
 def list_categories(conn):
@@ -868,6 +1063,40 @@ def bump_mcp_method(conn, method, day=None, n=1):
         "ON CONFLICT(day, method) DO UPDATE SET n = n + excluded.n",
         (day, str(method)[:64], int(n)),
     )
+
+
+_CLIENT_SEEN_TTL = 86400.0
+
+
+def remember_mcp_client(conn, ip, name):
+    """Associate an MCP clientInfo name with a peer IP.
+
+    The stateless transport hands us clientInfo on `initialize` and nothing on
+    the `tools/call` that follows, so the link is kept here instead of in the
+    session. Rows expire, keeping the table at roughly one row per active peer.
+    Caller commits (via writer())."""
+    if not ip or not name:
+        return
+    now = time.time()
+    conn.execute(
+        "INSERT INTO mcp_client_seen (ip, client_name, ts) VALUES (?, ?, ?) "
+        "ON CONFLICT(ip) DO UPDATE SET client_name = excluded.client_name, "
+        "ts = excluded.ts",
+        (str(ip)[:64], str(name)[:128], now),
+    )
+    conn.execute("DELETE FROM mcp_client_seen WHERE ts < ?", (now - _CLIENT_SEEN_TTL,))
+
+
+def recent_mcp_client(conn, ip, max_age=_CLIENT_SEEN_TTL):
+    """Best-guess clientInfo name last seen from `ip`. Shared NAT can mislabel."""
+    if not ip:
+        return None
+    row = conn.execute(
+        "SELECT client_name, ts FROM mcp_client_seen WHERE ip = ?", (str(ip)[:64],)
+    ).fetchone()
+    if row is None or (time.time() - (row[1] or 0)) > max_age:
+        return None
+    return row[0] or None
 
 
 def log_page_view(conn, kind, slug, ref=None, client_ip=None, ua=None):
@@ -965,17 +1194,34 @@ def _canonical_origin(url: str) -> str | None:
         return None
 
 
-def find_service_by_url(conn, url: str) -> dict | None:
-    """Best-effort lookup: any services row whose url or mcp_url shares the
-    same canonical origin as `url`. Returns the first match or None.
+def _canonical_endpoint(url: str) -> str | None:
+    """scheme://host/path (lowercased host, trailing slash trimmed).
+
+    The dedup key is the endpoint, not the origin: one provider commonly sells
+    several paid endpoints under the same domain, and each is its own service.
     """
-    origin = _canonical_origin(url)
-    if not origin:
+    if not url:
         return None
-    like = origin + "%"
+    try:
+        from urllib.parse import urlparse
+        p = urlparse(url.strip())
+        if not p.scheme or not p.netloc:
+            return None
+        path = (p.path or "").rstrip("/")
+        return f"{p.scheme.lower()}://{p.netloc.lower()}{path}"
+    except Exception:
+        return None
+
+
+def find_service_by_url(conn, url: str) -> dict | None:
+    """Best-effort lookup: a services row registering this exact endpoint."""
+    key = _canonical_endpoint(url)
+    if not key:
+        return None
     row = conn.execute(
-        "SELECT * FROM services WHERE url LIKE ? OR mcp_url LIKE ? LIMIT 1",
-        (like, like),
+        "SELECT * FROM services WHERE "
+        "rtrim(lower(url), '/')=? OR rtrim(lower(mcp_url), '/')=? LIMIT 1",
+        (key, key),
     ).fetchone()
     return row_to_dict(row) if row else None
 
@@ -1097,6 +1343,7 @@ def upsert_a2a_agent(conn: sqlite3.Connection, row: dict) -> tuple:
     text blob) so FTS can match skill ids/names/tags without parsing JSON.
     """
     now = int(time.time())
+    _src = (row.get("source"), row.get("source_id"), row.get("source_url"))
     row.setdefault("created_at", now)
     row["updated_at"] = now
     row["last_seen"] = now
@@ -1128,15 +1375,13 @@ def upsert_a2a_agent(conn: sqlite3.Connection, row: dict) -> tuple:
     existing_by_source_id = False
     if row.get("source") and row.get("source_id"):
         existing = cur.execute(
-            "SELECT id, slug, created_at, health, health_checked, last_success_at "
-            "FROM a2a_agents WHERE source=? AND source_id=?",
+            "SELECT * FROM a2a_agents WHERE source=? AND source_id=?",
             (row["source"], row["source_id"]),
         ).fetchone()
         existing_by_source_id = existing is not None
     if existing is None:
         existing = cur.execute(
-            "SELECT id, slug, created_at, health, health_checked, last_success_at "
-            "FROM a2a_agents WHERE slug=?",
+            "SELECT * FROM a2a_agents WHERE slug=?",
             (row["slug"],),
         ).fetchone()
 
@@ -1146,7 +1391,9 @@ def upsert_a2a_agent(conn: sqlite3.Connection, row: dict) -> tuple:
             f"INSERT INTO a2a_agents ({','.join(_A2A_COLS)}) VALUES ({placeholders})",
             [row.get(c) for c in _A2A_COLS],
         )
-        return True, cur.lastrowid
+        new_id = cur.lastrowid
+        _record_source(conn, "a2a", new_id, _src)
+        return True, new_id
 
     row["created_at"] = existing["created_at"]
     # A stable (source, source_id) identity should keep its public slug. Some
@@ -1154,17 +1401,18 @@ def upsert_a2a_agent(conn: sqlite3.Connection, row: dict) -> tuple:
     # with another indexed agent and break the whole crawl batch.
     if existing_by_source_id:
         row["slug"] = existing["slug"]
-    # metadata-only refresh must not reset a previously probed health
-    if row.get("health") is None:
-        row["health"] = existing["health"]
-    if row.get("health_checked") is None:
-        row["health_checked"] = existing["health_checked"]
-    if row.get("last_success_at") is None:
-        row["last_success_at"] = existing["last_success_at"]
+    # A metadata-only refresh has nothing to say about the last probe, and
+    # "nothing to say" is not "wipe it". latency_ms feeds the perf component of
+    # the score, so losing it silently cost verified-looking agents 20 points.
+    for _keep in ("health", "health_checked", "last_success_at", "latency_ms"):
+        if row.get(_keep) is None:
+            row[_keep] = existing[_keep]
+    _restore_owner_edits(row, existing)
     set_clause = ",".join(f"{c}=?" for c in _A2A_COLS if c != "created_at")
     params = [row.get(c) for c in _A2A_COLS if c != "created_at"]
     params.append(existing["id"])
     cur.execute(f"UPDATE a2a_agents SET {set_clause} WHERE id=?", params)
+    _record_source(conn, "a2a", existing["id"], _src)
     return False, int(existing["id"])
 
 
@@ -1218,7 +1466,11 @@ def search_a2a(conn, q=None, health=None, x402_only=False,
 
 def get_a2a_by_slug(conn, slug):
     row = conn.execute("SELECT * FROM a2a_agents WHERE slug=?", (slug,)).fetchone()
-    return a2a_row_to_dict(row) if row else None
+    if not row:
+        return None
+    out = a2a_row_to_dict(row)
+    out["sources"] = listing_sources(conn, "a2a", int(out["id"]))
+    return out
 
 
 def find_a2a_by_card_url(conn, card_url: str) -> dict | None:
@@ -1372,6 +1624,10 @@ def mcp_endpoint_urls(conn: sqlite3.Connection) -> list:
 def upsert_mcp_server(conn: sqlite3.Connection, row: dict) -> tuple:
     """Insert/update an MCP server. Dedup on (source, source_id) then slug."""
     now = int(time.time())
+    # Must be read before the cross-source branch below rewrites row["source"]
+    # to the first-seen owner -- that rewrite is what used to discard the fact
+    # that a second directory also indexes this endpoint.
+    _src = (row.get("source"), row.get("source_id"), row.get("source_url"))
     row.setdefault("created_at", now)
     row["updated_at"] = now
     row["last_seen"] = now
@@ -1381,9 +1637,7 @@ def upsert_mcp_server(conn: sqlite3.Connection, row: dict) -> tuple:
         row[k] = _to_json(row.get(k))
 
     cur = conn.cursor()
-    _sel = ("SELECT id, created_at, health, health_checked, last_success_at, "
-            "source, source_id, confidence, x402_supported, package_download_count "
-            "FROM mcp_servers ")
+    _sel = "SELECT * FROM mcp_servers "
     existing = None
     cross_source = False
     # 1) same source identity
@@ -1416,7 +1670,9 @@ def upsert_mcp_server(conn: sqlite3.Connection, row: dict) -> tuple:
             f"INSERT INTO mcp_servers ({','.join(_MCP_COLS)}) VALUES ({placeholders})",
             [row.get(c) for c in _MCP_COLS],
         )
-        return True, cur.lastrowid
+        new_id = cur.lastrowid
+        _record_source(conn, "mcp", new_id, _src)
+        return True, new_id
 
     row["created_at"] = existing["created_at"]
     # When the match was by endpoint across a different source, keep the
@@ -1435,12 +1691,11 @@ def upsert_mcp_server(conn: sqlite3.Connection, row: dict) -> tuple:
         row["confidence"] = max(new_conf, old_conf)
         row["slug"] = None  # keep existing slug (set below)
     # metadata-only refresh must not reset a previously probed health
-    if row.get("health") is None:
-        row["health"] = existing["health"]
-    if row.get("health_checked") is None:
-        row["health_checked"] = existing["health_checked"]
-    if row.get("last_success_at") is None:
-        row["last_success_at"] = existing["last_success_at"]
+    for _keep in ("health", "health_checked", "last_success_at",
+                  "latency_ms", "http_status"):
+        if row.get(_keep) is None:
+            row[_keep] = existing[_keep]
+    _restore_owner_edits(row, existing)
     # package_download_count is only provided by pulsemcp; don't let a re-crawl
     # from another source (which never carries it) wipe a stored value.
     if row.get("package_download_count") is None:
@@ -1456,6 +1711,7 @@ def upsert_mcp_server(conn: sqlite3.Connection, row: dict) -> tuple:
     params = [row.get(c) for c in cols]
     params.append(existing["id"])
     cur.execute(f"UPDATE mcp_servers SET {set_clause} WHERE id=?", params)
+    _record_source(conn, "mcp", existing["id"], _src)
     return False, int(existing["id"])
 
 
@@ -1534,7 +1790,11 @@ def search_mcp(conn, q=None, health=None, x402_only=False, kind=None,
 
 def get_mcp_by_slug(conn, slug):
     row = conn.execute("SELECT * FROM mcp_servers WHERE slug=?", (slug,)).fetchone()
-    return mcp_row_to_dict(row) if row else None
+    if not row:
+        return None
+    out = mcp_row_to_dict(row)
+    out["sources"] = listing_sources(conn, "mcp", int(out["id"]))
+    return out
 
 
 def mcp_stats(conn):
@@ -1615,18 +1875,40 @@ def mcp_p95_latency(conn, server_id: int, days: int = 14):
     return int(vals[idx])
 
 
-def mcp_quality_score(health, conformance, p95_ms, confidence=None):
-    """0..88 = availability(25) + conformance(25) + performance(30, continuous)
-    + trust(8).
+def _mcp_descriptor_parts(row) -> list:
+    """What the server tells an agent about itself, as (label, weight, present).
+
+    Replaces the old `confidence` term, which was 100% re-exported from
+    whichever registry happened to list the server.
+    """
+    def _filled(key, blanks=("", "[]", "{}")):
+        v = row.get(key)
+        return v is not None and str(v).strip() not in blanks
+
+    return [
+        ("Advertises its tools", 8.0, (row.get("tool_count") or 0) > 0),
+        ("Tool metadata captured", 5.0, _filled("tools_json")),
+        ("Source or package published", 4.0,
+         _filled("source_code_url") or _filled("package_name")),
+        ("Transport declared", 3.0, _filled("transport")),
+    ]
+
+
+def mcp_quality_score(row, p95_ms=None):
+    """0..100 = availability(25) + conformance(25) + performance(30)
+    + descriptor(20).
 
     Performance is continuous so the many healthy sub-300ms servers no longer
     all tie at full marks: full 30 at p95<=50ms, linearly down to 0 at
-    >=2000ms (no p95 data => 0). Trust scales the registry/cross-source
-    confidence (0..1). A perfect score therefore needs ok + pass + very low
-    latency + high confidence, which is rare instead of the default.
+    >=2000ms (no p95 data => 0).
     """
-    avail = 25 if health == "ok" else (10 if health == "degraded" else 0)
-    conf = 25 if conformance == "pass" else (10 if conformance == "partial" else 0)
+    d = row if isinstance(row, dict) else dict(row)
+    if p95_ms is None:
+        p95_ms = d.get("latency_p95_ms")
+    avail = 25 if d.get("health") == "ok" else (
+        10 if d.get("health") == "degraded" else 0)
+    conf = 25 if d.get("conformance") == "pass" else (
+        10 if d.get("conformance") == "partial" else 0)
     if p95_ms is None:
         perf = 0.0
     elif p95_ms <= 50:
@@ -1635,8 +1917,16 @@ def mcp_quality_score(health, conformance, p95_ms, confidence=None):
         perf = 0.0
     else:
         perf = 30.0 * (2000 - p95_ms) / (2000 - 50)
-    trust = 8.0 * min(1.0, max(0.0, float(confidence or 0)))
-    return round(avail + conf + perf + trust, 2)
+    desc = sum(w for _l, w, ok in _mcp_descriptor_parts(d) if ok)
+    score = _with_owner_bonus(avail + conf + perf + desc, d)
+    # A server our own scanner flagged must not sit in the top grades, whatever
+    # else it scores. Held to C when suspicious, to E when malicious.
+    verdict = d.get("safety_verdict")
+    if verdict == "malicious":
+        score = min(score, _band_ceiling("mcp", "E"))
+    elif verdict == "suspicious":
+        score = min(score, _band_ceiling("mcp", "C"))
+    return round(score, 2)
 
 
 # ---------------------------------------------------------------------------
@@ -1648,31 +1938,239 @@ def mcp_quality_score(health, conformance, p95_ms, confidence=None):
 # All three are availability-first and reuse signals we already probe/compute,
 # mirroring the chiark-style quality model. No new crawl.
 # ---------------------------------------------------------------------------
-_GRADE_BANDS = ((80, "A"), (70, "B+"), (60, "B"), (50, "C+"), (40, "C"), (25, "D"))
+# Cut at percentiles of each type's live distribution: A ~5%, B+ ~15%, B ~35%,
+# C+ ~50%, C ~70%, D ~80%. Bands are per-type because the three scorers measure
+# different things -- one shared ladder left MCP unable to reach A at all while
+# 62% of A2A agents sat there. "A" means top of its own kind.
+_GRADE_BANDS_BY_KIND = {
+    "x402": ((88, "A"), (80, "B+"), (62, "B"), (53, "C+"), (43, "C"), (12, "D")),
+    "mcp": ((95, "A"), (88, "B+"), (72, "B"), (56, "C+"), (40, "C"), (20, "D")),
+    "a2a": ((98, "A"), (96, "B+"), (92, "B"), (85, "C+"), (66, "C"), (60, "D")),
+}
+_GRADE_BANDS = _GRADE_BANDS_BY_KIND["x402"]
 
 
-def grade_letter(score100) -> str:
+def grade_letter(score100, kind: str = "x402") -> str:
     s = score100 or 0
-    for lo, g in _GRADE_BANDS:
+    for lo, g in _GRADE_BANDS_BY_KIND.get(kind, _GRADE_BANDS):
         if s >= lo:
             return g
     return "E"
 
 
-def _score_a2a(health, conformance, confidence) -> float:
-    avail = 40 if health == "ok" else (16 if health == "degraded" else 0)
-    conf = 30 if conformance == "pass" else (12 if conformance == "partial" else 0)
-    trust = 30.0 * min(1.0, max(0.0, float(confidence or 0)))
-    return round(avail + conf + trust, 1)
+def _a2a_card_parts(row) -> list:
+    """Agent-card completeness as (label, weight, present).
+
+    Replaces the old `confidence` term, which was a hardcoded 0.60 for 95.8%
+    of agents -- a constant 18 points that separated nobody from anybody.
+    """
+    def _filled(key, blanks=("", "[]", "{}")):
+        v = row.get(key)
+        return v is not None and str(v).strip() not in blanks
+
+    skills = row.get("skills")
+    if isinstance(skills, str):
+        try:
+            skills = json.loads(skills)
+        except (TypeError, json.JSONDecodeError):
+            skills = None
+    n_skills = len(skills) if isinstance(skills, list) else 0
+
+    return [
+        ("Skills declared", 8.0, n_skills > 0),
+        ("Three or more skills", 4.0, n_skills >= 3),
+        ("Callable endpoint published", 6.0, _filled("endpoint_url")),
+        ("Capabilities declared", 4.0, _filled("capabilities")),
+        ("Protocol version identified", 3.0, _filled("protocol_version")),
+        ("Auth scheme declared", 3.0, _filled("auth_schemes")),
+        ("Documentation published", 2.0, _filled("documentation_url")),
+    ]
 
 
-def _score_x402(health, confidence, tx_30d) -> float:
+def _a2a_perf(latency_ms) -> float:
+    """0..20. Card completeness is a checklist most agents pass, so without a
+    continuous term the top three quarters of the catalogue all tie."""
+    if latency_ms is None:
+        return 0.0
+    if latency_ms <= 150:
+        return 20.0
+    if latency_ms >= 1500:
+        return 0.0
+    return 20.0 * (1500 - latency_ms) / (1500 - 150)
+
+
+def _score_a2a(row) -> float:
+    d = row if isinstance(row, dict) else dict(row)
+    avail = 35 if d.get("health") == "ok" else (
+        14 if d.get("health") == "degraded" else 0)
+    conf = 25 if d.get("conformance") == "pass" else (
+        10 if d.get("conformance") == "partial" else 0)
+    card = sum(w for _l, w, ok in _a2a_card_parts(d) if ok) * (20.0 / 30.0)
+    score = avail + conf + card + _a2a_perf(d.get("latency_ms"))
+    return round(_with_owner_bonus(score, d), 1)
+
+
+# A dead endpoint cannot be recommended today whatever it earned before, so
+# its grade is held to the top of the D band.
+_DOWN_SCORE_CAP = 39.9
+
+# A claimed listing has someone accountable for it, which is worth a nudge but
+# not a promotion: most of the catalogue was crawled and its operators have
+# never heard of us, so this has to stay small enough to be an incentive rather
+# than a penalty on everyone else. Applied before the down/safety caps.
+_OWNER_BONUS = 3.0
+
+
+def _with_owner_bonus(score: float, row: dict) -> float:
+    if not row.get("owner_verified"):
+        return score
+    return min(100.0, score + _OWNER_BONUS)
+
+# "Top-graded" everywhere means A or B+, so the counters read the band instead
+# of a copy of its value that goes stale when the bands move.
+def _bplus(kind: str) -> int:
+    return next(lo for lo, g in _GRADE_BANDS_BY_KIND[kind] if g == "B+")
+
+
+def _band_ceiling(kind: str, grade: str) -> float:
+    """Highest score that still lands in `grade` -- derived from the bands so
+    caps follow when the bands move."""
+    bands = _GRADE_BANDS_BY_KIND[kind]
+    for i, (lo, g) in enumerate(bands):
+        if g == grade:
+            return 100.0 if i == 0 else bands[i - 1][0] - 0.1
+    return bands[-1][0] - 0.1   # "E"
+
+
+
+# availability / payability / demand. Demand outweighs payability now that
+# on-chain coverage is real: metadata completeness is table stakes, paying
+# customers are the scarce signal.
+_W_AVAIL, _W_PAY, _W_DEMAND = 40.0, 20.0, 40.0
+
+
+def _payability_parts(row) -> list:
+    """The five payability signals as (label, weight, present) triples.
+
+    Replaces the former `confidence` term, which was 62% another directory's
+    score, 11% a hardcoded 0.8 and 27% absent -- it measured which crawler
+    found the listing, not the service.
+    """
+    pay = row.get("payment")
+    if isinstance(pay, str):
+        try:
+            pay = json.loads(pay)
+        except (TypeError, json.JSONDecodeError):
+            pay = None
+    if not isinstance(pay, dict):
+        pay = {}
+    accepts = pay.get("accepts")
+    first = (accepts[0] if isinstance(accepts, list) and accepts
+             and isinstance(accepts[0], dict) else {})
+    return [
+        ("Answers a real HTTP 402 challenge", 15.0, bool(row.get("x402_ok"))),
+        ("Publishes a /.well-known/x402 descriptor", 5.0,
+         bool(row.get("well_known_url"))),
+        ("Payment address on record", 5.0,
+         bool(pay.get("pay_to") or pay.get("payTo")
+              or first.get("payTo") or first.get("pay_to"))),
+        ("Settlement network declared", 3.0,
+         bool(pay.get("network") or pay.get("chains") or pay.get("networks")
+              or first.get("network"))),
+        ("Price declared", 2.0, any(v is not None for v in (
+            pay.get("max_amount_usdc"), pay.get("price_min_usd"),
+            first.get("maxAmountRequired"), first.get("price")))),
+    ]
+
+
+def _payability(row) -> float:
+    """0..1 for "can an agent actually pay this", from our own probes only."""
+    return sum(w for _l, w, ok in _payability_parts(row) if ok) / 30.0
+
+
+def _demand(row) -> float:
+    """0..1 from on-chain USDC receipts, weighted 2:1 toward distinct payers.
+
+    Payer count is the harder number to fake, which is why the design note
+    ranks it above raw transfer count.
+    """
     import math
-    avail = {"ok": 40, "degraded": 18, "unknown": 9}.get(health, 0)
-    trust = 30.0 * min(1.0, max(0.0, float(confidence or 0)))
-    tx = tx_30d or 0
-    demand = 30.0 * min(1.0, math.log10(tx + 1) / 4.0) if tx > 0 else 0.0
-    return round(avail + trust + demand, 1)
+    tx = row.get("tx_30d") or row.get("payto_tx_30d") or 0
+    payers = row.get("payto_payers_30d") or 0
+    f = 0.0
+    if payers > 0:
+        f += (2 / 3) * min(1.0, math.log10(payers + 1) / 3.0)
+    if tx > 0:
+        f += (1 / 3) * min(1.0, math.log10(tx + 1) / 4.0)
+    return f
+
+
+def _score_x402(row) -> float:
+    d = row if isinstance(row, dict) else dict(row)
+    avail = {"ok": 1.0, "degraded": 0.45, "unknown": 0.22}.get(d.get("health"), 0.0)
+    score = _with_owner_bonus(
+        _W_AVAIL * avail + _W_PAY * _payability(d) + _W_DEMAND * _demand(d), d)
+    if d.get("health") == "down":
+        score = min(score, _DOWN_SCORE_CAP)
+    return round(score, 1)
+
+
+def score_breakdown(row) -> dict:
+    """Per-signal explanation of an x402 grade, for the public detail page."""
+    d = row if isinstance(row, dict) else dict(row)
+    health = d.get("health")
+    avail_f = {"ok": 1.0, "degraded": 0.45, "unknown": 0.22}.get(health, 0.0)
+
+    http_status = d.get("http_status")
+    avail_note = {
+        "ok": "Endpoint responded" + (f" (HTTP {http_status})" if http_status else ""),
+        "degraded": "Reachable but returned "
+                    + (f"HTTP {http_status}" if http_status else "an error"),
+        "down": "Endpoint did not respond",
+    }.get(health, "Not probed yet")
+
+    pay_parts = _payability_parts(d)
+    payers = d.get("payto_payers_30d")
+    tx = d.get("tx_30d") or d.get("payto_tx_30d")
+    if d.get("payto_checked"):
+        demand_note = (f"{payers or 0} distinct payers, {tx or 0} USDC transfers "
+                       "in the last 30 days")
+    elif any(ok for lbl, _w, ok in pay_parts if lbl == "Payment address on record"):
+        demand_note = "Payment address on record, not yet queried on-chain"
+    else:
+        demand_note = "No payment address on record, so demand cannot be measured"
+
+    def _ago(ts):
+        if not ts:
+            return None
+        mins = max(0, int((time.time() - ts) / 60))
+        if mins < 60:
+            return f"{mins} min ago"
+        if mins < 60 * 48:
+            return f"{mins // 60} h ago"
+        return f"{mins // 1440} d ago"
+
+    return {
+        "score": _score_x402(d),
+        "grade": grade_letter(_score_x402(d)),
+        "capped": health == "down",
+        "components": [
+            {"name": "Availability", "max": _W_AVAIL,
+             "points": round(_W_AVAIL * avail_f, 1), "note": avail_note},
+            {"name": "Payability", "max": _W_PAY,
+             "points": round(_W_PAY * _payability(d), 1), "note": None,
+             "parts": [{"label": l, "ok": ok} for l, _w, ok in pay_parts]},
+            {"name": "Demand", "max": _W_DEMAND,
+             "points": round(_W_DEMAND * _demand(d), 1), "note": demand_note},
+            {"name": "Owner verified", "max": _OWNER_BONUS, "bonus": True,
+             "points": _OWNER_BONUS if d.get("owner_verified") else 0.0,
+             "note": ("Operator proved control of this domain"
+                      if d.get("owner_verified")
+                      else "Nobody has claimed this listing yet")},
+        ],
+        "health_checked": _ago(d.get("health_checked")),
+        "payto_checked": _ago(d.get("payto_checked")),
+    }
 
 
 def rate_row(kind: str, row) -> tuple:
@@ -1681,11 +2179,99 @@ def rate_row(kind: str, row) -> tuple:
     if kind == "mcp":
         s = float(d.get("quality_score") or 0)
     elif kind == "a2a":
-        s = _score_a2a(d.get("health"), d.get("conformance"), d.get("confidence"))
+        s = d.get("quality_score")
+        s = _score_a2a(d) if s is None else float(s)
     else:  # x402
-        s = _score_x402(d.get("health"), d.get("confidence"),
-                        d.get("tx_30d") or d.get("payto_tx_30d"))
-    return s, grade_letter(s)
+        s = _score_x402(d)
+    return s, grade_letter(s, kind)
+
+
+_EXPORT_SPECS = {
+    "x402": ("services", row_to_dict),
+    "mcp": ("mcp_servers", mcp_row_to_dict),
+    "a2a": ("a2a_agents", a2a_row_to_dict),
+}
+
+
+def export_listings(conn: sqlite3.Connection, kind: str, after_id: int = 0,
+                    limit: int = 500, with_sources: bool = True) -> list[dict]:
+    """Keyset-paginated bulk export ordered by id.
+
+    search() ranks rows with a multi-tier ORDER BY that no index can satisfy,
+    so LIMIT/OFFSET degrades to O(offset) as callers page deeper. Bulk mirrors
+    do not need ranking, so this walks the primary key and stays index-backed
+    at any depth.
+    """
+    spec = _EXPORT_SPECS.get(kind)
+    if spec is None:
+        raise ValueError(f"unknown kind: {kind!r}")
+    table, to_dict = spec
+    rows = conn.execute(
+        f"SELECT * FROM {table} WHERE id > ? ORDER BY id LIMIT ?",
+        (int(after_id), int(limit)),
+    ).fetchall()
+    out = [to_dict(r) for r in rows]
+    if with_sources and out:
+        attach_sources(conn, kind, out)
+    return out
+
+
+def record_service_paytos(conn: sqlite3.Connection, observed: dict,
+                         ts: int) -> int:
+    """Remember which payTo addresses each service advertised, and when.
+
+    ``observed`` maps service_id -> [(chain, address), ...] as parsed from
+    that service's own verified payment descriptor.
+    """
+    rowsn = 0
+    for sid, keys in observed.items():
+        for chain, addr in keys:
+            conn.execute(
+                "INSERT INTO service_paytos(service_id, chain, address, "
+                "first_seen, last_seen) VALUES(?,?,?,?,?) "
+                "ON CONFLICT(service_id, chain, address) DO UPDATE SET "
+                "last_seen=excluded.last_seen",
+                (sid, chain, addr, ts, ts),
+            )
+            rowsn += 1
+    return rowsn
+
+
+def rescore_services(conn) -> int:
+    """Recompute and store services.quality_score.
+
+    The homepage counter and the leaderboard read this column instead of
+    re-deriving the formula in SQL, which is how the two used to drift apart.
+    """
+    rows = conn.execute(
+        "SELECT id, health, x402_ok, well_known_url, payment, tx_30d, "
+        "payto_tx_30d, payto_payers_30d, owner_verified FROM services").fetchall()
+    updates = [(_score_x402(dict(r)), r["id"]) for r in rows]
+    for start in range(0, len(updates), 1000):
+        conn.executemany("UPDATE services SET quality_score=? WHERE id=?",
+                         updates[start:start + 1000])
+    return len(updates)
+
+
+def rescore_a2a(conn) -> int:
+    rows = conn.execute("SELECT * FROM a2a_agents").fetchall()
+    ups = [(_score_a2a(dict(r)), r["id"]) for r in rows]
+    for i in range(0, len(ups), 1000):
+        conn.executemany("UPDATE a2a_agents SET quality_score=? WHERE id=?",
+                         ups[i:i + 1000])
+    return len(ups)
+
+
+def rescore_mcp(conn) -> int:
+    rows = conn.execute(
+        "SELECT id, health, conformance, latency_p95_ms, tool_count, tools_json, "
+        "source_code_url, package_name, transport, safety_verdict, "
+        "owner_verified FROM mcp_servers").fetchall()
+    ups = [(mcp_quality_score(dict(r)), r["id"]) for r in rows]
+    for i in range(0, len(ups), 1000):
+        conn.executemany("UPDATE mcp_servers SET quality_score=? WHERE id=?",
+                         ups[i:i + 1000])
+    return len(ups)
 
 
 def attach_ratings(kind: str, rows: list) -> list:
@@ -1699,32 +2285,26 @@ def attach_ratings(kind: str, rows: list) -> list:
 
 
 def grade_mix_all(conn) -> dict:
-    """A/B+ share per type, computed in SQL from stored signals (no per-row
-    scoring). MCP uses quality_score; a2a/x402 reuse the same band logic the
-    Python scorer uses, expressed inline so the homepage stays fast."""
+    """A/B+ share per type, read from each table's stored quality_score so the
+    counter cannot drift away from the Python scorer."""
     cur = conn.cursor()
     out = {}
     # MCP: quality_score already stored. A/B+ == score >= 70.
     r = cur.execute(
-        "SELECT COUNT(*) n, SUM(CASE WHEN quality_score>=70 THEN 1 ELSE 0 END) ap "
-        "FROM mcp_servers WHERE health='ok'").fetchone()
+        "SELECT COUNT(*) n, SUM(CASE WHEN quality_score>=? THEN 1 ELSE 0 END) ap "
+        "FROM mcp_servers WHERE health='ok'", (_bplus("mcp"),)).fetchone()
     n, ap = (r["n"] or 0), (r["ap"] or 0)
     out["mcp"] = {"a_plus": ap, "share": round(100 * ap / n) if n else 0}
-    # A2A: score = 40(health ok) + 30(conformance pass) + 30*confidence.
-    #   A/B+ (>=70) needs ok + (pass + conf>=0) OR ok + conf>=1; with health ok
-    #   that's conformance='pass' OR confidence>=1.0. Approximate via SQL.
     r = cur.execute(
-        "SELECT COUNT(*) n, SUM(CASE WHEN (40 + (CASE conformance WHEN 'pass' THEN 30 "
-        "WHEN 'partial' THEN 12 ELSE 0 END) + 30*COALESCE(confidence,0))>=70 THEN 1 ELSE 0 END) ap "
-        "FROM a2a_agents WHERE health='ok'").fetchone()
+        "SELECT COUNT(*) n, "
+        "SUM(CASE WHEN COALESCE(quality_score,0)>=? THEN 1 ELSE 0 END) ap "
+        "FROM a2a_agents WHERE health='ok'", (_bplus("a2a"),)).fetchone()
     n, ap = (r["n"] or 0), (r["ap"] or 0)
     out["a2a"] = {"a_plus": ap, "share": round(100 * ap / n) if n else 0}
-    # x402: score = 40(ok) + 30*confidence + 30*min(1, log10(tx+1)/4).
     r = cur.execute(
-        "SELECT COUNT(*) n, SUM(CASE WHEN (40 + 30*COALESCE(confidence,0) + "
-        "30*MIN(1.0, (CASE WHEN COALESCE(tx_30d,0)>0 THEN "
-        "(LN(COALESCE(tx_30d,0)+1)/LN(10))/4.0 ELSE 0 END)))>=70 THEN 1 ELSE 0 END) ap "
-        "FROM services WHERE health='ok'").fetchone()
+        "SELECT COUNT(*) n, "
+        "SUM(CASE WHEN COALESCE(quality_score,0)>=? THEN 1 ELSE 0 END) ap "
+        "FROM services WHERE health='ok'", (_bplus("x402"),)).fetchone()
     n, ap = (r["n"] or 0), (r["ap"] or 0)
     out["x402"] = {"a_plus": ap, "share": round(100 * ap / n) if n else 0}
     return out
@@ -1742,16 +2322,14 @@ def top_rated(conn, kind: str, limit: int = 10) -> list:
     if kind == "a2a":
         raw = conn.execute(
             "SELECT * FROM a2a_agents WHERE health='ok' ORDER BY "
-            "(40 + (CASE conformance WHEN 'pass' THEN 30 WHEN 'partial' THEN 12 "
-            "ELSE 0 END) + 30*COALESCE(confidence,0)) DESC, confidence DESC, "
-            "updated_at DESC LIMIT ?", (limit,)).fetchall()
+            "COALESCE(quality_score,0) DESC, updated_at DESC LIMIT ?",
+            (limit,)).fetchall()
         return attach_ratings("a2a", [a2a_row_to_dict(r) for r in raw])
     # x402
     raw = conn.execute(
         "SELECT * FROM services WHERE health='ok' ORDER BY "
-        "(40 + 30*COALESCE(confidence,0) + 30*MIN(1.0, (CASE WHEN COALESCE(tx_30d,0)>0 "
-        "THEN (LN(COALESCE(tx_30d,0)+1)/LN(10))/4.0 ELSE 0 END))) DESC, "
-        "tx_30d DESC, confidence DESC, updated_at DESC LIMIT ?", (limit,)).fetchall()
+        "COALESCE(quality_score,0) DESC, COALESCE(payto_payers_30d,0) DESC, "
+        "COALESCE(tx_30d,0) DESC, updated_at DESC LIMIT ?", (limit,)).fetchall()
     return attach_ratings("x402", [dict(r) for r in raw])
 
 
@@ -1816,3 +2394,284 @@ def a2a_categories(conn, min_count=1):
     out.sort(key=lambda d: (-d["count"], d["category"]))
     return out
 
+
+SHARED_HOST_MIN_PATHS = 20
+
+
+def _host_and_path(url: str) -> tuple[str, str]:
+    try:
+        u = urlparse(url or "")
+    except ValueError:
+        return "", ""
+    host = (u.hostname or "").lower()
+    if not host:
+        return "", ""
+    return host, (u.path or "/")
+
+
+def refresh_shared_hosts(
+    conn: sqlite3.Connection, min_paths: int = SHARED_HOST_MIN_PATHS
+) -> int:
+    """Rebuild the list of hosts that multiplex unrelated operators.
+
+    Whole-host domain verification is refused on these: the listing author
+    cannot change what the gateway returns, and the platform that can is not
+    the author.
+    """
+    paths: dict[str, set] = {}
+    listings: dict[str, int] = {}
+    for sql in (
+        "SELECT url FROM services WHERE url IS NOT NULL AND url != ''",
+        "SELECT endpoint_url FROM mcp_servers "
+        "WHERE endpoint_url IS NOT NULL AND endpoint_url != ''",
+        "SELECT COALESCE(endpoint_url, card_url) FROM a2a_agents "
+        "WHERE COALESCE(endpoint_url, card_url) IS NOT NULL",
+    ):
+        for row in conn.execute(sql):
+            host, path = _host_and_path(row[0])
+            if not host:
+                continue
+            paths.setdefault(host, set()).add(path)
+            listings[host] = listings.get(host, 0) + 1
+
+    # Path count only finds candidates. Whether the paths belong to unrelated
+    # authors is a judgement call, so a human verdict outlives every refresh.
+    verdicts = {
+        r["host"]: r["verdict"]
+        for r in conn.execute("SELECT host, verdict FROM shared_hosts")
+    }
+    now = int(time.time())
+    rows = [
+        (h, len(p), listings[h], verdicts.get(h, "unreviewed"), now)
+        for h, p in paths.items()
+        if len(p) >= min_paths
+    ]
+    conn.execute("DELETE FROM shared_hosts")
+    conn.executemany(
+        "INSERT INTO shared_hosts(host, path_count, listing_count, verdict, "
+        "updated_at) VALUES (?,?,?,?,?)",
+        rows,
+    )
+    conn.commit()
+    return len(rows)
+
+
+def is_shared_host(conn: sqlite3.Connection, host: str) -> bool:
+    """Whether whole-host verification must be refused for this host.
+
+    Unreviewed candidates count as shared: over-refusing costs an email,
+    under-refusing hands one party control over other people's listings.
+    """
+    if not host:
+        return False
+    row = conn.execute(
+        "SELECT verdict FROM shared_hosts WHERE host = ?", (host.lower(),)
+    ).fetchone()
+    return bool(row) and row["verdict"] != "single_operator"
+
+
+def sync_owner_verified(conn: sqlite3.Connection) -> dict[str, int]:
+    """Project verified domain claims onto the three listing tables.
+
+    Stored rather than joined so the scorers keep taking a plain row. Rebuilt
+    wholesale on every run: a partial update is how a projection starts lying.
+    Rows whose flag moved are rescored here too -- a badge that appears hours
+    before the score it earns reads like a bug.
+    """
+    hosts = {
+        r["host"]
+        for r in conn.execute(
+            "SELECT host FROM domain_ownership WHERE status='verified'")
+    }
+    out: dict[str, int] = {}
+    for table, url_expr, score_fn in (
+        ("services", "url", _score_x402),
+        ("mcp_servers", "endpoint_url", mcp_quality_score),
+        ("a2a_agents", "COALESCE(endpoint_url, card_url)", _score_a2a),
+    ):
+        marked: list[int] = []
+        changed: list[int] = []
+        for r in conn.execute(
+                "SELECT id, %s AS _u, COALESCE(owner_verified,0) AS _v FROM %s"
+                % (url_expr, table)):
+            host, _ = _host_and_path(r["_u"] or "")
+            flag = 1 if host in hosts else 0
+            if flag:
+                marked.append(r["id"])
+            if flag != r["_v"]:
+                changed.append(r["id"])
+
+        conn.execute(
+            "UPDATE %s SET owner_verified=0 WHERE COALESCE(owner_verified,0)=1"
+            % table)
+        for i in range(0, len(marked), 500):
+            chunk = marked[i:i + 500]
+            conn.execute(
+                "UPDATE %s SET owner_verified=1 WHERE id IN (%s)"
+                % (table, ",".join("?" * len(chunk))), chunk)
+
+        for i in range(0, len(changed), 500):
+            chunk = changed[i:i + 500]
+            rows = conn.execute(
+                "SELECT * FROM %s WHERE id IN (%s)"
+                % (table, ",".join("?" * len(chunk))), chunk).fetchall()
+            conn.executemany(
+                "UPDATE %s SET quality_score=? WHERE id=?" % table,
+                [(score_fn(dict(r)), r["id"]) for r in rows])
+
+        out[table] = len(marked)
+    conn.commit()
+    return out
+
+def upsert_user(conn: sqlite3.Connection, provider: str, provider_uid: str,
+                login: str | None = None, avatar_url: str | None = None,
+                email: str | None = None, email_verified: bool = False) -> int:
+    """Insert/refresh an OAuth identity, keyed on the provider's stable id.
+
+    Not keyed on email: GitHub handles and addresses both change, the numeric
+    id does not. `email` is contact information only -- it never authorises an
+    edit.
+    """
+    now = int(time.time())
+    row = conn.execute(
+        "SELECT id FROM users WHERE provider=? AND provider_uid=?",
+        (provider, provider_uid)).fetchone()
+    if row is None:
+        cur = conn.execute(
+            "INSERT INTO users(provider, provider_uid, login, avatar_url, "
+            "email, email_verified, status, created_at, last_login_at) "
+            "VALUES (?,?,?,?,?,?,'active',?,?)",
+            (provider, provider_uid, login, avatar_url, email,
+             1 if email_verified else 0, now, now))
+        conn.commit()
+        return int(cur.lastrowid)
+    conn.execute(
+        "UPDATE users SET login=?, avatar_url=?, email=COALESCE(?, email), "
+        "email_verified=?, last_login_at=? WHERE id=?",
+        (login, avatar_url, email, 1 if email_verified else 0, now, row["id"]))
+    conn.commit()
+    return int(row["id"])
+
+
+_EDITABLE_FIELDS = {
+    "x402": ("name", "description", "category", "url", "mcp_url"),
+    "mcp": ("name", "description", "homepage_url", "endpoint_url"),
+    "a2a": ("name", "description", "homepage_url", "documentation_url",
+            "provider_name", "endpoint_url", "card_url"),
+}
+
+# 改这些字段等于改这条 listing 指向谁，只接受该账号已验证过的 host。
+_ENDPOINT_FIELDS = {
+    "x402": ("url", "mcp_url"),
+    "mcp": ("endpoint_url",),
+    "a2a": ("endpoint_url", "card_url"),
+}
+
+# endpoint 一变，实测结论就不再适用于新地址，全部清空等待重测。
+_MEASURED_RESET = {
+    "x402": ("health", "health_checked", "latency_ms", "http_status", "x402_ok",
+             "quality_score", "resource_count", "resource_samples", "tx_30d",
+             "payto_tx_30d", "payto_payers_30d", "payto_checked", "down_since",
+             "last_seen", "latency_ms"),
+    "mcp": ("health", "health_checked", "latency_ms", "http_status", "tool_count",
+            "tools_json", "tools_text", "latency_p95_ms", "quality_score",
+            "conformance", "down_since", "last_success_at", "safety_verdict",
+            "safety_score", "safety_reasons"),
+    "a2a": ("health", "health_checked", "latency_ms", "conformance",
+            "quality_score", "down_since", "last_success_at"),
+}
+_KIND_TABLE = {"x402": "services", "mcp": "mcp_servers", "a2a": "a2a_agents"}
+
+
+def _restore_owner_edits(row: dict, existing) -> None:
+    """Keep fields an owner corrected by hand.
+
+    Upstream metadata is exactly what they were fixing, so a re-crawl must not
+    undo it. Measured columns are untouched by this -- owners cannot edit them.
+    """
+    try:
+        fields = json.loads(existing["owner_edited"] or "[]")
+    except Exception:
+        return
+    for field in fields:
+        row[field] = existing[field]
+
+
+def apply_listing_edits(conn: sqlite3.Connection, kind: str, listing_id: int,
+                        user_id: int, ownership_id: int,
+                        changes: dict,
+                        verified_hosts=None) -> tuple[list[str], list[str]]:
+    """Write owner edits and record each one in the public audit trail.
+
+    Returns (applied, rejected_messages). An endpoint change is only accepted on
+    a host this account already verified, and it wipes the measured columns so a
+    listing cannot carry its reputation over to a different address.
+    """
+    table = _KIND_TABLE[kind]
+    allowed = _EDITABLE_FIELDS[kind]
+    endpoints = _ENDPOINT_FIELDS.get(kind, ())
+    hosts = {str(h).lower() for h in (verified_hosts or ())}
+    current = conn.execute("SELECT * FROM %s WHERE id=?" % table,
+                           (listing_id,)).fetchone()
+    if current is None:
+        return [], []
+    now = int(time.time())
+    applied: list[str] = []
+    rejected: list[str] = []
+    endpoint_changed = False
+    for field, value in changes.items():
+        if field not in allowed:
+            continue
+        new = (value or "").strip() or None
+        old = current[field]
+        if (old or None) == new:
+            continue
+        if field in endpoints:
+            if new is None:
+                rejected.append("%s cannot be empty" % field)
+                continue
+            host, _ = _host_and_path(new)
+            if not host:
+                rejected.append("%s is not a valid URL" % field)
+                continue
+            if host not in hosts:
+                rejected.append(
+                    "%s: you have not verified control of %s" % (field, host))
+                continue
+            endpoint_changed = True
+        conn.execute("UPDATE %s SET %s=? WHERE id=?" % (table, field),
+                     (new, listing_id))
+        conn.execute(
+            "INSERT INTO listing_edits(kind, listing_id, user_id, ownership_id, "
+            "field, old_value, new_value, applied_at) VALUES (?,?,?,?,?,?,?,?)",
+            (kind, listing_id, user_id, ownership_id, field, old, new, now))
+        applied.append(field)
+    if endpoint_changed:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(%s)" % table)}
+        resets = sorted({c for c in _MEASURED_RESET.get(kind, ()) if c in cols})
+        if resets:
+            conn.execute(
+                "UPDATE %s SET %s WHERE id=?"
+                % (table, ", ".join("%s=NULL" % c for c in resets)),
+                (listing_id,))
+    if applied:
+        try:
+            marked = set(json.loads(current["owner_edited"] or "[]"))
+        except Exception:
+            marked = set()
+        marked.update(applied)
+        conn.execute("UPDATE %s SET owner_edited=? WHERE id=?" % table,
+                     (json.dumps(sorted(marked)), listing_id))
+    # 不在此提交：调用方的 db.writer() 负责，内部提交会让调用方无法组合事务。
+    return applied, rejected
+
+
+def listing_edit_history(conn: sqlite3.Connection, kind: str,
+                         listing_id: int, limit: int = 50) -> list[dict]:
+    """Public record of who changed what. Transparency is the anti-abuse."""
+    return [dict(r) for r in conn.execute(
+        "SELECT e.field, e.old_value, e.new_value, e.applied_at, u.login "
+        "FROM listing_edits e LEFT JOIN users u ON u.id = e.user_id "
+        "WHERE e.kind=? AND e.listing_id=? "
+        "ORDER BY e.applied_at DESC LIMIT ?",
+        (kind, listing_id, limit))]
