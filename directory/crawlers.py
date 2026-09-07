@@ -131,7 +131,7 @@ def _bazaar_price_usd(accept: dict):
         amt = float(amt)
     except (TypeError, ValueError):
         return None
-    asset = (accept.get("asset") or "").lower()
+    asset = str(accept.get("asset") or "").lower()
     extra = accept.get("extra") if isinstance(accept.get("extra"), dict) else {}
     name = (extra.get("name") or "").lower()
     if asset not in _BAZAAR_USDC and name not in ("usdc", "usd coin"):
