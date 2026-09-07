@@ -2049,6 +2049,52 @@ def _band_ceiling(kind: str, grade: str) -> float:
 _W_AVAIL, _W_PAY, _W_DEMAND = 40.0, 20.0, 40.0
 
 
+# Chain ids whose tokens carry no value; declaring one is not a settlement
+# capability, and its balance says nothing about real demand.
+_TESTNET_NETWORKS = {
+    "eip155:84532", "84532", "base-sepolia",
+    "eip155:11155111", "11155111", "sepolia",
+    "eip155:80002", "80002", "amoy", "polygon-amoy",
+    "solana:devnet", "devnet", "solana-devnet",
+}
+
+
+def _is_usable_payto(addr: str) -> bool:
+    """False for an address that exists but cannot receive funds.
+
+    A burn or all-zero address is worse than a missing one: the listing reads
+    as payable, so scoring it as an address on record points agents at money
+    they would lose.
+    """
+    a = (addr or "").strip().lower()
+    if not a:
+        return False
+    if a.startswith("0x"):
+        body = a[2:]
+        if len(body) != 40 or set(body) == {"0"}:
+            return False
+        if body.endswith("dead") and set(body[:-4]) == {"0"}:
+            return False
+    return True
+
+
+def _payto_of(row) -> str:
+    """The payTo a row advertises, wherever the descriptor happened to put it."""
+    pay = row.get("payment")
+    if isinstance(pay, str):
+        try:
+            pay = json.loads(pay)
+        except (TypeError, json.JSONDecodeError):
+            pay = None
+    if not isinstance(pay, dict):
+        return ""
+    accepts = pay.get("accepts")
+    first = (accepts[0] if isinstance(accepts, list) and accepts
+             and isinstance(accepts[0], dict) else {})
+    return str(pay.get("pay_to") or pay.get("payTo")
+               or first.get("payTo") or first.get("pay_to") or "")
+
+
 def _payability_parts(row) -> list:
     """The five payability signals as (label, weight, present) triples.
 
@@ -2067,16 +2113,20 @@ def _payability_parts(row) -> list:
     accepts = pay.get("accepts")
     first = (accepts[0] if isinstance(accepts, list) and accepts
              and isinstance(accepts[0], dict) else {})
+    addr = str(pay.get("pay_to") or pay.get("payTo")
+               or first.get("payTo") or first.get("pay_to") or "")
+    net = (pay.get("network") or first.get("network")
+           or pay.get("chains") or pay.get("networks"))
+    if isinstance(net, list):
+        net = net[0] if net else ""
+    net = str(net or "").strip().lower()
     return [
         ("Answers a real HTTP 402 challenge", 15.0, bool(row.get("x402_ok"))),
         ("Publishes a /.well-known/x402 descriptor", 5.0,
          bool(row.get("well_known_url"))),
-        ("Payment address on record", 5.0,
-         bool(pay.get("pay_to") or pay.get("payTo")
-              or first.get("payTo") or first.get("pay_to"))),
+        ("Payment address on record", 5.0, _is_usable_payto(addr)),
         ("Settlement network declared", 3.0,
-         bool(pay.get("network") or pay.get("chains") or pay.get("networks")
-              or first.get("network"))),
+         bool(net) and net not in _TESTNET_NETWORKS),
         ("Price declared", 2.0, any(v is not None for v in (
             pay.get("max_amount_usdc"), pay.get("price_min_usd"),
             first.get("maxAmountRequired"), first.get("price")))),
@@ -2137,8 +2187,11 @@ def score_breakdown(row) -> dict:
                        "in the last 30 days")
     elif any(ok for lbl, _w, ok in pay_parts if lbl == "Payment address on record"):
         demand_note = "Payment address on record, not yet queried on-chain"
-    else:
+    elif not _payto_of(d):
         demand_note = "No payment address on record, so demand cannot be measured"
+    else:
+        demand_note = ("Payment address is a burn or placeholder address, "
+                       "so demand cannot be measured")
 
     def _ago(ts):
         if not ts:
