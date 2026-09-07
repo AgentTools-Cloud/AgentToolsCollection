@@ -1109,6 +1109,62 @@ def _merge_payment(base, extra):
     return out
 
 
+# Chain ids whose funds are worthless; a descriptor often advertises a testnet
+# block alongside the real one, pointing at a burn address.
+_TESTNET_CHAIN_IDS = {
+    "eip155:84532", "84532", "base-sepolia",
+    "eip155:11155111", "11155111", "sepolia",
+    "eip155:80002", "80002", "amoy",
+    "solana:devnet", "devnet",
+}
+
+
+def _advertised_entries(doc: Any) -> list:
+    """Resource entries a descriptor advertises, top-level or network-scoped.
+
+    Some manifests leave the top level empty and hang the paid endpoints off a
+    per-network block instead, so we never learned which URL to probe and the
+    listing kept its price and payTo blank. Only a live, non-testnet block is
+    read; the address itself still comes from the endpoint's real 402 reply.
+    """
+    if not isinstance(doc, dict):
+        return []
+    top = doc.get("resources") or doc.get("endpoints")
+    if isinstance(top, list) and top:
+        return top
+
+    out: list = []
+    for block in doc.values():
+        # A network block is identified by carrying a chain id, not by its key,
+        # so this does not depend on one publisher's naming.
+        if not isinstance(block, dict) or not block.get("network"):
+            continue
+        if block.get("enabled") is False:
+            continue
+        net = str(block.get("network")).lower()
+        if (net in _TESTNET_CHAIN_IDS or "sepolia" in net
+                or "devnet" in net or "testnet" in net):
+            continue
+        items = (block.get("products") or block.get("resources")
+                 or block.get("endpoints"))
+        if isinstance(items, dict):
+            items = list(items.values())
+        if not isinstance(items, list):
+            continue
+        for it in items:
+            if isinstance(it, str):
+                out.append(it)
+            elif isinstance(it, dict):
+                url = it.get("endpoint") or it.get("url") or it.get("resource")
+                if url:
+                    out.append({
+                        "url": url,
+                        "method": it.get("method"),
+                        "description": it.get("description") or it.get("name"),
+                    })
+    return out
+
+
 def _extract_payment(obj: Any) -> dict[str, Any] | None:
     """Pull asset/network/amount/payTo out of an accepts[] / requirements body."""
     accepts = None
@@ -1234,8 +1290,7 @@ def fetch_wellknown_resources(url: str, well_known: str | None = None) -> dict[s
     # Some manifests list paid endpoints under `endpoints` with a
     # relative `path` instead of a `resources` array of URLs.
     doc_base = str((doc or {}).get("baseUrl") or "").strip() or origin
-    advertised = ((doc or {}).get("resources")
-                  or (doc or {}).get("endpoints") or [])
+    advertised = _advertised_entries(doc)
     advertised_total = 0
     for res in advertised:
         if isinstance(res, str):
@@ -1352,8 +1407,7 @@ def verify_x402(url: str, well_known: str | None = None) -> dict[str, Any]:
         # markers (so verification already succeeded) while holding no
         # accepts[], leaving the address only in each resource's 402 response.
         if payment is None and isinstance(doc_seen, dict):
-            advertised = (doc_seen.get("resources")
-                          or doc_seen.get("endpoints") or [])
+            advertised = _advertised_entries(doc_seen)
             for res in advertised[:5]:
                 if isinstance(res, str):
                     res_url, res_method = res.strip(), "POST"
@@ -1759,6 +1813,7 @@ def fetch_pulsemcp(max_pages: int = 200, per_page: int = 100,
     out: list[dict] = []
     seen: set[str] = set()
     consecutive_fail = 0
+    skipped_pages = 0
     consecutive_known = 0
     known_ids = known_ids or set()
     stopped_early = False
@@ -1790,12 +1845,12 @@ def fetch_pulsemcp(max_pages: int = 200, per_page: int = 100,
                 # Skip this page instead of dropping the whole crawl; bail
                 # only if several consecutive pages are unreachable.
                 consecutive_fail += 1
+                skipped_pages += 1
                 log.warning("pulsemcp page offset=%d gave up after retries "
                             "(skip; consecutive_fail=%d)", offset, consecutive_fail)
                 if consecutive_fail >= 3:
-                    log.warning("pulsemcp: too many consecutive failed pages, "
-                                "stopping with %d collected", len(out))
-                    break
+                    raise PartialCrawl(
+                        out, "%d consecutive pages failed" % consecutive_fail)
                 offset += per_page
                 continue
             consecutive_fail = 0
@@ -1871,11 +1926,27 @@ def fetch_pulsemcp(max_pages: int = 200, per_page: int = 100,
             if not data.get("next"):
                 break
     log.info("pulsemcp: collected %d remote MCP servers", len(out))
+    if skipped_pages:
+        raise PartialCrawl(out, "%d page(s) skipped after retries" % skipped_pages)
     return out
 
 
+class PartialCrawl(Exception):
+    """Pagination stopped early — ``items`` is a partial view, not the whole source.
+
+    Raised instead of returning the short list, because a caller that cannot tell
+    the difference will happily advance its incremental watermark past entries it
+    never fetched, and those entries are then never requested again.
+    """
+
+    def __init__(self, items: list, reason: str):
+        super().__init__(reason)
+        self.items = items
+        self.reason = reason
+
+
 def fetch_mcp_registry(updated_since: str | None = None,
-                       max_pages: int = 1000, per_page: int = 100,
+                       max_pages: int = 5000, per_page: int = 100,
                        remote_only: bool = True) -> list:
     """Import servers from the official MCP registry.
 
@@ -1896,13 +1967,21 @@ def fetch_mcp_registry(updated_since: str | None = None,
                 params["cursor"] = cursor
             if updated_since:
                 params["updated_since"] = updated_since
-            try:
-                r = c.get(_MCP_REGISTRY_API, params=params)
-                r.raise_for_status()
-                data = r.json()
-            except (httpx.HTTPError, ValueError) as e:
-                log.warning("mcp-registry page failed: %r", e)
-                break
+            last_err: Exception | None = None
+            for attempt in range(3):
+                try:
+                    r = c.get(_MCP_REGISTRY_API, params=params)
+                    r.raise_for_status()
+                    data = r.json()
+                    break
+                except (httpx.HTTPError, ValueError) as e:
+                    last_err = e
+                    log.warning("mcp-registry page attempt %d failed: %r",
+                                attempt + 1, e)
+                    time.sleep(2 ** attempt)
+            else:
+                raise PartialCrawl(
+                    out, "page fetch failed after 3 attempts: %r" % (last_err,))
             servers = data.get("servers") or []
             if not servers:
                 break
@@ -1964,6 +2043,10 @@ def fetch_mcp_registry(updated_since: str | None = None,
             cursor = (data.get("metadata") or {}).get("nextCursor")
             if not cursor:
                 break
+        else:
+            if cursor:
+                raise PartialCrawl(
+                    out, "hit max_pages=%d with more pages left" % max_pages)
     log.info("mcp-registry: collected %d items (updated_since=%s)",
              len(out), updated_since)
     return out
@@ -2156,7 +2239,15 @@ def fetch_mcp_keepalive(max_pages: int = 20, per_page: int = 100,
 
 
 MCP_CRAWLERS = {
-    "pulsemcp": fetch_pulsemcp,
+    # Paused 2026-09-07: v0beta finished its sunset ("September 2026: Fully
+    # sunset (100%)") and now answers 410 API_SUNSET to every request. The
+    # successor at www.pulsemcp.com/api sits behind Cloudflare bot protection
+    # and answers 403 — same from two hosts and with a browser UA, so it is
+    # their edge, not our egress. Their robots.txt is Allow: / with
+    # search=yes,use=reference, so this is reachability, not permission. The
+    # 907 rows already imported keep their own health checks. Re-enable after
+    # migrating to v0.1 (upstream offers help at hello@pulsemcp.com).
+    # "pulsemcp": fetch_pulsemcp,
     "mcp-registry": fetch_mcp_registry,
     # mcp-keepalive (holyai.me) is dead: host unreachable (connection timeout),
     # 0 contributions for weeks. Disabled 2026-06-23; re-enable if it returns.
