@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}Edit {{ listing.name }} — Agent Tools{% endblock %}
+{% block content %}
+<div class="max-w-2xl">
+
+  <a href="{{ back_url }}" class="text-sm text-slate-500 hover:text-slate-800">&larr; Back to listing</a>
+
+  <h1 class="text-xl font-semibold mt-3 mb-1">Edit {{ listing.name }}</h1>
+  <p class="text-sm text-slate-500 mb-6">
+    You control <span class="mono">{{ host }}</span>, so you may correct this
+    listing's description. Measured fields — availability, grade, latency,
+    conformance, on-chain demand — are not editable by anyone.
+  </p>
+
+  {% if error %}<p class="text-sm text-red-600 mb-4">{{ error }}</p>{% endif %}
+  {% if saved %}<p class="text-sm text-green-700 mb-4">Saved: {{ saved|join(', ') }}</p>{% endif %}
+
+  <form method="post" class="rounded-lg border border-slate-200 bg-white p-5 flex flex-col gap-4">
+    {% for f in fields %}
+      <label class="text-sm">
+        <span class="block font-medium mb-1">{{ f.label }}</span>
+        {% if f.multiline %}
+          <textarea name="{{ f.name }}" rows="4"
+                    class="w-full rounded border border-slate-300 px-3 py-2 text-sm">{{ f.value or '' }}</textarea>
+        {% else %}
+          <input type="text" name="{{ f.name }}" value="{{ f.value or '' }}"
+                 class="w-full rounded border border-slate-300 px-3 py-2 text-sm">
+        {% endif %}
+      </label>
+    {% endfor %}
+    <button class="self-start rounded bg-blue-600 text-white px-4 py-2 text-sm font-medium">Save changes</button>
+  </form>
+
+  <p class="text-xs text-slate-500 mt-3">
+    Every change is recorded in this listing's public edit history.
+  </p>
+
+  {% if history %}
+  <div class="rounded-lg border border-slate-200 bg-white p-5 mt-8">
+    <h2 class="font-semibold mb-3 text-sm">Edit history</h2>
+    <table class="w-full text-xs">
+      <tbody>
+      {% for h in history %}
+        <tr class="border-t border-slate-100">
+          <td class="py-1.5 text-slate-400 whitespace-nowrap">{{ h.ago }}</td>
+          <td class="py-1.5 text-slate-500 whitespace-nowrap">{{ h.login or 'staff' }}</td>
+          <td class="py-1.5 mono">{{ h.field }}</td>
+          <td class="py-1.5 text-slate-600">{{ (h.new_value or '—')[:70] }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
+</div>
+{% endblock %}

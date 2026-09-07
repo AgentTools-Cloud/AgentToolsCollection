@@ -745,19 +745,43 @@ def crawl_github_topic(topic: str = "a2a-protocol", max_repos: int = 100,
             "inserted": inserted, "updated": updated}
 
 
+_CARD_WELL_KNOWN = ("/.well-known/agent-card.json", "/.well-known/agent.json")
+
+
+def _card_candidates(card_url: str | None) -> list[str]:
+    """A2A 0.3 把 Agent Card 从 agent.json 改名为 agent-card.json，两处都要试。
+
+    存库的 card_url 必须排第一：把新位置排前面会对每个仍用旧位置的主机多打
+    一次请求，实测会触发部分主机限流，把本来 ok 的记录打成 down。
+    """
+    if not card_url:
+        return []
+    out = [card_url]
+    for suf in _CARD_WELL_KNOWN:
+        if card_url.endswith(suf):
+            base = card_url[: -len(suf)]
+            out += [base + s for s in _CARD_WELL_KNOWN if base + s not in out]
+            break
+    return out
+
+
 def probe_a2a_health(card_url: str | None, endpoint_url: str | None = None) -> dict:
     """Liveness probe for an indexed A2A agent.
 
     A reachable Agent Card (valid JSON) means the agent is published and
     discoverable -> 'ok'. A reachable-but-not-a-card response -> 'degraded'.
     Unreachable card with a reachable endpoint -> 'degraded'. Otherwise down.
+
+    Returns the card URL that actually served the card, so callers can correct
+    a stale location.
     """
-    targets = [t for t in (card_url, endpoint_url) if t]
+    cards = _card_candidates(card_url)
+    targets = cards + ([endpoint_url] if endpoint_url else [])
     if not targets:
         return {"status": "unknown", "latency_ms": None, "http_status": None,
-                "conformance": None}
+                "conformance": None, "card_url": None}
     last = {"status": "down", "latency_ms": None, "http_status": None,
-            "conformance": None}
+            "conformance": None, "card_url": None}
     try:
         with httpx.Client(timeout=httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0),
                           follow_redirects=True,
@@ -768,7 +792,7 @@ def probe_a2a_health(card_url: str | None, endpoint_url: str | None = None) -> d
                     r = c.get(t)
                     dt = int((time.monotonic() - t0) * 1000)
                     sc = r.status_code
-                    if i == 0 and sc == 200:
+                    if i < len(cards) and sc == 200:
                         try:
                             card = r.json()
                             if isinstance(card, dict) and (card.get("name") or card.get("skills")):
@@ -778,15 +802,17 @@ def probe_a2a_health(card_url: str | None, endpoint_url: str | None = None) -> d
                                 conf = ("pass" if (card.get("name") and isinstance(skills, list) and skills)
                                         else "partial")
                                 return {"status": "ok", "latency_ms": dt,
-                                        "http_status": sc, "conformance": conf}
+                                        "http_status": sc, "conformance": conf,
+                                        "card_url": t}
                         except (ValueError, json.JSONDecodeError):
                             pass
                     if sc < 500:
                         last = {"status": "degraded", "latency_ms": dt,
-                                "http_status": sc, "conformance": "fail"}
+                                "http_status": sc, "conformance": "fail",
+                                "card_url": None}
                 except Exception:
                     continue
         return last
     except Exception:
         return {"status": "down", "latency_ms": None, "http_status": None,
-                "conformance": None}
+                "conformance": None, "card_url": None}

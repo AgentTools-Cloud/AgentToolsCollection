@@ -15,3 +15,6 @@ data/
 # source-file backups from patch workflow (never commit)
 *.bak
 *.bak.*
+
+# patch workflow also emits .bak2/.bak3 style names
+*.bak[0-9]*

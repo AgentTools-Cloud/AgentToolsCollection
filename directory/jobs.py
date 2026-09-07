@@ -19,6 +19,7 @@ from pathlib import Path
 
 from . import a2a as a2a_mod
 from . import crawlers, db, mailer
+from . import ownership as ownership_mod
 from . import agenstry as agenstry_mod
 from . import flows as flows_mod
 from . import paygent as paygent_mod
@@ -72,7 +73,7 @@ def _finish_run(run_id: int, added: int, updated: int, errors: list[str], status
     db.with_retry(op)
 
 
-QUARANTINE_DAYS = 30
+QUARANTINE_DAYS = int(os.environ.get("AGENT_TOOLS_QUARANTINE_DAYS", "14"))
 _RESOURCE_LIST_SOURCES = {"flows-litprotocol", "x402-fuchss"}
 
 
@@ -442,10 +443,10 @@ def cmd_health(only_unknown: bool = False, quarantined_only: bool = False) -> in
     n_ok = n_down = n_degraded = 0
     _qc = int(time.time()) - QUARANTINE_DAYS * 86400
     if quarantined_only:
-        sql = ("SELECT id, url, well_known_url FROM services "
+        sql = ("SELECT id, url, well_known_url, mcp_url FROM services "
                f"WHERE down_since IS NOT NULL AND down_since <= {_qc}")
     else:
-        sql = ("SELECT id, url, well_known_url FROM services "
+        sql = ("SELECT id, url, well_known_url, mcp_url FROM services "
                f"WHERE (down_since IS NULL OR down_since > {_qc})")
         if only_unknown:
             # crawler inserts leave health NULL (bypasses the column DEFAULT), so
@@ -461,12 +462,21 @@ def cmd_health(only_unknown: bool = False, quarantined_only: bool = False) -> in
     from concurrent.futures import ThreadPoolExecutor
 
     def _probe(r):
-        res = crawlers.probe_health(r["url"], r["well_known_url"])
+        # 只看状态码无法区分「MCP 端点」和「恰好返回 200 的文档页」，
+        # 所以登记了 mcp_url 的条目走真正的 initialize 握手。
+        mcp_url = r["mcp_url"] if "mcp_url" in r.keys() else None
+        conf = None
+        if mcp_url:
+            res = crawlers.probe_mcp_health(mcp_url)
+            conf = res.get("conformance")
+            x = 1 if res.get("http_status") == 402 else 0
+        else:
+            res = crawlers.probe_health(r["url"], r["well_known_url"])
+            x = 1 if res["x402"] else 0
         h = res["status"]
-        x = 1 if res["x402"] else 0
         now = int(time.time())
         return (h,
-                (h, now, res["latency_ms"], res["http_status"], x, r["id"]),
+                (h, now, res["latency_ms"], res["http_status"], x, conf, r["id"]),
                 (r["id"], now, h, res["latency_ms"], res["http_status"], x))
 
     # Concurrent probes (network-I/O bound). 16 workers keeps this shared VPS
@@ -493,7 +503,8 @@ def cmd_health(only_unknown: bool = False, quarantined_only: bool = False) -> in
             with db.writer() as c:
                 c.executemany(
                     "UPDATE services SET health=?, health_checked=?, latency_ms=?, "
-                    "http_status=?, x402_ok=max(COALESCE(x402_ok,0), ?) WHERE id=?",
+                    "http_status=?, x402_ok=max(COALESCE(x402_ok,0), ?), "
+                    "conformance=COALESCE(?, conformance) WHERE id=?",
                     updates,
                 )
                 c.executemany(
@@ -512,6 +523,9 @@ def cmd_health(only_unknown: bool = False, quarantined_only: bool = False) -> in
         with db.writer() as c:
             c.execute("DELETE FROM health_history WHERE checked_at < ?", (cutoff,))
     db.with_retry(_prune)
+
+    cmd_ownership_recheck()
+    cmd_rescore()
 
     _maintain_down_since("services")
     log.info("health: ok=%d degraded=%d down=%d", n_ok, n_degraded, n_down)
@@ -553,8 +567,10 @@ def cmd_health_a2a(only_unknown: bool = False, quarantined_only: bool = False) -
         res = a2a_mod.probe_a2a_health(r["card_url"], r["endpoint_url"])
         h = res["status"]
         last_ok = now if h == "ok" else None
+        card = res.get("card_url") or r["card_url"]
         return h, res.get("conformance"), (h, now, res["latency_ms"],
-                                           res.get("conformance"), last_ok, r["id"])
+                                           res.get("conformance"), last_ok,
+                                           card, r["id"])
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
     workers = min(32, max(4, len(rows)))
@@ -573,7 +589,8 @@ def cmd_health_a2a(only_unknown: bool = False, quarantined_only: bool = False) -
         with db.writer() as c:
             c.executemany(
                 "UPDATE a2a_agents SET health=?, health_checked=?, latency_ms=?, "
-                "conformance=?, last_success_at=COALESCE(?, last_success_at) WHERE id=?",
+                "conformance=?, last_success_at=COALESCE(?, last_success_at), "
+                "card_url=? WHERE id=?",
                 updates,
             )
     db.with_retry(op)
@@ -630,7 +647,8 @@ def cmd_health_mcp(only_unknown: bool = False, quarantined_only: bool = False) -
         safety_reasons = json.dumps(scan.to_dict()["reasons"], ensure_ascii=False)
         upd = (h, now, res["latency_ms"], res["http_status"],
                conf, res.get("tool_count"), tools_json, tools_text,
-               scan.verdict, scan.score, safety_reasons, last_ok, r["id"])
+               scan.verdict, scan.score, safety_reasons,
+               res.get("protocol_version"), last_ok, r["id"])
         return r["id"], h, conf, res["latency_ms"], scan, upd
 
     # Concurrent probes (network-I/O bound). 16 workers keeps this VPS — which
@@ -661,6 +679,7 @@ def cmd_health_mcp(only_unknown: bool = False, quarantined_only: bool = False) -
                     "tools_json=COALESCE(?, tools_json), "
                     "tools_text=COALESCE(?, tools_text), "
                     "safety_verdict=?, safety_score=?, safety_reasons=?, "
+                    "protocol_version=COALESCE(?, protocol_version), "
                     "last_success_at=COALESCE(?, last_success_at) WHERE id=?",
                     updates,
                 )
@@ -677,10 +696,14 @@ def cmd_health_mcp(only_unknown: bool = False, quarantined_only: bool = False) -
                 for r in batch:
                     p95 = db.mcp_p95_latency(c, r["id"])
                     srow = c.execute(
-                        "SELECT health, conformance, confidence FROM mcp_servers WHERE id=?",
-                        (r["id"],)).fetchone()
-                    score = db.mcp_quality_score(
-                        srow["health"], srow["conformance"], p95, srow["confidence"])
+                        "SELECT health, conformance, tool_count, tools_json, "
+                        "source_code_url, package_name, transport, safety_verdict, "
+                        "owner_verified "
+                        "FROM mcp_servers WHERE id=?", (r["id"],)).fetchone()
+                    if srow is None:
+                        # a concurrent crawl can merge this row away mid-pass
+                        continue
+                    score = db.mcp_quality_score(dict(srow), p95)
                     c.execute(
                         "UPDATE mcp_servers SET latency_p95_ms=?, quality_score=? WHERE id=?",
                         (p95, score, r["id"]))
@@ -715,21 +738,45 @@ def _paytos_for_row(payment_json):
     except Exception:
         return []
     out, seen = [], set()
-    for a in (p.get("accepts") or []):
-        chain = crawlers.network_to_chain(a.get("network"))
-        if not chain:
-            continue
-        pt = a.get("pay_to") or a.get("payTo")
-        if not (pt and pt.startswith("0x")):
-            continue
-        key = (chain, pt.lower())
+
+    def _add(chain, pt):
+        if not chain or not pt or not str(pt).startswith("0x"):
+            return
+        # The zero address collects every mint and burn on the chain; counting
+        # it as a payee invents six-figure demand out of nothing.
+        if str(pt).lower() == "0x" + "0" * 40:
+            return
+        key = (chain, str(pt).lower())
         if key not in seen:
             seen.add(key)
             out.append(key)
+
+    for a in (p.get("accepts") or []):
+        _add(crawlers.network_to_chain(a.get("network")),
+             a.get("pay_to") or a.get("payTo"))
+
+    # Flat shape: some sources (cdp-bazaar) store one payTo plus a chains list
+    # instead of accepts[]. Without this the address is on record but never
+    # queried, so the service scores zero on-chain demand by default.
+    flat_pt = p.get("pay_to") or p.get("payTo")
+    if flat_pt:
+        # crawlers._extract_payment() emits a singular "network"; cdp-bazaar
+        # stores a "chains" list. Both land in this column.
+        networks = (p.get("chains") or p.get("networks")
+                    or p.get("network") or p.get("chain") or [])
+        if isinstance(networks, str):
+            networks = [networks]
+        for net in networks:
+            _add(crawlers.network_to_chain(net), flat_pt)
+
     return out
 
 
-def cmd_onchain(limit=None, stale_days=3, refresh_all=False, rate=0.3) -> int:
+# How far back a previously advertised payTo still counts toward demand.
+# Matches the 30-day measurement window.
+_PAYTO_WINDOW = 30 * 86400
+
+def cmd_onchain(limit=None, stale_days=3, refresh_all=False, rate=1.2) -> int:
     """Signal C: measure real on-chain USDC demand per service across every
     supported chain (Base, Ethereum, Optimism, Polygon, Arbitrum, Gnosis)."""
     now = int(time.time())
@@ -740,18 +787,40 @@ def cmd_onchain(limit=None, stale_days=3, refresh_all=False, rate=0.3) -> int:
             "WHERE payment IS NOT NULL AND payment != ''"
         ).fetchall())
 
+    # Addresses a service advertised earlier in the demand window still
+    # carry its demand: rotating a wallet must not read as losing customers.
+    # These only ever come from our own verification of the service's own
+    # descriptor/402 -- never from a submission or an email.
+    with db.connect(read_only=True) as c:
+        history = {}
+        for h in c.execute(
+            "SELECT service_id, chain, address FROM service_paytos "
+            "WHERE last_seen >= ?", (now - _PAYTO_WINDOW,)
+        ):
+            history.setdefault(h["service_id"], set()).add(
+                (h["chain"], h["address"]))
+
     # service_id -> [(chain, payto)]; (chain, payto) -> [service_id]
     service_keys = {}
     key_services = {}
+    observed = {}
     for r in rows:
         if not refresh_all and r["payto_checked"] and r["payto_checked"] > stale_cutoff:
             continue
         keys = _paytos_for_row(r["payment"])
         if not keys:
             continue
+        observed[r["id"]] = keys
+        keys = sorted({*keys, *history.get(r["id"], ())})
         service_keys[r["id"]] = keys
         for k in keys:
             key_services.setdefault(k, []).append(r["id"])
+
+    if observed:
+        def op_hist():
+            with db.writer() as c:
+                db.record_service_paytos(c, observed, now)
+        db.with_retry(op_hist)
 
     work = list(key_services)
     if limit:
@@ -769,15 +838,36 @@ def cmd_onchain(limit=None, stale_days=3, refresh_all=False, rate=0.3) -> int:
     log.info("onchain: querying %d unique (chain,payTo) over %d chains: %s",
              len(work), len(by_chain), by_chain)
 
-    # 1) query each unique (chain, payto) once
+    # 1) query each unique (chain, payto) once.
+    # Chains with a bulk log sweep go first: one pass covers every address on
+    # that chain, which is the only way Base finishes at all now that the
+    # per-address indexer throttles us.
     results = {}
+    remaining = list(work)
+    for chain in crawlers.BULK_LOG_CHAINS:
+        batch = [pt for ch, pt in remaining if ch == chain]
+        if not batch:
+            continue
+        bulk, ok = crawlers.fetch_chain_activity_bulk(batch, chain=chain)
+        if not ok:
+            log.warning("onchain: bulk sweep for %s incomplete; "
+                        "falling back to per-address queries", chain)
+            continue
+        for pt in batch:
+            got = bulk.get(pt.lower()) or {"tx": 0, "payers": 0}
+            results[(chain, pt)] = {"tx": got["tx"], "payers": got["payers"],
+                                    "ok": True, "capped": False}
+        remaining = [k for k in remaining if k[0] != chain]
+        log.info("onchain: bulk sweep covered %d %s addresses",
+                 len(batch), chain)
+
     done = 0
-    for key in work:
+    for key in remaining:
         ch, pt = key
         results[key] = crawlers.fetch_payto_activity(pt, chain=ch)
         done += 1
         if done % 50 == 0:
-            log.info("onchain progress: %d/%d addresses", done, len(work))
+            log.info("onchain progress: %d/%d addresses", done, len(remaining))
         time.sleep(rate)
 
     # 2) aggregate per service across its chains, then write once
@@ -787,19 +877,66 @@ def cmd_onchain(limit=None, stale_days=3, refresh_all=False, rate=0.3) -> int:
         if not accs:
             continue  # every query failed -> skip, avoid false zero
         tx = sum(a["tx"] for a in accs)
-        payers = sum(a["payers"] for a in accs)
+        ids = [a.get("payer_ids") for a in accs]
+        if all(i is not None for i in ids):
+            payers = len({p for i in ids for p in i})
+        else:
+            payers = sum(a["payers"] for a in accs)
         if tx > 0:
             n_active += 1
         def op(sid=sid, tx=tx, payers=payers, now=now):
             with db.writer() as c:
+                # payto_* keeps the raw on-chain provenance; tx_30d is the field
+                # every consumer reads (scoring, ranking, match_reason, API,
+                # MCP tools). Without folding the measurement in, the on-chain
+                # job produced data nothing ever looked at.
                 c.execute(
                     "UPDATE services SET payto_tx_30d=?, payto_payers_30d=?, "
-                    "payto_checked=? WHERE id=?",
-                    (tx, payers, now, sid),
+                    "payto_checked=?, tx_30d=MAX(COALESCE(tx_30d,0), ?) "
+                    "WHERE id=?",
+                    (tx, payers, now, tx, sid),
                 )
         db.with_retry(op)
         n_written += 1
     log.info("onchain: wrote %d services, %d with paying demand", n_written, n_active)
+    cmd_rescore()
+    return 0
+
+
+def cmd_ownership_recheck() -> int:
+    """Re-probe every verified domain claim and drop the ones that vanished.
+
+    Domains change hands. A badge that is never re-checked is a lie with a
+    timestamp on it.
+    """
+    def op():
+        with db.writer() as c:
+            kept, revoked = ownership_mod.recheck(c)
+            projection = db.sync_owner_verified(c)
+            return kept, revoked, projection
+    kept, revoked, projection = db.with_retry(op)
+    log.info("ownership recheck: kept=%d revoked=%d projection=%s",
+             kept, revoked, projection)
+    return 0
+
+
+def cmd_rescore() -> int:
+    """Recompute the stored quality_score for all three resource types."""
+    def op():
+        with db.writer() as c:
+            return (db.rescore_services(c), db.rescore_mcp(c), db.rescore_a2a(c))
+    x, m, a = db.with_retry(op)
+    log.info("rescore: %d services, %d mcp, %d a2a", x, m, a)
+    return 0
+
+
+def cmd_shared_hosts(min_paths: int = db.SHARED_HOST_MIN_PATHS) -> int:
+    """Recompute which hosts multiplex unrelated operators under one domain."""
+    def op():
+        with db.writer() as c:
+            return db.refresh_shared_hosts(c, min_paths=min_paths)
+    n = db.with_retry(op)
+    log.info("shared hosts: %d hosts with >= %d distinct paths", n, min_paths)
     return 0
 
 
@@ -870,6 +1007,15 @@ def _approve(sub_id: int, note: str | None = None,
         price_min = fixed_price if fixed_price is not None else detected_price
     if price_max is None:
         price_max = fixed_price if fixed_price is not None else detected_price
+    # A submitter registers one URL, but an origin usually sells several paid
+    # endpoints; take the full list from its x402 descriptor.
+    try:
+        res_info = crawlers.fetch_wellknown_resources(
+            url, p.get("well_known") or p.get("well_known_url"))
+    except Exception as e:  # noqa: BLE001 - extras must never block a listing
+        log.warning("approve #%d: resource discovery failed: %r", sub_id, e)
+        res_info = {}
+
     service = {
         "slug": _slugify(host) + "-sub" + str(sub_id),
         "name": name,
@@ -881,6 +1027,14 @@ def _approve(sub_id: int, note: str | None = None,
         "price_max": price_max,
         "currency": "USDC" if price_min is not None or price_max is not None else None,
         "mcp_url": p.get("mcp_url"),
+        "well_known_url": res_info.get("well_known_url"),
+        "resource_count": res_info.get("resource_count"),
+        "resource_samples": res_info.get("resource_samples"),
+        "call_info": {
+            "resource_count": res_info.get("resource_count"),
+            "resource_samples": res_info.get("resource_samples"),
+        } if res_info.get("resource_samples") else None,
+        "payment": payment or None,
         "source": "submission",
         "source_id": f"sub:{sub_id}",
         "tags": [p.get("category")] if p.get("category") else [],
@@ -1117,10 +1271,16 @@ def main(argv=None) -> int:
     p_auto = sub.add_parser("auto-review")
     p_auto.add_argument("--limit", type=int, default=100)
     p_auto.add_argument("--dry-run", action="store_true")
+    sub.add_parser("rescore")
+    sub.add_parser("ownership-recheck")
+    p_shared = sub.add_parser("shared-hosts")
+    p_shared.add_argument("--min-paths", type=int, default=db.SHARED_HOST_MIN_PATHS)
     p_onchain = sub.add_parser("onchain")
     p_onchain.add_argument("--limit", type=int, default=None)
     p_onchain.add_argument("--stale-days", type=int, default=3)
     p_onchain.add_argument("--all", action="store_true")
+    p_onchain.add_argument("--rate", type=float, default=1.2,
+                           help="seconds to sleep between indexer queries")
     args = p.parse_args(argv)
 
     if args.cmd == "init":
@@ -1151,9 +1311,15 @@ def main(argv=None) -> int:
         return cmd_reject(args.id, note=args.note)
     if args.cmd == "auto-review":
         return cmd_auto_review(limit=args.limit, dry_run=args.dry_run)
+    if args.cmd == "rescore":
+        return cmd_rescore()
+    if args.cmd == "ownership-recheck":
+        return cmd_ownership_recheck()
+    if args.cmd == "shared-hosts":
+        return cmd_shared_hosts(min_paths=args.min_paths)
     if args.cmd == "onchain":
         return cmd_onchain(limit=args.limit, stale_days=args.stale_days,
-                           refresh_all=args.all)
+                           refresh_all=args.all, rate=args.rate)
     return 2
 
 

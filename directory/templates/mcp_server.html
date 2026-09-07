@@ -20,6 +20,12 @@
 <header class="mt-4 mb-6 flex flex-wrap items-start justify-between gap-4">
   <div class="min-w-0">
     <h1 class="text-3xl md:text-4xl font-extrabold tracking-tight">{{ m.name }}</h1>
+
+    <div class="mt-3 hidden" data-edit-host="{{ url_host(m.endpoint_url) }}">
+      <a href="/listings/mcp/{{ m.slug }}/edit"
+         class="inline-flex items-center gap-1.5 rounded border border-slate-300 bg-white px-3 py-1.5 text-sm hover:border-slate-400">Edit this listing</a>
+      <span class="ml-2 text-xs text-slate-500">You verified control of this domain</span>
+    </div>
     {% if m.safety %}
     <div class="mt-3 rounded-lg px-4 py-3 text-sm {% if m.safety.verdict == "malicious" %}bg-rose-50 text-rose-800 ring-1 ring-rose-200{% else %}bg-amber-50 text-amber-800 ring-1 ring-amber-200{% endif %}">
       <div class="font-semibold">⚠ {% if m.safety.verdict == "malicious" %}Flagged by static safety scan — do not run install commands from this listing{% else %}Review recommended — static scan found suspicious patterns{% endif %}</div>
@@ -52,7 +58,7 @@
 </section>
 {% endif %}
 
-<section class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+<section class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
   <div class="stat-card">
     <div class="text-xs text-slate-500 mb-1">Transport</div>
     <div class="font-semibold mono text-sm">{{ m.transport or "—" }}</div>
@@ -65,7 +71,37 @@
     <div class="text-xs text-slate-500 mb-1">Cost</div>
     <div class="font-semibold mono text-sm">{{ m.cost_hint or "—" }}</div>
   </div>
+  <div class="stat-card">
+    <div class="text-xs text-slate-500 mb-1"
+         title="The MCP revision this server settled on when we offered it the latest one we know.">
+      Protocol revision
+    </div>
+    <div class="font-semibold mono text-sm">{{ m.protocol_version or "—" }}</div>
+    {% if m.protocol_version %}
+      <div class="text-xs text-slate-400 mt-1">negotiated, not declared</div>
+    {% endif %}
+  </div>
 </section>
+
+{% if m.sources %}
+<section class="svc-card p-6 mb-6">
+  <h2 class="text-base font-semibold mb-1">Listed in</h2>
+  <p class="text-xs text-slate-500 mb-4">Directories this entry was found in.</p>
+  <div class="flex flex-wrap gap-2">
+    {% for s in m.sources %}
+      {% if s.source_url %}
+      <a href="{{ s.source_url }}" target="_blank" rel="noopener"
+         class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-slate-200 bg-slate-50 hover:bg-slate-100 text-sm mono text-slate-700">
+        {{ s.source }}
+        <span class="text-slate-400">&#8599;</span>
+      </a>
+      {% else %}
+      <span class="inline-flex items-center px-3 py-1.5 rounded-full border border-slate-200 bg-slate-50 text-sm mono text-slate-700">{{ s.source }}</span>
+      {% endif %}
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
 
 <section class="svc-card p-6 mb-6">
   <h2 class="text-base font-semibold mb-4">How to connect</h2>

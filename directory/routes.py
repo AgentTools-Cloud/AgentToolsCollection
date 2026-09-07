@@ -24,8 +24,15 @@ from . import limits
 BASE_DIR = Path(__file__).resolve().parent
 TEMPLATES = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 # Build version — bump on deploy to bust browser/CDN HTML caches.
-BUILD_VERSION = "2026-06-04.17"
+BUILD_VERSION = "2026-09-03.1"
 TEMPLATES.env.globals["build_version"] = BUILD_VERSION
+# Anonymous visitors cost no query: this returns before touching
+# the DB when the session cookie is absent or unsigned.
+from .auth import current_user as _current_user
+TEMPLATES.env.globals["current_user"] = _current_user
+from .auth import may_edit_listing as _may_edit_listing
+TEMPLATES.env.globals["may_edit_listing"] = _may_edit_listing
+TEMPLATES.env.globals["url_host"] = lambda u: db._host_and_path(u or "")[0]
 
 router = APIRouter()
 
@@ -58,6 +65,9 @@ ASK_RATE_LIMITS = (
     ("day", limits.env_int("AGENT_TOOLS_ASK_RATE_LIMIT_PER_DAY", 200), 86400),
 )
 SUBMIT_RATE_LIMIT_PER_DAY = limits.env_int("AGENT_TOOLS_SUBMIT_RATE_LIMIT_PER_DAY", 5)
+# Ranked search cannot satisfy its ORDER BY from an index, so a deep offset
+# forces a proportionally larger sort. Cap it; bulk readers use /api/v1/export.
+MAX_SEARCH_OFFSET = limits.env_int("AGENT_TOOLS_MAX_SEARCH_OFFSET", 1000)
 
 
 def _enforce_ask_limit(request: Request, use_llm: bool) -> None:
@@ -73,7 +83,7 @@ def _enforce_ask_limit(request: Request, use_llm: bool) -> None:
 
 
 @router.get("/", response_class=HTMLResponse, include_in_schema=False)
-async def home(request: Request):
+def home(request: Request):
     with _conn() as c:
         s = db.stats(c)
         ms = db.mcp_stats(c)
@@ -91,7 +101,7 @@ async def home(request: Request):
 
 
 @router.get("/x402", response_class=HTMLResponse, include_in_schema=False)
-async def x402_page(
+def x402_page(
     request: Request,
     q: str | None = Query(default=None),
     category: str | None = Query(default=None),
@@ -117,16 +127,17 @@ async def x402_page(
 
 
 @router.get("/services/{slug}", response_class=HTMLResponse, include_in_schema=False)
-async def service_detail(request: Request, slug: str):
+def service_detail(request: Request, slug: str):
     with _conn() as c:
         svc = db.get_by_slug(c, slug)
     if not svc:
         raise HTTPException(404, "service not found")
-    return TEMPLATES.TemplateResponse(request, "service.html", {"request": request, "svc": svc})
+    return TEMPLATES.TemplateResponse(request, "service.html", {
+        "request": request, "svc": svc, "rating": db.score_breakdown(svc)})
 
 
 @router.get("/categories", response_class=HTMLResponse, include_in_schema=False)
-async def categories_page(request: Request):
+def categories_page(request: Request):
     with _conn() as c:
         x402_cats = db.list_categories(c)
         mcp_cats = db.mcp_categories(c)
@@ -143,28 +154,43 @@ async def categories_page(request: Request):
 
 
 @router.get("/submit", response_class=HTMLResponse, include_in_schema=False)
-async def submit_page(request: Request, type: str | None = Query(default=None)):
+def submit_page(request: Request, type: str | None = Query(default=None)):
     active = type if type in ("x402", "mcp", "a2a") else "x402"
     return TEMPLATES.TemplateResponse(request, "submit.html", {"request": request, "active_type": active})
 
 
 @router.get("/about", response_class=HTMLResponse, include_in_schema=False)
-async def about_page(request: Request):
+def about_page(request: Request):
     return TEMPLATES.TemplateResponse(request, "about.html", {"request": request})
 
 
+@router.get("/docs/claim", response_class=HTMLResponse, include_in_schema=False)
+def claim_page(request: Request):
+    return TEMPLATES.TemplateResponse(request, "claim.html", {"request": request})
+
+
+# Both were public briefly: /ownership named after the internal table, /claim
+# without saying it is documentation. Redirect straight to the final URL rather
+# than chaining.
+@router.get("/docs", include_in_schema=False)
+@router.get("/claim", include_in_schema=False)
+@router.get("/ownership", include_in_schema=False)
+def claim_docs_redirect() -> Response:
+    return Response(status_code=301, headers={"Location": "/docs/claim"})
+
+
 @router.get("/terms", response_class=HTMLResponse, include_in_schema=False)
-async def terms_page(request: Request):
+def terms_page(request: Request):
     return TEMPLATES.TemplateResponse(request, "terms.html", {"request": request})
 
 
 @router.get("/privacy", response_class=HTMLResponse, include_in_schema=False)
-async def privacy_page(request: Request):
+def privacy_page(request: Request):
     return TEMPLATES.TemplateResponse(request, "privacy.html", {"request": request})
 
 
 @router.get("/mcp", response_class=HTMLResponse, include_in_schema=False)
-async def mcp_page(
+def mcp_page(
     request: Request,
     q: str | None = Query(default=None),
     health: str | None = Query(default=None),
@@ -187,7 +213,7 @@ async def mcp_page(
 
 
 @router.get("/mcp/servers/{slug}", response_class=HTMLResponse, include_in_schema=False)
-async def mcp_detail(request: Request, slug: str):
+def mcp_detail(request: Request, slug: str):
     with _conn() as c:
         m = db.get_mcp_by_slug(c, slug)
     if not m:
@@ -196,7 +222,7 @@ async def mcp_detail(request: Request, slug: str):
 
 
 @router.get("/_partials/mcp", response_class=HTMLResponse, include_in_schema=False)
-async def mcp_partial(
+def mcp_partial(
     request: Request,
     q: str | None = Query(default=None),
     health: str | None = Query(default=None),
@@ -211,7 +237,7 @@ async def mcp_partial(
 
 
 @router.get("/a2a", response_class=HTMLResponse, include_in_schema=False)
-async def a2a_page(
+def a2a_page(
     request: Request,
     q: str | None = Query(default=None),
     health: str | None = Query(default=None),
@@ -234,7 +260,7 @@ async def a2a_page(
 
 
 @router.get("/a2a/agents/{slug}", response_class=HTMLResponse, include_in_schema=False)
-async def a2a_detail(request: Request, slug: str):
+def a2a_detail(request: Request, slug: str):
     with _conn() as c:
         a = db.get_a2a_by_slug(c, slug)
     if not a:
@@ -243,7 +269,7 @@ async def a2a_detail(request: Request, slug: str):
 
 
 @router.get("/_partials/a2a", response_class=HTMLResponse, include_in_schema=False)
-async def a2a_partial(
+def a2a_partial(
     request: Request,
     q: str | None = Query(default=None),
     health: str | None = Query(default=None),
@@ -258,7 +284,7 @@ async def a2a_partial(
 
 
 @router.get("/_partials/services", response_class=HTMLResponse, include_in_schema=False)
-async def services_partial(
+def services_partial(
     request: Request,
     view: str | None = Query(default=None),
     q: str | None = Query(default=None),
@@ -276,19 +302,20 @@ async def services_partial(
 
 
 @router.get("/api/v1/search", tags=["directory"])
-async def api_search(
+def api_search(
     q: str | None = Query(default=None, description="Free-text query."),
     category: str | None = None,
     chain: str | None = Query(default=None, description='e.g. "base", "solana"'),
     region: str | None = None,
     health: str | None = Query(default=None, description=HEALTH_DOC),
     limit: int = Query(default=20, ge=1, le=100),
-    offset: int = Query(default=0, ge=0),
+    offset: int = Query(default=0, ge=0, le=MAX_SEARCH_OFFSET),
 ):
     """Agent-friendly search across the x402 service directory."""
     with _conn() as c:
         services = db.search(c, q=q, category=category, chain=chain,
                              region=region, health=health, limit=limit, offset=offset)
+        db.attach_sources(c, "x402", services)
     for svc in services:
         svc.pop("source", None)
         svc.pop("source_id", None)
@@ -298,7 +325,7 @@ async def api_search(
 
 
 @router.get("/api/v1/services/{slug}", tags=["directory"])
-async def api_service(slug: str):
+def api_service(slug: str):
     with _conn() as c:
         svc = db.get_by_slug(c, slug)
     if not svc:
@@ -397,18 +424,18 @@ async def api_ask_get(
 
 
 @router.get("/api/v1/categories", tags=["directory"])
-async def api_categories():
+def api_categories():
     with _conn() as c:
         return {"categories": db.list_categories(c)}
 
 
 @router.get("/api/v1/a2a/search", tags=["a2a"])
-async def api_a2a_search(
+def api_a2a_search(
     q: str | None = Query(default=None, max_length=800),
     health: str | None = Query(default=None, description=HEALTH_DOC),
     x402_only: bool = Query(default=False),
     limit: int = Query(default=50, ge=1, le=100),
-    offset: int = Query(default=0, ge=0),
+    offset: int = Query(default=0, ge=0, le=MAX_SEARCH_OFFSET),
 ):
     with _conn() as c:
         rows = db.search_a2a(c, q=q, health=health, x402_only=x402_only,
@@ -421,7 +448,7 @@ async def api_a2a_search(
 
 
 @router.get("/api/v1/a2a/agents/{slug}", tags=["a2a"])
-async def api_a2a_agent(slug: str):
+def api_a2a_agent(slug: str):
     with _conn() as c:
         row = db.get_a2a_by_slug(c, slug)
     if not row:
@@ -430,18 +457,18 @@ async def api_a2a_agent(slug: str):
 
 
 @router.get("/api/v1/a2a/stats", tags=["a2a"])
-async def api_a2a_stats():
+def api_a2a_stats():
     with _conn() as c:
         return db.a2a_stats(c)
 
 
 @router.get("/api/v1/mcp/search", tags=["mcp"])
-async def api_mcp_search(
+def api_mcp_search(
     q: str | None = Query(default=None, max_length=800),
     chain: str | None = Query(default=None),
     health: str | None = Query(default=None, description=HEALTH_DOC),
     limit: int = Query(default=20, ge=1, le=100),
-    offset: int = Query(default=0, ge=0),
+    offset: int = Query(default=0, ge=0, le=MAX_SEARCH_OFFSET),
 ):
     """Search MCP servers.
 
@@ -477,13 +504,13 @@ async def api_mcp_search(
 
 
 @router.get("/api/v1/mcp/stats", tags=["mcp"])
-async def api_mcp_stats():
+def api_mcp_stats():
     with _conn() as c:
         return db.mcp_stats(c)
 
 
 @router.get("/api/v1/mcp/servers/{slug}", tags=["mcp"])
-async def api_mcp_server(slug: str):
+def api_mcp_server(slug: str):
     with _conn() as c:
         mcp = db.get_mcp_by_slug(c, slug)
         if mcp:
@@ -499,13 +526,13 @@ async def api_mcp_server(slug: str):
 
 
 @router.get("/api/v1/resources/search", tags=["directory"])
-async def api_resources_search(
+def api_resources_search(
     q: str | None = Query(default=None, max_length=800),
     protocol: str | None = Query(default=None, pattern="^(x402|mcp|a2a)$"),
     chain: str | None = Query(default=None),
     health: str | None = Query(default=None, description=HEALTH_DOC),
     limit: int = Query(default=20, ge=1, le=100),
-    offset: int = Query(default=0, ge=0),
+    offset: int = Query(default=0, ge=0, le=MAX_SEARCH_OFFSET),
 ):
     """Unified search across x402 services, MCP servers and A2A agents."""
     with _conn() as c:
@@ -515,8 +542,47 @@ async def api_resources_search(
         )
 
 
+@router.get("/api/v1/export", tags=["directory"])
+def api_export(
+    kind: str = Query(default="mcp", pattern="^(x402|mcp|a2a)$"),
+    after_id: int = Query(default=0, ge=0,
+                          description="Return rows with id greater than this."),
+    limit: int = Query(default=500, ge=1, le=1000),
+):
+    """Keyset-paginated bulk export of the public catalogue.
+
+    Ranked search caps `offset`; use this to walk the whole catalogue cheaply.
+    Pass the returned `next_after_id` back as `after_id` until `count` is 0.
+    """
+    with _conn() as c:
+        rows = db.export_listings(c, kind, after_id=after_id, limit=limit)
+    items: list[dict] = []
+    for row in rows:
+        sources = row.get("sources")
+        if kind == "a2a":
+            item = directory_a2a.public_agent(row)
+        elif kind == "mcp":
+            item = directory_resources.normalize_mcp_server(row)
+        else:
+            item = dict(row)
+            item.pop("source", None)
+            item.pop("source_id", None)
+            if item.get("slug"):
+                item["service_card_url"] = f"/api/v1/services/{item['slug']}"
+        item["id"] = row["id"]
+        if sources is not None:
+            item["sources"] = sources
+        items.append(item)
+    return {
+        "kind": kind,
+        "count": len(items),
+        "next_after_id": rows[-1]["id"] if rows else None,
+        "items": items,
+    }
+
+
 @router.get("/api/v1/broker/recommend", tags=["directory"])
-async def api_broker_recommend(
+def api_broker_recommend(
     request: Request,
     q: str = Query(min_length=1, max_length=800),
     max_price_usd: float | None = Query(default=None, ge=0),
@@ -536,7 +602,7 @@ async def api_broker_recommend(
 
 
 @router.get("/api/v1/stats", tags=["directory"])
-async def api_stats():
+def api_stats():
     with _conn() as c:
         return db.stats(c)
 
@@ -552,7 +618,18 @@ class SubmissionPayload(BaseModel):
                          pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
-@router.post("/api/v1/submit", tags=["directory"])
+@router.post(
+    "/api/v1/submit",
+    tags=["directory"],
+    summary="Submit a service for listing",
+    description=(
+        "Submit a new x402 service. This endpoint only *creates* listings; "
+        "re-submitting a URL that is already listed returns `already_listed` "
+        "and changes nothing.\n\n"
+        "To correct an existing listing, verify domain ownership at "
+        "<https://agent-tools.cloud/account> and edit it there (https://agent-tools.cloud/docs/claim)."
+    ),
+)
 async def api_submit(request: Request, payload: SubmissionPayload):
     url = str(payload.url).strip()
     client_ip = limits.client_ip_from_request(request)
@@ -563,14 +640,19 @@ async def api_submit(request: Request, payload: SubmissionPayload):
     if existing:
         return {
             "status": "already_listed",
-            "message": "A service with this URL is already in the directory.",
+            "message": (
+                "A service with this URL is already in the directory. Submitting "
+                "it again will not change it: verify domain ownership to edit."),
+            "claim_url": "https://agent-tools.cloud/account",
+            "claim_docs": "https://agent-tools.cloud/docs/claim",
             "slug": existing.get("slug"),
             "url": existing.get("url"),
         }
     if pending:
         return {
             "status": "already_pending",
-            "message": "A submission for this URL is already submitted and auto-verifying.",
+            "message": (
+                "A submission for this URL is already submitted and auto-verifying."),
             "submission_id": pending.get("id"),
         }
     if recent >= SUBMIT_RATE_LIMIT_PER_DAY:
@@ -665,7 +747,7 @@ async def api_submit_mcp(request: Request, payload: McpSubmissionPayload):
         directory_reverify.verify_and_mirror, endpoint,
         slug=slug, name=name,
         description=(payload.description or "").strip() or None,
-        homepage=endpoint, delivery="mcp", source="manual", source_id=endpoint)
+        homepage=endpoint, delivery="mcp", source="submission", source_id=endpoint)
     row = {
         "slug": slug,
         "name": name,
@@ -674,7 +756,7 @@ async def api_submit_mcp(request: Request, payload: McpSubmissionPayload):
         "endpoint_url": endpoint,
         "transport": (payload.transport or "streamable-http").strip(),
         "x402_supported": bool(x402.get("x402")),
-        "source": "manual",
+        "source": "submission",
         "source_id": endpoint,
         "source_url": endpoint,
         "health": probe.get("status"),
@@ -724,7 +806,7 @@ async def api_submit_a2a(request: Request, payload: A2ASubmissionPayload):
                             "/.well-known/agent-card.json is reachable."),
             },
         )
-    row = directory_a2a.card_to_row(card, card_url, source="manual")
+    row = directory_a2a.card_to_row(card, card_url, source="submission")
     # Probe for x402: an A2A agent can be a paid (402) endpoint, in which case
     # it must ALSO land in the x402 services catalog (delivery=a2a).
     verify_target = row.get("endpoint_url") or url
@@ -733,7 +815,7 @@ async def api_submit_a2a(request: Request, payload: A2ASubmissionPayload):
         slug=row["slug"], name=row.get("name"),
         description=row.get("description"),
         homepage=row.get("homepage_url"), delivery="a2a",
-        source="manual", source_id=row.get("source_id"))
+        source="submission", source_id=row.get("source_id"))
     if x402.get("x402"):
         # real 402 probe is authoritative; never downgrade card self-declaration
         row["x402_supported"] = True
@@ -763,10 +845,26 @@ async def api_submit_a2a(request: Request, payload: A2ASubmissionPayload):
 
 
 @router.get("/.well-known/agent-tools.json", tags=["discovery"])
-async def well_known():
+def well_known():
     return {
         "name": "agent-tools.cloud",
         "type": "x402-service-directory",
+        # Operators find their own listing through this file long before they
+        # find the web page, so the claim path has to be discoverable here too.
+        "ownership": {
+            "docs": "https://agent-tools.cloud/docs/claim",
+            "claim_url": "https://agent-tools.cloud/account",
+            "methods": ["descriptor", "wellknown_file", "dns_txt"],
+            "descriptor_field": "agentToolsVerify",
+            "descriptor_paths": ["/.well-known/x402",
+                                 "/.well-known/agent-card.json",
+                                 "/.well-known/agent.json"],
+            "wellknown_file": "/.well-known/agent-tools-verify.txt",
+            "dns_txt_name": "_agent-tools.<host>",
+            "dns_txt_value": "atc-verify=<token>",
+            "scope": "host",
+            "recheck_hours": 4,
+        },
         "version": "0.5",
         "description": (
             "Free directory and MCP discovery layer for x402 paid APIs. "
@@ -793,6 +891,12 @@ async def well_known():
                 "url": "https://agent-tools.cloud/api/v1/search",
                 "query": ["q", "category", "chain", "region", "health", "limit", "offset"],
                 "returns": "ranked directory rows with service_card_url",
+            },
+            "export": {
+                "method": "GET",
+                "url": "https://agent-tools.cloud/api/v1/export",
+                "query": ["kind", "after_id", "limit"],
+                "returns": "keyset-paginated bulk catalogue rows with provenance",
             },
             "ask": {
                 "method": "POST",
@@ -871,6 +975,7 @@ def sitemap_xml() -> Response:
         ("/x402", "0.9", "daily"),
         ("/categories", "0.6", "weekly"),
         ("/about", "0.4", "monthly"),
+        ("/docs/claim", "0.5", "monthly"),
         ("/terms", "0.2", "yearly"),
         ("/privacy", "0.2", "yearly"),
     ]

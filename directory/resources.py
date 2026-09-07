@@ -158,6 +158,9 @@ def normalize_mcp_server(row: dict) -> dict:
             "url": endpoint,
             "auth": row.get("auth_method"),
             "cost": row.get("cost_hint"),
+            # Revision the server settled on when we offered it the newest one
+            # we know; null when we have not completed a handshake with it.
+            "protocol_version": row.get("protocol_version"),
         }
     return {
         "type": "mcp",

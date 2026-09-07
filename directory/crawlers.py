@@ -139,6 +139,37 @@ def _bazaar_price_usd(accept: dict):
     return (amt / 1_000_000) or None
 
 
+_PRICE_NUM = re.compile(r"\d+(?:\.\d+)?")
+
+
+def _declared_price_usd(*objs):
+    """USD price a descriptor states outright, for entries whose atomic amount
+    is absent or not USDC-denominated. Only USD-marked strings are taken, so a
+    price in another currency is left unparsed rather than mislabelled.
+    """
+    for o in objs:
+        if not isinstance(o, dict):
+            continue
+        for k in ("price_usd", "priceUsd", "price_usdc", "priceUsdc",
+                  "price_min_usd", "priceMinUsd", "estimated_usd"):
+            v = o.get(k)
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 0:
+                return float(v)
+        v = o.get("price")
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 0:
+            return float(v)
+        if isinstance(v, str):
+            s = v.strip()
+            if s.startswith("$") or "usd" in s.lower():
+                m = _PRICE_NUM.search(s)
+                if m:
+                    try:
+                        return float(m.group())
+                    except ValueError:
+                        pass
+    return None
+
+
 def _bazaar_host(url: str) -> str:
     if not url or "://" not in url:
         return ""
@@ -590,8 +621,19 @@ def probe_health(url, well_known=None):
                 try:
                     t0 = time.monotonic()
                     r = c.head(t)
-                    if r.status_code in (405, 501):
+                    # Plenty of hosts answer HEAD with 404 on a path that GETs
+                    # fine, so a bare 404 here is not evidence of anything.
+                    if r.status_code in (404, 405, 501):
                         r = c.get(t)
+                    # POST-only paid endpoints answer HEAD/GET with 405/404 and
+                    # would otherwise be scored "down" despite being healthy.
+                    if r.status_code in (404, 405, 501) and t == url:
+                        try:
+                            rp = c.post(t, json={})
+                            if rp.status_code < 500:
+                                r = rp
+                        except Exception:
+                            pass
                     dt = int((time.monotonic() - t0) * 1000)
                     sc = r.status_code
                     # A healthy descriptor is useful fallback evidence, but it
@@ -628,10 +670,9 @@ def probe_health(url, well_known=None):
                     continue
                 seen_wk.add(wk)
                 try:
-                    descriptor = c.get(wk)
-                    if descriptor.status_code != 200:
+                    _st, obj = fetch_well_known(c, wk)
+                    if _st != 200 or obj is None:
                         continue
-                    obj = descriptor.json()
                     endpoints = obj.get("endpoints") if isinstance(obj, dict) else None
                     if not isinstance(endpoints, list):
                         continue
@@ -689,6 +730,7 @@ EVM_USDC_INDEXERS = {
 
 # payment.accepts[].network identifier -> chain key above.
 _NETWORK_CHAIN = {
+    "sui": "sui", "sui:mainnet": "sui", "mainnet.sui": "sui",
     "base": "base", "eip155:8453": "base", "8453": "base",
     "ethereum": "ethereum", "eth": "ethereum", "eip155:1": "ethereum", "1": "ethereum",
     "optimism": "optimism", "op": "optimism", "eip155:10": "optimism", "10": "optimism",
@@ -734,14 +776,26 @@ def fetch_payto_activity(payto, chain="base", days=30, max_pages=8):
                     "contractaddress": contract, "address": payto,
                     "page": page, "offset": 100, "sort": "desc",
                 }
-                r = c.get(_api_base, params=params)
-                if r.status_code == 429:
-                    time.sleep(1.5)
+                for attempt in range(5):
                     r = c.get(_api_base, params=params)
+                    if r.status_code != 429:
+                        break
+                    time.sleep(min(30.0, 2.0 * (2 ** attempt)))
+                else:
+                    # Still throttled after retries. The answer is unknown, not
+                    # zero -- returning ok=False makes the caller skip the write.
+                    return {"tx": 0, "payers": 0, "ok": False, "capped": False}
+                if r.status_code >= 400:
+                    return {"tx": 0, "payers": 0, "ok": False, "capped": False}
                 data = r.json()
                 rows = data.get("result")
                 if not isinstance(rows, list):
-                    break  # "No transactions found" -> status 0
+                    # Rate-limit and error bodies also carry result=null, so an
+                    # absent list is only a real zero when the indexer says so.
+                    msg = str(data.get("message") or "").lower()
+                    if "no transactions found" not in msg:
+                        return {"tx": 0, "payers": 0, "ok": False, "capped": False}
+                    break
                 stop = False
                 for row in rows:
                     try:
@@ -760,10 +814,148 @@ def fetch_payto_activity(payto, chain="base", days=30, max_pages=8):
                     break
                 if page == max_pages:
                     capped = True
-        return {"tx": tx, "payers": len(payers), "ok": True, "capped": capped}
+        return {"tx": tx, "payers": len(payers), "ok": True,
+                "capped": capped, "payer_ids": sorted(payers)}
     except Exception as e:
         log.debug("payto activity fetch failed for %s: %r", payto, e)
         return {"tx": 0, "payers": 0, "ok": False, "capped": False}
+
+
+# ---------------------------------------------------------------------------
+# Bulk on-chain demand via eth_getLogs
+#
+# The per-address indexer API throttles our egress hard enough that a full
+# sweep never finishes (sustained HTTP 429 even at one query every six
+# seconds). Transfer logs answer the same question for the whole catalogue at
+# once: a 30-day sweep costs a few hundred RPC calls instead of one call per
+# address, and public RPC nodes do not rate-limit us.
+# ---------------------------------------------------------------------------
+
+# chain -> (rpc url, usdc contract, seconds per block)
+BULK_LOG_CHAINS = {
+    "base": ("https://mainnet.base.org",
+             "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913", 2.0),
+}
+_TRANSFER_TOPIC = (
+    "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef")
+_LOG_BLOCK_WINDOW = 10000   # wider ranges are rejected with HTTP 413
+_LOG_ADDR_BATCH = 400       # busy windows blow up the node above this
+
+
+def _topic_addr(addr):
+    return "0x" + "0" * 24 + addr[2:].lower()
+
+
+def _oversized_range(exc):
+    """True when the node refused the range for holding too many logs.
+
+    413/500 from an archive node is deterministic: the same request will fail
+    again, so backing off before splitting only burns wall clock.
+    """
+    resp = getattr(exc, "response", None)
+    return resp is not None and resp.status_code in (413, 500)
+
+
+def _rpc(client, url, method, params):
+    r = client.post(url, json={"jsonrpc": "2.0", "id": 1,
+                               "method": method, "params": params})
+    r.raise_for_status()
+    payload = r.json()
+    if "error" in payload:
+        raise RuntimeError(str(payload["error"])[:200])
+    return payload["result"]
+
+
+def fetch_chain_activity_bulk(paytos, chain="base", days=30, rate=0.15):
+    """Count incoming USDC transfers per address over the window in one sweep.
+
+    Returns ``(results, ok)``. ``results`` maps a lowercased payTo to
+    {"tx": int, "payers": int}; every requested address is present, so a zero
+    is a confirmed zero rather than a missing lookup. ``ok`` is False when any
+    block window could not be read, because a gap silently undercounts and
+    must not be written as authoritative.
+    """
+    cfg = BULK_LOG_CHAINS.get(chain)
+    if cfg is None or not paytos:
+        return {}, False
+    rpc_url, contract, block_secs = cfg
+
+    wanted = sorted({a.lower() for a in paytos if a})
+    counts = {a: {"tx": 0, "payers": set()} for a in wanted}
+    topic_to_addr = {_topic_addr(a): a for a in wanted}
+
+    try:
+        with httpx.Client(timeout=httpx.Timeout(connect=10.0, read=60.0,
+                                                write=10.0, pool=10.0),
+                          headers={"User-Agent": UA}) as c:
+            head = int(_rpc(c, rpc_url, "eth_blockNumber", []), 16)
+            span = int(days * 86400 / block_secs)
+            start = max(0, head - span)
+
+            batches = [wanted[i:i + _LOG_ADDR_BATCH]
+                       for i in range(0, len(wanted), _LOG_ADDR_BATCH)]
+            windows = list(range(start, head + 1, _LOG_BLOCK_WINDOW))
+            total = len(batches) * len(windows)
+            log.info("onchain bulk %s: %d addresses, %d windows, %d calls",
+                     chain, len(wanted), len(windows), total)
+
+            done = 0
+            for batch in batches:
+                topics = [_TRANSFER_TOPIC, None,
+                          [_topic_addr(a) for a in batch]]
+                pending = [(lo, min(lo + _LOG_BLOCK_WINDOW - 1, head))
+                           for lo in windows]
+                while pending:
+                    lo, hi = pending.pop()
+                    params = [{"fromBlock": hex(lo), "toBlock": hex(hi),
+                               "address": contract, "topics": topics}]
+                    logs = None
+                    err = None
+                    for attempt in range(3):
+                        try:
+                            logs = _rpc(c, rpc_url, "eth_getLogs", params)
+                            break
+                        except Exception as e:
+                            err = e
+                            if _oversized_range(e):
+                                break
+                            time.sleep(1.0 * (2 ** attempt))
+                    if logs is None:
+                        # Busy ranges return more logs than the node will
+                        # serialize. Halving keeps the sweep going instead of
+                        # discarding the whole chain's results.
+                        if hi > lo:
+                            mid = (lo + hi) // 2
+                            pending.append((mid + 1, hi))
+                            pending.append((lo, mid))
+                            continue
+                        log.warning("onchain bulk %s: block %d failed: %r",
+                                    chain, lo, err)
+                        return {}, False
+                    for entry in logs:
+                        tp = entry.get("topics") or []
+                        if len(tp) < 3:
+                            continue
+                        addr = topic_to_addr.get(tp[2].lower())
+                        if addr is None:
+                            continue
+                        counts[addr]["tx"] += 1
+                        counts[addr]["payers"].add(tp[1].lower())
+                    done += 1
+                    if done % 50 == 0:
+                        log.info("onchain bulk %s: %d/%d windows (%d queued)",
+                                 chain, done, total, len(pending))
+                    time.sleep(rate)
+    except Exception as e:
+        log.warning("onchain bulk %s sweep failed: %r", chain, e)
+        return {}, False
+
+    # payer_ids lets a caller union payers across several addresses of the
+    # same service instead of adding counts, which would double-count
+    # anyone who paid more than one of them.
+    return ({a: {"tx": v["tx"], "payers": len(v["payers"]),
+                 "payer_ids": sorted(v["payers"])}
+             for a, v in counts.items()}, True)
 
 
 # ---------------------------------------------------------------------------
@@ -786,7 +978,23 @@ import socket as _socket
 _X402_MARKERS = ("accepts", "paymentrequirements", "x402version", "x402_version",
                  "paymentrequired", "maxamountrequired", "payto")
 _VERIFY_TIMEOUT = httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0)
-_MAX_BODY = 256 * 1024  # cap response body we parse
+_MAX_BODY = 1024 * 1024  # cap response body we parse
+
+
+def _parse_json_body(content: bytes, url: str = ""):
+    """Parse a response body, refusing an oversized one outright.
+
+    Slicing to _MAX_BODY and parsing the fragment can only ever raise, so an
+    oversized descriptor used to be indistinguishable from malformed JSON.
+    """
+    if len(content) > _MAX_BODY:
+        log.warning("descriptor_too_large bytes=%d url=%s",
+                    len(content), str(url)[:200])
+        return None
+    try:
+        return json.loads(content)
+    except (ValueError, json.JSONDecodeError):
+        return None
 
 
 def _host_safety(host: str) -> str:
@@ -835,6 +1043,44 @@ def _url_acceptable(url: str) -> bool:
         return True   # not an IP -> it's a domain, keep
 
 
+_WK_CACHE_TTL = int(os.environ.get("AGENT_TOOLS_WK_CACHE_TTL", "900"))
+_WK_CACHE_MAX = 4096
+# url -> (fetched_at, status_code, parsed_json_or_None)
+_WK_CACHE: dict[str, tuple[float, int, Any]] = {}
+
+
+def fetch_well_known(client, url: str):
+    """GET a .well-known descriptor, memoised per URL for _WK_CACHE_TTL seconds.
+
+    health, verify and resource discovery each walk the same one or two
+    descriptor URLs per origin, and several timers run them in the same window;
+    without this every listed origin absorbs a multiple of the probes it should.
+    Returns (status_code, parsed_json_or_None); status 0 means the fetch failed.
+    """
+    now = time.monotonic()
+    hit = _WK_CACHE.get(url)
+    if hit is not None and (now - hit[0]) <= _WK_CACHE_TTL:
+        return hit[1], hit[2]
+
+    try:
+        r = client.get(url)
+        status = r.status_code
+        obj = None
+        if status == 200:
+            obj = _parse_json_body(r.content, url)
+    except Exception:
+        status, obj = 0, None
+
+    if len(_WK_CACHE) >= _WK_CACHE_MAX:
+        cutoff = now - _WK_CACHE_TTL
+        for k, v in [(k, v) for k, v in _WK_CACHE.items() if v[0] < cutoff]:
+            _WK_CACHE.pop(k, None)
+        if len(_WK_CACHE) >= _WK_CACHE_MAX:
+            _WK_CACHE.clear()
+    _WK_CACHE[url] = (now, status, obj)
+    return status, obj
+
+
 def _looks_like_x402(obj: Any) -> bool:
     """True if a parsed JSON body carries recognizable x402 markers."""
     try:
@@ -844,9 +1090,36 @@ def _looks_like_x402(obj: Any) -> bool:
     return any(m in blob for m in _X402_MARKERS)
 
 
+def _merge_payment(base, extra):
+    """Fill blanks in ``base`` from ``extra``, keeping ``base``'s values.
+
+    A well-known descriptor advertises coarse terms ("base", "USDC", no
+    amount); the endpoint's own 402 challenge carries the exact ones
+    ("eip155:8453", the token address, the atomic amount). Taking whichever
+    arrived first threw the precise numbers away.
+    """
+    if not extra:
+        return base
+    if not base:
+        return extra
+    out = dict(base)
+    for k, v in extra.items():
+        if out.get(k) in (None, "") and v not in (None, ""):
+            out[k] = v
+    return out
+
+
 def _extract_payment(obj: Any) -> dict[str, Any] | None:
     """Pull asset/network/amount/payTo out of an accepts[] / requirements body."""
     accepts = None
+    if isinstance(obj, list):
+        # Some descriptors are a bare array of resource entries, each carrying
+        # its own accepts[].
+        for item in obj:
+            got = _extract_payment(item) if isinstance(item, dict) else None
+            if got:
+                return got
+        return None
     if isinstance(obj, dict):
         accepts = (obj.get("accepts") or obj.get("paymentRequirements")
                    or obj.get("payment_requirements"))
@@ -865,6 +1138,11 @@ def _extract_payment(obj: Any) -> dict[str, Any] | None:
                 if isinstance(item, dict) and isinstance(item.get("accepts"), list) and item["accepts"]:
                     accepts = item["accepts"]
                     break
+        # A few manifests hang the requirements off a top-level "payment" key.
+        if accepts is None and isinstance(obj.get("payment"), (dict, list)):
+            got = _extract_payment(obj["payment"])
+            if got:
+                return got
     if not isinstance(accepts, list) or not accepts:
         return None
     first = accepts[0] if isinstance(accepts[0], dict) else {}
@@ -878,6 +1156,8 @@ def _extract_payment(obj: Any) -> dict[str, Any] | None:
     amount_raw = (first.get("maxAmountRequired") or first.get("amount")
                   or first.get("price"))
     price_usdc = _bazaar_price_usd(first)
+    if price_usdc is None:
+        price_usdc = _declared_price_usd(first, obj)
     return {
         "scheme": first.get("scheme"),
         "network": first.get("network") or first.get("chain"),
@@ -912,6 +1192,101 @@ def _decode_payment_required_header(headers: Any) -> dict[str, Any] | None:
     return obj
 
 
+def fetch_wellknown_resources(url: str, well_known: str | None = None) -> dict[str, Any]:
+    """Read an origin's x402 descriptor and list every paid resource it advertises.
+
+    Submitters register one URL, but a manifest routinely advertises several paid
+    endpoints. Handles the shapes seen in the wild: `resources` as bare URL
+    strings, as objects (`url`/`resource` + optional `method`/`accepts`), and
+    manifests with no resource list at all (falls back to the submitted URL).
+
+    Returns {"well_known_url", "resource_count", "resource_samples"}.
+    """
+    parsed = urlparse(url if "//" in url else "https://" + url)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    candidates = ([well_known] if well_known else []) + [
+        origin + "/.well-known/x402",
+        origin + "/.well-known/x402.json",
+    ]
+
+    doc = None
+    wk_url = None
+    seen = set()
+    try:
+        with httpx.Client(timeout=_VERIFY_TIMEOUT, follow_redirects=True,
+                          max_redirects=3,
+                          headers={"User-Agent": UA, "Accept": "application/json"}) as c:
+            for wk in candidates:
+                if not wk or wk in seen:
+                    continue
+                seen.add(wk)
+                _st, obj = fetch_well_known(c, wk)
+                if _st != 200 or obj is None:
+                    continue
+                if isinstance(obj, dict):
+                    doc, wk_url = obj, wk
+                    break
+    except Exception:  # noqa: BLE001 - provenance extras never break a listing
+        doc = None
+
+    samples: list[dict[str, Any]] = []
+    seen_urls: set = set()
+    # Some manifests list paid endpoints under `endpoints` with a
+    # relative `path` instead of a `resources` array of URLs.
+    doc_base = str((doc or {}).get("baseUrl") or "").strip() or origin
+    advertised = ((doc or {}).get("resources")
+                  or (doc or {}).get("endpoints") or [])
+    advertised_total = 0
+    for res in advertised:
+        if isinstance(res, str):
+            res_url, method, accepts, desc = res.strip(), None, None, None
+            # "GET /v1/quote" is a method plus a baseUrl-relative path.
+            # verify_x402 below already understood this shape; this parser
+            # did not, so every such descriptor scored as zero resources.
+            parts = res_url.split(None, 1)
+            if len(parts) == 2 and parts[0].upper() in (
+                    "GET", "POST", "PUT", "PATCH", "DELETE"):
+                method, res_url = parts[0].upper(), parts[1].strip()
+            if res_url.startswith("/"):
+                res_url = doc_base.rstrip("/") + res_url
+        elif isinstance(res, dict):
+            res_url = str(res.get("url") or res.get("resource") or "").strip()
+            if not res_url and res.get("path"):
+                res_url = (doc_base.rstrip("/") + "/"
+                           + str(res["path"]).lstrip("/"))
+            method = res.get("method")
+            accepts = res.get("accepts") if isinstance(res.get("accepts"), list) else None
+            desc = res.get("description") or res.get("name")
+        else:
+            continue
+        if not res_url.startswith("http") or res_url in seen_urls:
+            continue
+        seen_urls.add(res_url)
+        advertised_total += 1
+        # Cap what we store, not what we count.
+        if len(samples) >= 50:
+            continue
+        sample: dict[str, Any] = {"url": res_url, "kind": "x402-resource"}
+        if method:
+            sample["method"] = str(method).upper()
+        if desc:
+            sample["description"] = str(desc)[:300]
+        if accepts:
+            sample["accepts"] = accepts[:5]
+        samples.append(sample)
+
+    if not samples:
+        # Keep one sample so the service card still has something callable,
+        # but do not let it count as an advertised resource.
+        samples = [{"url": url, "kind": "x402-resource"}]
+
+    return {
+        "well_known_url": wk_url or (origin + "/.well-known/x402"),
+        "resource_count": advertised_total,
+        "resource_samples": samples,
+    }
+
+
 def verify_x402(url: str, well_known: str | None = None) -> dict[str, Any]:
     """Machine-verify whether `url` exposes a real x402 service.
 
@@ -921,6 +1296,7 @@ def verify_x402(url: str, well_known: str | None = None) -> dict[str, Any]:
     evidence: list[str] = []
     payment: dict[str, Any] | None = None
     net_error = False
+    doc_seen: dict[str, Any] | None = None
 
     url = (url or "").strip()
     parsed = urlparse(url if "//" in url else "https://" + url)
@@ -954,43 +1330,117 @@ def verify_x402(url: str, well_known: str | None = None) -> dict[str, Any]:
             if not wk or wk in seen_wk:
                 continue
             seen_wk.add(wk)
-            try:
-                r = c.get(wk)
-            except Exception:
+            _st, obj = fetch_well_known(c, wk)
+            if _st == 0:
                 net_error = True
                 continue
-            if r.status_code == 200:
-                try:
-                    obj = json.loads(r.content[:_MAX_BODY])
-                except (ValueError, json.JSONDecodeError):
+            if _st == 200:
+                if obj is None:
                     continue
+                if isinstance(obj, dict) and doc_seen is None:
+                    doc_seen = obj
                 if _looks_like_x402(obj):
                     evidence.append(f"well-known x402 descriptor at {wk} (200, x402 markers)")
                     payment = payment or _extract_payment(obj)
 
+        # --- 1b. resources advertised by the descriptor ---
+        # A minimal manifest may carry no x402 marker at all (just a list of
+        # resource URLs). The resources themselves are the evidence: probe them
+        # for a real 402 rather than widening the marker list, which would make
+        # any JSON with a "resources" key look like an x402 service.
+        # Gate on the payTo, not on evidence: a descriptor can carry x402
+        # markers (so verification already succeeded) while holding no
+        # accepts[], leaving the address only in each resource's 402 response.
+        if payment is None and isinstance(doc_seen, dict):
+            advertised = (doc_seen.get("resources")
+                          or doc_seen.get("endpoints") or [])
+            for res in advertised[:5]:
+                if isinstance(res, str):
+                    res_url, res_method = res.strip(), "POST"
+                    # Entries like "POST /v1/chat" are method + path relative
+                    # to the descriptor's baseUrl.
+                    parts = res_url.split(None, 1)
+                    if len(parts) == 2 and parts[0].upper() in (
+                            "GET", "POST", "PUT", "PATCH", "DELETE"):
+                        res_method, res_url = parts[0].upper(), parts[1].strip()
+                    if res_url.startswith("/"):
+                        base = doc_seen.get("baseUrl") if isinstance(doc_seen, dict) else None
+                        res_url = str(base or origin).rstrip("/") + res_url
+                elif isinstance(res, dict):
+                    res_url = str(res.get("url") or res.get("resource") or "").strip()
+                    if not res_url and res.get("path"):
+                        _b = doc_seen.get("baseUrl") or origin
+                        res_url = str(_b).rstrip("/") + "/" + str(res["path"]).lstrip("/")
+                    res_method = str(res.get("method") or "POST").upper()
+                else:
+                    continue
+                if not res_url.startswith(("http://", "https://")):
+                    continue
+                for meth in (res_method, "GET" if res_method != "GET" else "POST"):
+                    try:
+                        r = (c.post(res_url, json={}) if meth == "POST"
+                             else c.get(res_url))
+                    except Exception:
+                        net_error = True
+                        continue
+                    if r.status_code == 402:
+                        # Most implementations put accepts[] in the body; the
+                        # header form is the exception. Reading only the header
+                        # here left minimal-manifest services with no payTo on
+                        # record, so their on-chain demand was never queryable.
+                        if payment is None:
+                            header_obj = _decode_payment_required_header(r.headers)
+                            if header_obj is not None:
+                                payment = _extract_payment(header_obj)
+                        if payment is None:
+                            _body = _parse_json_body(r.content, res_url)
+                            if _body is not None:
+                                try:
+                                    payment = _extract_payment(_body)
+                                except Exception:  # noqa: BLE001
+                                    pass
+                        evidence.append(
+                            f"advertised resource {res_url} returns HTTP 402 "
+                            f"with payment requirements")
+                        break
+                if evidence:
+                    break
+
         # --- 2. endpoint 402 challenge ---
+        # Many paid endpoints are POST-only and publish no descriptor at all;
+        # a GET-only probe reports them as "no 402 challenge" and rejects a
+        # perfectly valid service. Try GET first, then POST on the submitted URL.
         for target in (url, origin):
             if not target:
                 continue
             try:
                 r = c.get(target)
+                if r.status_code != 402 and target == url:
+                    try:
+                        rp = c.post(target, json={})
+                        if rp.status_code == 402:
+                            r = rp
+                    except Exception:
+                        pass
             except Exception:
                 net_error = True
-                continue
+                try:
+                    r = c.post(target, json={}) if target == url else None
+                except Exception:
+                    r = None
+                if r is None:
+                    continue
             if r.status_code == 402:
                 body_ok = False
                 header_obj = _decode_payment_required_header(r.headers)
                 if header_obj is not None and _looks_like_x402(header_obj):
                     body_ok = True
-                    payment = payment or _extract_payment(header_obj)
-                try:
-                    obj = json.loads(r.content[:_MAX_BODY])
-                    parsed_body = _looks_like_x402(obj)
-                    body_ok = body_ok or parsed_body
-                    if parsed_body:
-                        payment = payment or _extract_payment(obj)
-                except (ValueError, json.JSONDecodeError):
-                    obj = None
+                    payment = _merge_payment(_extract_payment(header_obj), payment)
+                obj = _parse_json_body(r.content, url)
+                parsed_body = _looks_like_x402(obj) if obj is not None else False
+                body_ok = body_ok or parsed_body
+                if parsed_body:
+                    payment = _merge_payment(_extract_payment(obj), payment)
                 # A bare 402 is suggestive; 402 + payment body is conclusive.
                 if body_ok:
                     evidence.append(f"endpoint {target} returns HTTP 402 with payment requirements")
@@ -1757,6 +2207,24 @@ def _summarize_tools(tools: list) -> list:
     return out
 
 
+MCP_LATEST_REVISION = "2026-07-28"
+
+
+def _probe_mcp_sse(client, endpoint: str, headers: dict) -> bool:
+    """SSE 传输的存活探测。只在 streamable-http 的 POST 失败后调用。"""
+    hdr = {"User-Agent": headers.get("User-Agent", UA),
+           "Accept": "text/event-stream"}
+    for cand in (endpoint, endpoint.rstrip("/") + "/sse"):
+        try:
+            with client.stream("GET", cand, headers=hdr) as resp:
+                ctype = (resp.headers.get("content-type") or "").lower()
+                if resp.status_code == 200 and "event-stream" in ctype:
+                    return True
+        except Exception:
+            continue
+    return False
+
+
 def probe_mcp_health(endpoint: str) -> dict:
     """Probe an MCP streamable-http endpoint.
 
@@ -1771,7 +2239,8 @@ def probe_mcp_health(endpoint: str) -> dict:
     Other reachable non-5xx protocol/method errors are 'degraded'.
     """
     base = {"status": "unknown", "latency_ms": None, "http_status": None,
-            "conformance": None, "tool_count": None, "tools": None}
+            "conformance": None, "tool_count": None, "tools": None,
+            "protocol_version": None}
     if not endpoint:
         return base
     # Smithery-hosted endpoints require the caller's own Smithery api_key.
@@ -1785,10 +2254,13 @@ def probe_mcp_health(endpoint: str) -> dict:
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
     }
+    # Negotiation settles on the highest version both sides know, so asking for
+    # an old revision makes every newer server report itself as old. Ask for the
+    # latest and record whatever the server answers with.
     init = {
         "jsonrpc": "2.0", "id": 1, "method": "initialize",
         "params": {
-            "protocolVersion": "2025-06-18",
+            "protocolVersion": MCP_LATEST_REVISION,
             "capabilities": {},
             "clientInfo": {"name": "agent-tools.cloud", "version": "0.1"},
         },
@@ -1806,9 +2278,27 @@ def probe_mcp_health(endpoint: str) -> dict:
                 return {**base, "status": "ok", "latency_ms": dt,
                         "http_status": sc, "conformance": "fail"}
             if sc >= 300:
+                # SSE 传输的服务器对基址 POST 本就返回 404/405。
+                if sc in (404, 405, 501) and _probe_mcp_sse(c, endpoint, headers):
+                    return {**base, "status": "ok", "latency_ms": dt,
+                            "http_status": sc, "conformance": "partial"}
                 return {**base, "status": "degraded", "latency_ms": dt,
                         "http_status": sc, "conformance": "fail"}
             # initialize ok -> Tier-2: confirm tools/list
+            try:
+                _init_parsed = _mcp_parse_response(r)
+            except Exception:
+                _init_parsed = None
+            # 2xx 只说明能连通。没有 jsonrpc 信封就不是 MCP 端点，
+            # 记成 partial 会让自定义 JSON 接口混进「基本可用」。
+            if not (isinstance(_init_parsed, dict)
+                    and ("jsonrpc" in _init_parsed or "result" in _init_parsed
+                         or "error" in _init_parsed)):
+                return {**base, "status": "degraded", "latency_ms": dt,
+                        "http_status": sc, "conformance": "fail"}
+            _result = _init_parsed.get("result")
+            server_rev = (_result or {}).get("protocolVersion") \
+                if isinstance(_result, dict) else None
             sid = r.headers.get("mcp-session-id") or r.headers.get("Mcp-Session-Id")
             h2 = dict(headers)
             if sid:
@@ -1838,7 +2328,7 @@ def probe_mcp_health(endpoint: str) -> dict:
                 pass
             return {"status": "ok", "latency_ms": dt, "http_status": sc,
                     "conformance": conformance, "tool_count": tool_count,
-                    "tools": tool_list}
+                    "tools": tool_list, "protocol_version": server_rev}
     except Exception:
         return {**base, "status": "down"}
 
@@ -2337,7 +2827,11 @@ def fetch_mcp_catalog() -> list:
     return out
 
 
-MCP_CRAWLERS["mcp-catalog"] = fetch_mcp_catalog
+# Paused 2026-09-07: mcp-catalog.com answers 403 on every path, so the public
+# Supabase anon key can no longer be derived from its JS bundle. Verified to be
+# the site and not our egress — same 403 from three hosts and with a browser UA.
+# The 41 rows already imported keep their own health checks. Re-enable if it returns.
+# MCP_CRAWLERS["mcp-catalog"] = fetch_mcp_catalog
 
 
 # ---------------------------------------------------------------------------
