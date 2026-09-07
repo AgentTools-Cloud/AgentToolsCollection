@@ -89,10 +89,13 @@ def db_checks() -> tuple[list[str], list[str]]:
     detail: list[str] = []
     now = time.time()
     with db.connect(read_only=True) as c:
+        # status=error means the fetch itself failed; the failing-source
+        # baseline above already owns those, and repeating them here would put
+        # the chronically broken sources into a daily mail.
         runs = c.execute(
             "SELECT source, added, updated, errors FROM crawl_runs "
-            "WHERE COALESCE(finished_at, started_at) >= ?",
-            (now - WINDOW_SECONDS,)).fetchall()
+            "WHERE COALESCE(finished_at, started_at) >= ? AND status <> ?",
+            (now - WINDOW_SECONDS, "error")).fetchall()
         for source, added, updated, errors in runs:
             n_err = len(errors.splitlines()) if errors else 0
             wrote = (added or 0) + (updated or 0)
