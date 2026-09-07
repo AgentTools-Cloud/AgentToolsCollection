@@ -303,8 +303,16 @@ def cmd_crawl_mcp(only=None) -> int:
             if full_done:
                 kwargs["known_ids"] = known
                 kwargs["stop_after_known"] = 60  # ~4 pages of known remotes = caught up
+        truncated = ""
         try:
             items = fn(**kwargs)
+        except crawlers.PartialCrawl as e:
+            # Keep what came back, but the watermark must not move past the
+            # part we never saw, or those entries are lost for good.
+            items, truncated = e.items, e.reason
+            errors.append(f"incomplete crawl: {e.reason}")
+            log.warning("mcp crawl %s incomplete (%s); keeping %d items, "
+                        "watermark held", name, e.reason, len(items))
         except Exception as e:
             _finish_run(run_id, 0, 0, [f"fetch failed: {e!r}"], status="error")
             log.warning("mcp crawl %s fetch failed: %r", name, e)
@@ -348,7 +356,7 @@ def cmd_crawl_mcp(only=None) -> int:
             added += b_add; updated += b_upd; errors.extend(b_err)
         _finish_run(run_id, added, updated, errors,
                     status="ok" if not errors else "partial")
-        if name == "mcp-registry" and max_updated:
+        if name == "mcp-registry" and max_updated and not truncated:
             with db.writer() as c:
                 db.set_meta(c, "mcp_registry:updated_since", max_updated)
         if name == "pulsemcp" and not errors and "known_ids" not in kwargs:

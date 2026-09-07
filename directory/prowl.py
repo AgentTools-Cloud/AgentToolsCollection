@@ -32,16 +32,29 @@ def _concrete_url(value: Any) -> str | None:
     return value
 
 
+def _transport_type(value: Any) -> str | None:
+    """Manifests spell the transport as a string, a list, or a whole block."""
+    if isinstance(value, dict):
+        value = value.get("type")
+    if isinstance(value, list):
+        value = value[0] if value else None
+    return value if isinstance(value, str) else None
+
+
 def _manifest_endpoints(manifest: dict) -> list[tuple[str, str | None]]:
     """Extract concrete remote MCP endpoints from known manifest fields."""
     out: list[tuple[str, str | None]] = []
+    transport = manifest.get("transport")
     direct = _concrete_url(
         manifest.get("endpoint")
         or manifest.get("endpoint_url")
         or manifest.get("endpointUrl")
+        # A transport block often carries the only copy of the URL.
+        or (transport.get("endpoint") or transport.get("url")
+            if isinstance(transport, dict) else None)
     )
     if direct:
-        out.append((direct, manifest.get("transport")))
+        out.append((direct, _transport_type(transport)))
 
     for item in manifest.get("transports") or []:
         if not isinstance(item, dict):

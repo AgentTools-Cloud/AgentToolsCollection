@@ -15,16 +15,21 @@ import os
 import re
 import subprocess
 import sys
+import time
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, "/opt/mcpserver")
 
-from directory import mailer  # noqa: E402
+from directory import db, mailer  # noqa: E402
 
 STATE = Path("/var/lib/agent-tools-watchdog/state.json")
 WINDOW = "24 hours ago"
+WINDOW_SECONDS = 24 * 3600
+# Every table is written by at least one job per 6h; twice that is clearly stuck.
+STALE_HOURS = 12
+FRESH_TABLES = ("mcp_servers", "services", "a2a_agents")
 
 # A stage that aborts logs "<stage> failed: <exc>" and is otherwise invisible.
 ABORT_RE = re.compile(r"directory\.jobs ((?:mcp|a2a) health) failed: (.+)")
@@ -73,6 +78,45 @@ def save_state(state: dict) -> None:
     STATE.write_text(json.dumps(state, indent=2, sort_keys=True))
 
 
+def db_checks() -> tuple[list[str], list[str]]:
+    """Two failure shapes the journal checks above cannot see.
+
+    A crawl whose every item raises still finishes, exits 0 and leaves the
+    failing-source set untouched, so nothing else here notices — that is how the
+    MCP table went six days without a single write (doc §4.41).
+    """
+    problems: list[str] = []
+    detail: list[str] = []
+    now = time.time()
+    with db.connect(read_only=True) as c:
+        runs = c.execute(
+            "SELECT source, added, updated, errors FROM crawl_runs "
+            "WHERE COALESCE(finished_at, started_at) >= ?",
+            (now - WINDOW_SECONDS,)).fetchall()
+        for source, added, updated, errors in runs:
+            n_err = len(errors.splitlines()) if errors else 0
+            wrote = (added or 0) + (updated or 0)
+            if not n_err:
+                continue
+            if wrote == 0:
+                problems.append(f"{source} 跑完但一条未写入，报错 {n_err} 条")
+            elif n_err > wrote:
+                problems.append(f"{source} 报错 {n_err} 条多于写入 {wrote} 条")
+
+        for table in FRESH_TABLES:
+            newest = c.execute(f"SELECT MAX(updated_at) FROM {table}").fetchone()[0]
+            if not newest:
+                problems.append(f"{table} 没有任何 updated_at")
+                continue
+            hours = (now - newest) / 3600
+            if hours > STALE_HOURS:
+                problems.append(
+                    f"{table} 最新写入已是 {hours:.1f} 小时前（阈值 {STALE_HOURS}）")
+            else:
+                detail.append(f"  {table} 最新写入 {hours:.1f} 小时前")
+    return problems, detail
+
+
 def main() -> int:
     lines = journal()
     problems: list[str] = []
@@ -94,6 +138,10 @@ def main() -> int:
 
     for unit, result in unit_results():
         problems.append(f"agent-tools-{unit}.service 上次结束状态 = {result}")
+
+    db_problems, db_detail = db_checks()
+    problems += db_problems
+    detail += db_detail
 
     # Known-broken crawl sources fail every run; alerting on them daily would be
     # pure noise. Track the set instead and speak up only when it changes.
