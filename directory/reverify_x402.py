@@ -82,7 +82,7 @@ def _norm_url(url: str) -> str:
 def _chain_from_payment(payment: dict | None) -> list:
     if not payment:
         return []
-    net = (payment.get("network") or "").lower()
+    net = db.network_id(payment.get("network"))
     return [_NETWORKS.get(net, net)] if net else []
 
 
@@ -391,7 +391,7 @@ def reverify(targets=("mcp", "a2a"), workers=24, limit=None,
               f"{len(service_payments)}", flush=True)
 
     # 2. mirror verified endpoints into services (x402) table
-    svc_new = svc_skip = 0
+    svc_new = svc_skip = svc_bad = 0
     for t in verified:
         key = _norm_url(t["endpoint"]) or _norm_url(t["homepage"])
         if key and key in existing_keys:
@@ -399,14 +399,23 @@ def reverify(targets=("mcp", "a2a"), workers=24, limit=None,
             continue
         if key:
             existing_keys.add(key)
-        service = _build_service(t, t["verdict"])
-        svc_new += int(_mirror_service(service))
+        try:
+            service = _build_service(t, t["verdict"])
+            svc_new += int(_mirror_service(service))
+        except Exception as exc:
+            # One malformed descriptor must not discard a step that already
+            # spent ~45min of CPU. Report it and keep mirroring the rest.
+            svc_bad += 1
+            print(f"[reverify] mirror_failed slug={t.get('slug')!r} "
+                  f"{type(exc).__name__}: {exc}", flush=True)
 
     print(f"[reverify] services mirrored: new/updated_paid={len(verified)} "
-          f"inserted={svc_new} skipped_dupe={svc_skip}", flush=True)
+          f"inserted={svc_new} skipped_dupe={svc_skip} failed={svc_bad}",
+          flush=True)
 
     return {"probed": total, "verified": n_ver,
             "services_inserted": svc_new, "services_skipped": svc_skip,
+            "services_failed": svc_bad,
             "native_services_tagged": len(service_ok_ids)}
 
 

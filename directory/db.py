@@ -2098,6 +2098,22 @@ def _payto_of(row) -> str:
                or first.get("payTo") or first.get("pay_to") or "")
 
 
+def network_id(net) -> str:
+    """A comparable chain id from the shapes descriptors use in the wild.
+
+    Seen as a bare string, as an int chain id, and as an object carrying
+    caip2 / chainId / name. Lowercasing the latter two raised AttributeError
+    and killed the reverify mirror step after its work had already committed.
+    """
+    if isinstance(net, dict):
+        net = net.get("caip2") or net.get("chainId") or net.get("name") or ""
+    if isinstance(net, (list, tuple)):
+        net = net[0] if net else ""
+        if isinstance(net, dict):
+            net = net.get("caip2") or net.get("chainId") or net.get("name") or ""
+    return str(net or "").strip().lower()
+
+
 def _payability_parts(row) -> list:
     """The five payability signals as (label, weight, present) triples.
 
@@ -2118,11 +2134,8 @@ def _payability_parts(row) -> list:
              and isinstance(accepts[0], dict) else {})
     addr = str(pay.get("pay_to") or pay.get("payTo")
                or first.get("payTo") or first.get("pay_to") or "")
-    net = (pay.get("network") or first.get("network")
-           or pay.get("chains") or pay.get("networks"))
-    if isinstance(net, list):
-        net = net[0] if net else ""
-    net = str(net or "").strip().lower()
+    net = network_id(pay.get("network") or first.get("network")
+                     or pay.get("chains") or pay.get("networks"))
     return [
         ("Answers a real HTTP 402 challenge", 15.0, bool(row.get("x402_ok"))),
         ("Publishes a /.well-known/x402 descriptor", 5.0,
