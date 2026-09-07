@@ -190,7 +190,11 @@ class CrawlerFailureTests(unittest.TestCase):
             def head(self, _url):
                 return _Response(404)
 
-            def get(self, _url):
+            def get(self, url):
+                # The descriptor is served but advertises no resource, so the
+                # endpoint itself stays unreachable and must not be POSTed to.
+                if url == endpoint:
+                    return _Response(404)
                 return _Response(200, {"x402Version": 2, "endpoints": []})
 
             def post(self, _url, json):

@@ -716,6 +716,7 @@ def upsert_service(conn: sqlite3.Connection, row: dict) -> tuple:
             if row.get(field) is None:
                 row[field] = existing[field]
         _restore_owner_edits(row, existing)
+        _keep_owned_slug(cur, "services", row, existing)
         set_clause = ",".join(f"{c}=?" for c in cols if c != "created_at")
         params = [row.get(c) for c in cols if c != "created_at"]
         params.append(existing["id"])
@@ -1408,6 +1409,7 @@ def upsert_a2a_agent(conn: sqlite3.Connection, row: dict) -> tuple:
         if row.get(_keep) is None:
             row[_keep] = existing[_keep]
     _restore_owner_edits(row, existing)
+    _keep_owned_slug(cur, "a2a_agents", row, existing)
     set_clause = ",".join(f"{c}=?" for c in _A2A_COLS if c != "created_at")
     params = [row.get(c) for c in _A2A_COLS if c != "created_at"]
     params.append(existing["id"])
@@ -1696,6 +1698,7 @@ def upsert_mcp_server(conn: sqlite3.Connection, row: dict) -> tuple:
         if row.get(_keep) is None:
             row[_keep] = existing[_keep]
     _restore_owner_edits(row, existing)
+    _keep_owned_slug(cur, "mcp_servers", row, existing)
     # package_download_count is only provided by pulsemcp; don't let a re-crawl
     # from another source (which never carries it) wipe a stored value.
     if row.get("package_download_count") is None:
@@ -2648,6 +2651,26 @@ def _restore_owner_edits(row: dict, existing) -> None:
         return
     for field in fields:
         row[field] = existing[field]
+
+
+_SLUG_TABLES = frozenset({"services", "mcp_servers", "a2a_agents"})
+
+
+def _keep_owned_slug(cur, table: str, row: dict, existing) -> None:
+    """Never rename a row onto a slug another row already owns.
+
+    Duplicate endpoints across sources mean the incoming slug can belong to a
+    different row; taking it breaks the UNIQUE constraint and the caller drops
+    the whole item, while keeping our own slug costs only the rename.
+    """
+    assert table in _SLUG_TABLES, table
+    slug = row.get("slug")
+    if not slug or slug == existing["slug"]:
+        return
+    taken = cur.execute(f"SELECT 1 FROM {table} WHERE slug=? AND id<>?",
+                        (slug, existing["id"])).fetchone()
+    if taken:
+        row["slug"] = existing["slug"]
 
 
 def apply_listing_edits(conn: sqlite3.Connection, kind: str, listing_id: int,
