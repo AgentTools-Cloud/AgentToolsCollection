@@ -395,6 +395,19 @@ def _auth_scheme_names(card: dict) -> list[str] | None:
     return names or None
 
 
+def _text(v) -> str | None:
+    """Coerce a card field the spec types as a string into one.
+
+    Cards in the wild nest an object here (sputnikx.xyz ships
+    provider.organization as {"name": ...}); sqlite refuses to bind it.
+    """
+    if isinstance(v, dict):
+        v = v.get("name") or v.get("organization") or v.get("title")
+    if v is None or isinstance(v, (dict, list)):
+        return None
+    return str(v).strip() or None
+
+
 def card_to_row(card: dict, card_url: str, source: str = "manual",
                 source_id: str | None = None, slug: str | None = None) -> dict:
     """Normalise an A2A Agent Card into an a2a_agents row dict."""
@@ -415,15 +428,17 @@ def card_to_row(card: dict, card_url: str, source: str = "manual",
     return {
         "slug": slug,
         "name": name,
-        "description": (card.get("description") or "").strip() or None,
-        "provider_name": provider.get("organization") or provider.get("name"),
-        "provider_url": provider.get("url"),
+        "description": _text(card.get("description")),
+        "provider_name": _text(provider.get("organization")) or _text(provider.get("name")),
+        "provider_url": _text(provider.get("url")),
         "card_url": card_url,
         "endpoint_url": endpoint,
-        "homepage_url": provider.get("url"),
-        "documentation_url": card.get("documentationUrl") or card.get("documentationURL"),
-        "protocol_version": card.get("protocolVersion") or card.get("version"),
-        "preferred_transport": card.get("preferredTransport"),
+        "homepage_url": _text(provider.get("url")),
+        "documentation_url": (_text(card.get("documentationUrl"))
+                              or _text(card.get("documentationURL"))),
+        "protocol_version": (_text(card.get("protocolVersion"))
+                             or _text(card.get("version"))),
+        "preferred_transport": _text(card.get("preferredTransport")),
         "skills": skills,
         "capabilities": caps,
         "default_input_modes": card.get("defaultInputModes"),

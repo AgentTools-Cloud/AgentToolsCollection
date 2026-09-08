@@ -21,6 +21,7 @@ URLs, so they do not map onto our concrete x402 `services` table.
 
 from __future__ import annotations
 
+import sqlite3
 import concurrent.futures as cf
 import logging
 import re
@@ -118,13 +119,23 @@ def crawl_agenstry_a2a(max_hosts: int = 4000, workers: int = 12) -> dict:
     inserted = updated = 0
     if rows:
         def _write():
-            ins = upd = 0
+            ins = upd = bad = 0
             with db.writer() as c:
                 for row in rows:
-                    is_new, _ = db.upsert_a2a_agent(c, row)
+                    # Only the binding/schema errors are per-row; a locked DB
+                    # must still propagate so db.with_retry can retry.
+                    try:
+                        is_new, _ = db.upsert_a2a_agent(c, row)
+                    except (sqlite3.ProgrammingError, sqlite3.InterfaceError) as e:
+                        bad += 1
+                        log.warning("agenstry a2a: unwritable card %s: %r",
+                                    row.get("source_id"), e)
+                        continue
                     ins += int(is_new)
                     upd += int(not is_new)
                 c.commit()
+            if bad:
+                log.warning("agenstry a2a: %d card(s) skipped on write", bad)
             return ins, upd
         inserted, updated = db.with_retry(_write)
     return {"candidates": len(domains), "resolved": len(rows),
