@@ -772,10 +772,12 @@ def _paytos_for_row(payment_json):
         # stores a "chains" list. Both land in this column.
         networks = (p.get("chains") or p.get("networks")
                     or p.get("network") or p.get("chain") or [])
-        if isinstance(networks, str):
+        # One network or several, and each may be a plain string, a bare
+        # int chain id, or an object -- iterating a dict yields its keys.
+        if not isinstance(networks, (list, tuple)):
             networks = [networks]
         for net in networks:
-            _add(crawlers.network_to_chain(net), flat_pt)
+            _add(crawlers.network_to_chain(db.network_id(net)), flat_pt)
 
     return out
 
