@@ -42,6 +42,8 @@ DONE_RE = {
 # The health timer fires every 4h (6/day). Allow slack for deploys and reboots.
 MIN_PASSES = 4
 CRAWL_FAIL_RE = re.compile(r"(?:mcp |a2a )?crawl ([a-z0-9][a-z0-9-]*) (?:fetch )?failed")
+# Every crawl source runs on the same ~6h timer, so four rounds is a full day.
+PARTIAL_STREAK = 4
 
 
 def journal() -> list[str]:
@@ -120,6 +122,44 @@ def db_checks() -> tuple[list[str], list[str]]:
     return problems, detail
 
 
+def stuck_sources() -> list[tuple[str, int, str]]:
+    """Sources whose last PARTIAL_STREAK runs were every one of them partial.
+
+    A source that limps every round hides from all three checks above: its
+    status is partial rather than error so the failing-source set never moves,
+    its writes still outnumber its errors, and the tables stay fresh because
+    other sources are writing to them. agenstry read as healthy by all three
+    for 21 days (doc §4.49).
+    """
+    now = time.time()
+    with db.connect(read_only=True) as c:
+        rows = c.execute(
+            "SELECT source, status, errors, COALESCE(finished_at, started_at) ts "
+            "FROM crawl_runs "
+            "WHERE COALESCE(finished_at, started_at) BETWEEN ? AND ? "
+            "ORDER BY source, ts", (now - 14 * 86400, now)).fetchall()
+
+    seqs: dict[str, list] = {}
+    for source, status, errors, ts in rows:
+        seqs.setdefault(source, []).append((status, errors, ts))
+
+    out: list[tuple[str, int, str]] = []
+    for source, seq in seqs.items():
+        # A source that stopped running altogether is a different failure and
+        # belongs to the staleness check, not here.
+        if seq[-1][2] < now - WINDOW_SECONDS:
+            continue
+        streak = 0
+        for status, _, _ in reversed(seq):
+            if status != "partial":
+                break
+            streak += 1
+        if streak >= PARTIAL_STREAK:
+            first = (seq[-streak][1] or "").splitlines()
+            out.append((source, streak, first[0][:120] if first else ""))
+    return sorted(out)
+
+
 def main() -> int:
     lines = journal()
     problems: list[str] = []
@@ -164,6 +204,28 @@ def main() -> int:
             detail.append(f"  已恢复的爬源: {', '.join(gone)}（基线已更新）")
         state["failing_sources"] = now_failing
         state["changed_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        save_state(state)
+
+    # Same treatment as the failing-source set: a source stuck on partial stays
+    # stuck until someone fixes it, so report the set changing rather than its
+    # contents, or this becomes a daily mail nobody reads.
+    stuck = stuck_sources()
+    stuck_names = sorted(s for s, _, _ in stuck)
+    stuck_base = state.get("stuck_sources")
+    if stuck_base is None:
+        state["stuck_sources"] = stuck_names
+        save_state(state)
+    elif stuck_names != stuck_base:
+        for source, streak, first in stuck:
+            if source not in stuck_base:
+                problems.append(
+                    f"{source} 连续 {streak} 轮 partial（约 {streak * 6}h 没跑全）")
+                if first:
+                    detail.append(f"  {source} 首条报错: {first}")
+        recovered = [s for s in stuck_base if s not in stuck_names]
+        if recovered:
+            detail.append(f"  已恢复的 partial 源: {', '.join(recovered)}（基线已更新）")
+        state["stuck_sources"] = stuck_names
         save_state(state)
 
     if not problems:
