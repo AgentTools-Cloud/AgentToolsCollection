@@ -1119,6 +1119,32 @@ _TESTNET_CHAIN_IDS = {
 }
 
 
+# Keys that carry paid resource entries in the wild. There is no spec for the
+# well-known descriptor, so this is an observed list, not a standard one.
+# `resources`/`endpoints` stay first so probe order does not change.
+_RESOURCE_CONTAINERS = ("resources", "endpoints", "items", "routes", "tools",
+                        "services", "paidTools", "products")
+
+
+def _entry_url(entry: dict, base: str) -> str:
+    """Absolute URL for one advertised resource entry.
+
+    x402 v2 turned `resource` into an object ({url, description, mimeType}),
+    so stringifying it yielded a dict repr and the entry was dropped whole.
+    """
+    out = ""
+    for key in ("url", "endpoint", "resource", "path"):
+        raw = entry.get(key)
+        if isinstance(raw, dict):
+            raw = raw.get("url") or raw.get("uri")
+        raw = str(raw or "").strip()
+        if raw:
+            out = raw
+            break
+    if out.startswith("/"):
+        out = base.rstrip("/") + "/" + out.lstrip("/")
+    return out
+
 def _advertised_entries(doc: Any) -> list:
     """Resource entries a descriptor advertises, top-level or network-scoped.
 
@@ -1127,10 +1153,21 @@ def _advertised_entries(doc: Any) -> list:
     listing kept its price and payTo blank. Only a live, non-testnet block is
     read; the address itself still comes from the endpoint's real 402 reply.
     """
+    if isinstance(doc, list):
+        # Some manifests are a bare array of resource entries.
+        return list(doc)
     if not isinstance(doc, dict):
         return []
-    top = doc.get("resources") or doc.get("endpoints")
-    if isinstance(top, list) and top:
+    # A descriptor may fill both keys with different entries, so picking the
+    # first non-empty one silently dropped the other list.
+    top: list = []
+    for key in _RESOURCE_CONTAINERS:
+        block = doc.get(key)
+        if isinstance(block, dict):
+            block = list(block.values())
+        if isinstance(block, list):
+            top.extend(block)
+    if top:
         return top
 
     out: list = []
@@ -1155,7 +1192,7 @@ def _advertised_entries(doc: Any) -> list:
             if isinstance(it, str):
                 out.append(it)
             elif isinstance(it, dict):
-                url = it.get("endpoint") or it.get("url") or it.get("resource")
+                url = _entry_url(it, "")
                 if url:
                     out.append({
                         "url": url,
@@ -1279,17 +1316,19 @@ def fetch_wellknown_resources(url: str, well_known: str | None = None) -> dict[s
                 _st, obj = fetch_well_known(c, wk)
                 if _st != 200 or obj is None:
                     continue
-                if isinstance(obj, dict):
+                if isinstance(obj, (dict, list)):
                     doc, wk_url = obj, wk
                     break
     except Exception:  # noqa: BLE001 - provenance extras never break a listing
         doc = None
 
     samples: list[dict[str, Any]] = []
-    seen_urls: set = set()
+    prices: list[float] = []
+    seen_urls: dict = {}
     # Some manifests list paid endpoints under `endpoints` with a
     # relative `path` instead of a `resources` array of URLs.
-    doc_base = str((doc or {}).get("baseUrl") or "").strip() or origin
+    _meta = doc if isinstance(doc, dict) else {}
+    doc_base = str(_meta.get("baseUrl") or "").strip() or origin
     advertised = _advertised_entries(doc)
     advertised_total = 0
     for res in advertised:
@@ -1305,18 +1344,30 @@ def fetch_wellknown_resources(url: str, well_known: str | None = None) -> dict[s
             if res_url.startswith("/"):
                 res_url = doc_base.rstrip("/") + res_url
         elif isinstance(res, dict):
-            res_url = str(res.get("url") or res.get("resource") or "").strip()
-            if not res_url and res.get("path"):
-                res_url = (doc_base.rstrip("/") + "/"
-                           + str(res["path"]).lstrip("/"))
+            res_url = _entry_url(res, doc_base)
             method = res.get("method")
             accepts = res.get("accepts") if isinstance(res.get("accepts"), list) else None
             desc = res.get("description") or res.get("name")
         else:
             continue
-        if not res_url.startswith("http") or res_url in seen_urls:
+        if not res_url.startswith("http"):
             continue
-        seen_urls.add(res_url)
+        # The sample cap below is a storage limit; a price span derived from
+        # only the first 50 entries understated the maximum by up to 15x.
+        for _acc in (accepts or []):
+            if isinstance(_acc, dict):
+                _usd = _bazaar_price_usd(_acc)
+                if _usd is not None:
+                    prices.append(_usd)
+        if res_url in seen_urls:
+            # One URL is often listed twice: a plain entry plus a canonical
+            # copy carrying accepts[]. Keeping only the first left the
+            # resource with no payment terms at all.
+            _idx = seen_urls[res_url]
+            if accepts and _idx is not None and not samples[_idx].get("accepts"):
+                samples[_idx]["accepts"] = accepts[:5]
+            continue
+        seen_urls[res_url] = len(samples) if len(samples) < 50 else None
         advertised_total += 1
         # Cap what we store, not what we count.
         if len(samples) >= 50:
@@ -1339,6 +1390,8 @@ def fetch_wellknown_resources(url: str, well_known: str | None = None) -> dict[s
         "well_known_url": wk_url or (origin + "/.well-known/x402"),
         "resource_count": advertised_total,
         "resource_samples": samples,
+        "price_min": min(prices) if prices else None,
+        "price_max": max(prices) if prices else None,
     }
 
 
@@ -1351,7 +1404,7 @@ def verify_x402(url: str, well_known: str | None = None) -> dict[str, Any]:
     evidence: list[str] = []
     payment: dict[str, Any] | None = None
     net_error = False
-    doc_seen: dict[str, Any] | None = None
+    doc_seen: Any = None
 
     url = (url or "").strip()
     parsed = urlparse(url if "//" in url else "https://" + url)
@@ -1392,7 +1445,7 @@ def verify_x402(url: str, well_known: str | None = None) -> dict[str, Any]:
             if _st == 200:
                 if obj is None:
                     continue
-                if isinstance(obj, dict) and doc_seen is None:
+                if doc_seen is None and isinstance(obj, (dict, list)):
                     doc_seen = obj
                 if _looks_like_x402(obj):
                     evidence.append(f"well-known x402 descriptor at {wk} (200, x402 markers)")
@@ -1406,7 +1459,7 @@ def verify_x402(url: str, well_known: str | None = None) -> dict[str, Any]:
         # Gate on the payTo, not on evidence: a descriptor can carry x402
         # markers (so verification already succeeded) while holding no
         # accepts[], leaving the address only in each resource's 402 response.
-        if payment is None and isinstance(doc_seen, dict):
+        if payment is None and doc_seen is not None:
             advertised = _advertised_entries(doc_seen)
             for res in advertised[:5]:
                 if isinstance(res, str):
@@ -1421,10 +1474,8 @@ def verify_x402(url: str, well_known: str | None = None) -> dict[str, Any]:
                         base = doc_seen.get("baseUrl") if isinstance(doc_seen, dict) else None
                         res_url = str(base or origin).rstrip("/") + res_url
                 elif isinstance(res, dict):
-                    res_url = str(res.get("url") or res.get("resource") or "").strip()
-                    if not res_url and res.get("path"):
-                        _b = doc_seen.get("baseUrl") or origin
-                        res_url = str(_b).rstrip("/") + "/" + str(res["path"]).lstrip("/")
+                    _b = doc_seen.get("baseUrl") if isinstance(doc_seen, dict) else None
+                    res_url = _entry_url(res, str(_b or origin))
                     res_method = str(res.get("method") or "POST").upper()
                 else:
                     continue
