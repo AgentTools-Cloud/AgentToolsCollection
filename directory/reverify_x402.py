@@ -306,7 +306,10 @@ def reverify(targets=("mcp", "a2a"), workers=24, limit=None,
                 pay = t["verdict"].get("payment") or None
                 if pay and pay.get("pay_to"):
                     res = t.get("resources") or {}
-                    lo, hi = _price_span(res.get("resource_samples"))
+                    lo, hi = res.get("price_min"), res.get("price_max")
+                    if lo is None:
+                        # Older cached results carry no span of their own.
+                        lo, hi = _price_span(res.get("resource_samples"))
                     if lo is None:
                         lo = hi = pay.get("max_amount_usdc")
                     service_payments.append((
