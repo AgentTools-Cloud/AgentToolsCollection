@@ -192,20 +192,28 @@ def _bazaar_fetch_raw(page_sleep: float = 0.3, max_pages: int = 400,
     items: list = []
     with httpx.Client(timeout=TIMEOUT, headers={"User-Agent": UA, "Accept": "application/json"}) as c:
         offset = 0
+        total = 0
         for _ in range(max_pages):
             params = {"limit": 100, "offset": offset}
-            try:
-                r = c.get(CDP_BAZAAR_V2, params=params)
-                if r.status_code == 429:
-                    time.sleep(2.5)
+            last_err: Exception | None = None
+            for attempt in range(3):
+                try:
                     r = c.get(CDP_BAZAAR_V2, params=params)
-                if r.status_code != 200:
-                    log.warning("cdp-bazaar: stop HTTP %d at offset %d", r.status_code, offset)
+                    if r.status_code == 429:
+                        time.sleep(2.5)
+                        r = c.get(CDP_BAZAAR_V2, params=params)
+                    r.raise_for_status()
+                    d = r.json()
                     break
-                d = r.json()
-            except Exception as e:
-                log.warning("cdp-bazaar: fetch error at offset %d: %r", offset, e)
-                break
+                except Exception as e:
+                    last_err = e
+                    log.warning("cdp-bazaar: offset %d attempt %d failed: %r",
+                                offset, attempt + 1, e)
+                    time.sleep(2 ** attempt)
+            else:
+                raise PartialCrawl(
+                    items,
+                    "offset %d failed after 3 attempts: %r" % (offset, last_err))
             page = d.get("items") or []
             if not page:
                 break
@@ -220,6 +228,11 @@ def _bazaar_fetch_raw(page_sleep: float = 0.3, max_pages: int = 400,
             if offset >= total:
                 break
             time.sleep(page_sleep)
+        else:
+            if total and offset < total:
+                raise PartialCrawl(
+                    items,
+                    "hit max_pages=%d at offset %d of %d" % (max_pages, offset, total))
     return items
 
 
@@ -253,7 +266,15 @@ def fetch_cdp_bazaar() -> list:
         log.warning("cdp-bazaar: watermark read failed, full crawl: %r", e)
         since_iso = None
 
-    raw = _bazaar_fetch_raw(since_iso=since_iso)
+    truncated = ""
+    try:
+        raw = _bazaar_fetch_raw(since_iso=since_iso)
+    except PartialCrawl as e:
+        # The watermark is written below, before anything is upserted; moving it
+        # on a short read would skip the offsets we never got to.
+        raw, truncated = e.items, e.reason
+        log.warning("cdp-bazaar: incomplete feed (%s); keeping %d items, "
+                    "watermark held", e.reason, len(raw))
     if not raw:
         return []
 
@@ -263,7 +284,7 @@ def fetch_cdp_bazaar() -> list:
         lu = (it.get("lastUpdated") or "") if isinstance(it, dict) else ""
         if lu > max_seen:
             max_seen = lu
-    if max_seen:
+    if max_seen and not truncated:
         try:
             with db.writer() as conn:
                 db.set_meta(conn, "cdp_bazaar:updated_since", max_seen)
@@ -2046,6 +2067,12 @@ def fetch_mcp_registry(updated_since: str | None = None,
                 updated_at = rmeta.get("updatedAt") or rmeta.get("publishedAt")
                 name = (srv.get("name") or "").strip()
                 if not name or name in seen:
+                    continue
+                # Every published version is listed; entries are ordered
+                # name:version ascending, so taking the first match would pin us
+                # to the oldest one -- and the endpoint often moves between
+                # versions. The registry flags which one is current.
+                if rmeta.get("isLatest") is False:
                     continue
                 seen.add(name)
                 # Deleted servers are emitted (incremental only) so the caller
