@@ -1111,6 +1111,15 @@ def _looks_like_x402(obj: Any) -> bool:
     return any(m in blob for m in _X402_MARKERS)
 
 
+def _payment_incomplete(payment) -> bool:
+    """True when we still need a live 402 to learn the price.
+
+    A descriptor routinely names payTo, network and asset but no amount, so a
+    non-empty record is not necessarily a usable one.
+    """
+    return not payment or payment.get("max_amount_usdc") is None
+
+
 def _merge_payment(base, extra):
     """Fill blanks in ``base`` from ``extra``, keeping ``base``'s values.
 
@@ -1480,7 +1489,8 @@ def verify_x402(url: str, well_known: str | None = None) -> dict[str, Any]:
         # Gate on the payTo, not on evidence: a descriptor can carry x402
         # markers (so verification already succeeded) while holding no
         # accepts[], leaving the address only in each resource's 402 response.
-        if payment is None and doc_seen is not None:
+        if _payment_incomplete(payment) and doc_seen is not None:
+            probed_402 = False
             advertised = _advertised_entries(doc_seen)
             for res in advertised[:5]:
                 if isinstance(res, str):
@@ -1514,22 +1524,27 @@ def verify_x402(url: str, well_known: str | None = None) -> dict[str, Any]:
                         # header form is the exception. Reading only the header
                         # here left minimal-manifest services with no payTo on
                         # record, so their on-chain demand was never queryable.
-                        if payment is None:
-                            header_obj = _decode_payment_required_header(r.headers)
-                            if header_obj is not None:
-                                payment = _extract_payment(header_obj)
-                        if payment is None:
+                        header_obj = _decode_payment_required_header(r.headers)
+                        if header_obj is not None:
+                            payment = _merge_payment(
+                                _extract_payment(header_obj), payment)
+                        if _payment_incomplete(payment):
                             _body = _parse_json_body(r.content, res_url)
                             if _body is not None:
                                 try:
-                                    payment = _extract_payment(_body)
+                                    payment = _merge_payment(
+                                        _extract_payment(_body), payment)
                                 except Exception:  # noqa: BLE001
                                     pass
                         evidence.append(
                             f"advertised resource {res_url} returns HTTP 402 "
                             f"with payment requirements")
+                        probed_402 = True
                         break
-                if evidence:
+                # `evidence` is already non-empty whenever the descriptor
+                # carried x402 markers, so testing it here stopped after the
+                # first resource without ever seeing a 402.
+                if probed_402:
                     break
 
         # --- 2. endpoint 402 challenge ---
