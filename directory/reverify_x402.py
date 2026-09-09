@@ -35,8 +35,12 @@ _NETWORKS = {
 
 
 # How long a verified listing's descriptor may go unread. Operators fix their
-# manifests and nothing here noticed until they emailed.
-_DESCRIPTOR_TTL = int(os.environ.get("AGENT_TOOLS_DESCRIPTOR_TTL", 7 * 86400))
+# manifests and nothing here noticed until they emailed. A full daily pass
+# costs ~15 minutes because 18.5k listings sit on ~4.5k origins and the
+# descriptor fetch is cached per run; a longer window mostly bought the
+# thundering herd that follows any full backfill, since one run leaves every
+# row with the same timestamp and they all expire on the same night.
+_DESCRIPTOR_TTL = int(os.environ.get("AGENT_TOOLS_DESCRIPTOR_TTL", 86400))
 
 
 def _price_span(samples):
