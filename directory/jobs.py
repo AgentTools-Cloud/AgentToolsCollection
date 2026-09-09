@@ -14,8 +14,10 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from . import a2a as a2a_mod
 from . import crawlers, db, mailer
@@ -608,6 +610,59 @@ def cmd_health_a2a(only_unknown: bool = False, quarantined_only: bool = False) -
     return 0
 
 
+# Minimum spacing between two probes aimed at the same host. Rows come back in
+# id order and a source's imports are contiguous, so a batch used to be 100 paths
+# on one multi-tenant gateway hit by 16 workers at once; that gateway answered
+# 429 for a third of them, and re-probing those slowly returns a stable 401.
+_HOST_GAP_S = float(os.environ.get("AGENT_TOOLS_HOST_GAP", "0.25"))
+_host_next: dict = {}
+_host_gap_lock = threading.Lock()
+
+
+def _probe_host(url) -> str:
+    try:
+        return urlsplit(str(url or "")).netloc.lower()
+    except ValueError:
+        return ""
+
+
+def _interleave_by_host(rows: list) -> list:
+    """Spread each host's rows evenly over the whole run.
+
+    Plain round-robin empties the small hosts in the first couple of passes and
+    leaves the largest one as a single unbroken tail, which is the shape that
+    earned us the 429s. Placing row k of n at (k - 0.5) / n instead gives every
+    host the same uniform spacing, so a batch holds each host in proportion to
+    its share rather than whichever ids happened to be adjacent.
+    """
+    total: dict = {}
+    for r in rows:
+        h = _probe_host(r["endpoint_url"])
+        total[h] = total.get(h, 0) + 1
+    rank: dict = {}
+    keyed = []
+    for r in rows:
+        h = _probe_host(r["endpoint_url"])
+        rank[h] = rank.get(h, 0) + 1
+        keyed.append(((rank[h] - 0.5) / total[h], h, r))
+    keyed.sort(key=lambda t: (t[0], t[1]))
+    return [t[2] for t in keyed]
+
+
+def _wait_for_host(url) -> None:
+    if _HOST_GAP_S <= 0:
+        return
+    h = _probe_host(url)
+    if not h:
+        return
+    with _host_gap_lock:
+        when = max(_host_next.get(h, 0.0), time.monotonic())
+        _host_next[h] = when + _HOST_GAP_S
+    delay = when - time.monotonic()
+    if delay > 0:
+        time.sleep(delay)
+
+
 def cmd_health_mcp(only_unknown: bool = False, quarantined_only: bool = False) -> int:
     """Liveness-probe indexed MCP servers via an `initialize` request."""
     _qc = int(time.time()) - QUARANTINE_DAYS * 86400
@@ -623,12 +678,14 @@ def cmd_health_mcp(only_unknown: bool = False, quarantined_only: bool = False) -
         rows = list(c.execute(sql).fetchall())
     if not rows:
         return 0
+    rows = _interleave_by_host(rows)
     n_ok = n_deg = n_down = n_conf = 0
     n_flagged = 0
     now = int(time.time())
     from concurrent.futures import ThreadPoolExecutor
 
     def _probe(r):
+        _wait_for_host(r["endpoint_url"])
         res = crawlers.probe_mcp_health(r["endpoint_url"])
         h = res["status"]
         conf = res.get("conformance")
