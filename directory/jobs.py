@@ -614,7 +614,10 @@ def cmd_health_a2a(only_unknown: bool = False, quarantined_only: bool = False) -
 # id order and a source's imports are contiguous, so a batch used to be 100 paths
 # on one multi-tenant gateway hit by 16 workers at once; that gateway answered
 # 429 for a third of them, and re-probing those slowly returns a stable 401.
-_HOST_GAP_S = float(os.environ.get("AGENT_TOOLS_HOST_GAP", "0.25"))
+# Read on use, not at import: _load_env_file() runs at the bottom of this
+# module, so a value in .env would arrive too late for a module constant
+# and only the systemd path (EnvironmentFile=) would see it.
+_HOST_GAP_DEFAULT = "0.5"
 _host_next: dict = {}
 _host_gap_lock = threading.Lock()
 
@@ -649,15 +652,23 @@ def _interleave_by_host(rows: list) -> list:
     return [t[2] for t in keyed]
 
 
+def _host_gap() -> float:
+    try:
+        return float(os.environ.get("AGENT_TOOLS_HOST_GAP", _HOST_GAP_DEFAULT))
+    except ValueError:
+        return float(_HOST_GAP_DEFAULT)
+
+
 def _wait_for_host(url) -> None:
-    if _HOST_GAP_S <= 0:
+    gap = _host_gap()
+    if gap <= 0:
         return
     h = _probe_host(url)
     if not h:
         return
     with _host_gap_lock:
         when = max(_host_next.get(h, 0.0), time.monotonic())
-        _host_next[h] = when + _HOST_GAP_S
+        _host_next[h] = when + gap
     delay = when - time.monotonic()
     if delay > 0:
         time.sleep(delay)
