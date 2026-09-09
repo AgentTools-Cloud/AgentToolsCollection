@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 
@@ -82,22 +83,40 @@ def _enforce_ask_limit(request: Request, use_llm: bool) -> None:
         limits.raise_rate_limited(state, "Too many LLM-backed ask requests. Try again later or set use_llm=false.")
 
 
+# The homepage aggregates walk whole tables -- mcp_stats alone reads every row
+# to bucket distinct domains -- but the numbers only move when the crawl and
+# health timers run, hours apart.
+_HOME_CACHE_TTL = limits.env_int("AGENT_TOOLS_HOME_CACHE_TTL", 300)
+_home_cache: dict = {"at": 0.0, "payload": None}
+_home_cache_lock = threading.Lock()
+
+
+def _home_payload():
+    now = time.time()
+    # Held across the rebuild so a burst on an expired entry recomputes once
+    # rather than once per waiting thread.
+    with _home_cache_lock:
+        cached = _home_cache["payload"]
+        if cached is not None and now - _home_cache["at"] < _HOME_CACHE_TTL:
+            return cached
+        with _conn() as c:
+            payload = {
+                "stats": db.stats(c),
+                "mcp_stats": db.mcp_stats(c),
+                "a2a_stats": db.a2a_stats(c),
+                "top_mcp": db.top_rated(c, "mcp", 5),
+                "top_a2a": db.top_rated(c, "a2a", 5),
+                "top_x402": db.top_rated(c, "x402", 5),
+                "grade_mix": db.grade_mix_all(c),
+            }
+        _home_cache["at"], _home_cache["payload"] = now, payload
+        return payload
+
+
 @router.get("/", response_class=HTMLResponse, include_in_schema=False)
 def home(request: Request):
-    with _conn() as c:
-        s = db.stats(c)
-        ms = db.mcp_stats(c)
-        a2s = db.a2a_stats(c)
-        top_mcp = db.top_rated(c, "mcp", 5)
-        top_a2a = db.top_rated(c, "a2a", 5)
-        top_x402 = db.top_rated(c, "x402", 5)
-        mix = db.grade_mix_all(c)
-    return TEMPLATES.TemplateResponse(request, "home.html", {
-            "request": request, "stats": s, "mcp_stats": ms, "a2a_stats": a2s,
-            "top_mcp": top_mcp, "top_a2a": top_a2a, "top_x402": top_x402,
-            "grade_mix": mix,
-        },
-    )
+    return TEMPLATES.TemplateResponse(
+        request, "home.html", {"request": request, **_home_payload()})
 
 
 @router.get("/x402", response_class=HTMLResponse, include_in_schema=False)
