@@ -28,7 +28,11 @@ STATE = Path("/var/lib/agent-tools-watchdog/state.json")
 WINDOW = "24 hours ago"
 WINDOW_SECONDS = 24 * 3600
 # Every table is written by at least one job per 6h; twice that is clearly stuck.
-STALE_HOURS = 12
+# health writes each table once a day now, and the a2a stage finishes early
+# in a round that runs over three hours, so a healthy table can legitimately
+# be a full day old. 30h flags a round that never ran without firing on the
+# normal daily rhythm.
+STALE_HOURS = 30
 FRESH_TABLES = ("mcp_servers", "services", "a2a_agents")
 
 # A stage that aborts logs "<stage> failed: <exc>" and is otherwise invisible.
@@ -40,9 +44,10 @@ DONE_RE = {
     "a2a health": re.compile(r"directory\.jobs a2a health: ok="),
 }
 # The health timer fires every 4h (6/day). Allow slack for deploys and reboots.
-MIN_PASSES = 4
+MIN_PASSES = 1
 CRAWL_FAIL_RE = re.compile(r"(?:mcp |a2a )?crawl ([a-z0-9][a-z0-9-]*) (?:fetch )?failed")
-# Every crawl source runs on the same ~6h timer, so four rounds is a full day.
+# health and crawl both moved to a single daily round on 2026-09-10, so one
+# pass per stage is now a full day and anything less means a stage aborted.
 PARTIAL_STREAK = 4
 
 
@@ -219,7 +224,7 @@ def main() -> int:
         for source, streak, first in stuck:
             if source not in stuck_base:
                 problems.append(
-                    f"{source} 连续 {streak} 轮 partial（约 {streak * 6}h 没跑全）")
+                    f"{source} 连续 {streak} 轮 partial（约 {streak * 24}h 没跑全）")
                 if first:
                     detail.append(f"  {source} 首条报错: {first}")
         recovered = [s for s in stuck_base if s not in stuck_names]
