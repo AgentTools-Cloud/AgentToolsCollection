@@ -752,11 +752,49 @@ def _enforce_submit_limit(request: Request, scope: str) -> str:
     return client_ip
 
 
+def _owner_locked(kind: str, row: dict) -> HTTPException:
+    """Refuse a submission aimed at a listing whose owner proved control.
+
+    Verification exists so an operator can correct their own entry; leaving the
+    anonymous path able to overwrite it afterwards would hand that correction to
+    whoever posts last.
+    """
+    slug = row.get("slug") or ""
+    view = {"mcp": "/mcp/servers/", "a2a": "/a2a/agents/"}.get(kind, "/services/")
+    return HTTPException(
+        status_code=409,
+        detail={
+            "error": "owner_verified",
+            "message": (
+                "This listing has a verified owner, so an unauthenticated "
+                "submission can no longer change it. Sign in and verify control "
+                "of the domain to edit it. Listings without a verified owner are "
+                "unaffected, and any URL that is not listed yet can still be "
+                "submitted here."),
+            "slug": slug,
+            "view_url": view + slug,
+            "edit_url": f"/listings/{kind}/{slug}/edit",
+            "claim_url": "https://agent-tools.cloud/account",
+            "claim_docs": "https://agent-tools.cloud/docs/claim",
+        },
+    )
+
+
 @router.post("/api/v1/mcp/submit", tags=["mcp"])
 async def api_submit_mcp(request: Request, payload: McpSubmissionPayload):
-    """Index a single MCP server by its streamable-http endpoint URL."""
+    """Index a single MCP server by its streamable-http endpoint URL.
+
+    Once a listing's owner has verified control of the domain it serves, this
+    endpoint returns 409 `owner_verified` instead of changing it, and the
+    response carries the URL to edit it through. Listings with no verified
+    owner are unaffected.
+    """
     _enforce_submit_limit(request, "submit-mcp")
     endpoint = str(payload.url).strip()
+    with db.connect(read_only=True) as _c:
+        _owned = db.find_mcp_by_endpoint(_c, endpoint)
+    if _owned and _owned.get("owner_verified"):
+        raise _owner_locked("mcp", _owned)
     name = (payload.name or "").strip() or directory_crawlers._host_slug(endpoint).replace("-", " ").title()
     slug = directory_a2a._slugify(name) or directory_crawlers._host_slug(endpoint)
     probe = await run_in_threadpool(directory_crawlers.probe_mcp_health, endpoint)
@@ -812,7 +850,13 @@ async def api_submit_mcp(request: Request, payload: McpSubmissionPayload):
 
 @router.post("/api/v1/a2a/submit", tags=["a2a"])
 async def api_submit_a2a(request: Request, payload: A2ASubmissionPayload):
-    """Index an A2A agent by fetching its well-known Agent Card."""
+    """Index an A2A agent by fetching its well-known Agent Card.
+
+    Once a listing's owner has verified control of the domain it serves, this
+    endpoint returns 409 `owner_verified` instead of changing it, and the
+    response carries the URL to edit it through. Listings with no verified
+    owner are unaffected.
+    """
     _enforce_submit_limit(request, "submit-a2a")
     url = str(payload.url).strip()
     card, card_url = await run_in_threadpool(directory_a2a.fetch_agent_card, url)
@@ -825,6 +869,10 @@ async def api_submit_a2a(request: Request, payload: A2ASubmissionPayload):
                             "/.well-known/agent-card.json is reachable."),
             },
         )
+    with db.connect(read_only=True) as _c:
+        _owned = db.find_a2a_by_card_url(_c, card_url)
+    if _owned and _owned.get("owner_verified"):
+        raise _owner_locked("a2a", _owned)
     row = directory_a2a.card_to_row(card, card_url, source="submission")
     # Probe for x402: an A2A agent can be a paid (402) endpoint, in which case
     # it must ALSO land in the x402 services catalog (delivery=a2a).

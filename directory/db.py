@@ -1475,6 +1475,22 @@ def get_a2a_by_slug(conn, slug):
     return out
 
 
+def _norm_endpoint(url: str) -> str:
+    """Endpoint dedup key: lowercased, no trailing slash."""
+    return (url or "").strip().lower().rstrip("/")
+
+
+def find_mcp_by_endpoint(conn, endpoint: str) -> dict | None:
+    """The row a submitted endpoint would land on, using upsert's own key."""
+    ep = _norm_endpoint(endpoint)
+    if not ep:
+        return None
+    row = conn.execute(
+        "SELECT * FROM mcp_servers WHERE lower(rtrim(endpoint_url, '/'))=? LIMIT 1",
+        (ep,)).fetchone()
+    return dict(row) if row else None
+
+
 def find_a2a_by_card_url(conn, card_url: str) -> dict | None:
     if not card_url:
         return None
@@ -1652,7 +1668,7 @@ def upsert_mcp_server(conn: sqlite3.Connection, row: dict) -> tuple:
     #    trailing slash). Lets the same server discovered on multiple
     #    directories collapse onto one row.
     if existing is None and (row.get("endpoint_url") or "").strip():
-        ep = row["endpoint_url"].strip().lower().rstrip("/")
+        ep = _norm_endpoint(row["endpoint_url"])
         existing = cur.execute(
             _sel + "WHERE lower(rtrim(endpoint_url, '/'))=?",
             (ep,),
