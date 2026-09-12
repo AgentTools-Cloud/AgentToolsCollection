@@ -43,9 +43,7 @@ DONE_RE = {
     "mcp health": re.compile(r"directory\.jobs mcp health: ok="),
     "a2a health": re.compile(r"directory\.jobs a2a health: ok="),
 }
-# The health timer fires every 4h (6/day). Allow slack for deploys and reboots.
 MIN_PASSES = 1
-CRAWL_FAIL_RE = re.compile(r"(?:mcp |a2a )?crawl ([a-z0-9][a-z0-9-]*) (?:fetch )?failed")
 # health and crawl both moved to a single daily round on 2026-09-10, so one
 # pass per stage is now a full day and anything less means a stage aborted.
 PARTIAL_STREAK = 4
@@ -127,6 +125,27 @@ def db_checks() -> tuple[list[str], list[str]]:
     return problems, detail
 
 
+def failing_sources() -> list[str]:
+    """Sources whose most recent run in the window ended in status=error.
+
+    This was read out of the journal, but the crawler logs
+    "<source>: fetch failed: ..." while the pattern wanted
+    "crawl <source> failed", so the set had been empty for as long as it
+    existed -- and db_checks skips status=error on the grounds that this
+    owns it. x402scan failed every round for 48 days without a word.
+    """
+    now = time.time()
+    with db.connect(read_only=True) as c:
+        rows = c.execute(
+            "SELECT source, status, COALESCE(finished_at, started_at) ts "
+            "FROM crawl_runs WHERE COALESCE(finished_at, started_at) >= ? "
+            "ORDER BY ts", (now - WINDOW_SECONDS,)).fetchall()
+    latest: dict[str, str] = {}
+    for source, status, _ts in rows:
+        latest[source] = status
+    return sorted(s for s, status in latest.items() if status == "error")
+
+
 def stuck_sources() -> list[tuple[str, int, str]]:
     """Sources whose last PARTIAL_STREAK runs were every one of them partial.
 
@@ -193,7 +212,7 @@ def main() -> int:
 
     # Known-broken crawl sources fail every run; alerting on them daily would be
     # pure noise. Track the set instead and speak up only when it changes.
-    now_failing = sorted(set(CRAWL_FAIL_RE.findall("\n".join(lines))))
+    now_failing = failing_sources()
     state = load_state()
     baseline = state.get("failing_sources")
     if baseline is None:
