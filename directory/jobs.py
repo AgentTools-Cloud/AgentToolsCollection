@@ -178,6 +178,13 @@ def _run_one(name):
     run_id = _start_run(name)
     try:
         items = fn()
+    except crawlers.PartialCrawl as e:
+        # Half an answer beats none, but the appended error is what makes
+        # _finish_run record the run as partial instead of clean.
+        items = e.items
+        errors.append(f"incomplete crawl: {e.reason}")
+        log.warning("crawl %s incomplete (%s); keeping %d items",
+                    name, e.reason, len(items))
     except Exception as e:
         errors.append(f"fetch failed: {e!r}")
         _finish_run(run_id, 0, 0, errors, status="error")

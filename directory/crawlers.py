@@ -383,6 +383,14 @@ def fetch_cdp_bazaar() -> list:
 X402SCAN_TRPC_URL = (
     "https://www.x402scan.com/api/trpc/public.origins.list.withResources"
 )
+# withResources takes no pagination and answers with every origin's resources
+# at once; that query started timing out on their side in late July. It does
+# accept an originIds filter, and the plain origin list is still fast, so page
+# it ourselves. 100 ids per call measured fastest overall: 63 calls, ~67s.
+X402SCAN_ORIGINS_URL = (
+    "https://www.x402scan.com/api/trpc/public.origins.list.origins"
+)
+X402SCAN_ID_BATCH = 100
 
 # USDC and most x402 stablecoins have 6 decimals.
 _X402_TOKEN_DECIMALS = 6
@@ -456,21 +464,44 @@ def fetch_x402scan() -> list:
 
     One service row per origin; resource accepts aggregated into the row.
     """
-    params = {"input": json.dumps({"json": {}}, separators=(",", ":"))}
+    def _query(client, url, payload):
+        r = client.get(url, params={"input": json.dumps(
+            {"json": payload}, separators=(",", ":"))})
+        r.raise_for_status()
+        body = r.json()
+        if not isinstance(body, dict):
+            raise RuntimeError("x402scan returned an unexpected payload shape")
+        return body.get("result", {}).get("data", {}).get("json")
+
+    origins: list = []
+    dropped = 0
+    headers = {"User-Agent": UA, "Accept": "application/json"}
     try:
-        with httpx.Client(timeout=TIMEOUT, headers={"User-Agent": UA, "Accept": "application/json"}) as c:
-            r = c.get(X402SCAN_TRPC_URL, params=params)
-            r.raise_for_status()
-            payload = r.json()
+        with httpx.Client(timeout=TIMEOUT, headers=headers) as c:
+            listed = _query(c, X402SCAN_ORIGINS_URL, {})
+            if not isinstance(listed, list):
+                raise RuntimeError(
+                    "x402scan returned an unexpected payload shape")
+            ids = [o.get("id") for o in listed
+                   if isinstance(o, dict) and o.get("id")]
+            for start in range(0, len(ids), X402SCAN_ID_BATCH):
+                chunk = ids[start:start + X402SCAN_ID_BATCH]
+                for attempt in range(3):
+                    try:
+                        batch = _query(c, X402SCAN_TRPC_URL,
+                                       {"originIds": chunk})
+                        if isinstance(batch, list):
+                            origins.extend(batch)
+                        break
+                    except Exception as e:
+                        if attempt == 2:
+                            dropped += len(chunk)
+                            log.warning("x402scan batch at %d dropped: %r",
+                                        start, e)
+                        else:
+                            time.sleep(2 ** attempt)
     except Exception as e:
         raise RuntimeError(f"x402scan tRPC fetch failed: {e!r}") from e
-
-    origins = (
-        payload.get("result", {}).get("data", {}).get("json")
-        if isinstance(payload, dict) else None
-    )
-    if not isinstance(origins, list):
-        raise RuntimeError("x402scan returned an unexpected payload shape")
 
     rows = []
     for origin in origins:
@@ -618,6 +649,10 @@ def fetch_x402scan() -> list:
             "source": "x402scan", "source_id": str(origin.get("id") or origin_url),
             "tags": sorted(tag_set), "region": "global",
         })
+    if dropped:
+        # Ingest what came back, but a short answer must not read as a full one.
+        raise PartialCrawl(
+            rows, "%d origin(s) dropped after retries" % dropped)
     return rows
 
 
