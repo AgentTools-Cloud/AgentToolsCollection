@@ -960,6 +960,98 @@ async def api_verify_claim(request: Request, claim_id: int,
     }
 
 
+def _api_editable(request: Request, kind: str, slug: str):
+    """auth._load_editable, with its refusals restated as JSON.
+
+    The authorisation is not restated -- it is the same function the web form
+    uses, so the two doors cannot drift apart.
+    """
+    try:
+        user, row, host, owner = directory_auth._load_editable(
+            request, kind, slug)
+    except HTTPException as exc:
+        if exc.status_code == 403 and isinstance(exc.detail, str):
+            raise HTTPException(403, {
+                "error": "not_verified_owner",
+                "message": exc.detail,
+                "claim_it": {"method": "POST", "url": "/api/v1/claims"},
+            })
+        if exc.status_code == 404 and isinstance(exc.detail, str):
+            raise HTTPException(404, {"error": "not_found",
+                                      "message": exc.detail})
+        raise
+    if user is None:
+        _require_api_user(request)  # raises the 401 that explains how to get a key
+    return user, row, host, owner
+
+
+@router.get("/api/v1/listings/{kind}/{slug}", tags=["ownership"])
+async def api_get_listing(request: Request, kind: str, slug: str):
+    """Read a listing you own, in the shape PATCH expects back."""
+    _user, row, host, _owner = _api_editable(request, kind, slug)
+    fields = db._EDITABLE_FIELDS[kind]
+    return {
+        "kind": kind,
+        "slug": slug,
+        "host": host,
+        "fields": {f: row[f] for f in fields},
+        "endpoint_fields": list(db._ENDPOINT_FIELDS.get(kind, ())),
+        "note": ("Changing an endpoint clears the measured columns: a listing "
+                 "cannot carry a reputation to a different address. The new "
+                 "endpoint must be on a host you have already verified."),
+    }
+
+
+@router.patch("/api/v1/listings/{kind}/{slug}", tags=["ownership"])
+async def api_patch_listing(request: Request, kind: str, slug: str,
+                            payload: dict[str, str]):
+    """Edit a listing you own. Send only the fields you want to change.
+
+    PATCH rather than PUT because the crawler keeps writing the columns you do
+    not own; a full replacement would silently revert them.
+    """
+    user, row, host, owner = _api_editable(request, kind, slug)
+    allowed = db._EDITABLE_FIELDS[kind]
+    unknown = sorted(k for k in payload if k not in allowed)
+    if unknown:
+        raise HTTPException(422, {
+            "error": "unknown_fields",
+            "message": "These are not editable: %s" % ", ".join(unknown),
+            "editable": list(allowed),
+        })
+    if not payload:
+        raise HTTPException(422, {
+            "error": "empty_patch",
+            "message": "Send at least one field.",
+            "editable": list(allowed),
+        })
+
+    with db.connect(read_only=True) as conn:
+        verified_hosts = {x["host"] for x in conn.execute(
+            "SELECT host FROM domain_ownership "
+            "WHERE user_id=? AND status='verified'", (user["id"],))}
+
+    def op():
+        with db.writer() as conn:
+            return db.apply_listing_edits(
+                conn, kind, row["id"], user["id"], owner["id"], payload,
+                verified_hosts=verified_hosts, via="api")
+
+    applied, rejected = db.with_retry(op)
+    table = db._KIND_TABLE[kind]
+    with db.connect(read_only=True) as conn:
+        fresh = conn.execute("SELECT * FROM %s WHERE id=?" % table,
+                             (row["id"],)).fetchone()
+    body = {
+        "kind": kind, "slug": slug, "host": host,
+        "applied": applied, "rejected": rejected,
+        "fields": {f: fresh[f] for f in allowed},
+    }
+    if rejected and not applied:
+        raise HTTPException(422, dict(body, error="nothing_applied"))
+    return body
+
+
 @router.post("/api/v1/mcp/submit", tags=["mcp"])
 async def api_submit_mcp(request: Request, payload: McpSubmissionPayload):
     """Index a single MCP server by its streamable-http endpoint URL.
