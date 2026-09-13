@@ -2556,8 +2556,7 @@ def probe_mcp_health(endpoint: str) -> dict:
 # Additional MCP directory sources (added 2026-06-04).
 #   - Smithery: public registry (no auth), ~6k servers, deployed ones expose a
 #     callable streamable-http endpoint at server.smithery.ai/{name}/mcp.
-#   - Glama: public cursor-paginated catalog (repo + metadata).
-# Both append themselves to MCP_CRAWLERS at import time (see bottom).
+# It appends itself to MCP_CRAWLERS at import time (see bottom).
 # ---------------------------------------------------------------------------
 
 _SMITHERY_API = "https://registry.smithery.ai/servers"
@@ -2652,85 +2651,6 @@ def fetch_smithery(max_pages: int = 80, per_page: int = 100,
     return out
 
 
-_GLAMA_API = "https://glama.ai/api/mcp/v1/servers"
-
-
-def fetch_glama(max_pages: int = 60, per_page: int = 100,
-                remote_only: bool = False) -> list:
-    """Import MCP servers from the Glama catalog (public, cursor paginated).
-
-    Glama exposes rich metadata (repo, hosting attributes) but no single
-    callable URL in the list response, so these are stored as catalog
-    entries (source_code_url + description). With ``remote_only`` only
-    remote-capable servers are kept.
-    """
-    out: list[dict] = []
-    seen: set[str] = set()
-    with httpx.Client(timeout=TIMEOUT, follow_redirects=True,
-                      headers={"User-Agent": UA, "Accept": "application/json"}) as c:
-        cursor = None
-        for _ in range(max_pages):
-            params: dict[str, Any] = {"first": per_page}
-            if cursor:
-                params["after"] = cursor
-            try:
-                r = c.get(_GLAMA_API, params=params)
-                r.raise_for_status()
-                data = r.json()
-            except (httpx.HTTPError, ValueError) as e:
-                log.warning("glama page failed: %r", e)
-                break
-            servers = data.get("servers") or []
-            if not servers:
-                break
-            for s in servers:
-                sid = (s.get("id") or "").strip()
-                if not sid or sid in seen:
-                    continue
-                attrs = s.get("attributes") or []
-                remote_capable = any("remote" in str(a).lower() for a in attrs)
-                if remote_only and not remote_capable:
-                    continue
-                seen.add(sid)
-                name = (s.get("name") or s.get("slug") or sid).strip()
-                desc = (s.get("description") or "").strip() or None
-                repo = s.get("repository")
-                repo_url = repo.get("url") if isinstance(repo, dict) else None
-                page_url = (s.get("url") or "").strip() or None
-                base = f"{s.get('namespace') or ''}-{s.get('slug') or name}"
-                slug = _slugify(base)[:80]
-                tags = ",".join(str(a) for a in attrs) or None
-                conf = 0.4
-                if remote_capable:
-                    conf += 0.1
-                out.append({
-                    "slug": slug,
-                    "name": name,
-                    "description": desc,
-                    "homepage_url": page_url,
-                    "endpoint_url": None,
-                    "transport": None,
-                    "auth_method": None,
-                    "cost_hint": None,
-                    "source_code_url": repo_url,
-                    "package_registry": None,
-                    "package_name": None,
-                    "github_stars": None,
-                    "tags": tags,
-                    "x402_supported": _mcp_x402(desc, name, tags),
-                    "source": "glama",
-                    "source_id": sid,
-                    "source_url": page_url,
-                    "confidence": round(min(1.0, conf), 3),
-                })
-            pi = data.get("pageInfo") or {}
-            if not pi.get("hasNextPage"):
-                break
-            cursor = pi.get("endCursor")
-            if not cursor:
-                break
-    log.info("glama: collected %d MCP servers", len(out))
-    return out
 
 
 MCP_CRAWLERS["smithery"] = fetch_smithery
@@ -2941,8 +2861,12 @@ def fetch_chiark_a2a() -> list:
 # chiark.ai retired its API with HTTP 410 in July 2026. Keep the parser for
 # historical/manual use, but do not poll a permanently retired source.
 
-# glama removed: catalog-only, all endpoint_url=null, not callable by agents (2026-06-04)
-# MCP_CRAWLERS["glama"] = fetch_glama
+# Glama is not a source. It was dropped 2026-06-04 for having no callable
+# endpoints; its connectors API has them now, but the API Data License makes
+# it unusable here: the grant is non-sublicensable while /api/v1/export hands
+# the directory to anyone, and attribution is required per record on every
+# surface. A 2026-09-13 sample put the gain at 170 endpoints we lack out of
+# 935, against 35.5k we already hold. The fetcher has been removed.
 
 
 # --- mcp-catalog.com (community-curated, Supabase-backed) -----------------
