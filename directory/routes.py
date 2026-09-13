@@ -1104,12 +1104,15 @@ def sitemap_xml() -> Response:
 @router.get("/robots.txt", include_in_schema=False)
 def robots_txt() -> Response:
     """Welcome search engines and AI agents; point them at the sitemap."""
+    # /auth/ only starts an OAuth redirect. Crawlers followed it 2,243 times in
+    # one day and completed it zero times, which was most of our redirect churn.
     body = (
         "# agent-tools.cloud - open directory of MCP servers, A2A agents and\n"
         "# x402 services. Crawlers and AI agents are welcome to index and use\n"
         "# the public catalogue and JSON API.\n"
         "User-agent: *\n"
         "Allow: /\n"
+        "Disallow: /auth/\n"
         "\n"
         "Sitemap: https://agent-tools.cloud/sitemap.xml\n"
     )
