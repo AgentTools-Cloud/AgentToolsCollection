@@ -25,6 +25,7 @@ from . import cards
 from . import db as directory_db
 from . import jobs as directory_jobs
 from . import limits
+from . import ownership as directory_ownership
 from . import resources as directory_resources
 from . import safety_service
 
@@ -685,6 +686,7 @@ async def register(
                 "it again will not change it: verify domain ownership to edit."),
             "claim_url": "https://agent-tools.cloud/account",
             "claim_docs": "https://agent-tools.cloud/docs/claim",
+            "api": directory_ownership.API_FLOW,
             "slug": existing.get("slug"),
             "url": existing.get("url"),
         }

@@ -43,6 +43,31 @@ DESCRIPTOR_PATHS = (
 )
 
 METHODS = ("descriptor", "wellknown_file", "dns_txt")
+
+# The same four steps are quoted by every surface that has to refuse a write:
+# the REST 409, the REST already_listed, and the MCP register tool. Keeping one
+# copy is the only way they stay true to each other.
+API_FLOW = {
+    "message": ("No browser needed. Mint a key, publish the token on your host, "
+                "verify, then edit. The key identifies you; the published token "
+                "is what proves the host is yours."),
+    "steps": [
+        {"method": "POST", "url": "https://agent-tools.cloud/api/v1/keys",
+         "note": "No credentials needed. Store the key; it is shown once."},
+        {"method": "POST", "url": "https://agent-tools.cloud/api/v1/claims",
+         "auth": "Authorization: Bearer <api_key>",
+         "body": {"host": "<your-host>", "method": "wellknown_file"},
+         "note": "Returns a token and where to publish it."},
+        {"method": "POST", "url": "https://agent-tools.cloud/api/v1/claims/<claim_id>/verify",
+         "auth": "Authorization: Bearer <api_key>",
+         "body": {"token": "<the token you just published>"},
+         "note": "Returns every listing on the host, with its edit URL."},
+        {"method": "PATCH", "url": "https://agent-tools.cloud/api/v1/listings/<kind>/<slug>",
+         "auth": "Authorization: Bearer <api_key>",
+         "note": "Send only the fields you want to change."},
+    ],
+    "docs": "https://agent-tools.cloud/docs/claim",
+}
 MAX_FAILS = 3   # consecutive misses before a verified claim is revoked
 
 
