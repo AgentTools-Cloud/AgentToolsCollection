@@ -104,15 +104,39 @@ def _redirect_uri(request: Request) -> str:
     return base + "/auth/github/callback"
 
 
+def _uid_from_bearer(request: Request) -> int | None:
+    """Resolve `Authorization: Bearer <key>` to an account id.
+
+    A key is a second way to present an identity, not a second set of powers:
+    whatever it reaches is still gated by domain_ownership further down.
+    """
+    scheme, _, raw = (request.headers.get("authorization") or "").partition(" ")
+    raw = raw.strip()
+    if scheme.lower() != "bearer" or not raw:
+        return None
+    try:
+        with db.connect(read_only=True) as conn:
+            row = db.api_key_row(conn, raw)
+    except Exception:
+        return None
+    if row is None:
+        return None
+    db.touch_api_key(row["id"], row["last_used_at"])
+    return int(row["user_id"])
+
+
 def current_user(request: Request):
-    """The signed-in user row, or None. Never implies any edit right."""
+    """The caller's user row, or None. Never implies any edit right."""
     data = unsign(request.cookies.get(SESSION_COOKIE))
-    if not data or not data.get("uid"):
+    uid = data.get("uid") if data else None
+    if not uid:
+        uid = _uid_from_bearer(request)
+    if not uid:
         return None
     try:
         with db.connect(read_only=True) as conn:
             row = conn.execute("SELECT * FROM users WHERE id=?",
-                               (data["uid"],)).fetchone()
+                               (uid,)).fetchone()
     except Exception:
         return None
     if row is None or row["status"] != "active":

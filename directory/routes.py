@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import secrets
 import threading
 import time
 from pathlib import Path
@@ -21,6 +22,8 @@ from . import resources as directory_resources
 from . import reverify_x402 as directory_reverify
 from . import mailer as directory_mailer
 from . import limits
+from . import auth as directory_auth
+from . import ownership as directory_ownership
 
 BASE_DIR = Path(__file__).resolve().parent
 TEMPLATES = Jinja2Templates(directory=str(BASE_DIR / "templates"))
@@ -782,6 +785,179 @@ def _owner_locked(kind: str, row: dict) -> HTTPException:
             "claim_docs": "https://agent-tools.cloud/docs/claim",
         },
     )
+
+
+# --------------------------------------------------------- agent self-service
+# Signing in with a browser is not something an agent can do, and the guard on
+# claimed listings would otherwise lock an operator out of their own entry. A
+# key is a second way to present an identity, never a second set of powers:
+# everything below still ends at domain_ownership.
+
+KEY_MINT_LIMIT_PER_DAY = limits.env_int("AGENT_TOOLS_KEY_MINT_PER_DAY", 5)
+CLAIM_LIMIT_PER_DAY = limits.env_int("AGENT_TOOLS_CLAIM_PER_DAY", 20)
+
+_PUBLISH_HINT = {
+    "wellknown_file": "Serve the token as the whole body of "
+                      "https://{host}/.well-known/agent-tools-verify.txt",
+    "descriptor": "Add an agentToolsVerify field holding the token to the JSON "
+                  "at https://{host}/.well-known/x402 or your agent card",
+    "dns_txt": "Publish a TXT record at _agent-tools.{host} with the value "
+               "atc-verify=<token>",
+}
+
+
+class KeyRequest(BaseModel):
+    name: str | None = Field(default=None, max_length=60)
+
+
+class ClaimRequest(BaseModel):
+    host: str = Field(min_length=3, max_length=253)
+    method: str = Field(default="wellknown_file")
+    contact: str | None = Field(
+        default=None, max_length=200,
+        pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+class ClaimVerifyRequest(BaseModel):
+    token: str = Field(min_length=8, max_length=200)
+
+
+def _require_api_user(request: Request):
+    """The account behind the request, or a 401 that says how to get one."""
+    user = directory_auth.current_user(request)
+    if user is None:
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "error": "no_credentials",
+                "message": ("Present an API key as Authorization: Bearer <key>. "
+                            "A key is free and grants nothing until a domain is "
+                            "verified with it."),
+                "get_a_key": {"method": "POST", "url": "/api/v1/keys"},
+            })
+    return user
+
+
+@router.post("/api/v1/keys", tags=["ownership"], status_code=201)
+async def api_mint_key(request: Request, payload: KeyRequest | None = None):
+    """Mint an API key. No credentials needed, because a key alone grants nothing.
+
+    Every edit still goes through a verified claim on the host that serves the
+    listing, so an unclaimed key can do exactly two things: read its own empty
+    account, and open a claim.
+    """
+    ip = limits.client_ip_from_request(request)
+    state = limits.check_ip_limits(
+        ip, "mint-key", (("day", KEY_MINT_LIMIT_PER_DAY, 86400),))
+    if state:
+        limits.raise_rate_limited(state, "Too many keys minted from this IP today.")
+
+    name = (payload.name if payload else None) or None
+    with db.writer() as conn:
+        uid = db.upsert_user(conn, provider="domain",
+                             provider_uid=secrets.token_hex(16))
+        raw = db.create_api_key(conn, uid, name=name)
+    return {
+        "api_key": raw,
+        "prefix": raw[:15],
+        "message": ("Store this now -- it is not shown again. It grants nothing "
+                    "until a domain is verified with it."),
+        "next": {
+            "method": "POST", "url": "/api/v1/claims",
+            "auth": "Authorization: Bearer <api_key>",
+            "body": {"host": "example.com", "method": "wellknown_file"},
+        },
+    }
+
+
+@router.post("/api/v1/claims", tags=["ownership"], status_code=201)
+async def api_open_claim(request: Request, payload: ClaimRequest):
+    """Open a claim on a host. Returns the token to publish there."""
+    user = _require_api_user(request)
+    ip = limits.client_ip_from_request(request)
+    state = limits.check_ip_limits(
+        ip, "open-claim", (("day", CLAIM_LIMIT_PER_DAY, 86400),))
+    if state:
+        limits.raise_rate_limited(state, "Too many claims from this IP today.")
+
+    if payload.method not in directory_ownership.METHODS:
+        raise HTTPException(422, {
+            "error": "unknown_method",
+            "message": "method must be one of %s"
+                       % (list(directory_ownership.METHODS),),
+        })
+    host = payload.host.strip().lower()
+    try:
+        with db.writer() as conn:
+            claim_id, token = directory_ownership.issue(
+                conn, int(user["id"]), host, payload.method)
+            if payload.contact:
+                # Unverified on purpose: a courtesy address for the one notice
+                # we send if the claim is later displaced, not a credential.
+                conn.execute(
+                    "UPDATE users SET email=?, email_verified=0 WHERE id=?",
+                    (payload.contact.strip(), int(user["id"])))
+    except directory_ownership.ClaimError as exc:
+        raise HTTPException(422, {"error": "claim_refused", "message": str(exc)})
+
+    return {
+        "claim_id": claim_id,
+        "host": host,
+        "method": payload.method,
+        "token": token,
+        "publish": _PUBLISH_HINT[payload.method].format(host=host),
+        "next": {
+            "method": "POST", "url": "/api/v1/claims/%d/verify" % claim_id,
+            "auth": "Authorization: Bearer <api_key>",
+            "body": {"token": token},
+        },
+    }
+
+
+@router.post("/api/v1/claims/{claim_id}/verify", tags=["ownership"])
+async def api_verify_claim(request: Request, claim_id: int,
+                           payload: ClaimVerifyRequest):
+    """Check that the token is live on the host, and hand over the listings."""
+    user = _require_api_user(request)
+    with db.connect(read_only=True) as conn:
+        row = conn.execute(
+            "SELECT user_id, host, method FROM domain_ownership WHERE id=?",
+            (claim_id,)).fetchone()
+    if row is None:
+        raise HTTPException(404, {"error": "no_such_claim"})
+    if int(row["user_id"]) != int(user["id"]):
+        # The token is public by design, so the claim it belongs to is what
+        # decides who gets the host.
+        raise HTTPException(403, {
+            "error": "not_your_claim",
+            "message": "Open your own claim with POST /api/v1/claims.",
+        })
+
+    with db.writer() as conn:
+        ok, detail = directory_ownership.verify_claim(
+            conn, claim_id, payload.token.strip())
+        if ok:
+            db.sync_owner_verified(conn)
+    if not ok:
+        raise HTTPException(422, {
+            "error": "not_verified",
+            "message": detail,
+            "publish": _PUBLISH_HINT.get(row["method"], "").format(
+                host=row["host"]),
+        })
+
+    with db.connect(read_only=True) as conn:
+        mine = db.listings_for_host(conn, row["host"])
+    return {
+        "status": "verified",
+        "host": row["host"],
+        "listings": mine,
+        "next": {
+            "method": "PATCH",
+            "url": "/api/v1/listings/{kind}/{slug}",
+            "auth": "Authorization: Bearer <api_key>",
+        },
+    }
 
 
 @router.post("/api/v1/mcp/submit", tags=["mcp"])

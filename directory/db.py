@@ -12,6 +12,8 @@ import math
 import sqlite3
 import time
 import random
+import secrets
+import hashlib
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Callable
@@ -379,6 +381,22 @@ CREATE TABLE IF NOT EXISTS listing_edits (
 );
 CREATE INDEX IF NOT EXISTS idx_listing_edits_listing
   ON listing_edits(kind, listing_id, applied_at);
+
+-- A second way to present an identity, not a second set of powers: a key
+-- reaches exactly what its account reaches, and that is still decided by
+-- domain_ownership. Only the hash is kept; the plaintext is shown once.
+CREATE TABLE IF NOT EXISTS api_keys (
+  id           INTEGER PRIMARY KEY,
+  user_id      INTEGER NOT NULL REFERENCES users(id),
+  name         TEXT,
+  key_hash     TEXT NOT NULL,
+  key_prefix   TEXT NOT NULL,            -- shown in the UI to tell keys apart
+  created_at   INTEGER NOT NULL,
+  last_used_at INTEGER,
+  revoked_at   INTEGER
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_api_keys_hash ON api_keys(key_hash);
+CREATE INDEX IF NOT EXISTS idx_api_keys_user ON api_keys(user_id, revoked_at);
 
 -- Hosts whose paths belong to different operators (shared gateways). Whole-host
 -- verification must be refused there: the author cannot change the response and
@@ -1491,6 +1509,64 @@ def find_mcp_by_endpoint(conn, endpoint: str) -> dict | None:
     return dict(row) if row else None
 
 
+API_KEY_PREFIX = "atc_live_"
+_TOUCH_EVERY = 3600          # last_used_at is for the owner's benefit, not billing
+
+
+def _api_key_hash(raw: str) -> str:
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def create_api_key(conn, user_id: int, name: str | None = None) -> str:
+    """Mint a key and return the plaintext, which is never stored or shown again."""
+    raw = API_KEY_PREFIX + secrets.token_urlsafe(32)
+    conn.execute(
+        "INSERT INTO api_keys(user_id, name, key_hash, key_prefix, created_at) "
+        "VALUES (?,?,?,?,?)",
+        (user_id, name, _api_key_hash(raw), raw[:len(API_KEY_PREFIX) + 6],
+         int(time.time())))
+    return raw
+
+
+def api_key_row(conn, raw: str):
+    """The live key row a presented secret belongs to, or None."""
+    raw = (raw or "").strip()
+    if not raw.startswith(API_KEY_PREFIX):
+        return None
+    return conn.execute(
+        "SELECT * FROM api_keys WHERE key_hash=? AND revoked_at IS NULL",
+        (_api_key_hash(raw),)).fetchone()
+
+
+def touch_api_key(key_id: int, last_used_at) -> None:
+    """Record use at most hourly. Never let bookkeeping break authentication."""
+    now = int(time.time())
+    if last_used_at and now - int(last_used_at) < _TOUCH_EVERY:
+        return
+    try:
+        with writer() as conn:
+            conn.execute("UPDATE api_keys SET last_used_at=? WHERE id=?",
+                         (now, key_id))
+    except Exception:  # noqa: BLE001 - bookkeeping must never break auth
+        pass
+
+
+def list_api_keys(conn, user_id: int) -> list:
+    rows = conn.execute(
+        "SELECT id, name, key_prefix, created_at, last_used_at, revoked_at "
+        "FROM api_keys WHERE user_id=? ORDER BY created_at DESC",
+        (user_id,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def revoke_api_key(conn, key_id: int, user_id: int) -> bool:
+    """Revoke one of this account's keys. Rows are kept so audit links survive."""
+    cur = conn.execute(
+        "UPDATE api_keys SET revoked_at=? WHERE id=? AND user_id=? "
+        "AND revoked_at IS NULL", (int(time.time()), key_id, user_id))
+    return cur.rowcount > 0
+
+
 def find_a2a_by_card_url(conn, card_url: str) -> dict | None:
     if not card_url:
         return None
@@ -2539,6 +2615,34 @@ def refresh_shared_hosts(
     )
     conn.commit()
     return len(rows)
+
+
+def listings_for_host(conn: sqlite3.Connection, host: str) -> list[dict]:
+    """Every listing served by a host, so a fresh claim can be handed its work.
+
+    LIKE only narrows the scan; membership is decided by parsing the URL, since
+    a substring match would also catch example.com.evil.net.
+    """
+    host = (host or "").strip().lower()
+    if not host:
+        return []
+    out: list[dict] = []
+    like = "%" + host + "%"
+    for kind, table, col, path in (
+            ("x402", "services", "url", "/services/%s"),
+            ("mcp", "mcp_servers", "endpoint_url", "/mcp/servers/%s"),
+            ("a2a", "a2a_agents", "COALESCE(endpoint_url, card_url)",
+             "/a2a/agents/%s")):
+        rows = conn.execute(
+            "SELECT slug, name, %s AS u FROM %s WHERE lower(%s) LIKE ?"
+            % (col, table, col), (like,)).fetchall()
+        for r in rows:
+            if _host_and_path(r["u"] or "")[0] != host:
+                continue
+            out.append({"kind": kind, "slug": r["slug"], "name": r["name"],
+                        "view_url": path % r["slug"],
+                        "edit_url": "/api/v1/listings/%s/%s" % (kind, r["slug"])})
+    return out
 
 
 def is_shared_host(conn: sqlite3.Connection, host: str) -> bool:
