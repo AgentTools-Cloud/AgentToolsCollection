@@ -123,9 +123,9 @@
         <tr class="text-left"><th class="py-1 pr-4">Listing type</th><th class="py-1">Editable fields</th></tr>
       </thead>
       <tbody>
-        <tr class="border-t border-slate-100"><td class="py-1.5 pr-4">x402 service</td><td class="py-1.5 mono text-xs">name, description, category</td></tr>
-        <tr class="border-t border-slate-100"><td class="py-1.5 pr-4">MCP server</td><td class="py-1.5 mono text-xs">name, description, homepage_url</td></tr>
-        <tr class="border-t border-slate-100"><td class="py-1.5 pr-4">A2A agent</td><td class="py-1.5 mono text-xs">name, description, homepage_url, documentation_url, provider_name</td></tr>
+        <tr class="border-t border-slate-100"><td class="py-1.5 pr-4">x402 service</td><td class="py-1.5 mono text-xs">name, description, category, url, mcp_url</td></tr>
+        <tr class="border-t border-slate-100"><td class="py-1.5 pr-4">MCP server</td><td class="py-1.5 mono text-xs">name, description, homepage_url, endpoint_url</td></tr>
+        <tr class="border-t border-slate-100"><td class="py-1.5 pr-4">A2A agent</td><td class="py-1.5 mono text-xs">name, description, homepage_url, documentation_url, provider_name, card_url, endpoint_url</td></tr>
       </tbody>
     </table>
 
@@ -138,6 +138,12 @@
         either a real fault or a bug in our probe — tell us and we will look at the
         probe, not at the number.</p>
     </div>
+
+    <p class="text-sm mt-4">The address fields — <span class="mono">url</span>,
+      <span class="mono">endpoint_url</span>, <span class="mono">mcp_url</span>,
+      <span class="mono">card_url</span> — may only be moved to a host you have
+      <i>already</i> verified, and moving one clears every measured column. A
+      listing cannot carry a grade earned at one address to another.</p>
 
     <p class="text-sm mt-4">Your edits also survive re-crawls. Upstream registry metadata
       is usually the thing you were correcting, so once you change a field we stop
@@ -190,9 +196,45 @@
       <a class="text-blue-600 hover:underline" href="/privacy">/privacy</a>.</p>
   </div>
 
+  <div id="api">
+    <h2 class="text-lg font-semibold text-slate-900 mb-2">Doing all of this without a browser</h2>
+    <p class="text-sm">Signing in with GitHub is not something an agent can do, and the
+      operator most likely to keep a listing correct is often a script. The same four
+      steps exist as JSON:</p>
+    <pre class="text-xs bg-slate-50 border border-slate-200 rounded p-3 mt-3 overflow-x-auto mono"># 1. Mint a key. No credentials needed, because a key on its own grants nothing.
+KEY=$(curl -sX POST https://agent-tools.cloud/api/v1/keys | jq -r .api_key)
+
+# 2. Open a claim on your host.
+curl -sX POST https://agent-tools.cloud/api/v1/claims \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"host":"example.com","method":"wellknown_file"}'
+# -&gt; {"claim_id":42,"token":"atc_...","publish":"Serve the token as ..."}
+
+# 3. Publish that token, then verify. You get back every listing on the host.
+curl -sX POST https://agent-tools.cloud/api/v1/claims/42/verify \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"token":"atc_..."}'
+
+# 4. Edit. Send only the fields you mean to change.
+curl -sX PATCH https://agent-tools.cloud/api/v1/listings/x402/your-slug \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"description":"What it actually does."}'</pre>
+    <p class="text-sm mt-3">The key is only an identity. Every write still goes through
+      the verified claim above, which is why we hand keys out to anyone who asks: a key
+      with no claim behind it can read its own empty account and nothing else. What an
+      attacker would still need is the one thing we cannot give them — the ability to
+      publish a file on your domain.</p>
+    <p class="text-sm mt-2">Edits made this way are recorded in the same public history
+      as edits made in the browser, marked as coming through the API.</p>
+    <p class="text-xs text-slate-500 mt-2">Full schemas:
+      <a class="text-blue-600 hover:underline" href="/docs#tag/ownership">/docs</a>.
+      Keys are rate limited per IP; a key that never verifies anything is disposable.</p>
+  </div>
+
   <div class="rounded-lg border border-slate-200 bg-white p-5">
     <h2 class="font-semibold text-slate-900 mb-2">Start</h2>
     <p class="text-sm"><a class="text-blue-600 hover:underline" href="/account">Sign in and claim a host →</a></p>
+    <p class="text-sm mt-1">Or, from code: <a class="text-blue-600 hover:underline" href="#api">claim a host over the API →</a></p>
     <p class="text-sm mt-2 text-slate-500">Questions, corrections, or anything the above
       does not cover:
       <a class="text-blue-600 hover:underline" href="mailto:admin@agent-tools.cloud">admin@agent-tools.cloud</a>.</p>

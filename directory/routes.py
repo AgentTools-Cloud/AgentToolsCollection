@@ -652,8 +652,10 @@ class SubmissionPayload(BaseModel):
         "Submit a new x402 service. This endpoint only *creates* listings; "
         "re-submitting a URL that is already listed returns `already_listed` "
         "and changes nothing.\n\n"
-        "To correct an existing listing, verify domain ownership at "
-        "<https://agent-tools.cloud/account> and edit it there (https://agent-tools.cloud/docs/claim)."
+        "To correct an existing listing, verify control of its domain and "
+        "edit it: in a browser at <https://agent-tools.cloud/account>, or from "
+        "code with `POST /api/v1/keys` -> `POST /api/v1/claims` -> "
+        "`PATCH /api/v1/listings/{kind}/{slug}` (https://agent-tools.cloud/docs/claim)."
     ),
 )
 async def api_submit(request: Request, payload: SubmissionPayload):
@@ -671,6 +673,7 @@ async def api_submit(request: Request, payload: SubmissionPayload):
                 "it again will not change it: verify domain ownership to edit."),
             "claim_url": "https://agent-tools.cloud/account",
             "claim_docs": "https://agent-tools.cloud/docs/claim",
+            "api": directory_ownership.API_FLOW,
             "slug": existing.get("slug"),
             "url": existing.get("url"),
         }
@@ -774,15 +777,17 @@ def _owner_locked(kind: str, row: dict) -> HTTPException:
             "error": "owner_verified",
             "message": (
                 "This listing has a verified owner, so an unauthenticated "
-                "submission can no longer change it. Sign in and verify control "
-                "of the domain to edit it. Listings without a verified owner are "
-                "unaffected, and any URL that is not listed yet can still be "
-                "submitted here."),
+                "submission can no longer change it. To edit it, prove control "
+                "of the domain: in a browser at claim_url, or from code by "
+                "following the steps under api. Listings without a verified "
+                "owner are unaffected, and any URL that is not listed yet can "
+                "still be submitted here."),
             "slug": slug,
             "view_url": view + slug,
             "edit_url": f"/listings/{kind}/{slug}/edit",
             "claim_url": "https://agent-tools.cloud/account",
             "claim_docs": "https://agent-tools.cloud/docs/claim",
+            "api": directory_ownership.API_FLOW,
         },
     )
 
