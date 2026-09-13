@@ -86,7 +86,11 @@ def _enforce_ask_limit(request: Request, use_llm: bool) -> None:
 # The homepage aggregates walk whole tables -- mcp_stats alone reads every row
 # to bucket distinct domains -- but the numbers only move when the crawl and
 # health timers run, hours apart.
-_HOME_CACHE_TTL = limits.env_int("AGENT_TOOLS_HOME_CACHE_TTL", 300)
+# Homepage traffic is sparse: measured over a full day, visits arrive 380s
+# apart on average, so a 300s window expired before the next visitor and 55%
+# of them still paid for a rebuild. At 1800s that falls to 1%, and the figures
+# are still eight times fresher than the four-hour job that changes them.
+_HOME_CACHE_TTL = limits.env_int("AGENT_TOOLS_HOME_CACHE_TTL", 1800)
 _home_cache: dict = {"at": 0.0, "payload": None}
 _home_cache_lock = threading.Lock()
 
