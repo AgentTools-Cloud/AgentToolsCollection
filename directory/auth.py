@@ -491,7 +491,8 @@ async def edit_listing(request: Request, kind: str, slug: str):
         with db.writer() as conn:
             return db.apply_listing_edits(conn, kind, row["id"], user["id"],
                                           owner["id"], changes,
-                                          verified_hosts=verified_hosts)
+                                          verified_hosts=verified_hosts,
+                                          via="web")
     applied, rejected = db.with_retry(op)
 
     with db.connect(read_only=True) as conn:

@@ -377,7 +377,8 @@ CREATE TABLE IF NOT EXISTS listing_edits (
   field        TEXT NOT NULL,
   old_value    TEXT,
   new_value    TEXT,
-  applied_at   INTEGER NOT NULL
+  applied_at   INTEGER NOT NULL,
+  via          TEXT                      -- 'web' | 'api'
 );
 CREATE INDEX IF NOT EXISTS idx_listing_edits_listing
   ON listing_edits(kind, listing_id, applied_at);
@@ -480,6 +481,7 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
         )
         for ddl in (
             "ALTER TABLE services ADD COLUMN confidence REAL",
+            "ALTER TABLE listing_edits ADD COLUMN via TEXT",
             "ALTER TABLE services ADD COLUMN tx_30d INTEGER",
             "ALTER TABLE services ADD COLUMN resource_count INTEGER",
             "ALTER TABLE services ADD COLUMN resource_samples TEXT",
@@ -2809,7 +2811,8 @@ def _keep_owned_slug(cur, table: str, row: dict, existing) -> None:
 def apply_listing_edits(conn: sqlite3.Connection, kind: str, listing_id: int,
                         user_id: int, ownership_id: int,
                         changes: dict,
-                        verified_hosts=None) -> tuple[list[str], list[str]]:
+                        verified_hosts=None,
+                        via: str = "web") -> tuple[list[str], list[str]]:
     """Write owner edits and record each one in the public audit trail.
 
     Returns (applied, rejected_messages). An endpoint change is only accepted on
@@ -2852,8 +2855,10 @@ def apply_listing_edits(conn: sqlite3.Connection, kind: str, listing_id: int,
                      (new, listing_id))
         conn.execute(
             "INSERT INTO listing_edits(kind, listing_id, user_id, ownership_id, "
-            "field, old_value, new_value, applied_at) VALUES (?,?,?,?,?,?,?,?)",
-            (kind, listing_id, user_id, ownership_id, field, old, new, now))
+            "field, old_value, new_value, applied_at, via) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (kind, listing_id, user_id, ownership_id, field, old, new, now,
+             via))
         applied.append(field)
     if endpoint_changed:
         cols = {r[1] for r in conn.execute("PRAGMA table_info(%s)" % table)}
