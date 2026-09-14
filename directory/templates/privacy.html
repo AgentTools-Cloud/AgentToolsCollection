@@ -4,13 +4,13 @@
 {% block content %}
 <section class="max-w-3xl mb-8">
   <h1 class="text-3xl md:text-4xl font-extrabold tracking-tight">Privacy Policy</h1>
-  <p class="text-slate-500 mt-2 text-sm">Last updated: 8 June 2026</p>
+  <p class="text-slate-500 mt-2 text-sm">Last updated: 14 September 2026</p>
 </section>
 
 <div class="max-w-3xl space-y-6 text-sm text-slate-600 leading-relaxed">
   <div>
     <h2 class="text-lg font-semibold text-slate-800 mb-2">1. The short version</h2>
-    <p>agent-tools.cloud is a public directory. There are no user accounts, no logins, and no tracking cookies. We collect only the minimal technical data needed to run the service, measure aggregate traffic, and keep it secure. We do not sell data and we do not run third-party advertising trackers.</p>
+    <p>agent-tools.cloud is a public directory. Browsing it, searching it and calling its API need no account, and there are no tracking cookies. An account exists only for one purpose: letting the operator of a listed service correct their own entry. Everything we store about you comes from that, and it is listed below. We collect only the minimal technical data needed to run the service, measure aggregate traffic, and keep it secure. We do not sell data and we do not run third-party advertising trackers.</p>
   </div>
 
   <div>
@@ -19,12 +19,16 @@
       <li><span class="font-medium">Server logs</span> — standard web-server records: IP address, timestamp, requested URL, status code, referrer and user-agent. Used for operations, security, abuse prevention and aggregate traffic statistics.</li>
       <li><span class="font-medium">Page-view counts</span> — when a real browser opens a service detail page, a small script records that the page was viewed (page type, slug, referrer, IP, user-agent). This measures which listings people find useful. Automated agents that don't run scripts are not counted.</li>
       <li><span class="font-medium">Rate-limit counters</span> — short-lived per-IP counters to prevent abuse of the API.</li>
+      <li><span class="font-medium">Account records, only if you create one</span> — signing in with GitHub stores your GitHub numeric id and login; minting an API key instead stores only a random identifier. Either way we also store the hostnames you have proved you control. A session cookie (<span class="mono">atc_session</span>) keeps a browser signed in; it is not used for tracking and is never sent to third parties.</li>
+      <li><span class="font-medium">API keys</span> — we store a SHA-256 hash of the key, never the key itself, alongside a short non-secret prefix and the times it was created and last used.</li>
+      <li><span class="font-medium">Edit history</span> — when you change a listing you control, we record the field, its old and new value, your account and the time. <b>This record is public</b> on the listing page: it is what makes self-service editing safe to offer.</li>
+      <li><span class="font-medium">A contact address, only if you give one</span> — optional when you submit a service or claim a host, and used only to reach you about that listing. We do not verify it and we do not use it for anything else.</li>
     </ul>
   </div>
 
   <div>
     <h2 class="text-lg font-semibold text-slate-800 mb-2">3. What we do not collect</h2>
-    <p>No accounts, no passwords, no tracking/advertising cookies, no cross-site profiling, no sale of personal data. We don't ask for personal information to use the directory. If you submit a service, the contact email you provide is used only to notify you about that submission.</p>
+    <p>No passwords — browser sign-in is delegated to GitHub, and an API key is only ever stored as a hash. No tracking or advertising cookies, no cross-site profiling, no sale of personal data. We don't ask for personal information to use the directory, and an account on its own grants nothing: the right to edit a listing comes only from proving control of the domain that serves it.</p>
   </div>
 
   <div>
@@ -34,7 +38,7 @@
 
   <div>
     <h2 class="text-lg font-semibold text-slate-800 mb-2">5. Retention</h2>
-    <p>Logs and view records are kept only as long as useful for operations, security and trend analysis, then rotated or aggregated. We don't build long-term profiles of individuals.</p>
+    <p>Logs and view records are kept only as long as useful for operations, security and trend analysis, then rotated or aggregated. We don't build long-term profiles of individuals. Edit history is different: it is part of a listing's public record and stays for as long as the listing does.</p>
   </div>
 
   <div>

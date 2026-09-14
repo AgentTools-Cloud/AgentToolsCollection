@@ -110,7 +110,7 @@
   <div class="text-xs text-slate-400 mt-4 pt-3 border-t border-slate-100">
     {% if rating.health_checked %}Endpoint last checked {{ rating.health_checked }}.{% endif %}
     {% if rating.payto_checked %} On-chain activity last read {{ rating.payto_checked }}.{% endif %}
-    Availability is re-probed every 4 hours and on-chain demand daily; the grade
+    Availability and on-chain demand are both re-probed daily; the grade
     updates automatically on the next pass.
   </div>
 </section>

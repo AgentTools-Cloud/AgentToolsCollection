@@ -1207,7 +1207,16 @@ def well_known():
             "dns_txt_name": "_agent-tools.<host>",
             "dns_txt_value": "atc-verify=<token>",
             "scope": "host",
-            "recheck_hours": 4,
+            "recheck_hours": 24,
+            "api": {
+                "mint_key": "https://agent-tools.cloud/api/v1/keys",
+                "open_claim": "https://agent-tools.cloud/api/v1/claims",
+                "verify_claim":
+                    "https://agent-tools.cloud/api/v1/claims/{claim_id}/verify",
+                "edit_listing":
+                    "https://agent-tools.cloud/api/v1/listings/{kind}/{slug}",
+                "auth": "Authorization: Bearer <api_key>",
+            },
         },
         "version": "0.5",
         "description": (
