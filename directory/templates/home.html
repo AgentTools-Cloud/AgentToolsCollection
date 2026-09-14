@@ -110,7 +110,7 @@
   <div class="flex flex-wrap items-end justify-between gap-4 mb-4">
     <div>
       <h2 class="text-2xl font-bold tracking-tight">Directory health &amp; quality, at a glance</h2>
-      <p class="text-sm text-slate-500 mt-1">A synthesized read on what's actually usable right now — refreshed continuously (scores recomputed on every hourly liveness probe; leaderboards ranked live on each request).</p>
+      <p class="text-sm text-slate-500 mt-1">A synthesized read on what's actually usable right now — refreshed continuously (scores recomputed on the daily liveness probe; leaderboards ranked live on each request).</p>
     </div>
   </div>
 
@@ -154,7 +154,7 @@
     services are the ones agents are actually paying. Roughly
     <span class="font-semibold text-slate-800">{{ mcp_stats.access_open }}</span> MCP servers are callable
     with no credentials at all; <span class="font-semibold text-slate-800">{{ mcp_stats.access_key }}</span>
-    need a human to provision a key first. Scores recompute hourly; rankings are live.
+    need a human to provision a key first. Scores recompute daily; rankings are live.
   </div>
 
   <div class="grid grid-cols-1 lg:grid-cols-3 gap-5">
