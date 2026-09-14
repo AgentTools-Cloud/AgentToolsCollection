@@ -1151,7 +1151,9 @@ def _approve(sub_id: int, note: str | None = None,
     try:
         contact = (p.get("contact") or "").strip()
         bits = [url]
-        chains = service.get("chains") or []
+        # Read the submission, not `service`: upsert_service JSON-encoded
+        # that dict in place, and joining a string yields its characters.
+        chains = p.get("chains") or []
         if chains:
             bits.append(" / ".join(str(c) for c in chains[:3]))
         pmin = service.get("price_min")
