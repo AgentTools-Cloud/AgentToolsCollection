@@ -145,6 +145,14 @@ def crawl_agenstry_a2a(max_hosts: int = 4000, workers: int = 12) -> dict:
 # ---------------------------------------------------------------------------
 # MCP servers  (registered into crawlers.MCP_CRAWLERS as "agenstry")
 # ---------------------------------------------------------------------------
+# Hosts whose primary_url is a catalog page rather than a callable endpoint.
+# Not every directory belongs here: server.smithery.ai, mcp.apify.com and mcp.so
+# are directories too, but they answer the protocol (84% / 98% / 89% reachable),
+# whereas glama.ai/mcp/servers/{owner}/{repo} is HTML -- all 4,199 rows it put in
+# the table failed conformance and none ever handshook.
+_NOT_AN_ENDPOINT = {"agenstry.com", "www.agenstry.com", "glama.ai", "www.glama.ai"}
+
+
 def _api_row_to_mcp(rec: dict) -> dict | None:
     """Map one /api/mcp-servers record to our mcp_servers upsert row."""
     endpoint = (rec.get("primary_url") or "").strip()
@@ -152,7 +160,7 @@ def _api_row_to_mcp(rec: dict) -> dict | None:
         return None
     endpoint = endpoint.rstrip("/")
     host = urlparse(endpoint).netloc.lower()
-    if not host or "agenstry.com" in host:
+    if not host or host in _NOT_AN_ENDPOINT or host.endswith(".agenstry.com"):
         return None
     aid = rec.get("name") or endpoint                 # e.g. "gvzq/flight-mcp"
     name = rec.get("title") or rec.get("name") or _host_slug(endpoint)
