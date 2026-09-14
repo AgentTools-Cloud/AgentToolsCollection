@@ -664,6 +664,12 @@ def attach_sources(conn: sqlite3.Connection, kind: str, rows: list) -> list:
 
 
 def upsert_service(conn: sqlite3.Connection, row: dict) -> tuple:
+    """Insert/update an x402 service. Dedup on (source, source_id) then slug.
+
+    Rewrites `row` in place: JSON columns are encoded and `slug` may be
+    corrected to the one already holding this endpoint. Read anything you
+    still need as a Python value before calling, or pass a copy.
+    """
     now = int(time.time())
     # Capture provenance before dedup logic can rewrite it (first-source-wins).
     _src = (row.get("source"), row.get("source_id"), row.get("source_url"))
@@ -1362,6 +1368,9 @@ def upsert_a2a_agent(conn: sqlite3.Connection, row: dict) -> tuple:
 
     `skills` may be a list of dicts; we also derive `skill_names` (a flat
     text blob) so FTS can match skill ids/names/tags without parsing JSON.
+
+    Rewrites `row` in place, including `slug`; routes.py relies on reading
+    the corrected slug back. Pass a copy if you need the original.
     """
     now = int(time.time())
     _src = (row.get("source"), row.get("source_id"), row.get("source_url"))
@@ -1718,7 +1727,11 @@ def mcp_endpoint_urls(conn: sqlite3.Connection) -> list:
 
 
 def upsert_mcp_server(conn: sqlite3.Connection, row: dict) -> tuple:
-    """Insert/update an MCP server. Dedup on (source, source_id) then slug."""
+    """Insert/update an MCP server. Dedup on (source, source_id) then slug.
+
+    Rewrites `row` in place, including `slug`; routes.py relies on reading
+    the corrected slug back. Pass a copy if you need the original.
+    """
     now = int(time.time())
     # Must be read before the cross-source branch below rewrites row["source"]
     # to the first-seen owner -- that rewrite is what used to discard the fact
