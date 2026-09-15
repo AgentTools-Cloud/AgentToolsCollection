@@ -1,0 +1,48 @@
+{% if exact_name_matches %}
+<section class="mb-5 border border-amber-200 bg-amber-50/60 rounded-lg overflow-hidden" aria-label="Exact name matches">
+  <div class="px-4 py-3 border-b border-amber-200">
+    <div class="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+      <h3 class="text-sm font-semibold text-slate-900">Exact name shared by {{ exact_name_matches.count }} different URLs</h3>
+      <span class="text-xs text-slate-500">All exact matches are shown; ranked results follow.</span>
+    </div>
+  </div>
+  <ul class="divide-y divide-amber-100 bg-white/70">
+    {% for match in exact_name_matches.matches %}
+    <li class="px-4 py-3">
+      <div class="flex flex-wrap items-start justify-between gap-2">
+        <div class="min-w-0">
+          <a href="{{ match.listings[0].detail_url }}" class="text-sm font-semibold text-slate-900 hover:text-blue-600">
+            {{ match.name }}
+          </a>
+          {% if match.url %}
+          <a href="{{ match.url }}" rel="nofollow noopener" class="block mt-1 text-xs mono text-blue-700 hover:underline break-all">
+            {{ match.url }}
+          </a>
+          {% else %}
+          <div class="mt-1 text-xs mono text-slate-400">No callable URL published</div>
+          {% endif %}
+        </div>
+        <div class="flex flex-wrap gap-1 shrink-0">
+          {% for protocol in match.protocols %}
+          <span class="badge bg-slate-100 text-slate-700 ring-1 ring-slate-200">{{ protocol }}</span>
+          {% endfor %}
+          <span class="badge {{ 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-100' if match.health_status == 'ok' else 'bg-slate-100 text-slate-500 ring-1 ring-slate-200' }}">
+            {{ match.health_status }}
+          </span>
+        </div>
+      </div>
+      {% if match.description %}
+      <p class="mt-1.5 text-xs text-slate-600 line-clamp-2">{{ match.description }}</p>
+      {% endif %}
+      {% if match.listings|length > 1 %}
+      <div class="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-slate-500">
+        {% for listing in match.listings %}
+        <a href="{{ listing.detail_url }}" class="hover:text-blue-600">{{ listing.type }} listing</a>
+        {% endfor %}
+      </div>
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}

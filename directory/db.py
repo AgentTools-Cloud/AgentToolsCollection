@@ -465,6 +465,11 @@ def with_retry(fn: Callable[[], Any], *, attempts: int = 6, base_delay: float = 
 def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
     with connect(db_path) as c:
         c.executescript(SCHEMA)
+        for table in ("services", "mcp_servers", "a2a_agents"):
+            c.execute(
+                "CREATE INDEX IF NOT EXISTS idx_%s_name_exact "
+                "ON %s(lower(trim(name)))" % (table, table)
+            )
         # idempotent migrations for older DBs that pre-date these columns
         c.execute(
             """CREATE TABLE IF NOT EXISTS mcp_health_history (
