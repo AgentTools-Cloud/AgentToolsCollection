@@ -327,6 +327,8 @@ def exact_name_groups(conn, query: str | None,
                       result_names) -> list[dict]:
     """Complete exact-name groups touched by a ranked search window."""
     query_name = (query or "").strip()
+    if not query_name:
+        return []
     candidates: dict[str, str] = {}
     for value in (query_name, *tuple(result_names)):
         name = str(value or "").strip()

@@ -69,6 +69,11 @@ check("an ordinary hit expands every strict duplicate-name URL",
       len(discovered) == 1 and discovered[0]["count"] == 2)
 check("a group discovered through a hit is not marked query_exact",
       discovered and discovered[0]["query_exact"] is False)
+with db.connect(read_only=True) as conn:
+    no_query = resources.exact_name_groups(
+        conn, None, ["Agent Trust API"])
+check("directory browsing without a query does not show ambiguity groups",
+      no_query == [])
 
 print("\n=== APIs ===")
 for path, result_key in (
@@ -114,6 +119,11 @@ check("that hit expands both exact-name URLs outside normal pagination",
       match and match["count"] == 2 and match["query_exact"] is False)
 
 print("\n=== browser + HTMX surfaces ===")
+for path in ("/x402", "/mcp", "/a2a"):
+    response = client.get(path)
+    check(path + " has no ambiguity banner without a query",
+          "different URLs" not in response.text)
+
 for path in ("/x402", "/mcp", "/a2a",
              "/_partials/services", "/_partials/mcp", "/_partials/a2a"):
     response = client.get(path, params={"q": "Agent Trust API"})
