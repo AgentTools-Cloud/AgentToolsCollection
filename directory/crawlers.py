@@ -1817,13 +1817,14 @@ def fetch_pay_skills_prs() -> list:
     return out
 
 
-X402_FUCHSS_LEADERBOARD = "https://x402.fuchss.app/trust/leaderboard"
+X402_FUCHSS_LEADERBOARD = "https://x402-trust.com/trust/leaderboard"
 
 
 def fetch_x402_fuchss() -> list:
-    """x402.fuchss.app free Top-25 trust leaderboard -> service entries.
+    """x402-trust.com free Top-25 trust leaderboard -> service entries.
 
-    x402.fuchss.app is an x402 endpoint trust-scoring service that probes the
+    x402-trust.com (formerly x402.fuchss.app) is an x402 endpoint
+    trust-scoring service that probes the
     whole x402 ecosystem 24/7. Its free /trust/leaderboard returns the most
     reliable endpoints with a deterministic trust score (0-100, A-F grade) and
     confidence. We host-aggregate them and carry the confidence forward. Most
@@ -1835,7 +1836,8 @@ def fetch_x402_fuchss() -> list:
     out = []
     seen = set()
     try:
-        with httpx.Client(timeout=TIMEOUT, headers={"User-Agent": UA}) as c:
+        with httpx.Client(timeout=TIMEOUT, follow_redirects=True,
+                          headers={"User-Agent": UA}) as c:
             r = c.get(X402_FUCHSS_LEADERBOARD)
             r.raise_for_status()
             data = r.json()
@@ -1866,7 +1868,7 @@ def fetch_x402_fuchss() -> list:
             "url": origin,
             "description": (
                 f"x402 endpoint - trust grade {grade} ({score}/100) "
-                f"per x402.fuchss.app leaderboard"
+                f"per x402-trust.com leaderboard"
             ),
             "category": "general",
             "chains": [],
