@@ -209,6 +209,89 @@ def normalize_a2a(row: dict) -> dict:
     }
 
 
+def exact_name_matches(conn, query: str | None) -> dict | None:
+    """Return every distinct URL whose complete display name equals `query`."""
+    name = (query or "").strip()
+    if not name:
+        return None
+
+    raw: list[dict] = []
+    for row in conn.execute(
+            "SELECT * FROM services WHERE lower(trim(name))=lower(?)", (name,)):
+        item = normalize_service(db.row_to_dict(row))
+        item["card_url"] = None
+        item["listing"] = {
+            "type": "x402", "slug": row["slug"],
+            "detail_url": "https://agent-tools.cloud/services/%s" % row["slug"],
+        }
+        raw.append(item)
+    for row in conn.execute(
+            "SELECT * FROM mcp_servers WHERE lower(trim(name))=lower(?)", (name,)):
+        item = normalize_mcp_server(db.mcp_row_to_dict(row))
+        item["card_url"] = None
+        item["listing"] = {
+            "type": "mcp", "slug": row["slug"],
+            "detail_url": "https://agent-tools.cloud/mcp/servers/%s" % row["slug"],
+        }
+        raw.append(item)
+    for row in conn.execute(
+            "SELECT * FROM a2a_agents WHERE lower(trim(name))=lower(?)", (name,)):
+        converted = db.a2a_row_to_dict(row)
+        item = normalize_a2a(converted)
+        item["card_url"] = converted.get("card_url")
+        item["listing"] = {
+            "type": "a2a", "slug": row["slug"],
+            "detail_url": "https://agent-tools.cloud/a2a/agents/%s" % row["slug"],
+        }
+        raw.append(item)
+
+    products: dict[str, dict] = {}
+    for item in raw:
+        product_url = (item.get("endpoint_url") or item.get("card_url") or "").strip()
+        key = db._norm_endpoint(product_url) if product_url else (
+            "%s:%s" % (item["listing"]["type"], item["listing"]["slug"]))
+        existing = products.get(key)
+        if existing is None:
+            host, _ = db._host_and_path(product_url)
+            products[key] = {
+                "name": item.get("name"),
+                "url": product_url or None,
+                "host": host or None,
+                "endpoint_url": item.get("endpoint_url"),
+                "card_url": item.get("card_url"),
+                "protocols": sorted(set(item.get("protocols") or [])),
+                "description": item.get("description"),
+                "health_status": item.get("health_status") or "unknown",
+                "listings": [item["listing"]],
+            }
+            continue
+        existing["protocols"] = sorted(
+            set(existing["protocols"]) | set(item.get("protocols") or []))
+        if item["listing"] not in existing["listings"]:
+            existing["listings"].append(item["listing"])
+        if not existing.get("endpoint_url") and item.get("endpoint_url"):
+            existing["endpoint_url"] = item["endpoint_url"]
+        if not existing.get("card_url") and item.get("card_url"):
+            existing["card_url"] = item["card_url"]
+        if _HEALTH_RANK.get(item.get("health_status"), 4) < _HEALTH_RANK.get(
+                existing.get("health_status"), 4):
+            existing["health_status"] = item["health_status"]
+
+    if len(products) < 2:
+        return None
+    matches = sorted(products.values(), key=lambda item: (
+        (item.get("host") or "").lower(), (item.get("url") or "").lower()))
+    return {
+        "name": matches[0].get("name") or name,
+        "count": len(matches),
+        "listing_count": len(raw),
+        "complete": True,
+        "deduplicated_by": "normalized_url",
+        "scope": "all_protocols",
+        "matches": matches,
+    }
+
+
 def _sort_key(item: dict) -> tuple:
     health = _HEALTH_RANK.get(item.get("health_status"), 4)
     conf = item.get("confidence")
@@ -259,6 +342,7 @@ def unified_search(conn, q: str | None = None, protocol: str | None = None,
         "count": len(window),
         "total_matched": len(deduped),
         "resources": window,
+        "exact_name_matches": exact_name_matches(conn, q),
     }
 
 
