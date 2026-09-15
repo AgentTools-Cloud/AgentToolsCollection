@@ -140,7 +140,8 @@ def x402_page(
         services = db.attach_ratings("x402", db.search(
             c, q=q, category=category, chain=chain,
             region=region, health=health, limit=60))
-        exact_name_matches = directory_resources.exact_name_matches(c, q)
+        exact_name_groups = directory_resources.exact_name_groups(
+            c, q, (item.get("name") for item in services))
         cats = db.list_categories(c)
         s = db.stats(c)
         leaders = db.top_rated(c, "x402", 10)
@@ -149,7 +150,7 @@ def x402_page(
             "stats": s, "q": q or "", "active_category": category,
             "active_chain": chain, "active_region": region, "active_health": health,
             "leaders": leaders, "view": view,
-            "exact_name_matches": exact_name_matches,
+            "exact_name_groups": exact_name_groups,
         },
     )
 
@@ -230,14 +231,15 @@ def mcp_page(
         servers = db.attach_ratings("mcp", db.search_mcp(
             c, q=q, health=health, x402_only=bool(x402),
             access=access, limit=60))
-        exact_name_matches = directory_resources.exact_name_matches(c, q)
+        exact_name_groups = directory_resources.exact_name_groups(
+            c, q, (item.get("name") for item in servers))
         s = db.mcp_stats(c)
         leaders = db.top_rated(c, "mcp", 10)
     return TEMPLATES.TemplateResponse(request, "mcp.html", {
             "request": request, "servers": servers, "stats": s, "q": q or "",
             "active_health": health, "active_x402": bool(x402),
             "active_access": access, "leaders": leaders, "view": view,
-            "exact_name_matches": exact_name_matches,
+            "exact_name_groups": exact_name_groups,
         },
     )
 
@@ -263,10 +265,11 @@ def mcp_partial(
     with _conn() as c:
         servers = db.attach_ratings("mcp", db.search_mcp(
             c, q=q, health=health, x402_only=bool(x402), access=access, limit=60))
-        exact_name_matches = directory_resources.exact_name_matches(c, q)
+        exact_name_groups = directory_resources.exact_name_groups(
+            c, q, (item.get("name") for item in servers))
     return TEMPLATES.TemplateResponse(request, "_mcp_grid.html", {
         "request": request, "servers": servers, "view": view,
-        "exact_name_matches": exact_name_matches,
+        "exact_name_groups": exact_name_groups,
     })
 
 
@@ -283,14 +286,15 @@ def a2a_page(
         agents = db.attach_ratings("a2a", db.search_a2a(
             c, q=q, health=health, x402_only=bool(x402),
             access=access, limit=60))
-        exact_name_matches = directory_resources.exact_name_matches(c, q)
+        exact_name_groups = directory_resources.exact_name_groups(
+            c, q, (item.get("name") for item in agents))
         s = db.a2a_stats(c)
         leaders = db.top_rated(c, "a2a", 10)
     return TEMPLATES.TemplateResponse(request, "a2a.html", {
             "request": request, "agents": agents, "stats": s, "q": q or "",
             "active_health": health, "active_x402": bool(x402),
             "active_access": access, "leaders": leaders, "view": view,
-            "exact_name_matches": exact_name_matches,
+            "exact_name_groups": exact_name_groups,
         },
     )
 
@@ -316,10 +320,11 @@ def a2a_partial(
     with _conn() as c:
         agents = db.attach_ratings("a2a", db.search_a2a(
             c, q=q, health=health, x402_only=bool(x402), access=access, limit=60))
-        exact_name_matches = directory_resources.exact_name_matches(c, q)
+        exact_name_groups = directory_resources.exact_name_groups(
+            c, q, (item.get("name") for item in agents))
     return TEMPLATES.TemplateResponse(request, "_a2a_grid.html", {
         "request": request, "agents": agents, "view": view,
-        "exact_name_matches": exact_name_matches,
+        "exact_name_groups": exact_name_groups,
     })
 
 
@@ -337,10 +342,11 @@ def services_partial(
         services = db.attach_ratings("x402", db.search(
             c, q=q, category=category, chain=chain,
             region=region, health=health, limit=60))
-        exact_name_matches = directory_resources.exact_name_matches(c, q)
+        exact_name_groups = directory_resources.exact_name_groups(
+            c, q, (item.get("name") for item in services))
     return TEMPLATES.TemplateResponse(request, "_service_grid.html", {
         "request": request, "services": services, "view": view,
-        "exact_name_matches": exact_name_matches,
+        "exact_name_groups": exact_name_groups,
     })
 
 
@@ -359,7 +365,8 @@ def api_search(
         services = db.search(c, q=q, category=category, chain=chain,
                              region=region, health=health, limit=limit, offset=offset)
         db.attach_sources(c, "x402", services)
-        exact_name_matches = directory_resources.exact_name_matches(c, q)
+        exact_name_groups = directory_resources.exact_name_groups(
+            c, q, (item.get("name") for item in services))
     for svc in services:
         svc.pop("source", None)
         svc.pop("source_id", None)
@@ -368,7 +375,9 @@ def api_search(
     return {
         "count": len(services),
         "services": services,
-        "exact_name_matches": exact_name_matches,
+        "exact_name_matches": next(
+            (group for group in exact_name_groups if group["query_exact"]), None),
+        "exact_name_groups": exact_name_groups,
     }
 
 
@@ -488,12 +497,15 @@ def api_a2a_search(
     with _conn() as c:
         rows = db.search_a2a(c, q=q, health=health, x402_only=x402_only,
                              limit=limit, offset=offset)
-        exact_name_matches = directory_resources.exact_name_matches(c, q)
+        exact_name_groups = directory_resources.exact_name_groups(
+            c, q, (item.get("name") for item in rows))
     return {
         "query": q,
         "count": len(rows),
         "agents": [directory_a2a.public_agent(r) for r in rows],
-        "exact_name_matches": exact_name_matches,
+        "exact_name_matches": next(
+            (group for group in exact_name_groups if group["query_exact"]), None),
+        "exact_name_groups": exact_name_groups,
     }
 
 
@@ -544,14 +556,18 @@ def api_mcp_search(
                 continue
             seen.add(key)
             servers.append(item)
-        exact_name_matches = directory_resources.exact_name_matches(c, q)
     window = servers[offset:offset + limit]
+    with _conn() as c:
+        exact_name_groups = directory_resources.exact_name_groups(
+            c, q, (item.get("name") for item in window))
     return {
         "query": q,
         "count": len(window),
         "total_matched": len(servers),
         "servers": window,
-        "exact_name_matches": exact_name_matches,
+        "exact_name_matches": next(
+            (group for group in exact_name_groups if group["query_exact"]), None),
+        "exact_name_groups": exact_name_groups,
     }
 
 
