@@ -62,6 +62,14 @@ check("1916 rows at one URL collapse to one product/no warning", collapsed is No
 check("884 rows at two URLs return two products, not 884",
       two_urls and two_urls["count"] == 2 and two_urls["listing_count"] == 884)
 
+with db.connect(read_only=True) as conn:
+    discovered = resources.exact_name_groups(
+        conn, "npm package risk", ["Agent Trust API"])
+check("an ordinary hit expands every strict duplicate-name URL",
+      len(discovered) == 1 and discovered[0]["count"] == 2)
+check("a group discovered through a hit is not marked query_exact",
+      discovered and discovered[0]["query_exact"] is False)
+
 print("\n=== APIs ===")
 for path, result_key in (
         ("/api/v1/search", "services"),
@@ -78,6 +86,32 @@ for path, result_key in (
           exact and exact["count"] == 2 and exact["complete"] is True)
     check(path + " exposes URL on every exact match",
           exact and all(x.get("url") for x in exact["matches"]))
+    groups = body.get("exact_name_groups", [])
+    check(path + " also exposes the plural group collection",
+          any(group["name"] == "Agent Trust API" and group["count"] == 2
+              for group in groups), len(groups))
+
+print("\n=== hit-triggered groups ===")
+# The query itself need not equal the duplicated name. Once a ranked result
+# hits that name, the complete group must accompany it.
+with db.connect(read_only=True) as conn:
+    groups = resources.exact_name_groups(
+        conn, "npm package risk", ["Agent Trust API"])
+match = next((group for group in groups
+              if group["name"] == "Agent Trust API"), None)
+check("ordinary search hits expand the complete duplicate-name group",
+      match and match["count"] == 2 and match["query_exact"] is False)
+
+response = client.get("/api/v1/a2a/search",
+                      params={"q": "on-chain reputation wallets", "limit": 100})
+body = response.json()
+agent_names = [agent.get("name") for agent in body.get("agents", [])]
+match = next((group for group in body.get("exact_name_groups", [])
+              if group["name"] == "Agent Trust API"), None)
+check("a real non-name query ranks one Agent Trust API result",
+      "Agent Trust API" in agent_names)
+check("that hit expands both exact-name URLs outside normal pagination",
+      match and match["count"] == 2 and match["query_exact"] is False)
 
 print("\n=== browser + HTMX surfaces ===")
 for path in ("/x402", "/mcp", "/a2a",
@@ -86,7 +120,7 @@ for path in ("/x402", "/mcp", "/a2a",
     text = response.text
     check(path + " returns 200", response.status_code == 200)
     check(path + " labels the exact-name ambiguity",
-          "Exact name shared by 2 different URLs" in text)
+          "is shared by 2 different URLs" in text)
     check(path + " prints both distinguishing URLs",
           all(url in text for url in expected))
 

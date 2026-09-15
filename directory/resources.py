@@ -209,42 +209,64 @@ def normalize_a2a(row: dict) -> dict:
     }
 
 
-def exact_name_matches(conn, query: str | None) -> dict | None:
-    """Return every distinct URL whose complete display name equals `query`."""
-    name = (query or "").strip()
-    if not name:
-        return None
+def _exact_name_rows(conn, names) -> dict[str, list[dict]]:
+    candidates: dict[str, str] = {}
+    for value in names:
+        name = str(value or "").strip()
+        if name:
+            candidates.setdefault(name.lower(), name)
+    if not candidates:
+        return {}
 
-    raw: list[dict] = []
-    for row in conn.execute(
-            "SELECT * FROM services WHERE lower(trim(name))=lower(?)", (name,)):
-        item = normalize_service(db.row_to_dict(row))
-        item["card_url"] = None
-        item["listing"] = {
-            "type": "x402", "slug": row["slug"],
-            "detail_url": "https://agent-tools.cloud/services/%s" % row["slug"],
-        }
-        raw.append(item)
-    for row in conn.execute(
-            "SELECT * FROM mcp_servers WHERE lower(trim(name))=lower(?)", (name,)):
-        item = normalize_mcp_server(db.mcp_row_to_dict(row))
-        item["card_url"] = None
-        item["listing"] = {
-            "type": "mcp", "slug": row["slug"],
-            "detail_url": "https://agent-tools.cloud/mcp/servers/%s" % row["slug"],
-        }
-        raw.append(item)
-    for row in conn.execute(
-            "SELECT * FROM a2a_agents WHERE lower(trim(name))=lower(?)", (name,)):
-        converted = db.a2a_row_to_dict(row)
-        item = normalize_a2a(converted)
-        item["card_url"] = converted.get("card_url")
-        item["listing"] = {
-            "type": "a2a", "slug": row["slug"],
-            "detail_url": "https://agent-tools.cloud/a2a/agents/%s" % row["slug"],
-        }
-        raw.append(item)
+    placeholders = ",".join("?" for _ in candidates)
+    params = tuple(candidates)
+    grouped: dict[str, list[dict]] = {key: [] for key in candidates}
 
+    for row in conn.execute(
+            "SELECT slug,name,description,url,mcp_url,health FROM services "
+            "WHERE lower(trim(name)) IN (%s)" % placeholders, params):
+        grouped[row["name"].strip().lower()].append({
+            "name": row["name"], "description": row["description"],
+            "endpoint_url": row["url"], "card_url": None,
+            "protocols": ["x402", "mcp"] if row["mcp_url"] else ["x402"],
+            "health_status": row["health"] or "unknown",
+            "listing": {
+                "type": "x402", "slug": row["slug"],
+                "detail_url": "https://agent-tools.cloud/services/%s" % row["slug"],
+            },
+        })
+    for row in conn.execute(
+            "SELECT slug,name,description,endpoint_url,health,x402_supported "
+            "FROM mcp_servers WHERE lower(trim(name)) IN (%s)"
+            % placeholders, params):
+        grouped[row["name"].strip().lower()].append({
+            "name": row["name"], "description": row["description"],
+            "endpoint_url": row["endpoint_url"], "card_url": None,
+            "protocols": ["mcp", "x402"] if row["x402_supported"] else ["mcp"],
+            "health_status": row["health"] or "unknown",
+            "listing": {
+                "type": "mcp", "slug": row["slug"],
+                "detail_url": "https://agent-tools.cloud/mcp/servers/%s" % row["slug"],
+            },
+        })
+    for row in conn.execute(
+            "SELECT slug,name,description,endpoint_url,card_url,health,x402_supported "
+            "FROM a2a_agents WHERE lower(trim(name)) IN (%s)"
+            % placeholders, params):
+        grouped[row["name"].strip().lower()].append({
+            "name": row["name"], "description": row["description"],
+            "endpoint_url": row["endpoint_url"], "card_url": row["card_url"],
+            "protocols": ["a2a", "x402"] if row["x402_supported"] else ["a2a"],
+            "health_status": row["health"] or "unknown",
+            "listing": {
+                "type": "a2a", "slug": row["slug"],
+                "detail_url": "https://agent-tools.cloud/a2a/agents/%s" % row["slug"],
+            },
+        })
+    return grouped
+
+
+def _exact_name_group(name: str, raw: list[dict]) -> dict | None:
     products: dict[str, dict] = {}
     for item in raw:
         product_url = (item.get("endpoint_url") or item.get("card_url") or "").strip()
@@ -292,6 +314,37 @@ def exact_name_matches(conn, query: str | None) -> dict | None:
     }
 
 
+def exact_name_matches(conn, query: str | None) -> dict | None:
+    """Return every distinct URL whose complete display name equals `query`."""
+    name = (query or "").strip()
+    if not name:
+        return None
+    grouped = _exact_name_rows(conn, (name,))
+    return _exact_name_group(name, grouped.get(name.lower(), []))
+
+
+def exact_name_groups(conn, query: str | None,
+                      result_names) -> list[dict]:
+    """Complete exact-name groups touched by a ranked search window."""
+    query_name = (query or "").strip()
+    candidates: dict[str, str] = {}
+    for value in (query_name, *tuple(result_names)):
+        name = str(value or "").strip()
+        if name:
+            candidates.setdefault(name.lower(), name)
+    grouped = _exact_name_rows(conn, candidates.values())
+    groups: list[dict] = []
+    for key, name in candidates.items():
+        group = _exact_name_group(name, grouped.get(key, []))
+        if group is None:
+            continue
+        group["query_exact"] = key == query_name.lower()
+        groups.append(group)
+    groups.sort(key=lambda group: (
+        not group["query_exact"], (group.get("name") or "").casefold()))
+    return groups
+
+
 def _sort_key(item: dict) -> tuple:
     health = _HEALTH_RANK.get(item.get("health_status"), 4)
     conf = item.get("confidence")
@@ -336,13 +389,17 @@ def unified_search(conn, q: str | None = None, protocol: str | None = None,
 
     deduped.sort(key=_sort_key)
     window = deduped[offset:offset + limit]
+    exact_groups = exact_name_groups(
+        conn, q, (item.get("name") for item in window))
     return {
         "query": q,
         "protocol": protocol,
         "count": len(window),
         "total_matched": len(deduped),
         "resources": window,
-        "exact_name_matches": exact_name_matches(conn, q),
+        "exact_name_matches": next(
+            (group for group in exact_groups if group["query_exact"]), None),
+        "exact_name_groups": exact_groups,
     }
 
 

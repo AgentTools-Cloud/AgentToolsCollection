@@ -1,13 +1,14 @@
-{% if exact_name_matches %}
+{% if exact_name_groups %}
+{% for exact_group in exact_name_groups %}
 <section class="mb-5 border border-amber-200 bg-amber-50/60 rounded-lg overflow-hidden" aria-label="Exact name matches">
   <div class="px-4 py-3 border-b border-amber-200">
     <div class="flex flex-wrap items-baseline gap-x-2 gap-y-1">
-      <h3 class="text-sm font-semibold text-slate-900">Exact name shared by {{ exact_name_matches.count }} different URLs</h3>
-      <span class="text-xs text-slate-500">All exact matches are shown; ranked results follow.</span>
+      <h3 class="text-sm font-semibold text-slate-900">“{{ exact_group.name }}” is shared by {{ exact_group.count }} different URLs</h3>
+      <span class="text-xs text-slate-500">All exact-name matches are shown; ranked results follow.</span>
     </div>
   </div>
   <ul class="divide-y divide-amber-100 bg-white/70">
-    {% for match in exact_name_matches.matches %}
+    {% for match in exact_group.matches %}
     <li class="px-4 py-3">
       <div class="flex flex-wrap items-start justify-between gap-2">
         <div class="min-w-0">
@@ -45,4 +46,5 @@
     {% endfor %}
   </ul>
 </section>
+{% endfor %}
 {% endif %}
