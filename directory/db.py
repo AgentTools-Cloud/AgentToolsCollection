@@ -827,6 +827,25 @@ def _query_tokens(q: str) -> list[str]:
     return [t for t in "".join(cleaned).split() if t]
 
 
+SEARCH_SORTS = ("default", "relevance", "quality", "newest", "name")
+
+
+def _search_order(sort: str, alias: str, default_order: str,
+                  relevance_expr: str | None = None) -> str:
+    if sort not in SEARCH_SORTS:
+        raise ValueError("unsupported search sort: %s" % sort)
+    if sort == "relevance" and relevance_expr:
+        return "%s ASC, %s.id ASC" % (relevance_expr, alias)
+    if sort == "quality":
+        return ("COALESCE(%s.quality_score, -1) DESC, %s.id DESC"
+                % (alias, alias))
+    if sort == "newest":
+        return ("COALESCE(%s.created_at, 0) DESC, %s.id DESC" % (alias, alias))
+    if sort == "name":
+        return ("LOWER(COALESCE(%s.name, '')) ASC, %s.id ASC" % (alias, alias))
+    return default_order
+
+
 def _expand_fts_query(q: str) -> str | None:
     """Turn a free-text query into a strict FTS5 MATCH expression.
 
@@ -911,7 +930,7 @@ def _match_reason(row: dict, q: str | None) -> list[str]:
 
 def search(conn, q=None, category=None, chain=None, region=None, health=None,
            min_confidence=None, has_mcp: bool = False,
-           limit=50, offset=0):
+           limit=50, offset=0, sort: str = "default"):
     """Search the directory.
 
     Returns a list of dict rows. Each row gets two extra synthetic fields:
@@ -930,11 +949,14 @@ def search(conn, q=None, category=None, chain=None, region=None, health=None,
     if q:
         fts_query = _expand_fts_query(q)
 
+    service_rank = "bm25(services_fts, 10.0, 5.0, 1.0, 1.0, 2.0, 2.0)"
     if fts_query is not None:
         # Use snippet() with a moderate token window — column -1 = any column.
         select_cols.append(
             "snippet(services_fts, -1, '[[', ']]', '…', 12) AS match_snippet"
         )
+        if sort == "relevance":
+            select_cols.append(service_rank + " AS search_rank")
         sql_parts = ["SELECT " + ", ".join(select_cols) + " FROM services s"]
         sql_parts.append("JOIN services_fts f ON f.rowid = s.id")
         where.append("services_fts MATCH ?")
@@ -965,9 +987,7 @@ def search(conn, q=None, category=None, chain=None, region=None, health=None,
     #   4. confidence value
     #   5. tx_30d value
     #   6. recency
-    sql_parts.append(
-        "ORDER BY "
-        # primary tier: ok -> degraded -> unknown -> down (dead links sink)
+    service_default_order = (
         "CASE s.health WHEN 'ok' THEN 0 WHEN 'degraded' THEN 1 "
         "WHEN 'unknown' THEN 2 WHEN 'down' THEN 3 ELSE 4 END ASC, "
         "(s.health='ok' AND COALESCE(s.tx_30d,0) > 0) DESC, "
@@ -976,6 +996,9 @@ def search(conn, q=None, category=None, chain=None, region=None, health=None,
         "COALESCE(s.tx_30d, 0) DESC, "
         "s.updated_at DESC"
     )
+    sql_parts.append("ORDER BY " + _search_order(
+        sort, "s", service_default_order,
+        service_rank if fts_query is not None else None))
     sql_parts.append("LIMIT ? OFFSET ?")
     params.extend([limit, offset])
     rows = conn.execute(" ".join(sql_parts), params).fetchall()
@@ -1003,16 +1026,15 @@ def search(conn, q=None, category=None, chain=None, region=None, health=None,
             if has_mcp:
                 where.append("s.mcp_url IS NOT NULL AND s.mcp_url != ''")
             sql_parts.append("WHERE " + " AND ".join(where))
-            sql_parts.append(
-                "ORDER BY bm25(services_fts), "
-                "CASE s.health WHEN 'ok' THEN 0 WHEN 'degraded' THEN 1 "
-                "WHEN 'unknown' THEN 2 WHEN 'down' THEN 3 ELSE 4 END ASC, "
-                "(s.health='ok' AND COALESCE(s.tx_30d,0) > 0) DESC, "
-                "(s.confidence IS NOT NULL) DESC, "
-                "s.confidence DESC, "
-                "COALESCE(s.tx_30d, 0) DESC, "
-                "s.updated_at DESC"
-            )
+            if sort == "relevance":
+                select_cols.append(service_rank + " AS search_rank")
+                sql_parts[0] = "SELECT " + ", ".join(select_cols) + " FROM services s"
+            if sort == "default":
+                # Preserve the pre-sort-option fallback order exactly.
+                order = "bm25(services_fts), " + service_default_order
+            else:
+                order = _search_order(sort, "s", service_default_order, service_rank)
+            sql_parts.append("ORDER BY " + order)
             sql_parts.append("LIMIT ? OFFSET ?")
             params.extend([limit, offset])
             rows = conn.execute(" ".join(sql_parts), params).fetchall()
@@ -1453,17 +1475,20 @@ def upsert_a2a_agent(conn: sqlite3.Connection, row: dict) -> tuple:
 
 
 def search_a2a(conn, q=None, health=None, x402_only=False,
-               access=None, limit=50, offset=0):
+               access=None, limit=50, offset=0, sort: str = "default"):
     """Search A2A agents. Ranks healthy + x402-capable + confident first."""
     select_cols = ["a.*"]
     where: list[str] = []
     params: list = []
     fts_query = _expand_fts_query(q) if q else None
 
+    a2a_rank = "bm25(a2a_fts, 10.0, 1.0, 3.0, 2.0)"
     if fts_query is not None:
         select_cols.append(
             "snippet(a2a_fts, -1, '[[', ']]', '…', 12) AS match_snippet"
         )
+        if sort == "relevance":
+            select_cols.append(a2a_rank + " AS search_rank")
         sql = ["SELECT " + ", ".join(select_cols) + " FROM a2a_agents a"]
         sql.append("JOIN a2a_fts f ON f.rowid = a.id")
         where.append("a2a_fts MATCH ?")
@@ -1479,8 +1504,7 @@ def search_a2a(conn, q=None, health=None, x402_only=False,
         where.append(_access_case("a", "a2a") + "=?"); params.append(access)
     if where:
         sql.append("WHERE " + " AND ".join(where))
-    sql.append(
-        "ORDER BY "
+    a2a_default_order = (
         "CASE a.health WHEN 'ok' THEN 0 WHEN 'degraded' THEN 1 "
         "WHEN 'unknown' THEN 2 WHEN 'down' THEN 3 ELSE 4 END ASC, "
         "a.x402_supported DESC, "
@@ -1488,6 +1512,9 @@ def search_a2a(conn, q=None, health=None, x402_only=False,
         "a.confidence DESC, "
         "a.updated_at DESC"
     )
+    sql.append("ORDER BY " + _search_order(
+        sort, "a", a2a_default_order,
+        a2a_rank if fts_query is not None else None))
     sql.append("LIMIT ? OFFSET ?")
     params.extend([limit, offset])
     rows = conn.execute(" ".join(sql), params).fetchall()
@@ -1855,15 +1882,18 @@ def _access_case(alias, kind):
 
 
 def search_mcp(conn, q=None, health=None, x402_only=False, kind=None,
-               access=None, limit=50, offset=0):
+               access=None, limit=50, offset=0, sort: str = "default"):
     """Search standalone MCP servers. Ranks healthy + remotely callable first."""
     select_cols = ["m.*"]
     where: list[str] = []
     params: list = []
     fts_query = _expand_fts_query(q) if q else None
 
+    mcp_rank = "bm25(mcp_fts, 10.0, 1.0, 2.0, 3.0)"
     if fts_query is not None:
         select_cols.append("snippet(mcp_fts, -1, '[[', ']]', '…', 12) AS match_snippet")
+        if sort == "relevance":
+            select_cols.append(mcp_rank + " AS search_rank")
         sql = ["SELECT " + ", ".join(select_cols) + " FROM mcp_servers m"]
         sql.append("JOIN mcp_fts f ON f.rowid = m.id")
         where.append("mcp_fts MATCH ?")
@@ -1881,8 +1911,7 @@ def search_mcp(conn, q=None, health=None, x402_only=False, kind=None,
         where.append("m.kind=?"); params.append(kind)
     if where:
         sql.append("WHERE " + " AND ".join(where))
-    sql.append(
-        "ORDER BY "
+    mcp_default_order = (
         "CASE m.health WHEN 'ok' THEN 0 WHEN 'degraded' THEN 1 "
         "WHEN 'unknown' THEN 2 WHEN 'down' THEN 3 ELSE 4 END ASC, "
         "(m.endpoint_url IS NOT NULL AND m.endpoint_url != '') DESC, "
@@ -1891,6 +1920,9 @@ def search_mcp(conn, q=None, health=None, x402_only=False, kind=None,
         "(m.github_stars IS NOT NULL) DESC, m.github_stars DESC, "
         "m.updated_at DESC"
     )
+    sql.append("ORDER BY " + _search_order(
+        sort, "m", mcp_default_order,
+        mcp_rank if fts_query is not None else None))
     sql.append("LIMIT ? OFFSET ?")
     params.extend([limit, offset])
     rows = conn.execute(" ".join(sql), params).fetchall()
