@@ -43,6 +43,12 @@ router = APIRouter()
 # Single source of truth for the liveness vocabulary, surfaced on every
 # `health` filter (services / a2a / mcp) and echoed by the `health_status`
 # field on each result.
+SEARCH_SORT_PATTERN = "^(default|relevance|quality|newest|name)$"
+SEARCH_SORT_DOC = (
+    "Result order: default (existing health-and-demand ranking), relevance "
+    "(text relevance; falls back to default without q), quality, newest, or name."
+)
+
 HEALTH_DOC = (
     "Filter by liveness from the most recent probe. One of: "
     "`ok` — the endpoint answered a live probe. For MCP, a successful "
@@ -134,12 +140,13 @@ def x402_page(
     chain: str | None = Query(default=None),
     region: str | None = Query(default=None),
     health: str | None = Query(default=None),
+    sort: str = Query(default="default", pattern=SEARCH_SORT_PATTERN),
     view: str | None = Query(default=None),
 ):
     with _conn() as c:
         services = db.attach_ratings("x402", db.search(
             c, q=q, category=category, chain=chain,
-            region=region, health=health, limit=60))
+            region=region, health=health, sort=sort, limit=60))
         exact_name_groups = directory_resources.exact_name_groups(
             c, q, (item.get("name") for item in services))
         cats = db.list_categories(c)
@@ -149,6 +156,7 @@ def x402_page(
             "request": request, "services": services, "categories": cats,
             "stats": s, "q": q or "", "active_category": category,
             "active_chain": chain, "active_region": region, "active_health": health,
+            "active_sort": sort,
             "leaders": leaders, "view": view,
             "exact_name_groups": exact_name_groups,
         },
@@ -225,12 +233,13 @@ def mcp_page(
     health: str | None = Query(default=None),
     x402: str | None = Query(default=None),
     access: str | None = Query(default=None),
+    sort: str = Query(default="default", pattern=SEARCH_SORT_PATTERN),
     view: str | None = Query(default=None),
 ):
     with _conn() as c:
         servers = db.attach_ratings("mcp", db.search_mcp(
             c, q=q, health=health, x402_only=bool(x402),
-            access=access, limit=60))
+            access=access, sort=sort, limit=60))
         exact_name_groups = directory_resources.exact_name_groups(
             c, q, (item.get("name") for item in servers))
         s = db.mcp_stats(c)
@@ -238,7 +247,8 @@ def mcp_page(
     return TEMPLATES.TemplateResponse(request, "mcp.html", {
             "request": request, "servers": servers, "stats": s, "q": q or "",
             "active_health": health, "active_x402": bool(x402),
-            "active_access": access, "leaders": leaders, "view": view,
+            "active_access": access, "active_sort": sort,
+            "leaders": leaders, "view": view,
             "exact_name_groups": exact_name_groups,
         },
     )
@@ -260,11 +270,12 @@ def mcp_partial(
     health: str | None = Query(default=None),
     x402: str | None = Query(default=None),
     access: str | None = Query(default=None),
+    sort: str = Query(default="default", pattern=SEARCH_SORT_PATTERN),
     view: str | None = Query(default=None),
 ):
     with _conn() as c:
         servers = db.attach_ratings("mcp", db.search_mcp(
-            c, q=q, health=health, x402_only=bool(x402), access=access, limit=60))
+            c, q=q, health=health, x402_only=bool(x402), access=access, sort=sort, limit=60))
         exact_name_groups = directory_resources.exact_name_groups(
             c, q, (item.get("name") for item in servers))
     return TEMPLATES.TemplateResponse(request, "_mcp_grid.html", {
@@ -280,12 +291,13 @@ def a2a_page(
     health: str | None = Query(default=None),
     x402: str | None = Query(default=None),
     access: str | None = Query(default=None),
+    sort: str = Query(default="default", pattern=SEARCH_SORT_PATTERN),
     view: str | None = Query(default=None),
 ):
     with _conn() as c:
         agents = db.attach_ratings("a2a", db.search_a2a(
             c, q=q, health=health, x402_only=bool(x402),
-            access=access, limit=60))
+            access=access, sort=sort, limit=60))
         exact_name_groups = directory_resources.exact_name_groups(
             c, q, (item.get("name") for item in agents))
         s = db.a2a_stats(c)
@@ -293,7 +305,8 @@ def a2a_page(
     return TEMPLATES.TemplateResponse(request, "a2a.html", {
             "request": request, "agents": agents, "stats": s, "q": q or "",
             "active_health": health, "active_x402": bool(x402),
-            "active_access": access, "leaders": leaders, "view": view,
+            "active_access": access, "active_sort": sort,
+            "leaders": leaders, "view": view,
             "exact_name_groups": exact_name_groups,
         },
     )
@@ -315,11 +328,12 @@ def a2a_partial(
     health: str | None = Query(default=None),
     x402: str | None = Query(default=None),
     access: str | None = Query(default=None),
+    sort: str = Query(default="default", pattern=SEARCH_SORT_PATTERN),
     view: str | None = Query(default=None),
 ):
     with _conn() as c:
         agents = db.attach_ratings("a2a", db.search_a2a(
-            c, q=q, health=health, x402_only=bool(x402), access=access, limit=60))
+            c, q=q, health=health, x402_only=bool(x402), access=access, sort=sort, limit=60))
         exact_name_groups = directory_resources.exact_name_groups(
             c, q, (item.get("name") for item in agents))
     return TEMPLATES.TemplateResponse(request, "_a2a_grid.html", {
@@ -337,11 +351,12 @@ def services_partial(
     chain: str | None = Query(default=None),
     region: str | None = Query(default=None),
     health: str | None = Query(default=None),
+    sort: str = Query(default="default", pattern=SEARCH_SORT_PATTERN),
 ):
     with _conn() as c:
         services = db.attach_ratings("x402", db.search(
             c, q=q, category=category, chain=chain,
-            region=region, health=health, limit=60))
+            region=region, health=health, sort=sort, limit=60))
         exact_name_groups = directory_resources.exact_name_groups(
             c, q, (item.get("name") for item in services))
     return TEMPLATES.TemplateResponse(request, "_service_grid.html", {
@@ -357,23 +372,28 @@ def api_search(
     chain: str | None = Query(default=None, description='e.g. "base", "solana"'),
     region: str | None = None,
     health: str | None = Query(default=None, description=HEALTH_DOC),
+    sort: str = Query(default="default", pattern=SEARCH_SORT_PATTERN,
+                      description=SEARCH_SORT_DOC),
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0, le=MAX_SEARCH_OFFSET),
 ):
     """Agent-friendly search across the x402 service directory."""
     with _conn() as c:
         services = db.search(c, q=q, category=category, chain=chain,
-                             region=region, health=health, limit=limit, offset=offset)
+                             region=region, health=health, sort=sort,
+                             limit=limit, offset=offset)
         db.attach_sources(c, "x402", services)
         exact_name_groups = directory_resources.exact_name_groups(
             c, q, (item.get("name") for item in services))
     for svc in services:
         svc.pop("source", None)
         svc.pop("source_id", None)
+        svc.pop("search_rank", None)
         if svc.get("slug"):
             svc["service_card_url"] = f"/api/v1/services/{svc['slug']}"
     return {
         "count": len(services),
+        "sort": sort,
         "services": services,
         "exact_name_matches": next(
             (group for group in exact_name_groups if group["query_exact"]), None),
@@ -491,16 +511,19 @@ def api_a2a_search(
     q: str | None = Query(default=None, max_length=800),
     health: str | None = Query(default=None, description=HEALTH_DOC),
     x402_only: bool = Query(default=False),
+    sort: str = Query(default="default", pattern=SEARCH_SORT_PATTERN,
+                      description=SEARCH_SORT_DOC),
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0, le=MAX_SEARCH_OFFSET),
 ):
     with _conn() as c:
         rows = db.search_a2a(c, q=q, health=health, x402_only=x402_only,
-                             limit=limit, offset=offset)
+                             sort=sort, limit=limit, offset=offset)
         exact_name_groups = directory_resources.exact_name_groups(
             c, q, (item.get("name") for item in rows))
     return {
         "query": q,
+        "sort": sort,
         "count": len(rows),
         "agents": [directory_a2a.public_agent(r) for r in rows],
         "exact_name_matches": next(
@@ -529,6 +552,8 @@ def api_mcp_search(
     q: str | None = Query(default=None, max_length=800),
     chain: str | None = Query(default=None),
     health: str | None = Query(default=None, description=HEALTH_DOC),
+    sort: str = Query(default="default", pattern=SEARCH_SORT_PATTERN,
+                      description=SEARCH_SORT_DOC),
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0, le=MAX_SEARCH_OFFSET),
 ):
@@ -537,31 +562,38 @@ def api_mcp_search(
     Unions the standalone MCP directory (PulseMCP / official registry import)
     with x402 services that also expose an mcp_url.
     """
+    effective_sort = "default" if sort == "relevance" and not (q or "").strip() else sort
     pull = limit + offset
     servers: list[dict] = []
     seen: set[str] = set()
     with _conn() as c:
-        for r in db.search_mcp(c, q=q, health=health, limit=pull):
-            item = directory_resources.normalize_mcp_server(r)
+        for r in db.search_mcp(c, q=q, health=health, sort=effective_sort, limit=pull):
+            item = directory_resources.normalize_mcp_server(
+                r, include_sort_meta=effective_sort != "default")
             key = (item.get("endpoint_url") or item.get("slug") or "").lower()
             if key in seen:
                 continue
             seen.add(key)
             servers.append(item)
         for r in db.search(c, q=q, chain=chain, health=health,
-                           has_mcp=True, limit=pull):
-            item = directory_resources.normalize_service(r, as_mcp=True)
+                           has_mcp=True, sort=effective_sort, limit=pull):
+            item = directory_resources.normalize_service(
+                r, as_mcp=True, include_sort_meta=effective_sort != "default")
             key = (item.get("endpoint_url") or item.get("slug") or "").lower()
             if key in seen:
                 continue
             seen.add(key)
             servers.append(item)
+    if effective_sort != "default":
+        directory_resources.sort_resources(servers, effective_sort, q)
     window = servers[offset:offset + limit]
+    directory_resources.strip_sort_metadata(window)
     with _conn() as c:
         exact_name_groups = directory_resources.exact_name_groups(
             c, q, (item.get("name") for item in window))
     return {
         "query": q,
+        "sort": sort,
         "count": len(window),
         "total_matched": len(servers),
         "servers": window,
@@ -599,6 +631,8 @@ def api_resources_search(
     protocol: str | None = Query(default=None, pattern="^(x402|mcp|a2a)$"),
     chain: str | None = Query(default=None),
     health: str | None = Query(default=None, description=HEALTH_DOC),
+    sort: str = Query(default="default", pattern=SEARCH_SORT_PATTERN,
+                      description=SEARCH_SORT_DOC),
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0, le=MAX_SEARCH_OFFSET),
 ):
@@ -606,7 +640,7 @@ def api_resources_search(
     with _conn() as c:
         return directory_resources.unified_search(
             c, q=q, protocol=protocol, chain=chain, health=health,
-            limit=limit, offset=offset,
+            sort=sort, limit=limit, offset=offset,
         )
 
 

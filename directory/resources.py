@@ -120,12 +120,13 @@ def _short_call_hint(template: dict) -> dict:
 # Normalisers -> unified resource shape
 # ---------------------------------------------------------------------------
 
-def normalize_service(row: dict, as_mcp: bool = False) -> dict:
+def normalize_service(row: dict, as_mcp: bool = False,
+                      include_sort_meta: bool = False) -> dict:
     mcp_url = (row.get("mcp_url") or "").strip()
     protocols = ["x402"]
     if mcp_url:
         protocols.append("mcp")
-    return {
+    item = {
         "type": "mcp" if as_mcp else "x402",
         "slug": row.get("slug"),
         "name": row.get("name"),
@@ -143,9 +144,17 @@ def normalize_service(row: dict, as_mcp: bool = False) -> dict:
         "call_hint": _short_call_hint(cards.build_call_template(row)),
         "detail_url": f"https://agent-tools.cloud/api/v1/services/{row.get('slug')}",
     }
+    if include_sort_meta:
+        item.update({
+            "_search_rank": row.get("search_rank"),
+            "_quality_score": row.get("quality_score"),
+            "_created_at": row.get("created_at"),
+            "_sort_id": row.get("id"),
+        })
+    return item
 
 
-def normalize_mcp_server(row: dict) -> dict:
+def normalize_mcp_server(row: dict, include_sort_meta: bool = False) -> dict:
     """Normalise a standalone mcp_servers row into the unified shape."""
     protocols = ["mcp"]
     if row.get("x402_supported"):
@@ -162,7 +171,7 @@ def normalize_mcp_server(row: dict) -> dict:
             # we know; null when we have not completed a handshake with it.
             "protocol_version": row.get("protocol_version"),
         }
-    return {
+    item = {
         "type": "mcp",
         "slug": row.get("slug"),
         "name": row.get("name"),
@@ -179,14 +188,22 @@ def normalize_mcp_server(row: dict) -> dict:
         "call_hint": call_hint,
         "detail_url": f"https://agent-tools.cloud/api/v1/mcp/servers/{row.get('slug')}",
     }
+    if include_sort_meta:
+        item.update({
+            "_search_rank": row.get("search_rank"),
+            "_quality_score": row.get("quality_score"),
+            "_created_at": row.get("created_at"),
+            "_sort_id": row.get("id"),
+        })
+    return item
 
 
-def normalize_a2a(row: dict) -> dict:
+def normalize_a2a(row: dict, include_sort_meta: bool = False) -> dict:
     protocols = ["a2a"]
     if row.get("x402_supported"):
         protocols.append("x402")
     price = row.get("price_hint_usd")
-    return {
+    item = {
         "type": "a2a",
         "slug": row.get("slug"),
         "name": row.get("name"),
@@ -207,6 +224,14 @@ def normalize_a2a(row: dict) -> dict:
         },
         "detail_url": f"https://agent-tools.cloud/api/v1/a2a/agents/{row.get('slug')}",
     }
+    if include_sort_meta:
+        item.update({
+            "_search_rank": row.get("search_rank"),
+            "_quality_score": row.get("quality_score"),
+            "_created_at": row.get("created_at"),
+            "_sort_id": row.get("id"),
+        })
+    return item
 
 
 def _exact_name_rows(conn, names) -> dict[str, list[dict]]:
@@ -353,30 +378,74 @@ def _sort_key(item: dict) -> tuple:
     return (health, 0 if conf is not None else 1, -(conf or 0.0))
 
 
+def sort_resources(items: list[dict], sort: str, query: str | None = None) -> None:
+    if sort == "default":
+        items.sort(key=_sort_key)
+    elif sort == "relevance":
+        items.sort(key=lambda item: (
+            item.get("_search_rank") is None,
+            item.get("_search_rank") or 0.0,
+            item.get("_sort_id") or 0,
+            item.get("type") or "",
+            item.get("slug") or ""))
+    elif sort == "quality":
+        items.sort(key=lambda item: (
+            item.get("_quality_score") is None,
+            -(item.get("_quality_score") or 0.0),
+            -(item.get("_sort_id") or 0),
+            item.get("type") or "",
+            item.get("slug") or ""))
+    elif sort == "newest":
+        items.sort(key=lambda item: (
+            -(item.get("_created_at") or 0),
+            -(item.get("_sort_id") or 0),
+            item.get("type") or "",
+            item.get("slug") or ""))
+    elif sort == "name":
+        items.sort(key=lambda item: (
+            (item.get("name") or "").casefold(),
+            item.get("_sort_id") or 0,
+            item.get("type") or "",
+            item.get("slug") or ""))
+    else:
+        raise ValueError("unsupported search sort: %s" % sort)
+
+def strip_sort_metadata(items: list[dict]) -> None:
+    for item in items:
+        item.pop("_search_rank", None)
+        item.pop("_quality_score", None)
+        item.pop("_created_at", None)
+        item.pop("_sort_id", None)
+
+
 # ---------------------------------------------------------------------------
 # P1: unified resource search
 # ---------------------------------------------------------------------------
 
 def unified_search(conn, q: str | None = None, protocol: str | None = None,
                    chain: str | None = None, health: str | None = None,
-                   limit: int = 20, offset: int = 0) -> dict:
+                   sort: str = "default", limit: int = 20, offset: int = 0) -> dict:
     """Union search across x402 / mcp / a2a, returning normalised rows."""
     protocol = (protocol or "").lower() or None
+    effective_sort = "default" if sort == "relevance" and not (q or "").strip() else sort
     pull = limit + offset
     items: list[dict] = []
 
     if protocol in (None, "x402"):
-        for r in db.search(conn, q=q, chain=chain, health=health, limit=pull):
-            items.append(normalize_service(r, as_mcp=False))
-    if protocol in (None, "mcp"):
-        for r in db.search_mcp(conn, q=q, health=health, limit=pull):
-            items.append(normalize_mcp_server(r))
         for r in db.search(conn, q=q, chain=chain, health=health,
-                           has_mcp=True, limit=pull):
-            items.append(normalize_service(r, as_mcp=True))
+                           sort=effective_sort, limit=pull):
+            items.append(normalize_service(r, as_mcp=False, include_sort_meta=sort != "default"))
+    if protocol in (None, "mcp"):
+        for r in db.search_mcp(conn, q=q, health=health,
+                               sort=effective_sort, limit=pull):
+            items.append(normalize_mcp_server(r, include_sort_meta=effective_sort != "default"))
+        for r in db.search(conn, q=q, chain=chain, health=health,
+                           has_mcp=True, sort=effective_sort, limit=pull):
+            items.append(normalize_service(r, as_mcp=True, include_sort_meta=effective_sort != "default"))
     if protocol in (None, "a2a"):
-        for r in db.search_a2a(conn, q=q, health=health, limit=pull):
-            items.append(normalize_a2a(r))
+        for r in db.search_a2a(conn, q=q, health=health,
+                               sort=effective_sort, limit=pull):
+            items.append(normalize_a2a(r, include_sort_meta=effective_sort != "default"))
 
     # When unfiltered, a service that is both x402 and mcp would surface twice
     # (once per protocol pass). Collapse by (type, slug) keeping first seen.
@@ -389,13 +458,15 @@ def unified_search(conn, q: str | None = None, protocol: str | None = None,
         seen.add(key)
         deduped.append(it)
 
-    deduped.sort(key=_sort_key)
+    sort_resources(deduped, effective_sort, q)
     window = deduped[offset:offset + limit]
     exact_groups = exact_name_groups(
         conn, q, (item.get("name") for item in window))
+    strip_sort_metadata(window)
     return {
         "query": q,
         "protocol": protocol,
+        "sort": sort,
         "count": len(window),
         "total_matched": len(deduped),
         "resources": window,
