@@ -24,7 +24,7 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 
-from . import db
+from . import db, public_http
 
 log = logging.getLogger("directory.a2a")
 
@@ -322,14 +322,16 @@ def _host_slug(url: str) -> str:
     return _slugify((host or "agent").replace(".", "-"))
 
 
-def fetch_agent_card(url: str, client: httpx.Client | None = None) -> tuple[dict | None, str | None]:
+def fetch_agent_card(url: str, client: httpx.Client | None = None,
+                     reject_unsafe: bool = False) -> tuple[dict | None, str | None]:
     """Fetch a remote Agent Card.
 
     `url` may be a direct card URL or a homepage/base URL (we then try the
     well-known card paths). Returns (card_dict, resolved_card_url).
     """
-    own = client or httpx.Client(timeout=TIMEOUT, follow_redirects=True,
-                                 headers={"User-Agent": UA, "Accept": "application/json"})
+    own = client or public_http.client(
+        timeout=TIMEOUT, follow_redirects=True,
+        headers={"User-Agent": UA, "Accept": "application/json"})
     try:
         candidates: list[str]
         path = urlparse(url).path or "/"
@@ -341,6 +343,10 @@ def fetch_agent_card(url: str, client: httpx.Client | None = None) -> tuple[dict
         for cand in candidates:
             try:
                 r = own.get(cand)
+            except public_http.UnsafeURL:
+                if reject_unsafe:
+                    raise
+                continue
             except httpx.HTTPError:
                 continue
             if r.status_code != 200:
@@ -499,8 +505,9 @@ def crawl_seeds(seed_path: str) -> dict:
     entries = seed.get("agents") or []
     inserted = updated = failed = 0
     failures: list[str] = []
-    client = httpx.Client(timeout=TIMEOUT, follow_redirects=True,
-                          headers={"User-Agent": UA, "Accept": "application/json"})
+    client = public_http.client(
+        timeout=TIMEOUT, follow_redirects=True,
+        headers={"User-Agent": UA, "Accept": "application/json"})
     rows: list[dict] = []
     try:
         for entry in entries:
@@ -576,8 +583,9 @@ def _extract_candidate_homepages(text: str) -> list[str]:
 
 def crawl_directories(max_hosts: int = 80) -> dict:
     """Crawl awesome-a2a lists, probe candidate homepages for Agent Cards."""
-    client = httpx.Client(timeout=TIMEOUT, follow_redirects=True,
-                          headers={"User-Agent": UA, "Accept": "application/json"})
+    client = public_http.client(
+        timeout=TIMEOUT, follow_redirects=True,
+        headers={"User-Agent": UA, "Accept": "application/json"})
     candidates: list[str] = []
     seen_hosts: set[str] = set()
     try:
@@ -628,8 +636,9 @@ def crawl_a2aregistry(page_size: int = 100, max_pages: int = 20) -> dict:
     per-agent re-fetch needed."""
     rows: list[dict] = []
     seen_ids: set[str] = set()
-    with httpx.Client(timeout=TIMEOUT, follow_redirects=True,
-                      headers={"User-Agent": UA, "Accept": "application/json"}) as c:
+    with public_http.client(
+            timeout=TIMEOUT, follow_redirects=True,
+            headers={"User-Agent": UA, "Accept": "application/json"}) as c:
         for page in range(max_pages):
             offset = page * page_size
             try:
@@ -722,8 +731,9 @@ def crawl_github_topic(topic: str = "a2a-protocol", max_repos: int = 100,
     log.info("github topic %s: probing %d candidate homepages", topic, len(homepages))
 
     rows: list[dict] = []
-    with httpx.Client(timeout=TIMEOUT, follow_redirects=True,
-                      headers={"User-Agent": UA, "Accept": "application/json"}) as c:
+    with public_http.client(
+            timeout=TIMEOUT, follow_redirects=True,
+            headers={"User-Agent": UA, "Accept": "application/json"}) as c:
         for hp in homepages:
             try:
                 card, card_url = fetch_agent_card(hp, client=c)
@@ -778,9 +788,10 @@ def probe_a2a_health(card_url: str | None, endpoint_url: str | None = None) -> d
     last = {"status": "down", "latency_ms": None, "http_status": None,
             "conformance": None, "card_url": None}
     try:
-        with httpx.Client(timeout=httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0),
-                          follow_redirects=True,
-                          headers={"User-Agent": UA, "Accept": "application/json"}) as c:
+        with public_http.client(
+            timeout=httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0),
+            follow_redirects=True,
+            headers={"User-Agent": UA, "Accept": "application/json"}) as c:
             for i, t in enumerate(targets):
                 try:
                     t0 = time.monotonic()

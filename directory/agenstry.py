@@ -32,6 +32,7 @@ import httpx
 
 from . import a2a as a2a_mod
 from . import db
+from . import public_http
 
 log = logging.getLogger("directory.agenstry")
 
@@ -100,8 +101,9 @@ def crawl_agenstry_a2a(max_hosts: int = 4000, workers: int = 12) -> dict:
         # card_to_row stays inside the try: a single malformed card must not
         # abort ex.map and take the whole source down with it.
         try:
-            with httpx.Client(timeout=TIMEOUT, follow_redirects=True,
-                              headers={"User-Agent": UA, "Accept": "application/json"}) as c:
+            with public_http.client(
+                    timeout=TIMEOUT, follow_redirects=True,
+                    headers={"User-Agent": UA, "Accept": "application/json"}) as c:
                 card, card_url = a2a_mod.fetch_agent_card(base, client=c)
             if card and card_url:
                 return a2a_mod.card_to_row(card, card_url, source="agenstry", source_id=dom)
