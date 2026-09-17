@@ -330,6 +330,53 @@ CREATE INDEX IF NOT EXISTS idx_listing_sources_listing
 CREATE INDEX IF NOT EXISTS idx_listing_sources_source
   ON listing_sources(source);
 
+-- Active tombstones are a final ingestion guard and a public 410 archive.
+-- The snapshot supports deliberate restoration; events are append-only audit.
+CREATE TABLE IF NOT EXISTS retired_listings (
+  id             INTEGER PRIMARY KEY,
+  kind           TEXT NOT NULL CHECK(kind IN ('x402','mcp','a2a')),
+  slug           TEXT NOT NULL,
+  name           TEXT,
+  original_url   TEXT,
+  normalized_url TEXT,
+  reason         TEXT NOT NULL,
+  requested_by   TEXT,
+  request_email  TEXT,
+  submission_id  INTEGER,
+  snapshot       TEXT NOT NULL,
+  status         TEXT NOT NULL DEFAULT 'active'
+                 CHECK(status IN ('active','restored')),
+  retired_at     INTEGER NOT NULL,
+  retired_by     TEXT NOT NULL,
+  restored_at    INTEGER,
+  restored_by    TEXT,
+  UNIQUE(kind, slug)
+);
+CREATE INDEX IF NOT EXISTS idx_retired_status_slug
+  ON retired_listings(status, kind, slug);
+CREATE INDEX IF NOT EXISTS idx_retired_status_url
+  ON retired_listings(status, kind, normalized_url);
+
+CREATE TABLE IF NOT EXISTS retired_listing_urls (
+  retirement_id  INTEGER NOT NULL REFERENCES retired_listings(id),
+  normalized_url TEXT NOT NULL,
+  original_url   TEXT NOT NULL,
+  PRIMARY KEY(retirement_id, normalized_url)
+);
+CREATE INDEX IF NOT EXISTS idx_retired_urls_lookup
+  ON retired_listing_urls(normalized_url, retirement_id);
+
+CREATE TABLE IF NOT EXISTS listing_retirement_events (
+  id            INTEGER PRIMARY KEY,
+  retirement_id INTEGER NOT NULL REFERENCES retired_listings(id),
+  action        TEXT NOT NULL CHECK(action IN ('retire','restore')),
+  actor         TEXT NOT NULL,
+  note          TEXT,
+  created_at    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_retirement_events
+  ON listing_retirement_events(retirement_id, created_at);
+
 -- Identity and authorisation are deliberately separate: a GitHub login proves
 -- who you are, only a token published on the listed host proves you control
 -- the endpoint. Edit rights come from domain_ownership, never from users.
@@ -675,6 +722,7 @@ def upsert_service(conn: sqlite3.Connection, row: dict) -> tuple:
     corrected to the one already holding this endpoint. Read anything you
     still need as a Python value before calling, or pass a copy.
     """
+    assert_listing_not_retired(conn, "x402", row)
     now = int(time.time())
     # Capture provenance before dedup logic can rewrite it (first-source-wins).
     _src = (row.get("source"), row.get("source_id"), row.get("source_url"))
@@ -1290,6 +1338,266 @@ def _canonical_endpoint(url: str) -> str | None:
         return None
 
 
+class RetiredListingError(ValueError):
+    def __init__(self, retirement):
+        self.retirement = dict(retirement)
+        super().__init__("listing retired: %s/%s" % (
+            self.retirement.get("kind"), self.retirement.get("slug")))
+
+
+_RETIREMENT_TABLES = {
+    "x402": ("services", ("url", "mcp_url")),
+    "mcp": ("mcp_servers", ("endpoint_url",)),
+    "a2a": ("a2a_agents", ("endpoint_url", "card_url")),
+}
+
+
+def _retirement_urls(kind: str, row: dict) -> list[str]:
+    if kind not in _RETIREMENT_TABLES:
+        raise ValueError("unknown listing kind: %s" % kind)
+    values = []
+    for column in _RETIREMENT_TABLES[kind][1]:
+        value = str(row.get(column) or "").strip()
+        if value and value not in values:
+            values.append(value)
+    return values
+
+
+def find_active_retirement(conn, kind: str, slug: str | None = None,
+                           urls=()):
+    if kind not in _RETIREMENT_TABLES:
+        raise ValueError("unknown listing kind: %s" % kind)
+    normalized = sorted({key for value in urls
+                         if (key := _canonical_endpoint(str(value or "")))})
+    clauses = []
+    params: list = []
+    if slug:
+        clauses.append("(r.kind=? AND lower(r.slug)=lower(?))")
+        params.extend((kind, str(slug).strip()))
+    if normalized:
+        marks = ",".join("?" * len(normalized))
+        clauses.append(
+            "EXISTS (SELECT 1 FROM retired_listing_urls u "
+            "WHERE u.retirement_id=r.id AND u.normalized_url IN (%s))" % marks)
+        params.extend(normalized)
+    if not clauses:
+        return None
+    return conn.execute(
+        "SELECT r.* FROM retired_listings r WHERE r.status='active' "
+        "AND (%s) ORDER BY r.retired_at DESC LIMIT 1"
+        % " OR ".join(clauses), params).fetchone()
+
+
+def get_retired_listing(conn, kind: str, slug: str):
+    row = conn.execute(
+        "SELECT * FROM retired_listings WHERE status='active' AND kind=? "
+        "AND lower(slug)=lower(?) ORDER BY retired_at DESC LIMIT 1",
+        (kind, slug)).fetchone()
+    if row is None:
+        return None
+    out = dict(row)
+    try:
+        out["snapshot"] = json.loads(out.get("snapshot") or "{}")
+    except (TypeError, json.JSONDecodeError):
+        out["snapshot"] = {}
+    return out
+
+
+def assert_listing_not_retired(conn, kind: str, row: dict) -> None:
+    retired = find_active_retirement(
+        conn, kind, row.get("slug"), _retirement_urls(kind, row))
+    if retired is not None:
+        raise RetiredListingError(retired)
+
+
+def _listing_snapshot(conn, kind: str, row) -> dict:
+    listing_id = int(row["id"])
+    sources = [dict(r) for r in conn.execute(
+        "SELECT * FROM listing_sources WHERE kind=? AND listing_id=?",
+        (kind, listing_id))]
+    edits = [dict(r) for r in conn.execute(
+        "SELECT * FROM listing_edits WHERE kind=? AND listing_id=?",
+        (kind, listing_id))]
+    snapshot = {"row": dict(row), "sources": sources, "edits": edits}
+    if kind == "x402":
+        snapshot["paytos"] = [dict(r) for r in conn.execute(
+            "SELECT * FROM service_paytos WHERE service_id=?", (listing_id,))]
+        snapshot["health_history"] = [dict(r) for r in conn.execute(
+            "SELECT * FROM health_history WHERE service_id=?", (listing_id,))]
+    elif kind == "mcp":
+        snapshot["health_history"] = [dict(r) for r in conn.execute(
+            "SELECT * FROM mcp_health_history WHERE server_id=?", (listing_id,))]
+    return snapshot
+
+
+def record_retirement_snapshot(conn, kind: str, snapshot: dict, reason: str,
+                               actor: str, requested_by: str | None = None,
+                               request_email: str | None = None,
+                               submission_id: int | None = None) -> dict:
+    row = dict(snapshot.get("row") or {})
+    slug = str(row.get("slug") or "").strip()
+    if kind not in _RETIREMENT_TABLES or not slug:
+        raise ValueError("retirement snapshot needs a known kind and slug")
+    urls = _retirement_urls(kind, row)
+    original_url = urls[0] if urls else None
+    normalized_url = _canonical_endpoint(original_url) if original_url else None
+    now = int(time.time())
+    conn.execute(
+        "INSERT INTO retired_listings(kind,slug,name,original_url,normalized_url,"
+        "reason,requested_by,request_email,submission_id,snapshot,status,"
+        "retired_at,retired_by,restored_at,restored_by) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?, 'active',?,?,NULL,NULL) "
+        "ON CONFLICT(kind,slug) DO UPDATE SET "
+        "name=excluded.name,original_url=excluded.original_url,"
+        "normalized_url=excluded.normalized_url,reason=excluded.reason,"
+        "requested_by=excluded.requested_by,request_email=excluded.request_email,"
+        "submission_id=excluded.submission_id,snapshot=excluded.snapshot,"
+        "status='active',retired_at=excluded.retired_at,retired_by=excluded.retired_by,"
+        "restored_at=NULL,restored_by=NULL",
+        (kind, slug, row.get("name"), original_url, normalized_url, reason,
+         requested_by, request_email, submission_id,
+         json.dumps(snapshot, ensure_ascii=False, default=str), now, actor))
+    retirement_id = conn.execute(
+        "SELECT id FROM retired_listings WHERE kind=? AND slug=?",
+        (kind, slug)).fetchone()[0]
+    conn.execute("DELETE FROM retired_listing_urls WHERE retirement_id=?",
+                 (retirement_id,))
+    for original in urls:
+        normalized = _canonical_endpoint(original)
+        if normalized:
+            conn.execute(
+                "INSERT OR IGNORE INTO retired_listing_urls"
+                "(retirement_id,normalized_url,original_url) VALUES(?,?,?)",
+                (retirement_id, normalized, original))
+    conn.execute(
+        "INSERT INTO listing_retirement_events"
+        "(retirement_id,action,actor,note,created_at) VALUES(?,?,?,?,?)",
+        (retirement_id, "retire", actor, reason, now))
+    return dict(conn.execute(
+        "SELECT * FROM retired_listings WHERE id=?", (retirement_id,)).fetchone())
+
+
+def retire_listing(conn, kind: str, slug: str, reason: str, actor: str,
+                   requested_by: str | None = None,
+                   request_email: str | None = None,
+                   submission_id: int | None = None) -> dict:
+    if kind not in _RETIREMENT_TABLES:
+        raise ValueError("unknown listing kind: %s" % kind)
+    table = _RETIREMENT_TABLES[kind][0]
+    row = conn.execute("SELECT * FROM %s WHERE slug=?" % table, (slug,)).fetchone()
+    if row is None:
+        existing = get_retired_listing(conn, kind, slug)
+        if existing is not None:
+            return existing
+        raise ValueError("listing not found: %s/%s" % (kind, slug))
+    snapshot = _listing_snapshot(conn, kind, row)
+    retired = record_retirement_snapshot(
+        conn, kind, snapshot, reason, actor, requested_by, request_email,
+        submission_id)
+    listing_id = int(row["id"])
+    conn.execute("DELETE FROM listing_sources WHERE kind=? AND listing_id=?",
+                 (kind, listing_id))
+    conn.execute("DELETE FROM listing_edits WHERE kind=? AND listing_id=?",
+                 (kind, listing_id))
+    if kind == "x402":
+        conn.execute("DELETE FROM health_history WHERE service_id=?", (listing_id,))
+        conn.execute("DELETE FROM service_paytos WHERE service_id=?", (listing_id,))
+    elif kind == "mcp":
+        conn.execute("DELETE FROM mcp_health_history WHERE server_id=?", (listing_id,))
+    conn.execute("DELETE FROM %s WHERE id=?" % table, (listing_id,))
+    if submission_id is not None:
+        conn.execute(
+            "UPDATE submissions SET status='retired', note=?, reviewed_at=? WHERE id=?",
+            (reason, int(time.time()), submission_id))
+    return retired
+
+
+def restore_retired_listing(conn, kind: str, slug: str, actor: str,
+                            note: str | None = None) -> dict:
+    retired = get_retired_listing(conn, kind, slug)
+    if retired is None:
+        raise ValueError("active retirement not found: %s/%s" % (kind, slug))
+    snapshot = retired.get("snapshot") or {}
+    row = dict(snapshot.get("row") or {})
+    if not row:
+        raise ValueError("retirement snapshot is empty")
+    table = _RETIREMENT_TABLES[kind][0]
+    columns = {r[1] for r in conn.execute("PRAGMA table_info(%s)" % table)}
+    values = {key: value for key, value in row.items() if key in columns}
+    original_id = values.get("id")
+    if original_id is not None and conn.execute(
+            "SELECT 1 FROM %s WHERE id=?" % table, (original_id,)).fetchone():
+        values.pop("id", None)
+    names = list(values)
+    conn.execute(
+        "INSERT INTO %s(%s) VALUES(%s)" % (
+            table, ",".join(names), ",".join("?" * len(names))),
+        [values[name] for name in names])
+    listing_id = values.get("id") or conn.execute(
+        "SELECT id FROM %s WHERE slug=?" % table, (slug,)).fetchone()[0]
+    for source in snapshot.get("sources") or []:
+        conn.execute(
+            "INSERT OR REPLACE INTO listing_sources"
+            "(kind,listing_id,source,source_id,source_url,first_seen,last_seen) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (kind, listing_id, source.get("source"), source.get("source_id"),
+             source.get("source_url"), source.get("first_seen"),
+             source.get("last_seen")))
+    for edit in snapshot.get("edits") or []:
+        conn.execute(
+            "INSERT INTO listing_edits"
+            "(kind,listing_id,user_id,ownership_id,field,old_value,new_value,applied_at,via) "
+            "VALUES(?,?,?,?,?,?,?,?,?)",
+            (kind, listing_id, edit.get("user_id"), edit.get("ownership_id"),
+             edit.get("field"), edit.get("old_value"), edit.get("new_value"),
+             edit.get("applied_at"), edit.get("via")))
+    if kind == "x402":
+        for payto in snapshot.get("paytos") or []:
+            conn.execute(
+                "INSERT OR REPLACE INTO service_paytos"
+                "(service_id,chain,address,first_seen,last_seen) VALUES(?,?,?,?,?)",
+                (listing_id, payto.get("chain"), payto.get("address"),
+                 payto.get("first_seen"), payto.get("last_seen")))
+        for history in snapshot.get("health_history") or []:
+            conn.execute(
+                "INSERT INTO health_history(service_id,checked_at,status,latency_ms,http_status) "
+                "VALUES(?,?,?,?,?)",
+                (listing_id, history.get("checked_at"), history.get("status"),
+                 history.get("latency_ms"), history.get("http_status")))
+    elif kind == "mcp":
+        for history in snapshot.get("health_history") or []:
+            conn.execute(
+                "INSERT INTO mcp_health_history(server_id,checked_at,status,latency_ms) "
+                "VALUES(?,?,?,?)",
+                (listing_id, history.get("checked_at"), history.get("status"),
+                 history.get("latency_ms")))
+    now = int(time.time())
+    conn.execute(
+        "UPDATE retired_listings SET status='restored',restored_at=?,restored_by=? "
+        "WHERE id=?", (now, actor, retired["id"]))
+    conn.execute(
+        "INSERT INTO listing_retirement_events"
+        "(retirement_id,action,actor,note,created_at) VALUES(?,?,?,?,?)",
+        (retired["id"], "restore", actor, note, now))
+    if retired.get("submission_id") is not None:
+        conn.execute(
+            "UPDATE submissions SET status='approved', note=?, reviewed_at=? WHERE id=?",
+            (note or "Restored by staff", now, retired["submission_id"]))
+    return dict(conn.execute("SELECT * FROM %s WHERE id=?" % table,
+                             (listing_id,)).fetchone())
+
+
+def list_retirements(conn, status: str | None = "active") -> list[dict]:
+    if status is None:
+        rows = conn.execute(
+            "SELECT * FROM retired_listings ORDER BY retired_at DESC").fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM retired_listings WHERE status=? ORDER BY retired_at DESC",
+            (status,)).fetchall()
+    return [dict(row) for row in rows]
+
+
 def find_service_by_url(conn, url: str) -> dict | None:
     """Best-effort lookup: a services row registering this exact endpoint."""
     key = _canonical_endpoint(url)
@@ -1422,6 +1730,7 @@ def upsert_a2a_agent(conn: sqlite3.Connection, row: dict) -> tuple:
     Rewrites `row` in place, including `slug`; routes.py relies on reading
     the corrected slug back. Pass a copy if you need the original.
     """
+    assert_listing_not_retired(conn, "a2a", row)
     now = int(time.time())
     _src = (row.get("source"), row.get("source_id"), row.get("source_url"))
     row.setdefault("created_at", now)
@@ -1787,6 +2096,7 @@ def upsert_mcp_server(conn: sqlite3.Connection, row: dict) -> tuple:
     Rewrites `row` in place, including `slug`; routes.py relies on reading
     the corrected slug back. Pass a copy if you need the original.
     """
+    assert_listing_not_retired(conn, "mcp", row)
     now = int(time.time())
     # Must be read before the cross-source branch below rewrites row["source"]
     # to the first-seen owner -- that rewrite is what used to discard the fact

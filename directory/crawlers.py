@@ -1079,6 +1079,18 @@ def _host_safety(host: str) -> str:
     return "public"
 
 
+# Fast-path filter for active operator retirements. The three upsert functions
+# enforce the same rule transactionally; this avoids doing unnecessary parser
+# and SQLite work for rows that cannot be re-created.
+def url_retired(url: str) -> bool:
+    try:
+        from . import db
+        with db.connect(read_only=True) as conn:
+            return db.find_active_retirement(
+                conn, "x402", urls=(url,)) is not None
+    except Exception:
+        return False
+
 def _url_acceptable(url: str) -> bool:
     """Ingestion gate: reject endpoints with no discoverability value.
 
@@ -1086,6 +1098,8 @@ def _url_acceptable(url: str) -> bool:
     typically dev/demo leftovers like 127.0.0.1 or ephemeral EC2 IPs).
     Domained http(s) URLs are kept.
     """
+    if url_retired(url):
+        return False
     try:
         host = urlparse(url if "//" in url else "https://" + url).hostname or ""
     except Exception:

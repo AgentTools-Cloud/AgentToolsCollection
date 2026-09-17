@@ -44,6 +44,21 @@ CARD_PATHS = (
 )
 
 
+def _upsert_rows(rows: list[dict]) -> tuple[int, int]:
+    """Write a batch while treating operator-retired agents as normal skips."""
+    inserted = updated = 0
+    with db.writer() as conn:
+        for row in rows:
+            try:
+                is_new, _ = db.upsert_a2a_agent(conn, row)
+            except db.RetiredListingError:
+                log.info("skip retired A2A listing: %s", row.get("slug"))
+                continue
+            inserted += int(is_new)
+            updated += int(not is_new)
+    return inserted, updated
+
+
 # ---------------------------------------------------------------------------
 # Role 1: our own Agent Card + JSON-RPC endpoint
 # ---------------------------------------------------------------------------
@@ -503,18 +518,7 @@ def crawl_seeds(seed_path: str) -> dict:
         client.close()
 
     if rows:
-        def _write_seeds():
-            ins = upd = 0
-            with db.writer() as c:
-                for row in rows:
-                    is_new, _ = db.upsert_a2a_agent(c, row)
-                    if is_new:
-                        ins += 1
-                    else:
-                        upd += 1
-                c.commit()
-            return ins, upd
-        inserted, updated = db.with_retry(_write_seeds)
+        inserted, updated = db.with_retry(lambda: _upsert_rows(rows))
     return {
         "seen": len(entries),
         "inserted": inserted,
@@ -606,18 +610,7 @@ def crawl_directories(max_hosts: int = 80) -> dict:
 
     inserted = updated = 0
     if rows:
-        def _write_dirs():
-            ins = upd = 0
-            with db.writer() as c:
-                for row in rows:
-                    is_new, _ = db.upsert_a2a_agent(c, row)
-                    if is_new:
-                        ins += 1
-                    else:
-                        upd += 1
-                c.commit()
-            return ins, upd
-        inserted, updated = db.with_retry(_write_dirs)
+        inserted, updated = db.with_retry(lambda: _upsert_rows(rows))
     return {
         "candidates": len(candidates),
         "resolved": len(rows),
@@ -672,15 +665,7 @@ def crawl_a2aregistry(page_size: int = 100, max_pages: int = 20) -> dict:
 
     inserted = updated = 0
     if rows:
-        def _write():
-            ins = upd = 0
-            with db.writer() as conn:
-                for row in rows:
-                    is_new, _ = db.upsert_a2a_agent(conn, row)
-                    ins += int(is_new); upd += int(not is_new)
-                conn.commit()
-            return ins, upd
-        inserted, updated = db.with_retry(_write)
+        inserted, updated = db.with_retry(lambda: _upsert_rows(rows))
     return {"candidates": len(rows), "resolved": len(rows),
             "inserted": inserted, "updated": updated}
 
@@ -750,15 +735,7 @@ def crawl_github_topic(topic: str = "a2a-protocol", max_repos: int = 100,
 
     inserted = updated = 0
     if rows:
-        def _write():
-            ins = upd = 0
-            with db.writer() as conn:
-                for row in rows:
-                    is_new, _ = db.upsert_a2a_agent(conn, row)
-                    ins += int(is_new); upd += int(not is_new)
-                conn.commit()
-            return ins, upd
-        inserted, updated = db.with_retry(_write)
+        inserted, updated = db.with_retry(lambda: _upsert_rows(rows))
     return {"candidates": len(homepages), "resolved": len(rows),
             "inserted": inserted, "updated": updated}
 
