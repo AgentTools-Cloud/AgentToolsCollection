@@ -73,8 +73,11 @@ def _send(to_email: str, subject: str, text: str, html: str) -> bool:
 
 
 def _approval_html(service_name: str, service_url: str, verified_line: str | None) -> str:
+    safe_name = html.escape(str(service_name), quote=True)
+    safe_url = html.escape(str(service_url), quote=True)
+    safe_verified = html.escape(str(verified_line), quote=True) if verified_line else ""
     verified_card = ""
-    if verified_line:
+    if safe_verified:
         verified_card = f"""
           <!-- verified card -->
           <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
@@ -82,7 +85,7 @@ def _approval_html(service_name: str, service_url: str, verified_line: str | Non
             <tr><td style="padding:14px 16px;">
               <div style="font-size:11px;font-weight:600;color:#94a3b8;letter-spacing:.6px;text-transform:uppercase;margin-bottom:6px;">Verified endpoint</div>
               <div style="font-family:'SF Mono',ui-monospace,Menlo,Consolas,monospace;font-size:13px;color:{INK};line-height:1.5;">
-                {verified_line}
+                {safe_verified}
               </div>
             </td></tr>
           </table>"""
@@ -118,14 +121,14 @@ def _approval_html(service_name: str, service_url: str, verified_line: str | Non
             Your service is live on Agent&nbsp;Tools
           </h1>
           <p style="margin:0 0 20px 0;font-size:15px;line-height:1.6;color:{SLATE};">
-            Thanks for submitting <strong style="color:{INK};">{service_name}</strong> to the
+            Thanks for submitting <strong style="color:{INK};">{safe_name}</strong> to the
             Agent&nbsp;Tools x402 directory. We verified your endpoint and it&rsquo;s now indexed.
           </p>
 {verified_card}
           <!-- CTA -->
           <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 26px 0;">
             <tr><td style="border-radius:10px;background:{BLUE};">
-              <a href="{service_url}" target="_blank"
+              <a href="{safe_url}" target="_blank"
                 style="display:inline-block;padding:11px 22px;font-size:14px;font-weight:600;color:#ffffff;text-decoration:none;border-radius:10px;">
                 View in directory &rarr;
               </a>
@@ -187,8 +190,10 @@ def send_approval_email(
 
 
 def _rejection_html(service_name: str, reason: str | None) -> str:
+    safe_name = html.escape(str(service_name), quote=True)
+    safe_reason = html.escape(str(reason), quote=True) if reason else ""
     reason_card = ""
-    if reason:
+    if safe_reason:
         reason_card = f"""
           <!-- reason card -->
           <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
@@ -196,7 +201,7 @@ def _rejection_html(service_name: str, reason: str | None) -> str:
             <tr><td style="padding:14px 16px;">
               <div style="font-size:11px;font-weight:600;color:#c2730c;letter-spacing:.6px;text-transform:uppercase;margin-bottom:6px;">Why it wasn&rsquo;t listed</div>
               <div style="font-size:13px;color:{INK};line-height:1.55;">
-                {reason}
+                {safe_reason}
               </div>
             </td></tr>
           </table>"""
@@ -232,7 +237,7 @@ def _rejection_html(service_name: str, reason: str | None) -> str:
             We couldn&rsquo;t verify your submission
           </h1>
           <p style="margin:0 0 20px 0;font-size:15px;line-height:1.6;color:{SLATE};">
-            Thanks for submitting <strong style="color:{INK};">{service_name}</strong> to the
+            Thanks for submitting <strong style="color:{INK};">{safe_name}</strong> to the
             Agent&nbsp;Tools x402 directory. We couldn&rsquo;t confirm x402 support, so it&rsquo;s
             not listed yet.
           </p>
