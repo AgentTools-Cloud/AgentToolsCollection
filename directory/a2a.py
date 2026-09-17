@@ -349,7 +349,9 @@ def _card_endpoint(card: dict, card_url: str) -> str | None:
     url = card.get("url") or card.get("endpoint") or card.get("endpointUrl")
     if url:
         return str(url)
-    interfaces = card.get("additionalInterfaces") or card.get("interfaces")
+    interfaces = (card.get("supportedInterfaces")
+                  or card.get("additionalInterfaces")
+                  or card.get("interfaces"))
     if isinstance(interfaces, list):
         for itf in interfaces:
             if isinstance(itf, dict) and itf.get("url"):
