@@ -698,20 +698,31 @@ def upsert_service(conn: sqlite3.Connection, row: dict) -> tuple:
 
     cur = conn.cursor()
     existing = None
+    cross_source = False
+    # 1) same source identity
     if row.get("source") and row.get("source_id"):
         existing = cur.execute(
             "SELECT * FROM services WHERE source=? AND source_id=?",
             (row["source"], row["source_id"]),
         ).fetchone()
+    # 2) same paid endpoint, regardless of source. upsert_mcp_server has always
+    #    done this, which is why mcp_servers holds 32k endpoints with only 128
+    #    duplicate groups while services had grown 17,011 rows across 2,192
+    #    endpoints by the 2026-09-16 merge. Without this step every directory
+    #    that lists the same URL mints its own row, and the merge regenerates
+    #    itself on the next crawl.
+    if existing is None and (row.get("url") or "").strip():
+        existing = cur.execute(
+            "SELECT * FROM services WHERE lower(rtrim(url, '/'))=? "
+            "ORDER BY id LIMIT 1",
+            (_norm_endpoint(row["url"]),),
+        ).fetchone()
+        if existing is not None:
+            cross_source = True
+    # 3) same slug fallback
     if existing is None:
         existing = cur.execute(
             "SELECT * FROM services WHERE slug=?", (row["slug"],)
-        ).fetchone()
-    if existing is None and row.get("source") == "paygent-discover" and row.get("url"):
-        existing = cur.execute(
-            "SELECT * FROM services "
-            "WHERE source=? AND rtrim(lower(url), '/')=? ORDER BY id LIMIT 1",
-            ("paygent-discover", row["url"].rstrip("/").lower()),
         ).fetchone()
 
     cols = [
@@ -736,6 +747,17 @@ def upsert_service(conn: sqlite3.Connection, row: dict) -> tuple:
         return True, new_id
     else:
         row["created_at"] = existing["created_at"]
+        if cross_source:
+            # First-source-wins: the endpoint keeps the source identity and the
+            # slug it was first listed under, so a second directory finding it
+            # later enriches the row instead of renaming it and breaking the
+            # public URL. The additional source is still recorded in
+            # listing_sources at the end of this function.
+            row["source"] = existing["source"]
+            row["source_id"] = existing["source_id"]
+            row["slug"] = existing["slug"]
+            row["confidence"] = max(row.get("confidence") or 0.0,
+                                    existing["confidence"] or 0.0)
         # Crawlers refresh discovery metadata; probes own the measured fields.
         # A crawl that simply has nothing to say about a field must not blank
         # what a probe established -- that is how 252 on-chain tx counts and,
