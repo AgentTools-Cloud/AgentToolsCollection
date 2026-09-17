@@ -24,6 +24,7 @@ from . import mailer as directory_mailer
 from . import limits
 from . import auth as directory_auth
 from . import ownership as directory_ownership
+from . import public_http as directory_public_http
 
 BASE_DIR = Path(__file__).resolve().parent
 TEMPLATES = Jinja2Templates(directory=str(BASE_DIR / "templates"))
@@ -758,6 +759,20 @@ class SubmissionPayload(BaseModel):
                          pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
+def _unsafe_url_error(message: str) -> HTTPException:
+    return HTTPException(
+        status_code=422,
+        detail={"error": "unsafe_url", "message": message},
+    )
+
+
+async def _require_public_url(url: str) -> None:
+    try:
+        await run_in_threadpool(directory_public_http.validate_url, url)
+    except directory_public_http.UnsafeURL as exc:
+        raise _unsafe_url_error(str(exc)) from exc
+
+
 @router.post(
     "/api/v1/submit",
     tags=["directory"],
@@ -774,6 +789,7 @@ class SubmissionPayload(BaseModel):
 )
 async def api_submit(request: Request, payload: SubmissionPayload):
     url = str(payload.url).strip()
+    await _require_public_url(url)
     if directory_crawlers.url_retired(url):
         raise HTTPException(
             status_code=410,
@@ -1186,6 +1202,7 @@ async def api_submit_mcp(request: Request, payload: McpSubmissionPayload):
     owner are unaffected.
     """
     endpoint = str(payload.url).strip()
+    await _require_public_url(endpoint)
     if directory_crawlers.url_retired(endpoint):
         raise HTTPException(
             status_code=410,
@@ -1199,6 +1216,8 @@ async def api_submit_mcp(request: Request, payload: McpSubmissionPayload):
     name = (payload.name or "").strip() or directory_crawlers._host_slug(endpoint).replace("-", " ").title()
     slug = directory_a2a._slugify(name) or directory_crawlers._host_slug(endpoint)
     probe = await run_in_threadpool(directory_crawlers.probe_mcp_health, endpoint)
+    if probe.get("unsafe_url"):
+        raise _unsafe_url_error(probe["unsafe_url"])
     # Also probe for x402: an MCP server can be a paid (402) endpoint, in which
     # case it must ALSO land in the x402 services catalog (delivery=mcp).
     x402 = await run_in_threadpool(
@@ -1259,13 +1278,18 @@ async def api_submit_a2a(request: Request, payload: A2ASubmissionPayload):
     owner are unaffected.
     """
     url = str(payload.url).strip()
+    await _require_public_url(url)
     if directory_crawlers.url_retired(url):
         raise HTTPException(
             status_code=410,
             detail="This endpoint was retired by its operator.",
         )
     _enforce_submit_limit(request, "submit-a2a")
-    card, card_url = await run_in_threadpool(directory_a2a.fetch_agent_card, url)
+    try:
+        card, card_url = await run_in_threadpool(
+            directory_a2a.fetch_agent_card, url, None, True)
+    except directory_public_http.UnsafeURL as exc:
+        raise _unsafe_url_error(str(exc)) from exc
     if not card:
         raise HTTPException(
             status_code=422,
@@ -1275,11 +1299,13 @@ async def api_submit_a2a(request: Request, payload: A2ASubmissionPayload):
                             "/.well-known/agent-card.json is reachable."),
             },
         )
+    row = directory_a2a.card_to_row(card, card_url, source="submission")
+    if row.get("endpoint_url"):
+        await _require_public_url(row["endpoint_url"])
     with db.connect(read_only=True) as _c:
         _owned = db.find_a2a_by_card_url(_c, card_url)
     if _owned and _owned.get("owner_verified"):
         raise _owner_locked("a2a", _owned)
-    row = directory_a2a.card_to_row(card, card_url, source="submission")
     # Probe for x402: an A2A agent can be a paid (402) endpoint, in which case
     # it must ALSO land in the x402 services catalog (delivery=a2a).
     verify_target = row.get("endpoint_url") or url

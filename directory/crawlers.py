@@ -17,6 +17,8 @@ from urllib.parse import urlparse
 import os
 import httpx
 
+from . import public_http
+
 log = logging.getLogger("directory.crawlers")
 
 UA = "agent-tools.cloud-crawler/0.1 (+https://agent-tools.cloud)"
@@ -669,8 +671,9 @@ def probe_health(url, well_known=None):
     targets.append(url)
     last = {"status": "down", "latency_ms": None, "http_status": None, "x402": False}
     try:
-        with httpx.Client(timeout=httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0),
-                          headers={"User-Agent": UA, "Accept": "application/json"}) as c:
+        with public_http.client(
+            timeout=httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0),
+            headers={"User-Agent": UA, "Accept": "application/json"}) as c:
             for t in targets:
                 if not t:
                     continue
@@ -1138,6 +1141,8 @@ def fetch_well_known(client, url: str):
         obj = None
         if status == 200:
             obj = _parse_json_body(r.content, url)
+    except public_http.UnsafeURL:
+        raise
     except Exception:
         status, obj = 0, None
 
@@ -1385,9 +1390,9 @@ def fetch_wellknown_resources(url: str, well_known: str | None = None) -> dict[s
     wk_url = None
     seen = set()
     try:
-        with httpx.Client(timeout=_VERIFY_TIMEOUT, follow_redirects=True,
-                          max_redirects=3,
-                          headers={"User-Agent": UA, "Accept": "application/json"}) as c:
+        with public_http.client(
+            timeout=_VERIFY_TIMEOUT, follow_redirects=True,
+            headers={"User-Agent": UA, "Accept": "application/json"}) as c:
             for wk in candidates:
                 if not wk or wk in seen:
                     continue
@@ -1485,6 +1490,11 @@ def verify_x402(url: str, well_known: str | None = None) -> dict[str, Any]:
     net_error = False
     doc_seen: Any = None
 
+    def unsafe(exc: public_http.UnsafeURL) -> dict[str, Any]:
+        return {"status": "rejected",
+                "evidence": [f"unsafe URL blocked: {exc}"],
+                "payment": None, "unsafe_url": str(exc)}
+
     url = (url or "").strip()
     parsed = urlparse(url if "//" in url else "https://" + url)
     if parsed.scheme not in ("http", "https"):
@@ -1508,16 +1518,19 @@ def verify_x402(url: str, well_known: str | None = None) -> dict[str, Any]:
     wk_candidates += [origin + "/.well-known/x402",
                       origin + "/.well-known/x402.json"]
 
-    with httpx.Client(timeout=_VERIFY_TIMEOUT, follow_redirects=True,
-                      max_redirects=3,
-                      headers={"User-Agent": UA, "Accept": "application/json"}) as c:
+    with public_http.client(
+            timeout=_VERIFY_TIMEOUT, follow_redirects=True,
+            headers={"User-Agent": UA, "Accept": "application/json"}) as c:
         # --- 1. well-known descriptor ---
         seen_wk = set()
         for wk in wk_candidates:
             if not wk or wk in seen_wk:
                 continue
             seen_wk.add(wk)
-            _st, obj = fetch_well_known(c, wk)
+            try:
+                _st, obj = fetch_well_known(c, wk)
+            except public_http.UnsafeURL as exc:
+                return unsafe(exc)
             if _st == 0:
                 net_error = True
                 continue
@@ -1565,6 +1578,8 @@ def verify_x402(url: str, well_known: str | None = None) -> dict[str, Any]:
                     try:
                         r = (c.post(res_url, json={}) if meth == "POST"
                              else c.get(res_url))
+                    except public_http.UnsafeURL as exc:
+                        return unsafe(exc)
                     except Exception:
                         net_error = True
                         continue
@@ -1610,12 +1625,18 @@ def verify_x402(url: str, well_known: str | None = None) -> dict[str, Any]:
                         rp = c.post(target, json={})
                         if rp.status_code == 402:
                             r = rp
+                    except public_http.UnsafeURL as exc:
+                        return unsafe(exc)
                     except Exception:
                         pass
+            except public_http.UnsafeURL as exc:
+                return unsafe(exc)
             except Exception:
                 net_error = True
                 try:
                     r = c.post(target, json={}) if target == url else None
+                except public_http.UnsafeURL as exc:
+                    return unsafe(exc)
                 except Exception:
                     r = None
                 if r is None:
@@ -2455,6 +2476,8 @@ def _probe_mcp_sse(client, endpoint: str, headers: dict) -> bool:
                 ctype = (resp.headers.get("content-type") or "").lower()
                 if resp.status_code == 200 and "event-stream" in ctype:
                     return True
+        except public_http.UnsafeURL:
+            raise
         except Exception:
             continue
     return False
@@ -2501,8 +2524,9 @@ def probe_mcp_health(endpoint: str) -> dict:
         },
     }
     try:
-        with httpx.Client(timeout=httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0),
-                          follow_redirects=True) as c:
+        with public_http.client(
+            timeout=httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0),
+            follow_redirects=True) as c:
             t0 = time.monotonic()
             r = c.post(endpoint, json=init, headers=headers)
             dt = int((time.monotonic() - t0) * 1000)
@@ -2544,6 +2568,8 @@ def probe_mcp_health(endpoint: str) -> dict:
                 c.post(endpoint, json={"jsonrpc": "2.0",
                                        "method": "notifications/initialized"},
                        headers=h2)
+            except public_http.UnsafeURL:
+                raise
             except Exception:
                 pass
             tool_list = None
@@ -2559,11 +2585,15 @@ def probe_mcp_health(endpoint: str) -> dict:
                             conformance = "pass"
                             tool_count = len(tools)
                             tool_list = _summarize_tools(tools)
+            except public_http.UnsafeURL:
+                raise
             except Exception:
                 pass
             return {"status": "ok", "latency_ms": dt, "http_status": sc,
                     "conformance": conformance, "tool_count": tool_count,
                     "tools": tool_list, "protocol_version": server_rev}
+    except public_http.UnsafeURL as exc:
+        return {**base, "status": "down", "unsafe_url": str(exc)}
     except Exception:
         return {**base, "status": "down"}
 
