@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}{{ retired.name or retired.slug }} — retired | Agent Tools{% endblock %}
+{% block desc %}This listing was retired and is no longer included in Agent Tools search results.{% endblock %}
+{% block robots %}<meta name="robots" content="noindex,nofollow">{% endblock %}
+{% block content %}
+<section class="max-w-3xl mx-auto px-5 py-16">
+  <p class="text-xs font-semibold uppercase tracking-widest text-amber-700 mb-3">HTTP 410 · Retired listing</p>
+  <h1 class="text-3xl font-bold tracking-tight text-slate-950">{{ retired.name or retired.slug }}</h1>
+  <p class="mt-4 text-slate-600">This listing has been removed from active search and discovery.</p>
+  <dl class="mt-8 grid gap-4 text-sm">
+    <div><dt class="font-semibold text-slate-900">Reason</dt><dd class="mt-1 text-slate-600">{{ retired.reason }}</dd></div>
+    {% if retired.original_url %}<div><dt class="font-semibold text-slate-900">Former endpoint</dt><dd class="mt-1 mono break-all text-slate-600">{{ retired.original_url }}</dd></div>{% endif %}
+    <div><dt class="font-semibold text-slate-900">Retired</dt><dd class="mt-1 text-slate-600">{{ retired.retired_display }}</dd></div>
+  </dl>
+  <p class="mt-8 text-sm text-slate-500">If this service returns, its operator may request restoration at <a class="text-blue-600 hover:underline" href="mailto:contact@agent-tools.cloud">contact@agent-tools.cloud</a>.</p>
+  <a class="inline-block mt-8 text-sm text-blue-600 hover:underline" href="/">Back to the directory</a>
+</section>
+{% endblock %}

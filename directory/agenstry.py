@@ -126,6 +126,10 @@ def crawl_agenstry_a2a(max_hosts: int = 4000, workers: int = 12) -> dict:
                     # must still propagate so db.with_retry can retry.
                     try:
                         is_new, _ = db.upsert_a2a_agent(c, row)
+                    except db.RetiredListingError:
+                        log.info("skip retired Agenstry A2A listing: %s",
+                                 row.get("slug"))
+                        continue
                     except (sqlite3.ProgrammingError, sqlite3.InterfaceError) as e:
                         bad += 1
                         log.warning("agenstry a2a: unwritable card %s: %r",

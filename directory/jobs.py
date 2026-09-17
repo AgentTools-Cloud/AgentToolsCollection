@@ -227,6 +227,8 @@ def _run_one(name):
                             batch_added += 1
                         else:
                             batch_updated += 1
+                    except db.RetiredListingError:
+                        log.info("skip retired x402 listing: %s", item.get("slug"))
                     except Exception as e:
                         batch_errors.append(f"upsert {item.get('slug')}: {e!r}")
             return batch_added, batch_updated, batch_errors
@@ -353,11 +355,14 @@ def cmd_crawl_mcp(only=None) -> int:
                 with db.writer() as c:
                     for item in batch:
                         try:
-                            if not (item.get("endpoint_url") or "").strip():
+                            endpoint = (item.get("endpoint_url") or "").strip()
+                            if not endpoint or crawlers.url_retired(endpoint):
                                 continue
                             created, _ = db.upsert_mcp_server(c, item)
                             b_add += int(created)
                             b_upd += int(not created)
+                        except db.RetiredListingError:
+                            log.info("skip retired MCP listing: %s", item.get("slug"))
                         except Exception as e:
                             b_err.append(f"upsert {item.get('slug')}: {e!r}")
                 return b_add, b_upd, b_err
@@ -1025,6 +1030,41 @@ def cmd_shared_hosts(min_paths: int = db.SHARED_HOST_MIN_PATHS) -> int:
     return 0
 
 
+def cmd_retire(kind: str, slug: str, reason: str, actor: str,
+               requested_by: str | None = None,
+               request_email: str | None = None,
+               submission_id: int | None = None) -> int:
+    def op():
+        with db.writer() as conn:
+            return db.retire_listing(
+                conn, kind, slug, reason, actor, requested_by,
+                request_email, submission_id)
+    row = db.with_retry(op)
+    print(json.dumps({"status": "retired", "kind": kind, "slug": slug,
+                      "retired_at": row["retired_at"]}, ensure_ascii=False))
+    return 0
+
+
+def cmd_restore(kind: str, slug: str, actor: str,
+                note: str | None = None) -> int:
+    def op():
+        with db.writer() as conn:
+            return db.restore_retired_listing(conn, kind, slug, actor, note)
+    row = db.with_retry(op)
+    print(json.dumps({"status": "restored", "kind": kind,
+                      "slug": row["slug"]}, ensure_ascii=False))
+    return 0
+
+
+def cmd_retirements(status: str | None = "active") -> int:
+    with db.connect(read_only=True) as conn:
+        rows = db.list_retirements(conn, status)
+    for row in rows:
+        print("%(kind)-5s %(slug)-48s %(status)-8s %(requested_by)s %(reason)s" % {
+            **row, "requested_by": row.get("requested_by") or "-"})
+    return 0
+
+
 def cmd_stats() -> int:
     with db.connect(read_only=True) as c:
         s = db.stats(c)
@@ -1100,6 +1140,11 @@ def _approve(sub_id: int, note: str | None = None,
     except Exception as e:  # noqa: BLE001 - extras must never block a listing
         log.warning("approve #%d: resource discovery failed: %r", sub_id, e)
         res_info = {}
+
+    if crawlers.url_retired(url) or crawlers.url_retired(p.get("mcp_url") or ""):
+        with db.writer() as wc:
+            db.mark_submission(wc, sub_id, "retired", note="Operator retired endpoint")
+        raise ValueError("endpoint has been retired by its operator")
 
     service = {
         "slug": _slugify(host) + "-sub" + str(sub_id),
@@ -1346,6 +1391,22 @@ def main(argv=None) -> int:
     sub.add_parser("health-a2a")
     sub.add_parser("health-mcp")
     sub.add_parser("stats")
+    p_retire = sub.add_parser("retire")
+    p_retire.add_argument("kind", choices=("x402", "mcp", "a2a"))
+    p_retire.add_argument("slug")
+    p_retire.add_argument("--reason", required=True)
+    p_retire.add_argument("--actor", default="staff-cli")
+    p_retire.add_argument("--requested-by", default=None)
+    p_retire.add_argument("--request-email", default=None)
+    p_retire.add_argument("--submission-id", type=int, default=None)
+    p_restore = sub.add_parser("restore")
+    p_restore.add_argument("kind", choices=("x402", "mcp", "a2a"))
+    p_restore.add_argument("slug")
+    p_restore.add_argument("--actor", default="staff-cli")
+    p_restore.add_argument("--note", default=None)
+    p_retired = sub.add_parser("retirements")
+    p_retired.add_argument("--status", choices=("active", "restored", "all"),
+                           default="active")
     p_subs = sub.add_parser("submissions")
     p_subs.add_argument("--status", default="pending")
     p_subs.add_argument("--limit", type=int, default=50)
@@ -1390,6 +1451,14 @@ def main(argv=None) -> int:
         return cmd_health_mcp()
     if args.cmd == "stats":
         return cmd_stats()
+    if args.cmd == "retire":
+        return cmd_retire(args.kind, args.slug, args.reason, args.actor,
+                          args.requested_by, args.request_email,
+                          args.submission_id)
+    if args.cmd == "restore":
+        return cmd_restore(args.kind, args.slug, args.actor, args.note)
+    if args.cmd == "retirements":
+        return cmd_retirements(None if args.status == "all" else args.status)
     if args.cmd == "submissions":
         return cmd_submissions(status=args.status, limit=args.limit)
     if args.cmd == "approve":

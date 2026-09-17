@@ -163,11 +163,28 @@ def x402_page(
     )
 
 
+def _retired_response(request: Request, kind: str, slug: str):
+    with _conn() as conn:
+        retired = db.get_retired_listing(conn, kind, slug)
+    if retired is None:
+        return None
+    retired["retired_display"] = time.strftime(
+        "%Y-%m-%d %H:%M UTC", time.gmtime(retired["retired_at"]))
+    return TEMPLATES.TemplateResponse(
+        request, "retired.html", {"request": request, "retired": retired},
+        status_code=410,
+        headers={"X-Robots-Tag": "noindex, nofollow"},
+    )
+
+
 @router.get("/services/{slug}", response_class=HTMLResponse, include_in_schema=False)
 def service_detail(request: Request, slug: str):
     with _conn() as c:
         svc = db.get_by_slug(c, slug)
     if not svc:
+        retired = _retired_response(request, "x402", slug)
+        if retired is not None:
+            return retired
         raise HTTPException(404, "service not found")
     return TEMPLATES.TemplateResponse(request, "service.html", {
         "request": request, "svc": svc, "rating": db.score_breakdown(svc)})
@@ -259,6 +276,9 @@ def mcp_detail(request: Request, slug: str):
     with _conn() as c:
         m = db.get_mcp_by_slug(c, slug)
     if not m:
+        retired = _retired_response(request, "mcp", slug)
+        if retired is not None:
+            return retired
         raise HTTPException(404, "mcp server not found")
     return TEMPLATES.TemplateResponse(request, "mcp_server.html", {"request": request, "m": m})
 
@@ -317,6 +337,9 @@ def a2a_detail(request: Request, slug: str):
     with _conn() as c:
         a = db.get_a2a_by_slug(c, slug)
     if not a:
+        retired = _retired_response(request, "a2a", slug)
+        if retired is not None:
+            return retired
         raise HTTPException(404, "a2a agent not found")
     return TEMPLATES.TemplateResponse(request, "a2a_agent.html", {"request": request, "a": a})
 
@@ -406,6 +429,11 @@ def api_service(slug: str):
     with _conn() as c:
         svc = db.get_by_slug(c, slug)
     if not svc:
+        with _conn() as c:
+            retired = db.get_retired_listing(c, "x402", slug)
+        if retired is not None:
+            raise HTTPException(status_code=410, detail={
+                "status": "retired", "slug": slug, "reason": retired["reason"]})
         raise HTTPException(404, "service not found")
     return cards.build_service_card(svc)
 
@@ -537,6 +565,11 @@ def api_a2a_agent(slug: str):
     with _conn() as c:
         row = db.get_a2a_by_slug(c, slug)
     if not row:
+        with _conn() as c:
+            retired = db.get_retired_listing(c, "a2a", slug)
+        if retired is not None:
+            raise HTTPException(status_code=410, detail={
+                "status": "retired", "slug": slug, "reason": retired["reason"]})
         raise HTTPException(status_code=404, detail="A2A agent not found")
     return directory_a2a.public_agent(row)
 
@@ -621,6 +654,11 @@ def api_mcp_server(slug: str):
             return mcp
         row = db.get_by_slug(c, slug)
     if not row or not (row.get("mcp_url") or "").strip():
+        with _conn() as c:
+            retired = db.get_retired_listing(c, "mcp", slug)
+        if retired is not None:
+            raise HTTPException(status_code=410, detail={
+                "status": "retired", "slug": slug, "reason": retired["reason"]})
         raise HTTPException(status_code=404, detail="MCP server not found")
     return cards.build_service_card(row)
 
@@ -736,6 +774,11 @@ class SubmissionPayload(BaseModel):
 )
 async def api_submit(request: Request, payload: SubmissionPayload):
     url = str(payload.url).strip()
+    if directory_crawlers.url_retired(url):
+        raise HTTPException(
+            status_code=410,
+            detail="This endpoint was retired by its operator.",
+        )
     client_ip = limits.client_ip_from_request(request)
     with _conn() as c:
         existing = db.find_service_by_url(c, url)
@@ -1142,8 +1185,13 @@ async def api_submit_mcp(request: Request, payload: McpSubmissionPayload):
     response carries the URL to edit it through. Listings with no verified
     owner are unaffected.
     """
-    _enforce_submit_limit(request, "submit-mcp")
     endpoint = str(payload.url).strip()
+    if directory_crawlers.url_retired(endpoint):
+        raise HTTPException(
+            status_code=410,
+            detail="This endpoint was retired by its operator.",
+        )
+    _enforce_submit_limit(request, "submit-mcp")
     with db.connect(read_only=True) as _c:
         _owned = db.find_mcp_by_endpoint(_c, endpoint)
     if _owned and _owned.get("owner_verified"):
@@ -1210,8 +1258,13 @@ async def api_submit_a2a(request: Request, payload: A2ASubmissionPayload):
     response carries the URL to edit it through. Listings with no verified
     owner are unaffected.
     """
-    _enforce_submit_limit(request, "submit-a2a")
     url = str(payload.url).strip()
+    if directory_crawlers.url_retired(url):
+        raise HTTPException(
+            status_code=410,
+            detail="This endpoint was retired by its operator.",
+        )
+    _enforce_submit_limit(request, "submit-a2a")
     card, card_url = await run_in_threadpool(directory_a2a.fetch_agent_card, url)
     if not card:
         raise HTTPException(
