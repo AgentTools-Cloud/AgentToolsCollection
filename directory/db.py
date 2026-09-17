@@ -868,6 +868,12 @@ def _search_order(sort: str, alias: str, default_order: str,
     return default_order
 
 
+def _fts_literal(value: str, prefix: bool = False) -> str:
+    """A literal FTS5 phrase; punctuation must never become query syntax."""
+    escaped = str(value).replace('"', '""')
+    return '"%s"%s' % (escaped, "*" if prefix else "")
+
+
 def _expand_fts_query(q: str) -> str | None:
     """Turn a free-text query into a strict FTS5 MATCH expression.
 
@@ -881,12 +887,12 @@ def _expand_fts_query(q: str) -> str | None:
     for t in tokens:
         syns = _SYNONYM_MAP.get(t)
         if syns:
-            quoted = [f'"{s}"' for s in syns]
+            quoted = [_fts_literal(s) for s in syns]
             groups.append("(" + " OR ".join(quoted) + ")")
         elif len(tokens) == 1:
-            groups.append(f"{t}*")
+            groups.append(_fts_literal(t, prefix=True))
         else:
-            groups.append(f'"{t}"')
+            groups.append(_fts_literal(t))
     return " AND ".join(groups)
 
 
@@ -910,12 +916,7 @@ def _expand_fts_query_relaxed(q: str) -> str | None:
             if not sl or sl in seen:
                 continue
             seen.add(sl)
-            if " " in sl:
-                terms.append(f'"{sl}"')
-            elif len(sl) >= 4:
-                terms.append(f"{sl}*")
-            else:
-                terms.append(f'"{sl}"')
+            terms.append(_fts_literal(sl, prefix=(" " not in sl and len(sl) >= 4)))
         if len(terms) >= 12:
             break
     if len(terms) < 2:
