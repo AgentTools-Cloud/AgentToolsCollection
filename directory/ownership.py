@@ -11,22 +11,31 @@ mode; it is always NULL today.
 from __future__ import annotations
 
 import hashlib
+import http.client
+import ipaddress
 import json
 import logging
+import re
 import secrets
+import socket
 import sqlite3
+import ssl
 import time
 from typing import Any
-
-import httpx
+from urllib.parse import urljoin, urlsplit
 
 from . import db
 
 log = logging.getLogger(__name__)
 
 UA = "agent-tools.cloud-verifier/0.1 (+https://agent-tools.cloud)"
-TIMEOUT = httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0)
+_CONNECT_TIMEOUT = 5.0
+_READ_TIMEOUT = 10.0
 _MAX_BODY = 64 * 1024
+_MAX_REDIRECTS = 3
+_REDIRECT_STATUSES = {301, 302, 303, 307, 308}
+_HOST_LABEL = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+_BLOCKED_SUFFIXES = (".localhost", ".local", ".internal", ".home", ".lan")
 
 VERIFY_FILE = "/.well-known/agent-tools-verify.txt"
 DNS_PREFIX = "_agent-tools."
@@ -97,41 +106,163 @@ def _find_token(obj: Any, token: str) -> bool:
     return False
 
 
-def _get(client: httpx.Client, url: str) -> httpx.Response | None:
+class UnsafeTarget(ValueError):
+    """A claim target is not a public HTTPS hostname."""
+
+
+def normalize_host(value: str) -> str:
+    raw = (value or "").strip().rstrip(".").lower()
+    if any(char in raw for char in "/\\@?#:"):
+        raise UnsafeTarget("host must be a DNS name without scheme, path, credentials, or port")
     try:
-        return client.get(url)
+        host = raw.encode("idna").decode("ascii")
+    except UnicodeError as exc:
+        raise UnsafeTarget("host is not a valid DNS name") from exc
+    if len(host) > 253 or "." not in host:
+        raise UnsafeTarget("host must be a fully-qualified DNS name")
+    labels = host.split(".")
+    if any(not _HOST_LABEL.fullmatch(label) for label in labels):
+        raise UnsafeTarget("host is not a valid DNS name")
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        pass
+    else:
+        raise UnsafeTarget("IP literals are not valid claim hosts")
+    if host == "localhost" or host.endswith(_BLOCKED_SUFFIXES):
+        raise UnsafeTarget("local hostnames are not valid claim hosts")
+    return host
+
+
+def _public_addresses(host: str) -> list[str]:
+    try:
+        infos = socket.getaddrinfo(
+            host, 443, type=socket.SOCK_STREAM, proto=socket.IPPROTO_TCP)
+    except socket.gaierror as exc:
+        raise UnsafeTarget("host does not resolve") from exc
+    addresses: list[str] = []
+    for info in infos:
+        raw = str(info[4][0]).split("%", 1)[0]
+        try:
+            address = ipaddress.ip_address(raw)
+        except ValueError as exc:
+            raise UnsafeTarget("host resolved to an invalid address") from exc
+        if not address.is_global:
+            raise UnsafeTarget("host resolves to a non-public address")
+        text = str(address)
+        if text not in addresses:
+            addresses.append(text)
+    if not addresses:
+        raise UnsafeTarget("host has no usable address")
+    return addresses
+
+
+class _FetchResponse:
+    def __init__(self, status_code: int, body: bytes, headers: dict[str, str]):
+        self.status_code = status_code
+        self.body = body
+        self.headers = headers
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(self, host: str, address: str):
+        super().__init__(
+            host, 443, timeout=_CONNECT_TIMEOUT,
+            context=ssl.create_default_context())
+        self._verified_address = address
+
+    def connect(self):
+        sock = socket.create_connection(
+            (self._verified_address, self.port), _CONNECT_TIMEOUT,
+            self.source_address)
+        self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+        self.sock.settimeout(_READ_TIMEOUT)
+
+
+def _read_https(host: str, path: str, accept: str) -> _FetchResponse:
+    last_error: Exception | None = None
+    for address in _public_addresses(host):
+        conn = _PinnedHTTPSConnection(host, address)
+        try:
+            conn.request("GET", path, headers={
+                "User-Agent": UA,
+                "Accept": accept,
+                "Accept-Encoding": "identity",
+                "Connection": "close",
+            })
+            response = conn.getresponse()
+            body = response.read(_MAX_BODY + 1)
+            if len(body) > _MAX_BODY:
+                raise UnsafeTarget("verification response exceeds 64 KiB")
+            headers = {key.lower(): value for key, value in response.getheaders()}
+            return _FetchResponse(response.status, body, headers)
+        except (OSError, ssl.SSLError, http.client.HTTPException) as exc:
+            last_error = exc
+        finally:
+            conn.close()
+    if last_error is not None:
+        raise last_error
+    raise UnsafeTarget("host has no reachable public address")
+
+
+def _fetch(host: str, path: str, accept: str) -> _FetchResponse:
+    url = "https://%s%s" % (normalize_host(host), path)
+    for redirect_count in range(_MAX_REDIRECTS + 1):
+        parsed = urlsplit(url)
+        if parsed.scheme != "https" or parsed.username or parsed.password:
+            raise UnsafeTarget("verification redirects must use public HTTPS URLs")
+        try:
+            port = parsed.port
+        except ValueError as exc:
+            raise UnsafeTarget("verification redirect has an invalid port") from exc
+        if port not in (None, 443):
+            raise UnsafeTarget("verification redirects may only use port 443")
+        target_host = normalize_host(parsed.hostname or "")
+        target_path = parsed.path or "/"
+        if parsed.query:
+            target_path += "?" + parsed.query
+        response = _read_https(target_host, target_path, accept)
+        if response.status_code not in _REDIRECT_STATUSES:
+            return response
+        location = response.headers.get("location")
+        if not location:
+            return response
+        if redirect_count >= _MAX_REDIRECTS:
+            raise UnsafeTarget("too many verification redirects")
+        url = urljoin(url, location)
+    raise UnsafeTarget("too many verification redirects")
+
+
+def _get(host: str, path: str, accept: str) -> _FetchResponse | None:
+    try:
+        return _fetch(host, path, accept)
     except Exception as exc:
-        log.debug("verify fetch failed %s: %s", url, exc)
+        log.debug("verify fetch failed https://%s%s: %s", host, path, exc)
         return None
 
 
 def check_descriptor(host: str, token: str) -> tuple[bool, str]:
-    with httpx.Client(timeout=TIMEOUT, follow_redirects=True,
-                      headers={"User-Agent": UA, "Accept": "application/json"}) as c:
-        for path in DESCRIPTOR_PATHS:
-            url = "https://%s%s" % (host, path)
-            r = _get(c, url)
-            if r is None or r.status_code >= 400:
-                continue
-            body = r.text[:_MAX_BODY]
-            try:
-                if _find_token(json.loads(body), token):
-                    return True, path
-            except ValueError:
-                continue
+    for path in DESCRIPTOR_PATHS:
+        response = _get(host, path, "application/json")
+        if response is None or response.status_code >= 400:
+            continue
+        try:
+            body = response.body.decode("utf-8", "replace")
+            if _find_token(json.loads(body), token):
+                return True, path
+        except ValueError:
+            continue
     return False, "%s not found in %s" % (TOKEN_FIELD, ", ".join(DESCRIPTOR_PATHS))
 
 
 def check_wellknown_file(host: str, token: str) -> tuple[bool, str]:
-    url = "https://%s%s" % (host, VERIFY_FILE)
-    with httpx.Client(timeout=TIMEOUT, follow_redirects=True,
-                      headers={"User-Agent": UA, "Accept": "text/plain"}) as c:
-        r = _get(c, url)
-    if r is None:
+    response = _get(host, VERIFY_FILE, "text/plain")
+    if response is None:
         return False, "fetch failed"
-    if r.status_code >= 400:
-        return False, "HTTP %d" % r.status_code
-    return (token in r.text[:_MAX_BODY]), VERIFY_FILE
+    if response.status_code >= 400:
+        return False, "HTTP %d" % response.status_code
+    body = response.body.decode("utf-8", "replace")
+    return (token in body), VERIFY_FILE
 
 
 def check_dns_txt(host: str, token: str) -> tuple[bool, str]:
@@ -163,6 +294,10 @@ def probe(method: str, host: str, token: str) -> tuple[bool, str]:
     check = _CHECKS.get(method)
     if check is None:
         return False, "unknown method %r" % method
+    try:
+        host = normalize_host(host)
+    except UnsafeTarget as exc:
+        return False, str(exc)
     return check(host, token)
 
 
@@ -175,9 +310,10 @@ def issue(conn: sqlite3.Connection, user_id: int, host: str,
     The token is shown once; only its hash is stored, so a database read
     during the pending window still cannot forge a claim.
     """
-    host = (host or "").strip().lower()
-    if not host:
-        raise ClaimError("missing host")
+    try:
+        host = normalize_host(host)
+    except UnsafeTarget as exc:
+        raise ClaimError(str(exc)) from exc
     if method not in METHODS:
         raise ClaimError("unknown method: %s" % method)
     if db.is_shared_host(conn, host):
