@@ -579,6 +579,9 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
                 if "duplicate column" not in str(e).lower():
                     raise
         _migrate_mcp_fts_tools(c)
+        from . import collisions
+
+        collisions.ensure_schema(c)
         c.commit()
 
 
@@ -3214,6 +3217,7 @@ def apply_listing_edits(conn: sqlite3.Connection, kind: str, listing_id: int,
     applied: list[str] = []
     rejected: list[str] = []
     endpoint_changed = False
+    moved_url = None
     for field, value in changes.items():
         if field not in allowed:
             continue
@@ -3234,6 +3238,8 @@ def apply_listing_edits(conn: sqlite3.Connection, kind: str, listing_id: int,
                     "%s: you have not verified control of %s" % (field, host))
                 continue
             endpoint_changed = True
+            if kind == "x402" and field == "url":
+                moved_url = (new, host)
         conn.execute("UPDATE %s SET %s=? WHERE id=?" % (table, field),
                      (new, listing_id))
         conn.execute(
@@ -3259,6 +3265,18 @@ def apply_listing_edits(conn: sqlite3.Connection, kind: str, listing_id: int,
         marked.update(applied)
         conn.execute("UPDATE %s SET owner_edited=? WHERE id=?" % table,
                      (json.dumps(sorted(marked)), listing_id))
+    if moved_url:
+        # The host check above proves this account controls the new address. It
+        # does not prove the address is still free, and only an edit can put two
+        # rows on one endpoint -- upsert_service dedups on it.
+        from . import collisions  # here so db has no import-time httpx dependency
+
+        collisions.on_endpoint_changed(
+            conn, listing_id=listing_id,
+            endpoint_key=_norm_endpoint(moved_url[0]), host=moved_url[1],
+            user_id=user_id, field="url", old_value=current["url"],
+            new_value=moved_url[0],
+            shared_host=is_shared_host(conn, moved_url[1]))
     # 不在此提交：调用方的 db.writer() 负责，内部提交会让调用方无法组合事务。
     return applied, rejected
 
