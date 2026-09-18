@@ -15,7 +15,8 @@ Two independent dimensions are reported:
   * `verdict`        - authoritative, from the deterministic static rules
                        (`mcp_safety`). This is what gets stored/surfaced and is
                        what the hourly health job refreshes.
-  * `llm_reference`  - advisory only, a Qwen3-8B read of the same advertised
+  * `llm_reference`  - advisory only, a second-opinion read of the same
+                       advertised
                        text. The LLM is SLOW, so it runs ON-DEMAND only (only on
                        a live user call, never in the hourly job) and is NEVER
                        persisted. Never overrides the rule verdict; when it is
@@ -46,7 +47,7 @@ log = logging.getLogger("mcpserver.directory.safety")
 
 _SEVERITY = {"clean": 0, "suspicious": 1, "malicious": 2}
 
-# ---- Qwen3-8B reference dimension --------------------------------------------
+# ---- second-opinion reference dimension --------------------------------------
 
 _LLM_SYSTEM = (
     "You are a security auditor for MCP (Model Context Protocol) servers. You "
@@ -79,7 +80,10 @@ def _strip_think(text: str) -> str:
 
 def llm_reference(name: str = "", description: str = "", tools_text: str = "",
                   timeout: float = 25.0) -> Optional[dict]:
-    """Ask Qwen3-8B for an advisory verdict over advertised metadata.
+    """Ask the configured model for an advisory verdict over advertised metadata.
+
+    The model is whatever AGENT_TOOLS_SAFETY_MODEL names; the returned dict
+    carries it so a stored opinion can never be misattributed.
 
     Returns ``{model, verdict, reason, confidence}`` or ``None`` on any failure
     (missing config, empty text, network/parse error). Never raises.
