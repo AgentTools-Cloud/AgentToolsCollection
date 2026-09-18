@@ -99,7 +99,7 @@
       {% if comp.parts %}
       <ul class="text-xs text-slate-500 mt-1 space-y-0.5">
         {% for pt in comp.parts %}
-        <li>{% if pt.ok %}<span class="text-emerald-600">✓</span>{% else %}<span class="text-slate-400">✗</span>{% endif %} {{ pt.label }}</li>
+        <li>{% if pt.state == 'yes' %}<span class="text-emerald-600">✓</span>{% elif pt.state == 'unknown' %}<span class="text-slate-300" title="Not measured yet">–</span>{% else %}<span class="text-slate-400">✗</span>{% endif %} {{ pt.label }}</li>
         {% endfor %}
       </ul>
       {% endif %}
@@ -144,7 +144,8 @@
   <div class="space-y-5">
     <div>
       <div class="text-xs text-slate-500 mb-1.5">cURL · x402-fetch / x402-axios will auto-handle 402</div>
-      <pre class="bg-slate-900 text-slate-100 text-xs p-3 rounded-lg overflow-x-auto"><code>curl -X POST {{ svc.url }}</code></pre>
+      {% set demo = svc.resource_samples[0] if svc.resource_samples else None %}
+      <pre class="bg-slate-900 text-slate-100 text-xs p-3 rounded-lg overflow-x-auto"><code>curl -X {{ (demo.method if demo and demo.method else 'POST')|upper }} {{ demo.url if demo and demo.url else svc.url }}</code></pre>
     </div>
     {% if svc.mcp_url %}
     <div>
