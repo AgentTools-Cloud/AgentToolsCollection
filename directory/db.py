@@ -2695,6 +2695,10 @@ def score_breakdown(row) -> dict:
     }.get(health, "Not probed yet")
 
     pay_parts = _payability_parts(d)
+    # A signal we never looked for is not a signal we looked for and missed.
+    # Until a verification pass finishes, x402_ok and payment are both NULL and
+    # none of the five payability signals has been measured.
+    pay_unmeasured = d.get("x402_ok") is None and not d.get("payment")
     payers = d.get("payto_payers_30d")
     tx = d.get("tx_30d") or d.get("payto_tx_30d")
     if d.get("payto_checked"):
@@ -2727,9 +2731,13 @@ def score_breakdown(row) -> dict:
              "points": round(_W_AVAIL * avail_f, 1), "note": avail_note},
             {"name": "Payability", "max": _W_PAY,
              "points": round(_W_PAY * _payability(d), 1), "note": None,
-             "parts": [{"label": l, "ok": ok} for l, _w, ok in pay_parts]},
+             "parts": [{"label": l, "ok": ok,
+                        "state": "yes" if ok
+                        else ("unknown" if pay_unmeasured else "no")}
+                       for l, _w, ok in pay_parts]},
             {"name": "Demand", "max": _W_DEMAND,
-             "points": round(_W_DEMAND * _demand(d), 1), "note": demand_note},
+             "points": round(_W_DEMAND * _demand(d), 1), "note": demand_note,
+             "unmeasured": not d.get("payto_checked")},
             {"name": "Owner verified", "max": _OWNER_BONUS, "bonus": True,
              "points": _OWNER_BONUS if d.get("owner_verified") else 0.0,
              "note": ("Operator proved control of this domain"
@@ -3177,6 +3185,10 @@ _MEASURED_RESET = {
             "quality_score", "down_since", "last_success_at"),
 }
 _KIND_TABLE = {"x402": "services", "mcp": "mcp_servers", "a2a": "a2a_agents"}
+# Only the field the measurements were taken against invalidates them. An x402
+# listing is probed at `url`; `mcp_url` is a second address on the same service
+# and moving it says nothing about the numbers gathered from the first.
+_PRIMARY_ENDPOINT = {"x402": "url", "mcp": "endpoint_url", "a2a": "endpoint_url"}
 
 
 def _restore_owner_edits(row: dict, existing) -> None:
@@ -3256,9 +3268,10 @@ def apply_listing_edits(conn: sqlite3.Connection, kind: str, listing_id: int,
                 rejected.append(
                     "%s: you have not verified control of %s" % (field, host))
                 continue
-            endpoint_changed = True
-            if kind == "x402" and field == "url":
-                moved_url = (new, host)
+            if field == _PRIMARY_ENDPOINT.get(kind):
+                endpoint_changed = True
+                if kind == "x402":
+                    moved_url = (new, host)
         conn.execute("UPDATE %s SET %s=? WHERE id=?" % (table, field),
                      (new, listing_id))
         conn.execute(
