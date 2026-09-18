@@ -2,12 +2,21 @@
 """SSRF regression coverage for public submission probes."""
 import os
 import socket
+import sqlite3
 import sys
 from unittest.mock import patch
 
 import httpx
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# directory.db freezes AGENT_TOOLS_DB_PATH into a module constant at import
+# time, so the copy has to happen before the first `from directory import ...`.
+source_db = os.environ.get("AGENT_TOOLS_SOURCE_DB",
+                           "/opt/mcpserver/data/agent-tools.db")
+copy_db = "/tmp/test-submission-ssrf-%d.db" % os.getpid()
+sqlite3.connect(source_db).backup(sqlite3.connect(copy_db))
+os.environ["AGENT_TOOLS_DB_PATH"] = copy_db
 
 from directory import a2a, crawlers, public_http
 
@@ -165,6 +174,7 @@ with patch("directory.public_http.socket.getaddrinfo", return_value=PRIVATE), \
               result.status_code == 422 and detail.get("error") == "unsafe_url",
               "status=%s body=%s" % (result.status_code, result.text[:200]))
 check("unsafe submissions never reach a probe", not probe_calls, str(probe_calls))
+os.unlink(copy_db)
 
 print("\n%d passed, %d failed" % (passed, failed))
 raise SystemExit(bool(failed))
