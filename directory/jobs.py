@@ -1020,6 +1020,113 @@ def cmd_rescore() -> int:
     return 0
 
 
+def cmd_collisions(limit: int = 50, adjudicate: bool = False) -> int:
+    """Show the endpoint-collision ledger, optionally settling what is open.
+
+    Provenance already merged what it could. What is left needs judgement, so
+    it goes to the adjudicator model -- which may well answer `hold`, and that
+    is a result, not a failure. Anything we cannot execute verbatim stays open.
+    """
+    from urllib.parse import urlparse
+
+    from directory import collisions
+
+    def read():
+        with db.writer() as c:
+            collisions.ensure_schema(c)
+            return collisions.open_rows(c, limit=limit)
+
+    rows = db.with_retry(read)
+    if not rows:
+        log.info("collisions: nothing open")
+        return 0
+
+    if not adjudicate:
+        for r in rows:
+            log.info("#%s listing %s vs %s  %s  %s", r["id"], r["listing_id"],
+                     r["occupant_id"], r["reason_code"], r["new_value"])
+        log.info("collisions: %d open (pass --adjudicate to settle them)",
+                 len(rows))
+        return 0
+
+    merged = held = skipped = 0
+    for r in rows:
+        def build():
+            with db.writer() as c:
+                host = (urlparse(r["new_value"] or "").hostname or "").lower()
+                return host, collisions.build_payload(
+                    c, r["listing_id"], r["occupant_id"], host,
+                    {"user_id": r["user_id"], "field": r["field"],
+                     "old_value": r["old_value"], "new_value": r["new_value"],
+                     "via": "api"})
+
+        host, payload = db.with_retry(build)
+        if payload.get("editing") is None or payload.get("occupant") is None:
+            log.info("collision #%s: a row is already gone, closing", r["id"])
+
+            def gone():
+                with db.writer() as c:
+                    collisions.close_row(
+                        c, r["id"], decision=collisions.HOLD,
+                        reason_code="row_disappeared",
+                        evidence=["one of the two rows no longer exists"],
+                        uncertainty=["what removed it, and whether the other "
+                                     "row absorbed anything"])
+            db.with_retry(gone)
+            skipped += 1
+            continue
+
+        verdict = collisions.adjudicate(payload)
+        if verdict is None:
+            log.warning("collision #%s: no verdict, leaving it open", r["id"])
+            skipped += 1
+            continue
+        ok, why = collisions.check_verdict(verdict, r["listing_id"],
+                                           r["occupant_id"])
+        if not ok:
+            log.warning("collision #%s: unusable verdict (%s), leaving it open",
+                        r["id"], why)
+            skipped += 1
+            continue
+
+        if verdict["decision"] == collisions.HOLD:
+            def hold():
+                with db.writer() as c:
+                    collisions.close_row(
+                        c, r["id"], decision=collisions.HOLD,
+                        reason_code=verdict.get("reason_code") or "held",
+                        evidence=verdict.get("evidence"),
+                        uncertainty=verdict.get("uncertainty"))
+            db.with_retry(hold)
+            held += 1
+            log.info("collision #%s held: %s", r["id"],
+                     verdict.get("reason_code"))
+            continue
+
+        def do_merge():
+            with db.writer() as c:
+                out = collisions.merge_pair(c, int(verdict["survivor_id"]),
+                                            int(verdict["absorbed_id"]))
+                collisions.close_row(
+                    c, r["id"], decision=collisions.MERGE,
+                    reason_code=verdict.get("reason_code") or "merged",
+                    evidence=verdict.get("evidence"),
+                    uncertainty=verdict.get("uncertainty"),
+                    survivor_id=out["survivor_id"],
+                    absorbed_id=out["absorbed_id"])
+                return out
+
+        out = db.with_retry(do_merge)
+        merged += 1
+        log.info("collision #%s merged %s into %s: %s", r["id"],
+                 out["absorbed_slug"], out["survivor_slug"],
+                 verdict.get("reason_code"))
+
+    log.info("collisions: merged=%d held=%d left_open=%d", merged, held,
+             skipped)
+    return 0
+
+
 def cmd_shared_hosts(min_paths: int = db.SHARED_HOST_MIN_PATHS) -> int:
     """Recompute which hosts multiplex unrelated operators under one domain."""
     def op():
@@ -1421,6 +1528,9 @@ def main(argv=None) -> int:
     p_auto.add_argument("--dry-run", action="store_true")
     sub.add_parser("rescore")
     sub.add_parser("ownership-recheck")
+    p_coll = sub.add_parser("collisions")
+    p_coll.add_argument("--limit", type=int, default=50)
+    p_coll.add_argument("--adjudicate", action="store_true")
     p_shared = sub.add_parser("shared-hosts")
     p_shared.add_argument("--min-paths", type=int, default=db.SHARED_HOST_MIN_PATHS)
     p_onchain = sub.add_parser("onchain")
@@ -1471,6 +1581,8 @@ def main(argv=None) -> int:
         return cmd_rescore()
     if args.cmd == "ownership-recheck":
         return cmd_ownership_recheck()
+    if args.cmd == "collisions":
+        return cmd_collisions(limit=args.limit, adjudicate=args.adjudicate)
     if args.cmd == "shared-hosts":
         return cmd_shared_hosts(min_paths=args.min_paths)
     if args.cmd == "onchain":
