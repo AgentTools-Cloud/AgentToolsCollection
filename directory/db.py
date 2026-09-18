@@ -718,6 +718,14 @@ def attach_sources(conn: sqlite3.Connection, kind: str, rows: list) -> list:
     return rows
 
 
+def _as_int(value):
+    """int(value) or None -- upstream sends counts as str, float and None."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def upsert_service(conn: sqlite3.Connection, row: dict) -> tuple:
     """Insert/update an x402 service. Dedup on (source, source_id) then slug.
 
@@ -819,6 +827,17 @@ def upsert_service(conn: sqlite3.Connection, row: dict) -> tuple:
                       "confidence"):
             if row.get(field) is None:
                 row[field] = existing[field]
+        # Sources disagree wildly on what counts as a resource: for scvd.store
+        # on one day pay-skills-pr said 1 (its parse failed and it fell back to
+        # a synthetic sample), our own descriptor read said 43, x402scan said
+        # 190. Before endpoint dedup each source kept its own row and its own
+        # number; now they share one, so the last crawler of the night would
+        # decide. Only reverify_x402, which reads the descriptor and writes this
+        # column directly, may lower it.
+        _new_rc, _old_rc = _as_int(row.get("resource_count")), _as_int(existing["resource_count"])
+        if _new_rc is not None and _old_rc is not None and _new_rc < _old_rc:
+            row["resource_count"] = existing["resource_count"]
+            row["resource_samples"] = existing["resource_samples"]
         _restore_owner_edits(row, existing)
         _keep_owned_slug(cur, "services", row, existing)
         set_clause = ",".join(f"{c}=?" for c in cols if c != "created_at")
