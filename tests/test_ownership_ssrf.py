@@ -7,6 +7,16 @@ import sys
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# directory.db freezes AGENT_TOOLS_DB_PATH into a module constant at import
+# time, so the copy has to happen before the first `from directory import ...`.
+source_db = os.environ.get("AGENT_TOOLS_SOURCE_DB",
+                           "/opt/mcpserver/data/agent-tools.db")
+copy_db = "/tmp/test-ownership-ssrf-%d.db" % os.getpid()
+sqlite3.connect(source_db).backup(sqlite3.connect(copy_db))
+os.environ["AGENT_TOOLS_DB_PATH"] = copy_db
+os.environ["AGENT_TOOLS_KEY_MINT_PER_DAY"] = "200"
+
 from directory import ownership
 
 passed = failed = 0
@@ -121,11 +131,6 @@ with patch("directory.ownership._public_addresses", return_value=["93.184.216.34
 check("reject response above 64 KiB before buffering more", rejected)
 
 # Unsafe targets are refused before a pending claim is persisted.
-source_db = "/opt/mcpserver/data/agent-tools.db"
-copy_db = "/tmp/test-ownership-ssrf-%d.db" % os.getpid()
-sqlite3.connect(source_db).backup(sqlite3.connect(copy_db))
-os.environ["AGENT_TOOLS_DB_PATH"] = copy_db
-os.environ["AGENT_TOOLS_KEY_MINT_PER_DAY"] = "200"
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from directory.routes import router
