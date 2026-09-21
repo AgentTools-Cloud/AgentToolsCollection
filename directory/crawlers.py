@@ -8,6 +8,7 @@ import logging
 import random
 import re
 import time
+from contextlib import closing
 from datetime import datetime, timezone
 
 import yaml
@@ -1088,7 +1089,9 @@ def _host_safety(host: str) -> str:
 def url_retired(url: str) -> bool:
     try:
         from . import db
-        with db.connect(read_only=True) as conn:
+        # SQLite's connection context manages transactions, not connection
+        # lifetime. Close every lookup before a large crawl exhausts its FDs.
+        with closing(db.connect(read_only=True)) as conn:
             return db.find_active_retirement(
                 conn, "x402", urls=(url,)) is not None
     except Exception:
