@@ -17,6 +17,13 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class AskBackendTests(unittest.TestCase):
+    def test_deployed_ask_and_safety_use_gpt56(self):
+        settings = dict(line.split('=', 1) for line in
+                        (ROOT/'deploy/agent-tools-ask.env').read_text().splitlines()
+                        if line and not line.startswith('#'))
+        self.assertEqual(settings['AGENT_TOOLS_ASK_MODEL'], 'OpenAI/GPT-5.6-Sol')
+        self.assertEqual(settings['AGENT_TOOLS_SAFETY_MODEL'], 'OpenAI/GPT-5.6-Sol')
+
     def setUp(self):
         self.requests = []
         def respond(request):

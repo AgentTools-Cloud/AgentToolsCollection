@@ -19,8 +19,9 @@ override and two-worker command.
 
 `AGENT_TOOLS_ASK_USE_SAFETY_BACKEND=1` explicitly selects this project's existing
 `AGENT_TOOLS_SAFETY_BASE_URL` and `AGENT_TOOLS_SAFETY_API_KEY`.
-`AGENT_TOOLS_ASK_MODEL` independently selects `OpenAI/GPT-6-Astra`; if unset or
-empty, it inherits `AGENT_TOOLS_SAFETY_MODEL`. The safety scan remains unchanged.
+Both `AGENT_TOOLS_ASK_MODEL` and `AGENT_TOOLS_SAFETY_MODEL` are explicitly set to
+`OpenAI/GPT-5.6-Sol`. Ask still supports independent model selection; if unset
+or empty, it inherits `AGENT_TOOLS_SAFETY_MODEL`.
 It shares the project's existing key quota/billing;
 no key values are stored in this repository or copied between environment files.
 Missing shared settings fail closed, not back to another credential. With the
