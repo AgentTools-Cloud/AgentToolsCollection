@@ -41,6 +41,7 @@ class AskBackendTests(unittest.TestCase):
 
     def test_explicit_shared_backend_and_no_silent_fallback(self):
         self.env['AGENT_TOOLS_ASK_USE_SAFETY_BACKEND']='1'
+        self.env.pop('AGENT_TOOLS_ASK_MODEL')
         with patch.dict(os.environ,self.env,clear=True):
             self.assertTrue(asyncio.run(self.ns['_call_llm']('fixture')))
         req=self.requests[0]
@@ -51,6 +52,24 @@ class AskBackendTests(unittest.TestCase):
         with patch.dict(os.environ,self.env,clear=True):
             self.assertIsNone(asyncio.run(self.ns['_call_llm']('fixture')))
         self.assertFalse(self.requests)
+
+    def test_shared_credentials_with_independent_astra_model(self):
+        self.env['AGENT_TOOLS_ASK_USE_SAFETY_BACKEND'] = '1'
+        self.env['AGENT_TOOLS_ASK_MODEL'] = 'OpenAI/GPT-6-Astra'
+        with patch.dict(os.environ, self.env, clear=True):
+            self.assertTrue(asyncio.run(self.ns['_call_llm']('fixture')))
+            self.assertEqual(os.environ['AGENT_TOOLS_SAFETY_MODEL'], 'safety-model')
+        req = self.requests[0]
+        self.assertEqual(json.loads(req.content)['model'], 'OpenAI/GPT-6-Astra')
+        self.assertEqual(str(req.url), 'https://safety.example/v1/chat/completions')
+        self.assertEqual(req.headers['Authorization'], 'Bearer synthetic-safety')
+
+    def test_empty_ask_override_keeps_shared_model(self):
+        self.env['AGENT_TOOLS_ASK_USE_SAFETY_BACKEND'] = '1'
+        self.env['AGENT_TOOLS_ASK_MODEL'] = ''
+        with patch.dict(os.environ, self.env, clear=True):
+            self.assertTrue(asyncio.run(self.ns['_call_llm']('fixture')))
+        self.assertEqual(json.loads(self.requests[0].content)['model'], 'safety-model')
 
 
 if __name__ == '__main__': unittest.main()

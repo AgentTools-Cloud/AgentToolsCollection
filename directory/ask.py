@@ -98,7 +98,9 @@ async def _call_llm(prompt: str) -> dict[str, Any] | None:
     if shared:
         base_url = os.getenv("AGENT_TOOLS_SAFETY_BASE_URL", "").rstrip("/")
         api_key = os.getenv("AGENT_TOOLS_SAFETY_API_KEY", "")
-        model = os.getenv("AGENT_TOOLS_SAFETY_MODEL", "")
+        # Share transport/credentials, not the safety scan's model choice.
+        model = (os.getenv("AGENT_TOOLS_ASK_MODEL")
+             or os.getenv("AGENT_TOOLS_SAFETY_MODEL", ""))
     else:
         base_url = (os.getenv("AGENT_TOOLS_ASK_BASE_URL")
                     or os.getenv("UPSTREAM_BASE_URL", "")).rstrip("/")
