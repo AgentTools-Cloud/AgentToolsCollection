@@ -24,6 +24,10 @@
     {
       "url": "https://policycheck.tools/.well-known/agent.json",
       "source": "a2aagentlist"
+    },
+    {
+      "url": "https://feeless402.com/.well-known/agent-card.json",
+      "source": "manual-seed"
     }
   ]
 }
