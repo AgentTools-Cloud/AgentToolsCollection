@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import time
@@ -25,6 +26,7 @@ sys.path.insert(0, "/opt/mcpserver")
 from directory import db, mailer  # noqa: E402
 
 STATE = Path("/var/lib/agent-tools-watchdog/state.json")
+BACKUP_SUCCESS = Path("/var/backups/agent-tools/last-success.json")
 WINDOW = "24 hours ago"
 WINDOW_SECONDS = 24 * 3600
 # Every table is written by at least one job per 6h; twice that is clearly stuck.
@@ -60,7 +62,7 @@ def journal() -> list[str]:
 def unit_results() -> list[tuple[str, str]]:
     """Units whose last run did not end cleanly."""
     bad = []
-    for unit in ("crawl", "health", "reverify", "review", "onchain", "quarantine"):
+    for unit in ("crawl", "health", "reverify", "review", "onchain", "quarantine", "backup"):
         name = f"agent-tools-{unit}.service"
         r = subprocess.run(
             ["systemctl", "show", name, "-p", "Result", "--value"],
@@ -69,6 +71,32 @@ def unit_results() -> list[tuple[str, str]]:
         if r and r != "success":
             bad.append((unit, r))
     return bad
+
+
+def backup_is_fresh() -> bool:
+    """Read the durable offsite receipt, not unloadable systemd timestamps."""
+    try:
+        if BACKUP_SUCCESS.resolve() != BACKUP_SUCCESS.absolute():
+            return False
+        fd = os.open(BACKUP_SUCCESS, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o600:
+                return False
+            raw = stream.read(4097)
+            if len(raw) > 4096:
+                return False
+            state = json.loads(raw)
+        if (not isinstance(state, dict) or type(state.get("version")) is not int
+                or state["version"] != 1 or state.get("offsite") is not True):
+            return False
+        epoch, archive = state.get("finished_at"), state.get("archive")
+        return (type(epoch) in (int, float) and epoch > 0
+                and 0 <= time.time() - epoch <= 30 * 3600
+                and isinstance(archive, str)
+                and re.fullmatch(r"agent-tools-[0-9]{8}T[0-9]{12}Z-[0-9a-f]{16}\.tar\.gz\.age", archive) is not None)
+    except (OSError, ValueError, TypeError, OverflowError, RuntimeError):
+        return False
 
 
 def load_state() -> dict:
@@ -205,6 +233,11 @@ def main() -> int:
 
     for unit, result in unit_results():
         problems.append(f"agent-tools-{unit}.service 上次结束状态 = {result}")
+
+    # This receipt survives reboot and oneshot unloading. Exact unit Result
+    # above still reports a newer failed run even while the receipt is fresh.
+    if not backup_is_fresh():
+        problems.append("加密异地备份最近完成已超过 30h，或成功记录缺失/无效")
 
     db_problems, db_detail = db_checks()
     problems += db_problems

@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily Agent Tools encrypted offsite backup
+
+[Timer]
+OnCalendar=*-*-* 04:00:00
+Persistent=true
+Unit=agent-tools-backup.service
+
+[Install]
+WantedBy=timers.target
