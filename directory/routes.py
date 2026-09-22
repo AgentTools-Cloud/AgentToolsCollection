@@ -5,7 +5,9 @@ from __future__ import annotations
 import secrets
 import threading
 import time
+from contextlib import closing
 from pathlib import Path
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, Response
@@ -191,21 +193,57 @@ def service_detail(request: Request, slug: str):
         "request": request, "svc": svc, "rating": db.score_breakdown(svc)})
 
 
+_CATEGORY_PAGE_SIZE = 60
+_CATEGORY_CACHE_TTL = 300
+_category_cache: dict = {}
+_category_cache_lock = threading.Lock()
+_CATEGORY_KINDS = {
+    "x402": ("x402 Services", "/x402", "category"),
+    "mcp": ("MCP Topics", "/mcp", "q"),
+    "a2a": ("A2A Skill Tags", "/a2a", "q"),
+}
+
+
+def _category_rows(kind: str):
+    # Three aggregate entries per worker, never one cache entry per query.
+    with _category_cache_lock:
+        cached = _category_cache.get(kind)
+        if cached and time.monotonic() - cached[0] < _CATEGORY_CACHE_TTL:
+            return cached[1]
+        loader = {"x402": db.list_categories, "mcp": db.mcp_categories,
+                  "a2a": db.a2a_categories}[kind]
+        with closing(_conn()) as c:
+            rows = sorted(loader(c), key=lambda r: (-r["count"], r["category"]))
+        _category_cache[kind] = (time.monotonic(), rows)
+        return rows
+
+
 @router.get("/categories", response_class=HTMLResponse, include_in_schema=False)
-def categories_page(request: Request):
-    with _conn() as c:
-        x402_cats = db.list_categories(c)
-        mcp_cats = db.mcp_categories(c)
-        a2a_cats = db.a2a_categories(c)
-        s = db.stats(c)
-        ms = db.mcp_stats(c)
-        a2s = db.a2a_stats(c)
+def categories_page(
+    request: Request,
+    kind: str = Query(default="x402", pattern="^(x402|mcp|a2a)$"),
+    q: str = Query(default="", max_length=200),
+    page: int = Query(default=1, ge=1, le=100000),
+):
+    query = q.strip()
+    rows = _category_rows(kind)
+    matched = [r for r in rows if query.casefold() in r["category"].casefold()]
+    pages = max(1, (len(matched) + _CATEGORY_PAGE_SIZE - 1) // _CATEGORY_PAGE_SIZE)
+    page = min(page, pages)
+    start = (page - 1) * _CATEGORY_PAGE_SIZE
+    title, target, param = _CATEGORY_KINDS[kind]
+    items = [{**r, "url": target + "?" + urlencode({param: r["category"]})}
+             for r in matched[start:start + _CATEGORY_PAGE_SIZE]]
+    def page_url(number):
+        return "/categories?" + urlencode({"kind": kind, "q": query, "page": number})
     return TEMPLATES.TemplateResponse(request, "categories.html", {
-            "request": request,
-            "x402_cats": x402_cats, "mcp_cats": mcp_cats, "a2a_cats": a2a_cats,
-            "stats": s, "mcp_stats": ms, "a2a_stats": a2s,
-        },
-    )
+        "request": request, "kind": kind, "kinds": _CATEGORY_KINDS,
+        "q": query, "title": title, "items": items, "total": len(matched),
+        "all_total": len(rows), "page": page, "pages": pages,
+        "first": start + 1 if items else 0, "last": start + len(items),
+        "previous_url": page_url(page - 1) if page > 1 else None,
+        "next_url": page_url(page + 1) if page < pages else None,
+    })
 
 
 @router.get("/submit", response_class=HTMLResponse, include_in_schema=False)

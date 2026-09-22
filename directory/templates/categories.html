@@ -3,55 +3,40 @@
 {% block content %}
 <section class="mb-8">
   <h1 class="text-3xl md:text-4xl font-extrabold tracking-tight">Categories</h1>
-  <p class="text-slate-500 mt-2">Browse all three directories by topic — x402 services, MCP servers, and A2A agents.</p>
+  <p class="text-slate-500 mt-2">Explore service categories, MCP topics and A2A skill tags. All topics remain searchable.</p>
 </section>
-
-{% macro cat_grid(cats, base_url, param) %}
-<ul class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
-  {% for c in cats %}
-  <li>
-    <a href="{{ base_url }}?{{ param }}={{ c.category | urlencode }}" class="svc-card p-4 flex items-center justify-between">
-      <span class="font-semibold text-slate-900 capitalize truncate">{{ c.category }}</span>
-      <span class="badge bg-slate-50 text-slate-600 ring-1 ring-slate-200 mono shrink-0 ml-2">{{ c.count }}</span>
-    </a>
-  </li>
+<nav aria-label="Directory type" class="flex flex-wrap gap-3 mb-6">
+  {% for key, info in kinds.items() %}
+  <a href="/categories?kind={{ key }}" class="pill {% if key == kind %}ring-2 ring-blue-500{% endif %}" {% if key == kind %}aria-current="page"{% endif %}>{{ info[0] }}</a>
   {% endfor %}
-</ul>
-{% endmacro %}
-
-<section class="mb-12">
-  <div class="flex items-baseline gap-3 mb-4">
-    <h2 class="text-xl font-bold tracking-tight">x402 Services</h2>
-    <span class="text-sm text-slate-400">{{ stats.total }} services · {{ x402_cats|length }} categories</span>
+</nav>
+<form action="/categories" method="get" class="search-shell mb-6">
+  <input type="hidden" name="kind" value="{{ kind }}">
+  <input name="q" value="{{ q }}" maxlength="200" aria-label="Filter categories" placeholder="Find a category or tag…" class="flex-1 min-w-0 bg-transparent outline-none">
+  <button type="submit" class="btn-primary">Search</button>
+</form>
+<section>
+  <div class="flex flex-wrap items-baseline gap-3 mb-4">
+    <h2 class="text-xl font-bold">{{ title }}</h2>
+    <span class="text-sm text-slate-500">{{ first }}–{{ last }} of {{ total }}{% if q %} matching{% endif %} topics · {{ all_total }} total</span>
   </div>
-  {% if x402_cats %}
-    {{ cat_grid(x402_cats, "/", "category") }}
-  {% else %}
-    <p class="text-slate-400 text-sm">No categories yet.</p>
-  {% endif %}
-</section>
-
-<section class="mb-12">
-  <div class="flex items-baseline gap-3 mb-4">
-    <h2 class="text-xl font-bold tracking-tight">MCP Servers</h2>
-    <span class="text-sm text-slate-400">{{ mcp_stats.total }} servers · grouped by topic</span>
-  </div>
-  {% if mcp_cats %}
-    {{ cat_grid(mcp_cats, "/mcp", "q") }}
-  {% else %}
-    <p class="text-slate-400 text-sm">No topics yet.</p>
-  {% endif %}
-</section>
-
-<section class="mb-12">
-  <div class="flex items-baseline gap-3 mb-4">
-    <h2 class="text-xl font-bold tracking-tight">A2A Agents</h2>
-    <span class="text-sm text-slate-400">{{ a2a_stats.total }} agents · {{ a2a_cats|length }} skill tags</span>
-  </div>
-  {% if a2a_cats %}
-    {{ cat_grid(a2a_cats, "/a2a", "q") }}
-  {% else %}
-    <p class="text-slate-400 text-sm">No skill tags yet.</p>
-  {% endif %}
+  <p class="text-sm text-slate-500 mb-4">Sorted by coverage. Counts refresh every five minutes.{% if kind != 'x402' %} Topic links open full-text search; search result counts may differ from topic coverage.{% endif %}</p>
+  <ul class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
+    {% for c in items %}
+    <li class="min-w-0">
+      <a href="{{ c.url }}" data-category-link class="svc-card p-4 flex items-center justify-between min-w-0">
+        <span class="font-semibold truncate" title="{{ c.category }}">{{ c.category }}</span>
+        <span class="badge bg-slate-50 mono shrink-0 ml-2">{{ c.count }}</span>
+      </a>
+    </li>
+    {% else %}
+    <li class="text-slate-500">No matching topics. Try another search.</li>
+    {% endfor %}
+  </ul>
+  <nav aria-label="Category pages" class="flex flex-wrap items-center gap-4 mt-8">
+    {% if previous_url %}<a href="{{ previous_url }}" rel="prev" class="pill">← Previous</a>{% endif %}
+    <span class="text-sm text-slate-500">Page {{ page }} of {{ pages }}</span>
+    {% if next_url %}<a href="{{ next_url }}" rel="next" class="pill">Next →</a>{% endif %}
+  </nav>
 </section>
 {% endblock %}

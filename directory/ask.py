@@ -6,6 +6,8 @@ import json
 import logging
 import os
 import re
+import time
+from contextlib import closing
 from typing import Any
 
 import httpx
@@ -90,15 +92,22 @@ def _extract_json(text: str) -> dict[str, Any] | None:
 
 
 async def _call_llm(prompt: str) -> dict[str, Any] | None:
-    base_url = (
-        os.getenv("AGENT_TOOLS_ASK_BASE_URL")
-        or os.getenv("UPSTREAM_BASE_URL", "")
-    ).rstrip("/")
-    api_key = os.getenv("AGENT_TOOLS_ASK_API_KEY") or os.getenv("UPSTREAM_API_KEY", "")
-    if not base_url or not api_key:
+    # Explicit opt-in to the backend already configured for this project's
+    # safety review. Never silently borrow another credential on an error.
+    shared = os.getenv("AGENT_TOOLS_ASK_USE_SAFETY_BACKEND") == "1"
+    if shared:
+        base_url = os.getenv("AGENT_TOOLS_SAFETY_BASE_URL", "").rstrip("/")
+        api_key = os.getenv("AGENT_TOOLS_SAFETY_API_KEY", "")
+        model = os.getenv("AGENT_TOOLS_SAFETY_MODEL", "")
+    else:
+        base_url = (os.getenv("AGENT_TOOLS_ASK_BASE_URL")
+                    or os.getenv("UPSTREAM_BASE_URL", "")).rstrip("/")
+        api_key = os.getenv("AGENT_TOOLS_ASK_API_KEY") or os.getenv("UPSTREAM_API_KEY", "")
+        model = _allowed_model()
+    if not base_url or not api_key or not model:
         return None
     body = {
-        "model": _allowed_model(),
+        "model": model,
         "messages": [
             {
                 "role": "system",
@@ -144,7 +153,18 @@ def _prompt(query: str, candidates: list[dict[str, Any]], limit: int) -> str:
     for i, c in enumerate(candidates[:10]):
         # idx is a stable numeric handle; LLMs echo a plain integer far more
         # reliably than an opaque slug they tend to "reconstruct" from the host.
-        compact.append({"idx": i, **cards.brief_for_llm(c)})
+        # Untrusted descriptors can include entire schemas or huge resource
+        # descriptions. Ranking does not need these; full cards stay unchanged.
+        compact.append({
+            "idx": i, "slug": str(c.get("slug") or "")[:200],
+            "name": str(c.get("name") or "")[:100],
+            "description": str(c.get("description") or "")[:350],
+            "category": str(c.get("category") or "")[:80],
+            "price_min_usd": c.get("price_min"),
+            "price_max_usd": c.get("price_max"),
+            "health": c.get("health"), "tx_30d": c.get("tx_30d"),
+            "resource_count": c.get("resource_count"),
+        })
     return (
         "User/agent intent:\n"
         f"{query}\n\n"
@@ -325,7 +345,7 @@ async def answer_query(
     limit = max(1, min(int(limit), 10))
     candidate_limit = max(limit, min(int(candidate_limit), 50))
 
-    with db.connect(db_path, read_only=True) as conn:
+    with closing(db.connect(db_path, read_only=True)) as conn:
         rows = _retrieve_rows(
             conn,
             query,
@@ -355,13 +375,19 @@ async def answer_query(
         out = _fallback(query, candidates, limit, "use_llm=false")
         out["candidate_count"] = len(candidates)
         return out
+    started = time.monotonic()
     raw = await _call_llm(_prompt(query, candidates, limit))
     if raw is None:
+        log.warning("ask_outcome=llm_unavailable seconds=%.3f", time.monotonic() - started)
         out = _fallback(query, candidates, limit, "llm_unavailable")
         out["candidate_count"] = len(candidates)
         return out
     out = _sanitize_llm_result(query, raw, candidates, limit)
     if not out.get("recommendations"):
+        log.warning("ask_outcome=no_valid_recommendations seconds=%.3f", time.monotonic() - started)
         out = _fallback(query, candidates, limit, "llm_returned_no_valid_recommendations")
         out["candidate_count"] = len(candidates)
+    else:
+        log.info("ask_outcome=llm_success seconds=%.3f recommendations=%d",
+                 time.monotonic() - started, len(out["recommendations"]))
     return out
