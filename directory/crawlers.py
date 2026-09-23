@@ -2107,6 +2107,24 @@ class PartialCrawl(Exception):
         self.reason = reason
 
 
+def _registry_auth_method(remote: dict) -> str | None:
+    """Summarise required Registry headers into the public auth vocabulary."""
+    headers = remote.get("headers") or []
+    required = [item for item in headers
+                if isinstance(item, dict) and item.get("isRequired") is True]
+    if not required:
+        return None
+    for item in required:
+        if str(item.get("name") or "").strip().lower() != "authorization":
+            continue
+        value = str(item.get("value") or "").strip().lower()
+        description = str(item.get("description") or "").strip().lower()
+        if "bearer" in value or "bearer" in description:
+            return "bearer_api_key"
+        return "authorization_header"
+    return "required_headers"
+
+
 def fetch_mcp_registry(updated_since: str | None = None,
                        max_pages: int = 5000, per_page: int = 100,
                        remote_only: bool = True) -> list:
@@ -2193,7 +2211,7 @@ def fetch_mcp_registry(updated_since: str | None = None,
                     "homepage_url": (srv.get("websiteUrl") or "").strip() or None,
                     "endpoint_url": endpoint,
                     "transport": remote.get("type"),
-                    "auth_method": None,
+                    "auth_method": _registry_auth_method(remote),
                     "cost_hint": None,
                     "source_code_url": repo.get("url") if isinstance(repo, dict) else None,
                     "package_registry": None,
