@@ -89,6 +89,39 @@ class CrawlerFailureTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "tRPC fetch failed"):
                 crawlers.fetch_x402scan()
 
+    def test_registry_required_bearer_header_maps_to_api_key(self):
+        remote = {
+            "headers": [{
+                "name": "Authorization",
+                "value": "Bearer {api_key}",
+                "description": "Bearer followed by your API key",
+                "isRequired": True,
+                "isSecret": True,
+            }],
+        }
+        self.assertEqual(crawlers._registry_auth_method(remote),
+                         "bearer_api_key")
+
+    def test_registry_optional_headers_do_not_gate_access(self):
+        remote = {
+            "headers": [{
+                "name": "X-Trace-Id",
+                "isRequired": False,
+            }],
+        }
+        self.assertIsNone(crawlers._registry_auth_method(remote))
+
+    def test_registry_other_required_headers_are_not_open(self):
+        remote = {
+            "headers": [{
+                "name": "X-API-Key",
+                "isRequired": True,
+                "isSecret": True,
+            }],
+        }
+        self.assertEqual(crawlers._registry_auth_method(remote),
+                         "required_headers")
+
     def test_mcp_catalog_missing_key_surfaces(self):
         with patch.object(crawlers, "_mcp_catalog_anon_key", return_value=None):
             with self.assertRaisesRegex(RuntimeError, "anon key"):
