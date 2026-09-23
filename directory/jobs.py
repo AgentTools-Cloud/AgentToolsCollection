@@ -26,12 +26,14 @@ from . import agenstry as agenstry_mod
 from . import flows as flows_mod
 from . import paygent as paygent_mod
 from . import prowl as prowl_mod
+from . import wellknown as wellknown_mod
 from . import mcp_safety
 
 # agenstry.com reverse-crawl: register its MCP page crawler as a source so
 # `python -m directory.jobs crawl-mcp agenstry` works like any other source.
 crawlers.MCP_CRAWLERS["agenstry"] = agenstry_mod.fetch_agenstry_mcp
 crawlers.MCP_CRAWLERS["prowl"] = prowl_mod.fetch_prowl_mcp
+crawlers.MCP_CRAWLERS["wellknown"] = wellknown_mod.fetch_wellknown_mcp
 
 # paygent.net reverse-crawl: register its x402 payment index (x402/mpp/l402)
 # as an x402 source; crawl runs via ALL_CRAWLERS -> cmd_crawl -> upsert_service.
@@ -280,6 +282,59 @@ def cmd_crawl(only=None) -> int:
     return 0
 
 
+def _upsert_wellknown_listing(conn, kind: str, row: dict) -> tuple[bool, int]:
+    """Link an existing endpoint without replacing its richer primary record."""
+    table = {"mcp": "mcp_servers", "a2a": "a2a_agents"}[kind]
+    endpoint = str(row.get("endpoint_url") or "").strip().lower().rstrip("/")
+    existing = None
+    if endpoint:
+        existing = conn.execute(
+            f"SELECT id FROM {table} WHERE lower(rtrim(endpoint_url, '/'))=? "
+            "ORDER BY id LIMIT 1",
+            (endpoint,),
+        ).fetchone()
+    if existing is not None:
+        listing_id = int(existing["id"])
+        db._record_source(
+            conn,
+            kind,
+            listing_id,
+            (row.get("source"), row.get("source_id"), row.get("source_url")),
+        )
+        return False, listing_id
+    if kind == "mcp":
+        return db.upsert_mcp_server(conn, row)
+    return db.upsert_a2a_agent(conn, row)
+
+
+def _upsert_wellknown_a2a_rows(rows: list[dict]) -> tuple[int, int, list[str]]:
+    added = updated = 0
+    errors: list[str] = []
+    for start in range(0, len(rows), 100):
+        batch = rows[start:start + 100]
+
+        def op(batch=batch):
+            batch_added = batch_updated = 0
+            batch_errors: list[str] = []
+            with db.writer() as conn:
+                for row in batch:
+                    try:
+                        created, _ = _upsert_wellknown_listing(conn, "a2a", row)
+                        batch_added += int(created)
+                        batch_updated += int(not created)
+                    except db.RetiredListingError:
+                        log.info("skip retired A2A listing: %s", row.get("slug"))
+                    except Exception as exc:
+                        batch_errors.append(f"upsert {row.get('slug')}: {exc!r}")
+            return batch_added, batch_updated, batch_errors
+
+        batch_added, batch_updated, batch_errors = db.with_retry(op)
+        added += batch_added
+        updated += batch_updated
+        errors.extend(batch_errors)
+    return added, updated, errors
+
+
 def cmd_crawl_mcp(only=None) -> int:
     """Import MCP servers from the standalone MCP directory sources."""
     names = [only] if only else list(crawlers.MCP_CRAWLERS)
@@ -358,7 +413,10 @@ def cmd_crawl_mcp(only=None) -> int:
                             endpoint = (item.get("endpoint_url") or "").strip()
                             if not endpoint or crawlers.url_retired(endpoint):
                                 continue
-                            created, _ = db.upsert_mcp_server(c, item)
+                            if name == "wellknown":
+                                created, _ = _upsert_wellknown_listing(c, "mcp", item)
+                            else:
+                                created, _ = db.upsert_mcp_server(c, item)
                             b_add += int(created)
                             b_upd += int(not created)
                         except db.RetiredListingError:
@@ -413,6 +471,21 @@ def cmd_crawl_a2a() -> int:
                  g["candidates"], g["resolved"], g["inserted"], g["updated"])
     except Exception as e:
         errors.append(f"agenstry: {e!r}"); log.warning("a2a agenstry crawl failed: %r", e)
+    try:
+        try:
+            wellknown_rows = wellknown_mod.fetch_wellknown_a2a()
+        except crawlers.PartialCrawl as e:
+            wellknown_rows = e.items
+            errors.append(f"wellknown: incomplete crawl: {e.reason}")
+            log.warning("a2a wellknown incomplete (%s); keeping %d items",
+                        e.reason, len(wellknown_rows))
+        w_added, w_updated, w_errors = _upsert_wellknown_a2a_rows(wellknown_rows)
+        errors.extend(f"wellknown: {error}" for error in w_errors)
+        added += w_added; updated += w_updated
+        log.info("a2a wellknown: candidates=%d inserted=%d updated=%d",
+                 len(wellknown_rows), w_added, w_updated)
+    except Exception as e:
+        errors.append(f"wellknown: {e!r}"); log.warning("a2a wellknown crawl failed: %r", e)
     # chiark.ai retired its API with HTTP 410 in July 2026. Existing rows stay
     # in the directory and continue through health checks; only polling stops.
     try:
