@@ -111,6 +111,14 @@ def _extract_peer_ip(scope: dict) -> str | None:
 # affects request handling.
 
 _MCP_PEEK_CAP = 256 * 1024  # never buffer more than this just to read the method
+_MCP_BATCH_METHOD_CAP = 64
+_MCP_KNOWN_METHODS = {
+    "initialize", "notifications/initialized", "notifications/cancelled",
+    "ping", "tools/list", "tools/call", "resources/list", "resources/read",
+    "resources/templates/list", "prompts/list", "prompts/get",
+    "completion/complete", "logging/setLevel", "roots/list",
+    "sampling/createMessage", "elicitation/create",
+}
 
 
 def _methods_from_body(body: bytes) -> list[str]:
@@ -122,11 +130,11 @@ def _methods_from_body(body: bytes) -> list[str]:
         return []
     items = data if isinstance(data, list) else [data]
     out = []
-    for it in items:
+    for it in items[:_MCP_BATCH_METHOD_CAP]:
         if isinstance(it, dict):
             m = it.get("method")
             if isinstance(m, str) and m:
-                out.append(m)
+                out.append(m if m in _MCP_KNOWN_METHODS else "_other")
     return out
 
 
@@ -457,7 +465,11 @@ async def get(slug: str, ctx: Context | None = None) -> dict[str, Any]:
     """
     with _open() as conn:
         row = directory_db.get_by_slug(conn, slug)
+        suppressed = directory_db.find_privacy_suppression_any(
+            conn, "x402", {"slug": slug}) if row is None else None
     if row is None:
+        if suppressed is not None:
+            return {"error": "not_found", "slug": slug}
         _log_call("get", ctx=ctx, args={"slug": slug}, result_n=0)
         return {"error": "not_found", "slug": slug}
     row = cards.build_service_card(row)
@@ -537,6 +549,10 @@ async def search_mcp_servers(
 async def get_mcp_server(slug: str, ctx: Context | None = None) -> dict[str, Any]:
     """Get the full card for one MCP server by slug."""
     with _open() as conn:
+        suppressed = directory_db.find_privacy_suppression_any(
+            conn, "mcp", {"slug": slug})
+        if suppressed is not None:
+            return {"error": "not_found", "message": f"No MCP server with slug {slug!r}"}
         mcp = directory_db.get_mcp_by_slug(conn, slug)
         if mcp:
             _log_call("get_mcp_server", ctx=ctx, args={"slug": slug}, result_slug=slug)

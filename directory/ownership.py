@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import http.client
+import idna
 import ipaddress
 import json
 import logging
@@ -115,8 +116,8 @@ def normalize_host(value: str) -> str:
     if any(char in raw for char in "/\\@?#:"):
         raise UnsafeTarget("host must be a DNS name without scheme, path, credentials, or port")
     try:
-        host = raw.encode("idna").decode("ascii")
-    except UnicodeError as exc:
+        host = idna.encode(raw, uts46=True).decode("ascii")
+    except (idna.IDNAError, UnicodeError) as exc:
         raise UnsafeTarget("host is not a valid DNS name") from exc
     if len(host) > 253 or "." not in host:
         raise UnsafeTarget("host must be a fully-qualified DNS name")
@@ -316,6 +317,8 @@ def issue(conn: sqlite3.Connection, user_id: int, host: str,
         raise ClaimError(str(exc)) from exc
     if method not in METHODS:
         raise ClaimError("unknown method: %s" % method)
+    if db.find_privacy_suppression(conn, "x402", {"host": host}) is not None:
+        raise ClaimError("this host was removed by its operator")
     if db.is_shared_host(conn, host):
         raise ClaimError(
             "%s hosts listings by unrelated authors; self-claim is not "
@@ -350,7 +353,17 @@ def verify_claim(conn: sqlite3.Connection, ownership_id: int,
         return False, "no such claim"
     if row["token_hash"] != token_hash(token):
         return False, "token mismatch"
+    if db.is_shared_host(conn, row["host"]):
+        return False, "host is shared; whole-host verification is unavailable"
     ok, detail = probe(row["method"], row["host"], token)
+    conn.execute("BEGIN IMMEDIATE")
+    row = conn.execute(
+        "SELECT * FROM domain_ownership WHERE id=?", (ownership_id,)
+    ).fetchone()
+    if row is None or row["token_hash"] != token_hash(token):
+        return False, "claim changed during verification"
+    if db.is_shared_host(conn, row["host"]):
+        return False, "host is shared; whole-host verification is unavailable"
     now = int(time.time())
     if ok:
         # Whoever can publish on the host today owns it. If someone else held
@@ -385,7 +398,6 @@ def verify_claim(conn: sqlite3.Connection, ownership_id: int,
             "fail_count=fail_count+1 WHERE id=?",
             (now, ownership_id),
         )
-    conn.commit()
     return ok, detail
 
 
@@ -400,6 +412,12 @@ def recheck(conn: sqlite3.Connection) -> tuple[int, int]:
     rows = list(conn.execute(
         "SELECT * FROM domain_ownership WHERE status='verified'"))
     for row in rows:
+        if db.is_shared_host(conn, row["host"]):
+            conn.execute(
+                "UPDATE domain_ownership SET status='revoked', last_checked=? "
+                "WHERE id=?", (now, row["id"]))
+            revoked += 1
+            continue
         token = row["token"]
         ok = bool(token) and probe(row["method"], row["host"], token)[0]
         if ok:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import secrets
+import json
 import threading
 import time
 from contextlib import closing
@@ -166,7 +167,28 @@ def x402_page(
     )
 
 
+def _privacy_suppressed_response(kind: str, slug: str, detail: str):
+    with _conn() as conn:
+        suppressed = db.find_privacy_suppression_any(
+            conn, kind, {"slug": slug})
+    if suppressed is None:
+        return None
+    return Response(
+        content=json.dumps({"detail": detail}, separators=(",", ":")),
+        status_code=404,
+        media_type="application/json",
+        headers={
+            "X-Agent-Tools-Privacy-Suppressed": "1",
+        },
+    )
+
+
 def _retired_response(request: Request, kind: str, slug: str):
+    detail = {"x402": "service not found", "mcp": "mcp server not found",
+              "a2a": "a2a agent not found"}[kind]
+    suppressed = _privacy_suppressed_response(kind, slug, detail)
+    if suppressed is not None:
+        return suppressed
     with _conn() as conn:
         retired = db.get_retired_listing(conn, kind, slug)
     if retired is None:
@@ -468,6 +490,10 @@ def api_service(slug: str):
     with _conn() as c:
         svc = db.get_by_slug(c, slug)
     if not svc:
+        suppressed = _privacy_suppressed_response(
+            "x402", slug, "service not found")
+        if suppressed is not None:
+            return suppressed
         with _conn() as c:
             retired = db.get_retired_listing(c, "x402", slug)
         if retired is not None:
@@ -604,6 +630,10 @@ def api_a2a_agent(slug: str):
     with _conn() as c:
         row = db.get_a2a_by_slug(c, slug)
     if not row:
+        suppressed = _privacy_suppressed_response(
+            "a2a", slug, "A2A agent not found")
+        if suppressed is not None:
+            return suppressed
         with _conn() as c:
             retired = db.get_retired_listing(c, "a2a", slug)
         if retired is not None:
@@ -683,6 +713,10 @@ def api_mcp_stats():
 
 @router.get("/api/v1/mcp/servers/{slug}", tags=["mcp"])
 def api_mcp_server(slug: str):
+    suppressed = _privacy_suppressed_response(
+        "mcp", slug, "MCP server not found")
+    if suppressed is not None:
+        return suppressed
     with _conn() as c:
         mcp = db.get_mcp_by_slug(c, slug)
         if mcp:
@@ -902,6 +936,12 @@ async def api_submit(request: Request, payload: SubmissionPayload):
             "message": "Auto-review could not confirm x402 payment support for this URL.",
             "evidence": review.get("evidence"),
         }
+    if rstatus == "owner_locked":
+        raise HTTPException(status_code=409, detail={
+            "error": "owner_verified",
+            "message": "A verified owner controls this endpoint.",
+            "submission_id": sub_id,
+        })
     return {
         "status": "pending",
         "submission_id": sub_id,
@@ -1156,7 +1196,8 @@ def _api_editable(request: Request, kind: str, slug: str):
             })
         if exc.status_code == 404 and isinstance(exc.detail, str):
             raise HTTPException(404, {"error": "not_found",
-                                      "message": exc.detail})
+                                      "message": exc.detail},
+                                headers=exc.headers)
         raise
     if user is None:
         _require_api_user(request)  # raises the 401 that explains how to get a key
@@ -1204,16 +1245,11 @@ async def api_patch_listing(request: Request, kind: str, slug: str,
             "editable": list(allowed),
         })
 
-    with db.connect(read_only=True) as conn:
-        verified_hosts = {x["host"] for x in conn.execute(
-            "SELECT host FROM domain_ownership "
-            "WHERE user_id=? AND status='verified'", (user["id"],))}
-
     def op():
-        with db.writer() as conn:
+        with db.writer(immediate=True) as conn:
             return db.apply_listing_edits(
                 conn, kind, row["id"], user["id"], owner["id"], payload,
-                verified_hosts=verified_hosts, via="api")
+                via="api")
 
     applied, rejected = db.with_retry(op)
     table = db._KIND_TABLE[kind]
@@ -1262,7 +1298,13 @@ async def api_submit_mcp(request: Request, payload: McpSubmissionPayload):
         directory_reverify.verify_and_mirror, endpoint,
         slug=slug, name=name,
         description=(payload.description or "").strip() or None,
-        homepage=endpoint, delivery="mcp", source="submission", source_id=endpoint)
+        homepage=endpoint, delivery="mcp", source="submission", source_id=endpoint,
+        protect_owner_kind="mcp", protect_owner_slug=slug,
+        protect_owner_url=endpoint)
+    if x402.get("owner_locked"):
+        with db.connect(read_only=True) as conn:
+            locked = db.find_owner_locked_listing(conn, "mcp", endpoint, slug)
+        raise _owner_locked("mcp", locked)
     row = {
         "slug": slug,
         "name": name,
@@ -1281,7 +1323,10 @@ async def api_submit_mcp(request: Request, payload: McpSubmissionPayload):
         "last_success_at": int(time.time()) if probe.get("status") == "ok" else None,
         "confidence": 0.5,
     }
-    with db.writer() as c:
+    with db.writer(immediate=True) as c:
+        locked = db.find_owner_locked_listing(c, "mcp", endpoint, slug)
+        if locked:
+            raise _owner_locked("mcp", locked)
         created, server_id = db.upsert_mcp_server(c, row)
     await run_in_threadpool(
         directory_mailer.send_admin_notification,
@@ -1352,11 +1397,23 @@ async def api_submit_a2a(request: Request, payload: A2ASubmissionPayload):
         slug=row["slug"], name=row.get("name"),
         description=row.get("description"),
         homepage=row.get("homepage_url"), delivery="a2a",
-        source="submission", source_id=row.get("source_id"))
+        source="submission", source_id=row.get("source_id"),
+        protect_owner_kind="a2a", protect_owner_slug=row["slug"],
+        protect_owner_url=card_url,
+        protect_owner_alternate_url=row.get("endpoint_url"))
+    if x402.get("owner_locked"):
+        with db.connect(read_only=True) as conn:
+            locked = db.find_owner_locked_listing(
+                conn, "a2a", card_url, row["slug"], row.get("endpoint_url"))
+        raise _owner_locked("a2a", locked)
     if x402.get("x402"):
         # real 402 probe is authoritative; never downgrade card self-declaration
         row["x402_supported"] = True
-    with db.writer() as c:
+    with db.writer(immediate=True) as c:
+        locked = db.find_owner_locked_listing(
+            c, "a2a", card_url, row["slug"], row.get("endpoint_url"))
+        if locked:
+            raise _owner_locked("a2a", locked)
         created, agent_id = db.upsert_a2a_agent(c, row)
     slug = row["slug"]
     await run_in_threadpool(

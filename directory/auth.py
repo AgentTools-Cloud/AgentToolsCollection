@@ -408,6 +408,13 @@ def _load_editable(request: Request, kind: str, slug: str):
     """
     if kind not in _KIND_LOOKUP:
         raise HTTPException(404, "Unknown listing type")
+    with db.connect(read_only=True) as conn:
+        suppressed = db.find_privacy_suppression_any(
+            conn, kind, {"slug": slug})
+    if suppressed is not None:
+        raise HTTPException(
+            404, "No such listing",
+            headers={"X-Agent-Tools-Privacy-Suppressed": "1"})
     user = current_user(request)
     if user is None:
         return None, None, None, None
@@ -482,17 +489,10 @@ async def edit_listing(request: Request, kind: str, slug: str):
     changes = {f: str(form.get(f) or "") for f in db._EDITABLE_FIELDS[kind]
                if f in form}
 
-    with db.connect(read_only=True) as conn:
-        verified_hosts = {r["host"] for r in conn.execute(
-            "SELECT host FROM domain_ownership "
-            "WHERE user_id=? AND status='verified'", (user["id"],))}
-
     def op():
-        with db.writer() as conn:
+        with db.writer(immediate=True) as conn:
             return db.apply_listing_edits(conn, kind, row["id"], user["id"],
-                                          owner["id"], changes,
-                                          verified_hosts=verified_hosts,
-                                          via="web")
+                                          owner["id"], changes, via="web")
     applied, rejected = db.with_retry(op)
 
     with db.connect(read_only=True) as conn:

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ipaddress
+import idna
 import re
 import socket
 from collections.abc import Callable
@@ -19,8 +20,8 @@ class UnsafeURL(ValueError):
 def normalize_hostname(value: str) -> str:
     raw = (value or "").strip().rstrip(".").lower()
     try:
-        host = raw.encode("idna").decode("ascii")
-    except UnicodeError as exc:
+        host = idna.encode(raw, uts46=True).decode("ascii")
+    except (idna.IDNAError, UnicodeError) as exc:
         raise UnsafeURL("URL host is not a valid DNS name") from exc
     if not host or len(host) > 253 or "." not in host:
         raise UnsafeURL("URL host must be a fully-qualified DNS name")

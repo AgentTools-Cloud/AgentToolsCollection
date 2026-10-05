@@ -33,36 +33,58 @@ DURATION = Histogram(
     buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10),
 )
 
-_SLUG = re.compile(r"^/services/[^/]+/?$")
+_SLUG_ROUTES = (
+    (re.compile(r"^/services/[^/]+/?$"), "/services/:slug"),
+    (re.compile(r"^/mcp/servers/[^/]+/?$"), "/mcp/servers/:slug"),
+    (re.compile(r"^/a2a/agents/[^/]+/?$"), "/a2a/agents/:slug"),
+    (re.compile(r"^/listings/(x402|mcp|a2a)/[^/]+/edit/?$"),
+     "/listings/:kind/:slug/edit"),
+    (re.compile(r"^/api/v1/services/[^/]+/?$"), "/api/v1/services/:slug"),
+    (re.compile(r"^/api/v1/mcp/servers/[^/]+/?$"),
+     "/api/v1/mcp/servers/:slug"),
+    (re.compile(r"^/api/v1/a2a/agents/[^/]+/?$"),
+     "/api/v1/a2a/agents/:slug"),
+    (re.compile(r"^/api/v1/listings/(x402|mcp|a2a)/[^/]+/?$"),
+     "/api/v1/listings/:kind/:slug"),
+)
 _CAT = re.compile(r"^/categories/[^/]+/?$")
 _WELL = re.compile(r"^/\.well-known/.+")
 _STATIC = re.compile(r"^/(static|assets)/.+")
-_KNOWN_ROOT_PREFIXES = (
-    "/mcp", "/mcp-discovery", "/api/v1", "/v1",
-    "/services", "/categories", "/healthz", "/health",
-    "/llms.txt", "/openapi.json", "/robots.txt", "/favicon.ico",
-    "/submit", "/about", "/metrics", "/", "/.well-known",
+_EXACT_ROUTES = {
+    "/", "/mcp", "/mcp-discovery", "/api/v1/search", "/api/v1/ask",
+    "/api/v1/categories", "/api/v1/stats", "/api/v1/resources/search",
+    "/api/v1/mcp/search", "/api/v1/mcp/stats", "/api/v1/a2a/search",
+    "/api/v1/a2a/stats", "/api/v1/submit", "/api/v1/mcp/submit",
+    "/api/v1/a2a/submit", "/v1/models", "/x402", "/a2a", "/categories",
+    "/healthz", "/health", "/llms.txt", "/openapi.json", "/robots.txt",
+    "/favicon.ico", "/submit", "/about", "/metrics",
+}
+_COLLAPSED_PREFIXES = (
+    "/api/v1", "/mcp-discovery", "/mcp", "/v1", "/services",
+    "/categories", "/listings",
 )
+_HTTP_METHODS = {"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"}
 
 
 def normalize_route(path: str) -> str:
     p = path or "/"
     if p != "/" and p.endswith("/"):
         p = p.rstrip("/")
-    if _SLUG.match(p + "/"):
-        return "/services/:slug"
+    for pattern, label in _SLUG_ROUTES:
+        if pattern.match(p):
+            return label
     if _CAT.match(p + "/"):
         return "/categories/:cat"
     if _WELL.match(p):
         return "/.well-known/*"
     if _STATIC.match(p):
         return "/static/*"
-    if not any(p == r or p.startswith(r + "/") or p == r for r in _KNOWN_ROOT_PREFIXES):
-        # Unknown path — likely vuln scanner; collapse to avoid label explosion.
-        return "/_other"
-    if len(p) > 64:
-        return "/_long"
-    return p
+    if p in _EXACT_ROUTES:
+        return p
+    for prefix in _COLLAPSED_PREFIXES:
+        if p.startswith(prefix + "/"):
+            return prefix + "/*"
+    return "/_other"
 
 
 class PrometheusMiddleware:
@@ -75,7 +97,8 @@ class PrometheusMiddleware:
         if scope.get("type") != "http":
             await self.app(scope, receive, send)
             return
-        method = scope.get("method", "?")
+        raw_method = str(scope.get("method", "?")).upper()
+        method = raw_method if raw_method in _HTTP_METHODS else "_other"
         route = normalize_route(scope.get("path", "/"))
         # /metrics itself must not be timed (avoid scraper self-counting).
         if route == "/metrics":
@@ -107,6 +130,13 @@ def _peer_ip(request: Request) -> str | None:
     return request.client.host if request.client else None
 
 
+def _is_direct_loopback(request: Request) -> bool:
+    if any(request.headers.get(name) for name in (
+            "cf-connecting-ip", "x-forwarded-for", "x-real-ip")):
+        return False
+    return _is_loopback(request.client.host if request.client else None)
+
+
 def _is_loopback(ip: str | None) -> bool:
     if not ip:
         return False
@@ -122,6 +152,6 @@ async def metrics_endpoint(request: Request) -> Response:
         auth = request.headers.get("authorization") or ""
         if auth != f"Bearer {token}":
             return Response("not found\n", status_code=404, media_type="text/plain")
-    elif not _is_loopback(_peer_ip(request)):
+    elif not _is_direct_loopback(request):
         return Response("not found\n", status_code=404, media_type="text/plain")
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)

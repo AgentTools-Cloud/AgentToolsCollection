@@ -1092,8 +1092,14 @@ def url_retired(url: str) -> bool:
         # SQLite's connection context manages transactions, not connection
         # lifetime. Close every lookup before a large crawl exhausts its FDs.
         with closing(db.connect(read_only=True)) as conn:
-            return db.find_active_retirement(
-                conn, "x402", urls=(url,)) is not None
+            return (
+                db.find_privacy_suppression(
+                    conn, "x402", {"url": url}) is not None
+                or db.find_active_retirement(
+                    conn, "x402", urls=(url,)) is not None
+            )
+    except RuntimeError:
+        raise
     except Exception:
         return False
 
