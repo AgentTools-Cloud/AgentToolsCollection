@@ -138,25 +138,33 @@ def _build_service(t: dict, verdict: dict) -> dict:
     }
 
 
-def _mirror_service(service: dict) -> bool:
+def _mirror_service(service: dict, protect_owner=None) -> bool | None:
     """Upsert a verified paid endpoint into services + mark x402_ok. Returns
     True if a new row was created."""
     def op(service=service):
-        with db.writer() as c:
+        with db.writer(immediate=bool(protect_owner)) as c:
+            if protect_owner:
+                locked = db.find_owner_locked_listing(c, **protect_owner)
+                if locked:
+                    return None
             created, _ = db.upsert_service(c, dict(service))
             # the verify already proved a 402 challenge -> mark x402_ok
             c.execute(
                 "UPDATE services SET x402_ok=1 WHERE source=? AND source_id=?",
                 (service["source"], service["source_id"]))
             return created
-    return bool(db.with_retry(op))
+    return db.with_retry(op)
 
 
 def verify_and_mirror(endpoint: str, *, slug: str, name: str | None = None,
                       description: str | None = None, homepage: str | None = None,
                       delivery: str = "mcp", source: str | None = None,
                       source_id: str | None = None,
-                      verdict: dict | None = None) -> dict:
+                      verdict: dict | None = None,
+                      protect_owner_kind: str | None = None,
+                      protect_owner_slug: str | None = None,
+                      protect_owner_url: str | None = None,
+                      protect_owner_alternate_url: str | None = None) -> dict:
     """Probe a single endpoint for x402 and, if verified, mirror it into the
     services (x402) table — the live equivalent of one reverify() iteration.
 
@@ -181,6 +189,14 @@ def verify_and_mirror(endpoint: str, *, slug: str, name: str | None = None,
          "category": _CATEGORY.get(delivery, delivery)}
     service = _build_service(t, verdict)
     out["service_slug"] = service["slug"]
+    protect_owner = None
+    if protect_owner_kind:
+        protect_owner = {
+            "kind": protect_owner_kind,
+            "url": protect_owner_url,
+            "slug": protect_owner_slug,
+            "alternate_url": protect_owner_alternate_url,
+        }
 
     with db.connect(read_only=True) as c:
         existing_keys = _load_existing_service_keys(c)
@@ -188,9 +204,15 @@ def verify_and_mirror(endpoint: str, *, slug: str, name: str | None = None,
     if key and key in existing_keys:
         # already catalogued under some source — refresh it but report dupe
         out["duplicate"] = True
-        _mirror_service(service)
+        mirrored = _mirror_service(service, protect_owner)
+        if mirrored is None:
+            out["owner_locked"] = True
         return out
-    out["created"] = _mirror_service(service)
+    mirrored = _mirror_service(service, protect_owner)
+    if mirrored is None:
+        out["owner_locked"] = True
+        return out
+    out["created"] = bool(mirrored)
     return out
 
 
@@ -270,6 +292,14 @@ def _probe(task):
         except Exception:
             task["resources"] = {}
     return task
+
+
+def _privacy_suppressed_metadata(conn, **values) -> bool:
+    try:
+        return db.find_privacy_suppression_any(
+            conn, "x402", values) is not None
+    except RuntimeError:
+        return True
 
 
 def reverify(targets=("mcp", "a2a"), workers=24, limit=None,
@@ -368,10 +398,15 @@ def reverify(targets=("mcp", "a2a"), workers=24, limit=None,
 
         def op(chunk=chunk):
             with db.writer() as c:
-                c.executemany(
-                    "UPDATE services SET resource_count=?, "
-                    "resource_samples=COALESCE(?, resource_samples), "
-                    "updated_at=? WHERE id=?", chunk)
+                for resource_count, samples, updated_at, service_id in chunk:
+                    if _privacy_suppressed_metadata(
+                            c, resource_samples=samples):
+                        continue
+                    c.execute(
+                        "UPDATE services SET resource_count=?, "
+                        "resource_samples=COALESCE(?, resource_samples), "
+                        "updated_at=? WHERE id=?",
+                        (resource_count, samples, updated_at, service_id))
         db.with_retry(op)
     if service_resources:
         print(f"[reverify] resource counts refreshed: "
@@ -385,13 +420,18 @@ def reverify(targets=("mcp", "a2a"), workers=24, limit=None,
 
         def op(chunk=chunk):
             with db.writer() as c:
-                c.executemany(
-                    "UPDATE services SET payment=?, "
-                    "resource_count=COALESCE(?, resource_count), "
-                    "resource_samples=COALESCE(?, resource_samples), "
-                    "price_min=COALESCE(?, price_min), "
-                    "price_max=COALESCE(?, price_max), "
-                    "updated_at=? WHERE id=?", chunk)
+                for update in chunk:
+                    payment, _count, samples, _lo, _hi, _updated, _id = update
+                    if _privacy_suppressed_metadata(
+                            c, payment=payment, resource_samples=samples):
+                        continue
+                    c.execute(
+                        "UPDATE services SET payment=?, "
+                        "resource_count=COALESCE(?, resource_count), "
+                        "resource_samples=COALESCE(?, resource_samples), "
+                        "price_min=COALESCE(?, price_min), "
+                        "price_max=COALESCE(?, price_max), "
+                        "updated_at=? WHERE id=?", update)
         db.with_retry(op)
     if service_payments:
         print(f"[reverify] payment metadata recorded: "

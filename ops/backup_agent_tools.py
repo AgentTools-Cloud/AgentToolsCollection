@@ -169,6 +169,12 @@ def snapshot(source, target, tables, seconds=600):
         src.execute("PRAGMA query_only=ON")
         src.execute("BEGIN")
         src.execute("SELECT count(*) FROM sqlite_master").fetchone()  # pin one WAL snapshot
+        if src.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'"
+        ).fetchone() and src.execute(
+            "SELECT value FROM meta WHERE key='privacy_finalize_required'"
+        ).fetchone():
+            raise RuntimeError("privacy storage finalization is required")
         with closing(sqlite3.connect(target)) as dst:
             src.backup(dst, pages=64, progress=progress, sleep=0.05)
             dst.execute("PRAGMA journal_mode=DELETE")

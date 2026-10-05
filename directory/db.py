@@ -14,7 +14,10 @@ import time
 import random
 import secrets
 import hashlib
-from contextlib import contextmanager
+import hmac
+import idna
+import re
+from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Callable
 from urllib.parse import urlparse
@@ -377,6 +380,22 @@ CREATE TABLE IF NOT EXISTS listing_retirement_events (
 CREATE INDEX IF NOT EXISTS idx_retirement_events
   ON listing_retirement_events(retirement_id, created_at);
 
+-- Privacy erasure cannot use retired_listings: that table deliberately keeps
+-- the original URL and a restorable snapshot. These keyed digests block future
+-- ingestion without retaining the erased hostname, slug or source identity.
+CREATE TABLE IF NOT EXISTS privacy_suppressions (
+    id          INTEGER PRIMARY KEY,
+    kind        TEXT NOT NULL,
+    match_type  TEXT NOT NULL,
+    digest      TEXT NOT NULL,
+    reason_code TEXT NOT NULL,
+    created_at  INTEGER NOT NULL,
+    created_by  TEXT NOT NULL,
+    UNIQUE(kind, match_type, digest)
+);
+CREATE INDEX IF NOT EXISTS idx_privacy_suppressions_lookup
+    ON privacy_suppressions(kind, match_type, digest);
+
 -- Identity and authorisation are deliberately separate: a GitHub login proves
 -- who you are, only a token published on the listed host proves you control
 -- the endpoint. Edit rights come from domain_ownership, never from users.
@@ -466,7 +485,8 @@ def _ensure_dir(path: str) -> None:
     Path(path).parent.mkdir(parents=True, exist_ok=True)
 
 
-def connect(db_path: str = DEFAULT_DB_PATH, read_only: bool = False) -> sqlite3.Connection:
+def connect(db_path: str = DEFAULT_DB_PATH, read_only: bool = False,
+            set_wal: bool = True) -> sqlite3.Connection:
     _ensure_dir(db_path)
     # sqlite timeout handles ordinary writer contention; busy_timeout is kept for
     # older sqlite builds and PRAGMA visibility. 30s is intentionally longer
@@ -480,7 +500,7 @@ def connect(db_path: str = DEFAULT_DB_PATH, read_only: bool = False) -> sqlite3.
         isolation_level=None if read_only else "DEFERRED",
     )
     conn.row_factory = sqlite3.Row
-    if not read_only:
+    if not read_only and set_wal:
         conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA busy_timeout=30000")
@@ -510,7 +530,7 @@ def with_retry(fn: Callable[[], Any], *, attempts: int = 6, base_delay: float = 
 
 
 def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
-    with connect(db_path) as c:
+    with closing(connect(db_path)) as c:
         c.executescript(SCHEMA)
         for table in ("services", "mcp_servers", "a2a_agents"):
             c.execute(
@@ -558,7 +578,8 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
             "ALTER TABLE mcp_servers ADD COLUMN safety_verdict TEXT",
             "ALTER TABLE mcp_servers ADD COLUMN safety_score INTEGER",
             "ALTER TABLE mcp_servers ADD COLUMN safety_reasons TEXT",
-        "ALTER TABLE mcp_servers ADD COLUMN protocol_version TEXT",
+            "ALTER TABLE mcp_servers ADD COLUMN protocol_version TEXT",
+            "ALTER TABLE mcp_servers ADD COLUMN kind TEXT",
             "ALTER TABLE a2a_agents ADD COLUMN conformance TEXT",
             "ALTER TABLE services ADD COLUMN down_since INTEGER",
             "ALTER TABLE mcp_servers ADD COLUMN down_since INTEGER",
@@ -629,9 +650,12 @@ def _migrate_mcp_fts_tools(c: sqlite3.Connection) -> None:
 
 
 @contextmanager
-def writer(db_path: str = DEFAULT_DB_PATH) -> Iterator[sqlite3.Connection]:
+def writer(db_path: str = DEFAULT_DB_PATH,
+           immediate: bool = False) -> Iterator[sqlite3.Connection]:
     conn = connect(db_path)
     try:
+        if immediate:
+            conn.execute("BEGIN IMMEDIATE")
         yield conn
         conn.commit()
     except Exception:
@@ -1188,6 +1212,12 @@ def record_crawl_start(conn, source):
 
 def log_tool_call(conn, tool, args=None, result_n=None, result_slug=None,
                   client_name=None, client_ip=None):
+    try:
+        if find_privacy_suppression_any(conn, "x402", {
+                "slug": result_slug, "args": args}) is not None:
+            return
+    except RuntimeError:
+        return
     conn.execute(
         "INSERT INTO tool_calls (ts, tool, args, result_n, result_slug, "
         "client_name, client_ip) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -1249,6 +1279,14 @@ def recent_mcp_client(conn, ip, max_age=_CLIENT_SEEN_TTL):
 def log_page_view(conn, kind, slug, ref=None, client_ip=None, ua=None):
     """Record a real-browser detail-page view (fired by a JS beacon, so bots
     that don't execute JS never reach here)."""
+    privacy_kind = {"service": "x402", "mcp": "mcp", "a2a": "a2a"}.get(
+        kind, "x402")
+    try:
+        if find_privacy_suppression_any(conn, privacy_kind, {
+                "slug": slug, "ref": ref}) is not None:
+            return
+    except RuntimeError:
+        return
     conn.execute(
         "INSERT INTO page_views (ts, kind, slug, ref, client_ip, ua) "
         "VALUES (?, ?, ?, ?, ?, ?)",
@@ -1367,6 +1405,16 @@ class RetiredListingError(ValueError):
             self.retirement.get("kind"), self.retirement.get("slug")))
 
 
+class PrivacySuppressedListingError(RetiredListingError):
+    def __init__(self, suppression, kind: str, slug: str | None):
+        self.suppression = dict(suppression)
+        super().__init__({
+            "kind": kind,
+            "slug": slug,
+            "status": "privacy-suppressed",
+        })
+
+
 _RETIREMENT_TABLES = {
     "x402": ("services", ("url", "mcp_url")),
     "mcp": ("mcp_servers", ("endpoint_url",)),
@@ -1383,6 +1431,188 @@ def _retirement_urls(kind: str, row: dict) -> list[str]:
         if value and value not in values:
             values.append(value)
     return values
+
+
+def _privacy_secret() -> bytes:
+    value = os.getenv("PRIVACY_SUPPRESSION_KEY")
+    if not value:
+        raise RuntimeError("PRIVACY_SUPPRESSION_KEY is not set")
+    return value.encode("utf-8")
+
+
+_PRIVACY_KEY_META = "privacy_suppression_key_id"
+_PRIVACY_KEY_SENTINEL = b"agent-tools.cloud privacy suppression key v1"
+
+
+def _privacy_key_id() -> str:
+    return hmac.new(
+        _privacy_secret(), _PRIVACY_KEY_SENTINEL, hashlib.sha256
+    ).hexdigest()
+
+
+def bind_privacy_suppression_key(conn, allow_existing: bool = False) -> str:
+    """Bind the configured key to this DB, or reject a mismatched key."""
+    key_id = _privacy_key_id()
+    row = conn.execute("SELECT value FROM meta WHERE key=?",
+                       (_PRIVACY_KEY_META,)).fetchone()
+    if row is not None:
+        if not hmac.compare_digest(str(row[0] or ""), key_id):
+            raise RuntimeError("PRIVACY_SUPPRESSION_KEY does not match this database")
+        return key_id
+    existing = conn.execute(
+        "SELECT COUNT(*) FROM privacy_suppressions").fetchone()[0]
+    if existing and not allow_existing:
+        raise RuntimeError(
+            "existing privacy suppressions require explicit key binding")
+    conn.execute(
+        "INSERT INTO meta(key,value,updated_at) VALUES(?,?,?)",
+        (_PRIVACY_KEY_META, key_id, int(time.time())),
+    )
+    return key_id
+
+
+def _verify_privacy_suppression_key(conn) -> None:
+    row = conn.execute("SELECT value FROM meta WHERE key=?",
+                       (_PRIVACY_KEY_META,)).fetchone()
+    if row is None:
+        raise RuntimeError(
+            "privacy suppressions exist but their key is not bound")
+    if not hmac.compare_digest(str(row[0] or ""), _privacy_key_id()):
+        raise RuntimeError("PRIVACY_SUPPRESSION_KEY does not match this database")
+
+
+def _privacy_digest(match_type: str, value: str) -> str:
+    material = "%s\0%s" % (match_type, value)
+    return hmac.new(
+        _privacy_secret(), material.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+
+
+def _privacy_host(value: str | None) -> str | None:
+    if not value:
+        return None
+    try:
+        host = (urlparse(str(value).strip()).hostname or "").lower().rstrip(".")
+        return idna.encode(host, uts46=True).decode("ascii") if host else None
+    except (idna.IDNAError, UnicodeError, ValueError):
+        return None
+
+
+def _privacy_source(source, source_id) -> str | None:
+    if source in (None, "") or source_id in (None, ""):
+        return None
+    return "%s\0%s" % (str(source).strip().lower(), str(source_id).strip())
+
+
+def _privacy_hosts(value) -> set[str]:
+    hosts: set[str] = set()
+    if isinstance(value, dict):
+        for item in value.values():
+            hosts.update(_privacy_hosts(item))
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            hosts.update(_privacy_hosts(item))
+    elif isinstance(value, str):
+        host = _privacy_host(value)
+        if host:
+            hosts.add(host)
+        elif value.lstrip().startswith(("{", "[")):
+            try:
+                hosts.update(_privacy_hosts(json.loads(value)))
+            except (TypeError, json.JSONDecodeError):
+                pass
+        for match in re.findall(r"https?://[^\s<>\"'\[\]{}(),]+", value,
+                                flags=re.IGNORECASE):
+            host = _privacy_host(match.rstrip(".;:!?"))
+            if host:
+                hosts.add(host)
+        for match in re.findall(
+                r"(?<![\w.\-])(?:[\w](?:[\w\-]{0,61}[\w])?\.)+"
+                r"[A-Za-z\u0080-\uffff]{2,63}(?![\w.\-])", value):
+            host = _privacy_host("https://" + match)
+            if host:
+                hosts.add(host)
+    return hosts
+
+
+_SUBMISSION_PRIMARY_ADDRESS_FIELDS = {
+    "x402": ("url",),
+    "mcp": ("endpoint_url", "url"),
+    "a2a": ("endpoint_url", "card_url", "url"),
+}
+
+
+def _submission_hosts(payload: dict, kind: str = "x402") -> set[str]:
+    for field in _SUBMISSION_PRIMARY_ADDRESS_FIELDS[kind]:
+        hosts = _privacy_hosts(payload.get(field))
+        if hosts:
+            return hosts
+    return set()
+
+
+def _privacy_candidates(kind: str, row: dict):
+    slug = str(row.get("slug") or "").strip().lower()
+    if slug:
+        yield kind, "slug", slug
+    source = _privacy_source(row.get("source"), row.get("source_id"))
+    if source:
+        yield kind, "source", source
+    direct_host = str(row.get("host") or "").strip().lower().rstrip(".")
+    if direct_host:
+        yield "*", "host", direct_host
+    for host in sorted(_privacy_hosts(row)):
+        yield "*", "host", host
+
+
+def find_privacy_suppression(conn, kind: str, row: dict):
+    try:
+        has_suppressions = conn.execute(
+            "SELECT 1 FROM privacy_suppressions LIMIT 1").fetchone()
+        if has_suppressions is None:
+            return None
+    except sqlite3.OperationalError as exc:
+        if "no such table: privacy_suppressions" in str(exc).lower():
+            return None
+        raise
+    _verify_privacy_suppression_key(conn)
+    for scope, match_type, value in dict.fromkeys(
+            _privacy_candidates(kind, row)):
+        digest = _privacy_digest(match_type, value)
+        found = conn.execute(
+            "SELECT id,kind,match_type,reason_code,created_at,created_by "
+            "FROM privacy_suppressions WHERE kind IN (?, '*') "
+            "AND match_type=? AND digest=? ORDER BY id LIMIT 1",
+            (scope, match_type, digest),
+        ).fetchone()
+        if found is not None:
+            return found
+    return None
+
+
+def find_privacy_suppression_any(conn, kind: str, row: dict):
+    kinds = (kind,) + tuple(value for value in _RETIREMENT_TABLES if value != kind)
+    return next((
+        suppression for candidate in kinds
+        if (suppression := find_privacy_suppression(
+            conn, candidate, row)) is not None
+    ), None)
+
+
+def _add_privacy_suppression(conn, kind: str, match_type: str, value: str,
+                             reason: str, actor: str) -> int:
+    bind_privacy_suppression_key(conn)
+    digest = _privacy_digest(match_type, value)
+    conn.execute(
+        "INSERT OR IGNORE INTO privacy_suppressions"
+        "(kind,match_type,digest,reason_code,created_at,created_by) "
+        "VALUES(?,?,?,?,?,?)",
+        (kind, match_type, digest, reason, int(time.time()), actor),
+    )
+    return conn.execute(
+        "SELECT id FROM privacy_suppressions "
+        "WHERE kind=? AND match_type=? AND digest=?",
+        (kind, match_type, digest),
+    ).fetchone()[0]
 
 
 def find_active_retirement(conn, kind: str, slug: str | None = None,
@@ -1426,10 +1656,478 @@ def get_retired_listing(conn, kind: str, slug: str):
 
 
 def assert_listing_not_retired(conn, kind: str, row: dict) -> None:
+    suppressed = find_privacy_suppression(conn, kind, row)
+    if suppressed is not None:
+        raise PrivacySuppressedListingError(suppressed, kind, row.get("slug"))
     retired = find_active_retirement(
         conn, kind, row.get("slug"), _retirement_urls(kind, row))
     if retired is not None:
         raise RetiredListingError(retired)
+
+
+def _privacy_pattern(value: str, hostname: bool = False):
+    boundary = r"[\w.\-]" if hostname else r"[\w\-]"
+    return re.compile(r"(?<!%s)%s(?!%s)" %
+                      (boundary, re.escape(str(value)), boundary),
+                      re.IGNORECASE)
+
+
+def _contains_sensitive_text(text, hosts=(), slugs=()) -> bool:
+    value = str(text or "")
+    if _privacy_hosts(value) & set(hosts):
+        return True
+    return any(_privacy_pattern(host, True).search(value) for host in hosts) or any(
+        _privacy_pattern(slug).search(value) for slug in slugs)
+
+
+def _redact_sensitive_text(text, hosts=(), slugs=()):
+    if text is None:
+        return None
+    value = str(text)
+    def redact_url(match):
+        return "[removed]" if _privacy_host(match.group(0)) in hosts else match.group(0)
+    value = re.sub(r"https?://[^\s<>\"'\[\]{}(),]+", redact_url, value,
+                   flags=re.IGNORECASE)
+    def redact_bare_host(match):
+        host = _privacy_host("https://" + match.group(0))
+        return "[removed]" if host in hosts else match.group(0)
+    value = re.sub(
+        r"(?<![\w.\-])(?:[\w](?:[\w\-]{0,61}[\w])?\.)+"
+        r"[A-Za-z\u0080-\uffff]{2,63}(?![\w.\-])",
+        redact_bare_host, value)
+    for host in hosts:
+        value = _privacy_pattern(host, True).sub("[removed]", value)
+    for slug in slugs:
+        value = _privacy_pattern(slug).sub("[removed]", value)
+    return value
+
+
+def _delete_sensitive_rows(conn, table: str, columns: tuple[str, ...],
+                           hosts=(), slugs=()) -> int:
+    ids = []
+    selected = ",".join(["rowid AS _privacy_rowid"] +
+                        ['"%s"' % col.replace('"', '""') for col in columns])
+    for row in conn.execute("SELECT %s FROM \"%s\"" %
+                            (selected, table.replace('"', '""'))):
+        if any(_contains_sensitive_text(row[index], hosts, slugs)
+               for index in range(1, len(row))):
+            ids.append(row[0])
+    if not ids:
+        return 0
+    marks = ",".join("?" * len(ids))
+    return conn.execute(
+        "DELETE FROM \"%s\" WHERE rowid IN (%s)" %
+        (table.replace('"', '""'), marks), ids).rowcount
+
+
+def _redact_listing_fields(conn, table: str, excluded_ids: set[int],
+                           hosts: set[str], slugs: set[str]) -> int:
+    columns = [row[1] for row in conn.execute("PRAGMA table_info(%s)" % table)
+               if "TEXT" in str(row[2]).upper()]
+    changed = 0
+    for row in conn.execute("SELECT * FROM %s" % table).fetchall():
+        if int(row["id"]) in excluded_ids:
+            continue
+        updates = {}
+        for column in columns:
+            old = row[column]
+            if _contains_sensitive_text(old, hosts, slugs):
+                updates[column] = _redact_sensitive_text(old, hosts, slugs)
+        if updates:
+            conn.execute(
+                "UPDATE %s SET %s WHERE id=?" %
+                (table, ",".join("%s=?" % key for key in updates)),
+                [*updates.values(), row["id"]],
+            )
+            changed += 1
+    return changed
+
+
+def _privacy_audit_rowids(conn, hosts: set[str], slugs: set[str]) -> dict:
+    slugs_lower = {value.lower() for value in slugs}
+    out: dict[str, list[int]] = {}
+
+    def add(table, rowid):
+        out.setdefault(table, []).append(int(rowid))
+
+    for row in conn.execute(
+            "SELECT rowid AS _privacy_rowid,* FROM retired_listings"):
+        if (str(row["slug"] or "").lower() in slugs_lower
+                or any(_contains_sensitive_text(row[column], hosts, ())
+                       for column in ("original_url", "normalized_url", "snapshot"))):
+            add("retired_listings", row["_privacy_rowid"])
+
+    for table, columns in {
+        "listing_edits": ("old_value", "new_value"),
+        "endpoint_collisions": ("old_value", "new_value", "evidence",
+                                "uncertainty"),
+        "crawl_runs": ("errors",),
+        "listing_sources": ("source_url",),
+        "listing_retirement_events": ("note",),
+    }.items():
+        for row in conn.execute(
+            "SELECT rowid AS _privacy_rowid,* FROM %s" % table):
+            if any(_contains_sensitive_text(row[column], hosts, ())
+                   for column in columns):
+                add(table, row["_privacy_rowid"])
+
+    for row in conn.execute(
+            "SELECT rowid AS _privacy_rowid,* FROM page_views"):
+        if (str(row["slug"] or "").lower() in slugs_lower
+                or _contains_sensitive_text(row["ref"], hosts, ())):
+                add("page_views", row["_privacy_rowid"])
+
+    for row in conn.execute(
+            "SELECT rowid AS _privacy_rowid,* FROM tool_calls"):
+        if (str(row["result_slug"] or "").lower() in slugs_lower
+                or _contains_sensitive_text(row["args"], hosts, ())):
+            add("tool_calls", row["_privacy_rowid"])
+
+    for rows in out.values():
+        rows.sort()
+    return out
+
+
+def _privacy_impact_plan(conn, tables: dict[str, str], target_ids,
+                         hosts: set[str], slugs: set[str],
+                         submission_ids, ownership_ids) -> dict:
+    impact = {
+        "targets": [],
+        "submissions": sorted(submission_ids),
+        "ownerships": sorted(
+            int(row[0]) for row in conn.execute(
+                "SELECT id FROM domain_ownership WHERE lower(host) IN (%s)" %
+                ",".join("?" * len(hosts)), sorted(hosts))
+        ) if hosts else sorted(ownership_ids),
+        "rows": _privacy_audit_rowids(conn, hosts, slugs),
+        "redactions": [],
+    }
+    for kind, ids in target_ids.items():
+        table = tables[kind]
+        for listing_id in ids:
+            row = conn.execute(
+                "SELECT * FROM %s WHERE id=?" % table, (listing_id,)
+            ).fetchone()
+            if row is not None:
+                digest = hashlib.sha256(json.dumps(
+                    dict(row), sort_keys=True, default=str,
+                    separators=(",", ":")).encode("utf-8")).hexdigest()
+                impact["targets"].append((kind, listing_id, digest))
+    impact["targets"].sort()
+    for kind, table in tables.items():
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(%s)" % table)
+                   if "TEXT" in str(row[2]).upper()]
+        for row in conn.execute("SELECT * FROM %s" % table):
+            if int(row["id"]) in target_ids[kind]:
+                continue
+            for column in columns:
+                value = row[column]
+                if _contains_sensitive_text(value, hosts, ()):
+                    impact["redactions"].append((
+                        table, int(row["id"]), column,
+                        hashlib.sha256(str(value).encode("utf-8")).hexdigest(),
+                    ))
+    for row in conn.execute("SELECT id,payload,note FROM submissions"):
+        if int(row["id"]) in submission_ids:
+            continue
+        for column in ("payload", "note"):
+            value = row[column]
+            if _contains_sensitive_text(value, hosts, ()):
+                impact["redactions"].append((
+                    "submissions", int(row["id"]), column,
+                    hashlib.sha256(str(value).encode("utf-8")).hexdigest(),
+                ))
+    impact["redactions"].sort()
+    return impact
+
+
+_PRIVACY_TARGET_FIELDS = {
+    "x402": ("url",),
+    "mcp": ("endpoint_url",),
+    "a2a": ("endpoint_url", "card_url"),
+}
+
+_PRIVACY_PRIMARY_FIELDS = {
+    "x402": ("url",),
+    "mcp": ("endpoint_url",),
+    "a2a": ("endpoint_url", "card_url"),
+}
+
+
+def privacy_purge_listing(conn, kind: str, slug: str, actor: str,
+                          reason: str = "owner_privacy_request",
+                          submission_ids=(), ownership_ids=()) -> dict:
+    """Irreversibly erase a listing while retaining only keyed deny digests."""
+    if kind not in _RETIREMENT_TABLES:
+        raise ValueError("unknown listing kind: %s" % kind)
+    _privacy_secret()
+    if conn.in_transaction:
+        conn.execute(
+            "UPDATE meta SET updated_at=updated_at WHERE key=?",
+            (_PRIVACY_KEY_META,))
+    else:
+        conn.execute("BEGIN IMMEDIATE")
+    bind_privacy_suppression_key(conn)
+    conn.execute("PRAGMA secure_delete=ON")
+    table = _RETIREMENT_TABLES[kind][0]
+    anchor = conn.execute(
+        "SELECT * FROM %s WHERE slug=?" % table, (slug,)
+    ).fetchone()
+    if anchor is None:
+        raise ValueError("listing not found: %s/%s" % (kind, slug))
+
+    submission_ids = sorted({int(value) for value in submission_ids})
+    ownership_ids = sorted({int(value) for value in ownership_ids})
+    anchor_hosts: set[str] = set()
+    for field in _PRIVACY_PRIMARY_FIELDS[kind]:
+        host = _privacy_host(anchor[field])
+        if host:
+            anchor_hosts.add(host)
+            break
+    submission_hosts: set[str] = set()
+    if submission_ids:
+        marks = ",".join("?" * len(submission_ids))
+        found_submissions = set()
+        for row in conn.execute(
+                "SELECT id,payload FROM submissions WHERE id IN (%s)" % marks,
+                submission_ids):
+            found_submissions.add(int(row["id"]))
+            try:
+                row_hosts = _submission_hosts(json.loads(row["payload"]), kind)
+            except (TypeError, json.JSONDecodeError):
+                row_hosts = set()
+            if len(row_hosts) != 1:
+                raise ValueError(
+                    "each privacy purge submission must identify one primary host")
+            submission_hosts.update(row_hosts)
+        if found_submissions != set(submission_ids):
+            raise ValueError("privacy purge submission not found")
+        if len(submission_hosts) != 1:
+            raise ValueError("privacy purge submissions span multiple hosts")
+    ownership_hosts: set[str] = set()
+    if ownership_ids:
+        marks = ",".join("?" * len(ownership_ids))
+        for row in conn.execute(
+                "SELECT id,host,scope_path,status FROM domain_ownership "
+                "WHERE id IN (%s)" % marks,
+                ownership_ids):
+            if row["status"] != "verified" or row["scope_path"] is not None:
+                raise ValueError("privacy purge requires verified whole-host claims")
+            host = str(row["host"] or "").strip().lower().rstrip(".")
+            if host:
+                ownership_hosts.add(host)
+        found_ids = {
+            int(row[0]) for row in conn.execute(
+                "SELECT id FROM domain_ownership WHERE id IN (%s)" % marks,
+                ownership_ids)
+        }
+        if found_ids != set(ownership_ids):
+            raise ValueError("privacy purge ownership claim not found")
+        if len(ownership_hosts) != 1:
+            raise ValueError("privacy purge ownership claims span multiple hosts")
+    if ownership_hosts:
+        if submission_hosts and submission_hosts != ownership_hosts:
+            raise ValueError("submission host is not covered by the ownership claim")
+        anchor_source = str(anchor["source_id"] or "")
+        anchor_submission = (
+            anchor["source"] == "submission"
+            and anchor_source.startswith("sub:")
+            and anchor_source[4:].isdigit()
+            and int(anchor_source[4:]) in submission_ids
+        )
+        anchor_mentions_claim = anchor_hosts == ownership_hosts
+        if not anchor_submission and not anchor_mentions_claim:
+            raise ValueError("ownership claim does not cover the anchor listing")
+        hosts = ownership_hosts
+    elif submission_hosts:
+        anchor_source = str(anchor["source_id"] or "")
+        anchor_submission = (
+            anchor["source"] == "submission"
+            and anchor_source.startswith("sub:")
+            and anchor_source[4:].isdigit()
+            and int(anchor_source[4:]) in submission_ids
+        )
+        if not anchor_submission and anchor_hosts != submission_hosts:
+            raise ValueError("submission does not identify the anchor listing")
+        hosts = submission_hosts
+    else:
+        if len(anchor_hosts) != 1:
+            raise ValueError("privacy purge anchor must identify one primary host")
+        hosts = anchor_hosts
+    if not hosts:
+        raise ValueError("privacy purge could not identify a host")
+    shared = [host for host in hosts if is_shared_host(conn, host)]
+    if shared:
+        raise ValueError(
+            "whole-host privacy purge is refused for shared hosts")
+
+    tables = {"x402": "services", "mcp": "mcp_servers", "a2a": "a2a_agents"}
+    targets: dict[str, list] = {target_kind: [] for target_kind in tables}
+    for target_kind, target_table in tables.items():
+        for row in conn.execute("SELECT * FROM %s" % target_table):
+            row_hosts: set[str] = set()
+            for column in _PRIVACY_TARGET_FIELDS[target_kind]:
+                row_hosts.update(_privacy_hosts(row[column]))
+            source_submission_id = None
+            if target_kind == "x402" and row["source"] == "submission":
+                source_id = str(row["source_id"] or "")
+                if source_id.startswith("sub:"):
+                    try:
+                        source_submission_id = int(source_id[4:])
+                    except ValueError:
+                        pass
+            slug_exposes_host = _contains_sensitive_text(row["slug"], hosts, ())
+            if (row_hosts & hosts or slug_exposes_host
+                    or source_submission_id in submission_ids):
+                targets[target_kind].append(row)
+    if not any(int(row["id"]) == int(anchor["id"]) for row in targets[kind]):
+        targets[kind].append(anchor)
+
+    target_ids: dict[str, set[int]] = {target_kind: set() for target_kind in tables}
+    target_slugs: set[str] = {"sub%d" % value for value in submission_ids}
+    suppression_ids: set[int] = set()
+    for host in hosts:
+        suppression_ids.add(_add_privacy_suppression(
+            conn, "*", "host", host, reason, actor))
+    for target_kind, rows in targets.items():
+        for row in rows:
+            listing_id = int(row["id"])
+            if listing_id in target_ids[target_kind]:
+                continue
+            target_ids[target_kind].add(listing_id)
+            target_slug = str(row["slug"])
+            target_slugs.add(target_slug.lower())
+            suppression_ids.add(_add_privacy_suppression(
+                conn, target_kind, "slug", target_slug.lower(), reason, actor))
+            source = _privacy_source(row["source"], row["source_id"])
+            if source:
+                suppression_ids.add(_add_privacy_suppression(
+                    conn, target_kind, "source", source, reason, actor))
+    for submission_id in submission_ids:
+        suppression_ids.add(_add_privacy_suppression(
+            conn, "x402", "source",
+            _privacy_source("submission", "sub:%d" % submission_id),
+            reason, actor))
+        suppression_ids.add(_add_privacy_suppression(
+            conn, "x402", "slug", "sub%d" % submission_id,
+            reason, actor))
+
+    plan = {
+        "hosts": sorted(hosts),
+        "impact": _privacy_impact_plan(
+            conn, tables, target_ids, hosts, target_slugs,
+            submission_ids, ownership_ids),
+    }
+    plan_digest = _privacy_digest(
+        "purge-plan", json.dumps(plan, separators=(",", ":"), sort_keys=True))
+
+    audit_rowids = plan["impact"]["rows"]
+    retirement_ids = audit_rowids.get("retired_listings", [])
+    if retirement_ids:
+        marks = ",".join("?" * len(retirement_ids))
+        conn.execute(
+            "DELETE FROM listing_retirement_events WHERE retirement_id IN (%s)"
+            % marks, retirement_ids)
+        conn.execute(
+            "DELETE FROM retired_listing_urls WHERE retirement_id IN (%s)"
+            % marks, retirement_ids)
+        conn.execute(
+            "DELETE FROM retired_listings WHERE id IN (%s)" % marks,
+            retirement_ids)
+    for audit_table, rowids in audit_rowids.items():
+        if audit_table == "retired_listings" or not rowids:
+            continue
+        marks = ",".join("?" * len(rowids))
+        conn.execute(
+            "DELETE FROM %s WHERE rowid IN (%s)" % (audit_table, marks),
+            rowids)
+    if hosts:
+        marks = ",".join("?" * len(hosts))
+        conn.execute(
+            "DELETE FROM shared_hosts WHERE lower(host) IN (%s)" % marks,
+            sorted(hosts))
+
+    page_kind = {"x402": "service", "mcp": "mcp", "a2a": "a2a"}
+    for target_kind, ids in target_ids.items():
+        target_table = tables[target_kind]
+        for listing_id in ids:
+            row = conn.execute(
+                "SELECT slug FROM %s WHERE id=?" % target_table,
+                (listing_id,)).fetchone()
+            if row is None:
+                continue
+            target_slug = row["slug"]
+            conn.execute(
+                "DELETE FROM listing_sources WHERE kind=? AND listing_id=?",
+                (target_kind, listing_id))
+            conn.execute(
+                "DELETE FROM listing_edits WHERE kind=? AND listing_id=?",
+                (target_kind, listing_id))
+            conn.execute(
+                "DELETE FROM page_views WHERE kind=? AND slug=?",
+                (page_kind[target_kind], target_slug))
+            conn.execute("DELETE FROM tool_calls WHERE result_slug=?", (target_slug,))
+            if target_kind == "x402":
+                conn.execute(
+                    "DELETE FROM endpoint_collisions WHERE kind='x402' AND "
+                    "(listing_id=? OR occupant_id=? OR survivor_id=? OR absorbed_id=?)",
+                    (listing_id,) * 4)
+                conn.execute(
+                    "DELETE FROM health_history WHERE service_id=?", (listing_id,))
+                conn.execute(
+                    "DELETE FROM service_paytos WHERE service_id=?", (listing_id,))
+            elif target_kind == "mcp":
+                conn.execute(
+                    "DELETE FROM mcp_health_history WHERE server_id=?", (listing_id,))
+            conn.execute("DELETE FROM %s WHERE id=?" % target_table, (listing_id,))
+
+    redacted_by_kind = {}
+    for target_kind, target_table in tables.items():
+        redacted_by_kind[target_kind] = _redact_listing_fields(
+            conn, target_table, target_ids[target_kind], hosts, set())
+
+    submissions_deleted = 0
+    if submission_ids:
+        marks = ",".join("?" * len(submission_ids))
+        submissions_deleted = conn.execute(
+            "DELETE FROM submissions WHERE id IN (%s)" % marks,
+            submission_ids).rowcount
+    for row in conn.execute(
+            "SELECT id,payload,note FROM submissions").fetchall():
+        payload = _redact_sensitive_text(row["payload"], hosts, set())
+        note = _redact_sensitive_text(row["note"], hosts, set())
+        if payload != row["payload"] or note != row["note"]:
+            conn.execute(
+                "UPDATE submissions SET payload=?,note=? WHERE id=?",
+                (payload, note, row["id"]))
+
+    ownerships_deleted = 0
+    if ownership_ids:
+        marks = ",".join("?" * len(ownership_ids))
+        ownerships_deleted = conn.execute(
+            "DELETE FROM domain_ownership WHERE id IN (%s)" % marks,
+            ownership_ids).rowcount
+    if hosts:
+        marks = ",".join("?" * len(hosts))
+        ownerships_deleted += conn.execute(
+            "DELETE FROM domain_ownership WHERE lower(host) IN (%s)" % marks,
+            sorted(hosts)).rowcount
+
+    fts_tables = {"x402": "services_fts", "mcp": "mcp_fts", "a2a": "a2a_fts"}
+    for target_kind, ids in target_ids.items():
+        if ids or redacted_by_kind[target_kind]:
+            fts = fts_tables[target_kind]
+            conn.execute("INSERT INTO %s(%s) VALUES('rebuild')" % (fts, fts))
+
+    return {
+        "listing_id": int(anchor["id"]),
+        "listings_deleted": sum(len(ids) for ids in target_ids.values()),
+        "submissions_deleted": submissions_deleted,
+        "ownerships_deleted": ownerships_deleted,
+        "suppressions": len(suppression_ids),
+        "listings_redacted": sum(redacted_by_kind.values()),
+        "plan_digest": plan_digest,
+    }
 
 
 def _listing_snapshot(conn, kind: str, row) -> dict:
@@ -1633,6 +2331,46 @@ def find_service_by_url(conn, url: str) -> dict | None:
     return row_to_dict(row) if row else None
 
 
+def find_owner_locked_listing(conn, kind: str, url: str | None = None,
+                              slug: str | None = None,
+                              alternate_url: str | None = None) -> dict | None:
+    table, columns = {
+        "x402": ("services", ("url",)),
+        "mcp": ("mcp_servers", ("endpoint_url",)),
+        "a2a": ("a2a_agents", ("card_url", "endpoint_url")),
+    }[kind]
+    clauses = []
+    params = []
+    for value, column in zip((url, alternate_url), columns):
+        key = _canonical_endpoint(value or "")
+        if key:
+            clauses.append("lower(rtrim(%s,'/'))=?" % column)
+            params.append(key)
+    if slug:
+        clauses.append("lower(slug)=lower(?)")
+        params.append(slug)
+    if not clauses:
+        return None
+    row = conn.execute(
+        "SELECT * FROM %s WHERE owner_verified=1 AND (%s) "
+        "ORDER BY id LIMIT 1" % (table, " OR ".join(clauses)), params
+    ).fetchone()
+    if row is None:
+        return None
+    if kind == "x402":
+        return row_to_dict(row)
+    if kind == "mcp":
+        return mcp_row_to_dict(row)
+    return a2a_row_to_dict(row)
+
+
+def endpoint_owner_locked(conn, kind: str, url: str,
+                          slug: str | None = None) -> bool:
+    if not url and not slug:
+        return False
+    return find_owner_locked_listing(conn, kind, url, slug) is not None
+
+
 def count_recent_submissions(conn, client_ip: str | None,
                              since_seconds: int = 86400) -> int:
     """Count pending submissions from `client_ip` in the last N seconds.
@@ -1669,6 +2407,10 @@ def find_pending_submission(conn, url: str) -> dict | None:
 
 def create_submission(conn, payload: dict) -> int:
     """Insert a submission row. payload is stored verbatim as JSON."""
+    suppressed = find_privacy_suppression(conn, "x402", payload)
+    if suppressed is not None:
+        raise PrivacySuppressedListingError(
+            suppressed, "x402", payload.get("slug"))
     cur = conn.execute(
         "INSERT INTO submissions (payload, status, created_at) "
         "VALUES (?, 'pending', ?)",
@@ -2080,6 +2822,12 @@ def set_meta(conn: sqlite3.Connection, key: str, value: str) -> None:
         "updated_at=excluded.updated_at",
         (key, value, int(time.time())),
     )
+
+
+def require_privacy_finalized(conn) -> None:
+    if get_meta(conn, "privacy_finalize_required"):
+        raise RuntimeError(
+            "privacy storage finalization is required before startup or backup")
 
 
 def delete_mcp_by_source(conn: sqlite3.Connection, source: str, source_id: str) -> int:
@@ -3012,15 +3760,22 @@ def refresh_shared_hosts(
 
     # Path count only finds candidates. Whether the paths belong to unrelated
     # authors is a judgement call, so a human verdict outlives every refresh.
-    verdicts = {
-        r["host"]: r["verdict"]
-        for r in conn.execute("SELECT host, verdict FROM shared_hosts")
+    existing = {
+        r["host"]: dict(r)
+        for r in conn.execute("SELECT * FROM shared_hosts")
     }
     now = int(time.time())
+    candidate_hosts = {
+        h for h, host_paths in paths.items() if len(host_paths) >= min_paths
+    }
+    reviewed_hosts = {
+        host for host, row in existing.items()
+        if row["verdict"] in ("shared", "single_operator")
+    }
     rows = [
-        (h, len(p), listings[h], verdicts.get(h, "unreviewed"), now)
-        for h, p in paths.items()
-        if len(p) >= min_paths
+        (host, len(paths.get(host, set())), listings.get(host, 0),
+         existing.get(host, {}).get("verdict", "unreviewed"), now)
+        for host in sorted(candidate_hosts | reviewed_hosts)
     ]
     conn.execute("DELETE FROM shared_hosts")
     conn.executemany(
@@ -3228,7 +3983,6 @@ def _keep_owned_slug(cur, table: str, row: dict, existing) -> None:
 def apply_listing_edits(conn: sqlite3.Connection, kind: str, listing_id: int,
                         user_id: int, ownership_id: int,
                         changes: dict,
-                        verified_hosts=None,
                         via: str = "web") -> tuple[list[str], list[str]]:
     """Write owner edits and record each one in the public audit trail.
 
@@ -3239,11 +3993,26 @@ def apply_listing_edits(conn: sqlite3.Connection, kind: str, listing_id: int,
     table = _KIND_TABLE[kind]
     allowed = _EDITABLE_FIELDS[kind]
     endpoints = _ENDPOINT_FIELDS.get(kind, ())
-    hosts = {str(h).lower() for h in (verified_hosts or ())}
     current = conn.execute("SELECT * FROM %s WHERE id=?" % table,
                            (listing_id,)).fetchone()
     if current is None:
         return [], []
+    ownership = conn.execute(
+        "SELECT * FROM domain_ownership WHERE id=? AND user_id=? "
+        "AND status='verified' AND scope_path IS NULL",
+        (ownership_id, user_id),
+    ).fetchone()
+    primary_url = current[_PRIMARY_ENDPOINT[kind]]
+    current_host, _ = _host_and_path(primary_url or "")
+    if ownership is None or ownership["host"] != current_host:
+        raise PermissionError("verified ownership changed before the edit")
+    hosts = {
+        str(row["host"]).lower()
+        for row in conn.execute(
+            "SELECT host FROM domain_ownership WHERE user_id=? "
+            "AND status='verified' AND scope_path IS NULL",
+            (user_id,))
+    }
     now = int(time.time())
     applied: list[str] = []
     rejected: list[str] = []
@@ -3255,6 +4024,11 @@ def apply_listing_edits(conn: sqlite3.Connection, kind: str, listing_id: int,
         new = (value or "").strip() or None
         old = current[field]
         if (old or None) == new:
+            continue
+        suppressed = find_privacy_suppression(conn, kind, {field: new})
+        if suppressed is not None:
+            rejected.append("%s: this value references data removed by its operator"
+                            % field)
             continue
         if field in endpoints:
             if new is None:

@@ -10,12 +10,14 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hmac
 import json
 import logging
 import os
 import sys
 import threading
 import time
+from contextlib import closing
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -272,6 +274,10 @@ def cmd_crawl(only=None) -> int:
             cmd_crawl_a2a()
         except Exception as e:
             log.warning("a2a crawl failed: %r", e)
+        try:
+            cmd_shared_hosts()
+        except Exception as e:
+            log.warning("shared-host refresh failed: %r", e)
         # Clear the submission queue automatically — there is no human
         # gate. verified -> listed, rejected -> dropped, uncertain ->
         # retried next cycle.
@@ -1225,6 +1231,183 @@ def cmd_retire(kind: str, slug: str, reason: str, actor: str,
     return 0
 
 
+def cmd_privacy_purge(kind: str, slug: str | None, reason: str, actor: str,
+                      submission_ids=(), ownership_ids=(),
+                      anchor_submission_id: int | None = None,
+                      dry_run: bool = False,
+                      expect_listings: int | None = None,
+                      expect_submissions: int | None = None,
+                      expect_ownerships: int | None = None,
+                      expect_plan_digest: str | None = None,
+                      db_path: str | None = None) -> int:
+    if bool(slug) == bool(anchor_submission_id):
+        raise ValueError("provide exactly one of slug or --anchor-submission-id")
+    submission_ids = sorted({int(value) for value in submission_ids})
+    if (anchor_submission_id is not None
+            and anchor_submission_id not in submission_ids):
+        submission_ids.append(anchor_submission_id)
+    if not dry_run and (expect_listings is None
+                        or expect_submissions is None
+                        or expect_ownerships is None
+                        or not expect_plan_digest):
+        raise ValueError(
+            "apply requires --expect-listings, --expect-submissions, "
+            "--expect-ownerships and --expect-plan-digest from a dry run")
+    if not dry_run and os.getenv("AGENT_TOOLS_PRIVACY_MAINTENANCE") != "1":
+        raise ValueError(
+            "apply requires AGENT_TOOLS_PRIVACY_MAINTENANCE=1 after stopping writers")
+
+    def run(conn):
+        resolved_slug = slug
+        if anchor_submission_id is not None:
+            row = conn.execute(
+                "SELECT slug FROM services WHERE source='submission' "
+                "AND source_id=?",
+                ("sub:%d" % anchor_submission_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("submission anchor listing not found")
+            resolved_slug = row["slug"]
+        result = db.privacy_purge_listing(
+            conn, kind, resolved_slug, actor, reason,
+            submission_ids=submission_ids,
+            ownership_ids=ownership_ids)
+        expected = {
+            "listings_deleted": expect_listings,
+            "submissions_deleted": expect_submissions,
+            "ownerships_deleted": expect_ownerships,
+        }
+        mismatches = {
+            key: {"expected": value, "actual": result[key]}
+            for key, value in expected.items()
+            if value is not None and result[key] != value
+        }
+        if mismatches:
+            raise RuntimeError("privacy purge count mismatch: %s" %
+                               json.dumps(mismatches, sort_keys=True))
+        if expect_plan_digest and not hmac.compare_digest(
+                result["plan_digest"], expect_plan_digest):
+            raise RuntimeError("privacy purge plan digest mismatch")
+        if not dry_run:
+            db.set_meta(conn, "privacy_finalize_required", json.dumps({
+                "at": int(time.time()),
+                "kind": kind,
+                "plan_digest": result["plan_digest"],
+            }, separators=(",", ":"), sort_keys=True))
+        return result
+
+    if dry_run:
+        conn = db.connect(db_path or db.DEFAULT_DB_PATH)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            result = run(conn)
+        finally:
+            conn.rollback()
+            conn.close()
+    else:
+        path = db_path or db.DEFAULT_DB_PATH
+        switched = False
+        try:
+            with closing(db.connect(path, set_wal=False)) as conn:
+                checkpoint = conn.execute(
+                    "PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+                if checkpoint and int(checkpoint[0]) != 0:
+                    raise RuntimeError(
+                        "privacy purge preflight found a busy WAL; "
+                        "stop all readers first")
+            with closing(db.connect(path, set_wal=False)) as conn:
+                mode = conn.execute("PRAGMA journal_mode=DELETE").fetchone()[0]
+                if str(mode).lower() != "delete":
+                    raise RuntimeError(
+                        "privacy purge could not acquire DELETE journal mode")
+                switched = True
+
+            def op():
+                conn = db.connect(path, set_wal=False)
+                try:
+                    conn.execute("BEGIN EXCLUSIVE")
+                    outcome = run(conn)
+                    conn.commit()
+                    return outcome
+                except Exception:
+                    conn.rollback()
+                    raise
+                finally:
+                    conn.close()
+            result = db.with_retry(op)
+            try:
+                _finalize_privacy_storage(path, switch_to_delete=False)
+            except Exception as exc:
+                raise RuntimeError(
+                    "logical privacy purge committed; run privacy-finalize "
+                    "in maintenance mode") from exc
+        finally:
+            if switched:
+                with closing(db.connect(path, set_wal=False)) as conn:
+                    mode = conn.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+                    if str(mode).lower() != "wal":
+                        raise RuntimeError(
+                            "privacy purge could not restore WAL journal mode")
+    print(json.dumps({
+        "status": "privacy-purge-dry-run" if dry_run else "privacy-purged",
+        "kind": kind,
+        "rolled_back": dry_run,
+        **result,
+    }, ensure_ascii=False))
+    return 0
+
+
+def _finalize_privacy_storage(path: str, switch_to_delete: bool = True) -> None:
+    switched = False
+    try:
+        if switch_to_delete:
+            with closing(db.connect(path, set_wal=False)) as conn:
+                checkpoint = conn.execute(
+                    "PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+                if checkpoint and int(checkpoint[0]) != 0:
+                    raise RuntimeError(
+                        "privacy finalize found a busy WAL; stop all readers first")
+            with closing(db.connect(path, set_wal=False)) as conn:
+                mode = conn.execute("PRAGMA journal_mode=DELETE").fetchone()[0]
+                if str(mode).lower() != "delete":
+                    raise RuntimeError("privacy finalize could not acquire DELETE mode")
+                switched = True
+        with closing(db.connect(path, set_wal=False)) as conn:
+            conn.execute("PRAGMA secure_delete=ON")
+            conn.execute("VACUUM")
+    finally:
+        if switch_to_delete and switched:
+            with closing(db.connect(path, set_wal=False)) as conn:
+                mode = conn.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+                if str(mode).lower() != "wal":
+                    raise RuntimeError("privacy finalize could not restore WAL mode")
+    with closing(db.connect(path, set_wal=switch_to_delete)) as conn:
+        conn.execute("DELETE FROM meta WHERE key='privacy_finalize_required'")
+        conn.commit()
+
+
+def cmd_privacy_finalize(db_path: str | None = None) -> int:
+    if os.getenv("AGENT_TOOLS_PRIVACY_MAINTENANCE") != "1":
+        raise ValueError(
+            "privacy-finalize requires AGENT_TOOLS_PRIVACY_MAINTENANCE=1")
+    path = db_path or db.DEFAULT_DB_PATH
+    _finalize_privacy_storage(path)
+    print(json.dumps({"status": "privacy-finalized"}))
+    return 0
+
+
+def cmd_privacy_bind_key(db_path: str | None = None) -> int:
+    if os.getenv("AGENT_TOOLS_PRIVACY_MAINTENANCE") != "1":
+        raise ValueError(
+            "privacy-bind-key requires AGENT_TOOLS_PRIVACY_MAINTENANCE=1")
+    path = db_path or db.DEFAULT_DB_PATH
+    with db.writer(path, immediate=True) as conn:
+        key_id = db.bind_privacy_suppression_key(conn, allow_existing=True)
+    print(json.dumps({"status": "privacy-key-bound",
+                      "key_id_prefix": key_id[:12]}))
+    return 0
+
+
 def cmd_restore(kind: str, slug: str, actor: str,
                 note: str | None = None) -> int:
     def op():
@@ -1351,11 +1534,20 @@ def _approve(sub_id: int, note: str | None = None,
         "region": "global",
     }
     def op():
-        with db.writer() as wc:
+        with db.writer(immediate=True) as wc:
+            if db.endpoint_owner_locked(wc, "x402", url, service["slug"]):
+                db.mark_submission(
+                    wc, sub_id, "owner_locked",
+                    note="Verified owner controls this endpoint")
+                return {"owner_locked": True}
             created, _sid = db.upsert_service(wc, service)
             db.mark_submission(wc, sub_id, "approved", note=note)
-            return created
-    created = db.with_retry(op)
+            return {"created": bool(created)}
+    outcome = db.with_retry(op)
+    if outcome.get("owner_locked"):
+        log.warning("approve #%d refused: verified owner controls endpoint", sub_id)
+        return {"owner_locked": True, "name": name, "url": url}
+    created = outcome["created"]
     log.info("approved submission #%d -> service slug=%s (%s)",
              sub_id, service["slug"], "new" if created else "updated")
     # Probe once now so the new service is not stuck at health=unknown
@@ -1398,7 +1590,7 @@ def _approve(sub_id: int, note: str | None = None,
 def cmd_approve(sub_id: int, note: str | None = None) -> int:
     """CLI manual-override approve (the normal flow is fully automatic)."""
     res = _approve(sub_id, note=note)
-    if res is None:
+    if res is None or res.get("owner_locked"):
         print(f"submission #{sub_id} could not be approved", file=sys.stderr)
         return 1
     print(f"approved submission #{sub_id} -> service slug={res['slug']} "
@@ -1458,6 +1650,9 @@ def review_submission(sub_id: int, note_prefix: str = "auto-review", notify_pend
 
     if vstatus == "verified":
         res = _approve(sub_id, note=note, payment=verdict.get("payment"))
+        if res and res.get("owner_locked"):
+            return {"status": "owner_locked", "submission_id": sub_id,
+                    "evidence": ["Verified owner controls this endpoint"]}
         if res:
             return {"status": "listed", "submission_id": sub_id,
                     "slug": res["slug"], "evidence": evidence}
@@ -1579,6 +1774,21 @@ def main(argv=None) -> int:
     p_retire.add_argument("--requested-by", default=None)
     p_retire.add_argument("--request-email", default=None)
     p_retire.add_argument("--submission-id", type=int, default=None)
+    p_purge = sub.add_parser("privacy-purge")
+    p_purge.add_argument("kind", choices=("x402", "mcp", "a2a"))
+    p_purge.add_argument("slug", nargs="?", default=None)
+    p_purge.add_argument("--reason", default="owner_privacy_request")
+    p_purge.add_argument("--actor", default="staff-cli")
+    p_purge.add_argument("--anchor-submission-id", type=int, default=None)
+    p_purge.add_argument("--submission-id", type=int, action="append", default=[])
+    p_purge.add_argument("--ownership-id", type=int, action="append", default=[])
+    p_purge.add_argument("--dry-run", action="store_true")
+    p_purge.add_argument("--expect-listings", type=int, default=None)
+    p_purge.add_argument("--expect-submissions", type=int, default=None)
+    p_purge.add_argument("--expect-ownerships", type=int, default=None)
+    p_purge.add_argument("--expect-plan-digest", default=None)
+    sub.add_parser("privacy-finalize")
+    sub.add_parser("privacy-bind-key")
     p_restore = sub.add_parser("restore")
     p_restore.add_argument("kind", choices=("x402", "mcp", "a2a"))
     p_restore.add_argument("slug")
@@ -1638,6 +1848,17 @@ def main(argv=None) -> int:
         return cmd_retire(args.kind, args.slug, args.reason, args.actor,
                           args.requested_by, args.request_email,
                           args.submission_id)
+    if args.cmd == "privacy-purge":
+        return cmd_privacy_purge(
+            args.kind, args.slug, args.reason, args.actor,
+            args.submission_id, args.ownership_id,
+            args.anchor_submission_id, args.dry_run,
+            args.expect_listings, args.expect_submissions,
+            args.expect_ownerships, args.expect_plan_digest)
+    if args.cmd == "privacy-finalize":
+        return cmd_privacy_finalize()
+    if args.cmd == "privacy-bind-key":
+        return cmd_privacy_bind_key()
     if args.cmd == "restore":
         return cmd_restore(args.kind, args.slug, args.actor, args.note)
     if args.cmd == "retirements":

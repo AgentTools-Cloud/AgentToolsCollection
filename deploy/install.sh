@@ -26,6 +26,10 @@ if [[ ! -f .env ]]; then
 fi
 
 install -m 644 deploy/mcpserver.service /etc/systemd/system/mcpserver.service
+install -m 644 deploy/nginx/agent-tools-privacy-log.conf \
+    /etc/nginx/conf.d/agent-tools-privacy-log.conf
+nginx -t
+systemctl reload nginx
 systemctl daemon-reload
 systemctl enable mcpserver
 systemctl restart mcpserver

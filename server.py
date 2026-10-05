@@ -42,9 +42,12 @@ async def lifespan(app: FastAPI):
     # Ensure the directory site DB exists. Safe to run repeatedly.
     try:
         directory_db.init_db()
+        with contextlib.closing(directory_db.connect(read_only=True)) as conn:
+            directory_db.require_privacy_finalized(conn)
     except Exception:
         import logging
         logging.getLogger("mcpserver").exception("directory db init failed")
+        raise
     # FastMCP streamable-http needs its own session-manager lifespan.
     # Only the free directory-discovery MCP at /mcp-discovery is mounted now
     # (the paid /mcp mount was retired 2026-05-25).
@@ -76,8 +79,10 @@ async def _not_found(request: Request, exc):
     )
     if accepts_html and not is_api:
         return TEMPLATES.TemplateResponse(
-            request, "404.html", {"build_version": BUILD_VERSION}, status_code=404)
-    return JSONResponse({"detail": "Not Found"}, status_code=404)
+            request, "404.html", {"build_version": BUILD_VERSION}, status_code=404,
+            headers=exc.headers)
+    return JSONResponse({"detail": "Not Found"}, status_code=404,
+                        headers=exc.headers)
 
 
 # Free directory-discovery MCP (search/get/list_categories/stats) — ungated.
