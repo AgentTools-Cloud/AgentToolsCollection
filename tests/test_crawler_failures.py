@@ -89,6 +89,69 @@ class CrawlerFailureTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "tRPC fetch failed"):
                 crawlers.fetch_x402scan()
 
+    def test_x402scan_uses_only_paid_resource_as_primary_url(self):
+        origin = "https://agents.example.test"
+        paid = origin + "/v1/property"
+        client = _Client([
+            _Response(200, {"result": {"data": {"json": [
+                {"id": "origin-1"},
+            ]}}}),
+            _Response(200, {"result": {"data": {"json": [{
+                "id": "origin-1",
+                "origin": origin,
+                "title": "Property Check",
+                "resources": [
+                    {"resource": origin + "/a2a", "accepts": []},
+                    {"resource": paid, "accepts": [{
+                        "scheme": "exact",
+                        "network": "eip155:8453",
+                        "maxAmountRequired": "1000000",
+                        "asset": "0x" + "1" * 40,
+                        "payTo": "0x" + "2" * 40,
+                    }]},
+                    {"resource": origin + "/v1/reports", "accepts": []},
+                ],
+            }]}}}),
+        ])
+        with patch.object(crawlers.httpx, "Client", return_value=client):
+            rows = crawlers.fetch_x402scan()
+
+        self.assertEqual(rows[0]["url"], paid)
+        self.assertEqual(rows[0]["well_known_url"], origin + "/.well-known/x402")
+        self.assertEqual(rows[0]["resource_count"], 1)
+        self.assertEqual(
+            [sample["url"] for sample in rows[0]["resource_samples"]],
+            [paid],
+        )
+
+    def test_x402scan_multiple_paid_resources_never_uses_origin(self):
+        origin = "https://agents.example.test"
+        paid_urls = [origin + "/v1/a", origin + "/v1/b"]
+        resources = [{
+            "resource": url,
+            "accepts": [{
+                "scheme": "exact",
+                "network": "eip155:8453",
+                "maxAmountRequired": "1000000",
+                "asset": "0x" + "1" * 40,
+                "payTo": "0x" + "2" * 40,
+            }],
+        } for url in reversed(paid_urls)]
+        client = _Client([
+            _Response(200, {"result": {"data": {"json": [
+                {"id": "origin-1"},
+            ]}}}),
+            _Response(200, {"result": {"data": {"json": [{
+                "id": "origin-1", "origin": origin,
+                "resources": resources,
+            }]}}}),
+        ])
+        with patch.object(crawlers.httpx, "Client", return_value=client):
+            rows = crawlers.fetch_x402scan()
+
+        self.assertEqual(rows[0]["url"], paid_urls[0])
+        self.assertNotEqual(rows[0]["url"], origin)
+
     def test_registry_required_bearer_header_maps_to_api_key(self):
         remote = {
             "headers": [{

@@ -41,8 +41,23 @@ def check(label, condition, detail=""):
         print("  FAIL %-56s %s" % (label, detail))
 
 
-HOST = "measured-reset.example"
+HOST = "measured-reset-%d.example" % os.getpid()
 MEASURED = ("health", "x402_ok", "tx_30d", "payto_payers_30d", "quality_score")
+
+with db.writer() as c:
+    user = c.execute(
+        "INSERT INTO users(provider,provider_uid,login,status,created_at) "
+        "VALUES('github',?,?,'active',1)",
+        ("measured-reset-%d" % os.getpid(), "measured-reset"),
+    )
+    USER_ID = int(user.lastrowid)
+    ownership = c.execute(
+        "INSERT INTO domain_ownership(user_id,host,method,token_hash,status,"
+        "created_at,verified_at) VALUES(?,?,'wellknown_file','fixture',"
+        "'verified',1,1)",
+        (USER_ID, HOST),
+    )
+    OWNERSHIP_ID = int(ownership.lastrowid)
 
 
 def fixture(slug):
@@ -68,8 +83,9 @@ def measured(sid):
 
 def edit(sid, changes):
     with db.writer() as c:
-        return db.apply_listing_edits(c, "x402", sid, 1, 1, changes,
-                                      verified_hosts={HOST}, via="api")
+        return db.apply_listing_edits(
+            c, "x402", sid, USER_ID, OWNERSHIP_ID, changes, via="api"
+        )
 
 
 print("1. 改 mcp_url 不动属于 url 的测量值")

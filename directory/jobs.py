@@ -290,23 +290,26 @@ def cmd_crawl(only=None) -> int:
 
 def _upsert_wellknown_listing(conn, kind: str, row: dict) -> tuple[bool, int]:
     """Link an existing endpoint without replacing its richer primary record."""
+    db.assert_listing_not_retired(conn, kind, row)
     table = {"mcp": "mcp_servers", "a2a": "a2a_agents"}[kind]
-    endpoint = str(row.get("endpoint_url") or "").strip().lower().rstrip("/")
+    endpoint = db._exact_endpoint(row.get("endpoint_url") or "")
     existing = None
     if endpoint:
         existing = conn.execute(
-            f"SELECT id FROM {table} WHERE lower(rtrim(endpoint_url, '/'))=? "
+            f"SELECT id FROM {table} WHERE endpoint_url=? "
             "ORDER BY id LIMIT 1",
             (endpoint,),
         ).fetchone()
     if existing is not None:
         listing_id = int(existing["id"])
-        db._record_source(
+        recorded = db._record_source(
             conn,
             kind,
             listing_id,
             (row.get("source"), row.get("source_id"), row.get("source_url")),
         )
+        if not recorded:
+            raise ValueError("source identity belongs to another listing")
         return False, listing_id
     if kind == "mcp":
         return db.upsert_mcp_server(conn, row)
@@ -668,7 +671,8 @@ def cmd_health_a2a(only_unknown: bool = False, quarantined_only: bool = False) -
         res = a2a_mod.probe_a2a_health(r["card_url"], r["endpoint_url"])
         h = res["status"]
         last_ok = now if h == "ok" else None
-        card = res.get("card_url") or r["card_url"]
+        card = db._exact_endpoint(res.get("card_url") or r["card_url"] or "")
+        card = card or r["card_url"]
         return h, res.get("conformance"), (h, now, res["latency_ms"],
                                            res.get("conformance"), last_ok,
                                            card, r["id"])
@@ -1460,7 +1464,7 @@ def cmd_submissions(status: str = "pending", limit: int = 50) -> int:
 
 
 def _approve(sub_id: int, note: str | None = None,
-             payment: dict | None = None) -> dict | None:
+             verdict: dict | None = None) -> dict | None:
     """Core approve logic: copy a pending submission into services + mark it
     approved + health-probe + notify. Returns a dict describing the listed
     service, or None if the submission could not be approved."""
@@ -1481,10 +1485,12 @@ def _approve(sub_id: int, note: str | None = None,
     if not isinstance(p, dict):
         log.warning("approve: submission #%d payload not parseable", sub_id)
         return None
-    url = (p.get("url") or "").strip()
-    if not url:
+    submitted_url = (p.get("url") or "").strip()
+    url = str((verdict or {}).get("verified_url") or submitted_url).strip()
+    if not submitted_url or not url:
         log.warning("approve: submission #%d has no url", sub_id)
         return None
+    payment = (verdict or {}).get("payment") or None
     host = urlparse(url).hostname or url
     name = p.get("name") or host
     fixed_price = p.get("price_usdc")
@@ -1504,7 +1510,8 @@ def _approve(sub_id: int, note: str | None = None,
         log.warning("approve #%d: resource discovery failed: %r", sub_id, e)
         res_info = {}
 
-    if crawlers.url_retired(url) or crawlers.url_retired(p.get("mcp_url") or ""):
+    if (crawlers.url_retired(url) or crawlers.url_retired(submitted_url)
+            or crawlers.url_retired(p.get("mcp_url") or "")):
         with db.writer() as wc:
             db.mark_submission(wc, sub_id, "retired", note="Operator retired endpoint")
         raise ValueError("endpoint has been retired by its operator")
@@ -1535,6 +1542,7 @@ def _approve(sub_id: int, note: str | None = None,
     }
     def op():
         with db.writer(immediate=True) as wc:
+            db.assert_listing_not_retired(wc, "x402", service)
             if db.endpoint_owner_locked(wc, "x402", url, service["slug"]):
                 db.mark_submission(
                     wc, sub_id, "owner_locked",
@@ -1649,7 +1657,7 @@ def review_submission(sub_id: int, note_prefix: str = "auto-review", notify_pend
              ("Submission", f"#{sub_id}")])
 
     if vstatus == "verified":
-        res = _approve(sub_id, note=note, payment=verdict.get("payment"))
+        res = _approve(sub_id, note=note, verdict=verdict)
         if res and res.get("owner_locked"):
             return {"status": "owner_locked", "submission_id": sub_id,
                     "evidence": ["Verified owner controls this endpoint"]}

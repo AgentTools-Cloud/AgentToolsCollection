@@ -77,6 +77,7 @@ class WellknownCrawlerTests(unittest.TestCase):
         conn = Mock()
         conn.execute.return_value.fetchone.return_value = {"id": 42}
         with (
+            patch.object(jobs.db, "assert_listing_not_retired"),
             patch.object(jobs.db, "_record_source") as record_source,
             patch.object(jobs.db, "upsert_mcp_server") as upsert,
         ):
@@ -89,6 +90,24 @@ class WellknownCrawlerTests(unittest.TestCase):
             ("wellknown", "ag_1", "https://wellknown.network/agents/example"),
         )
         upsert.assert_not_called()
+
+    def test_suppression_gate_runs_before_attribution_fast_path(self):
+        row = {
+            "source": "wellknown",
+            "source_id": "suppressed",
+            "endpoint_url": "https://removed.example/mcp",
+        }
+        conn = Mock()
+        with (
+            patch.object(
+                jobs.db, "assert_listing_not_retired",
+                side_effect=RuntimeError("suppressed"),
+            ),
+            patch.object(jobs.db, "_record_source") as record_source,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "suppressed"):
+                jobs._upsert_wellknown_listing(conn, "mcp", row)
+        record_source.assert_not_called()
 
     def test_a2a_source_is_scheduled(self):
         row = {

@@ -1,6 +1,6 @@
 import unittest
 
-from directory.a2a import _auth_scheme_names, card_to_row
+from directory.a2a import _auth_scheme_names, _detect_x402, card_to_row
 
 CARD_URL = "https://example.test/.well-known/agent.json"
 
@@ -40,6 +40,66 @@ class AuthSchemeShapesTest(unittest.TestCase):
             with self.subTest(value=value):
                 row = card_to_row({"name": "a", "securitySchemes": value}, CARD_URL)
                 self.assertIn("auth_schemes", row)
+
+    def test_optional_registry_payment_metadata_does_not_mark_endpoint_x402(self):
+        card = {
+            "name": "Property Check",
+            "url": "https://agents.example.test/a2a",
+            "capabilities": {
+                "extensions": [{
+                    "required": False,
+                    "uri": "https://a2a-registry.org/extensions/registry/v1",
+                    "params": {
+                        "payment": {
+                            "protocols": ["x402"],
+                            "resource": "https://agents.example.test/v1/property",
+                        },
+                    },
+                }],
+            },
+            "securitySchemes": {
+                "bearer": {
+                    "httpAuthSecurityScheme": {
+                        "scheme": "Bearer",
+                        "description": "Buy credits with x402 at /v1/property",
+                    },
+                },
+            },
+        }
+        self.assertEqual(_detect_x402(card), (False, None))
+
+    def test_endpoint_x402_security_scheme_is_detected(self):
+        card = {
+            "name": "Paid Agent",
+            "securitySchemes": {
+                "x402": {
+                    "type": "x402",
+                    "payTo": "0x123",
+                },
+            },
+            "security": [{"x402": []}],
+        }
+        self.assertEqual(_detect_x402(card), (True, "0x123"))
+
+    def test_list_endpoint_x402_security_scheme_is_detected(self):
+        card = {
+            "name": "Paid Agent",
+            "securitySchemes": [{
+                "type": "x402",
+                "payTo": "0x456",
+            }],
+        }
+        self.assertEqual(_detect_x402(card), (True, "0x456"))
+
+    def test_http_type_with_x402_scheme_is_detected(self):
+        card = {
+            "name": "Paid Agent",
+            "securitySchemes": [{
+                "type": "http", "scheme": "x402",
+                "payTo": "0x789",
+            }],
+        }
+        self.assertEqual(_detect_x402(card), (True, "0x789"))
 
 
 if __name__ == "__main__":

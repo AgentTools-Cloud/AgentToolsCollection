@@ -2,8 +2,9 @@
 
 Instead of flagging x402 support by string-matching "x402" in metadata, this
 module probes each endpoint with crawlers.verify_x402() and:
-  * sets mcp_servers.x402_supported / a2a_agents.x402_supported from the verdict
-  * mirrors every *verified* paid endpoint into the services (x402) table,
+    * sets mcp_servers.x402_supported / a2a_agents.x402_supported only when that
+        protocol endpoint itself answers with x402 payment requirements
+    * mirrors every separately verified paid resource into the services table,
     de-duplicated by normalized URL, tagged with its delivery channel
     (mcp / a2a) so the catalog can surface "agent-ready" x402 services.
 
@@ -68,36 +69,32 @@ def _slugify(text: str) -> str:
     return s or "unnamed"
 
 
-def _norm_url(url: str) -> str:
-    """Normalized dedup key: host + path, scheme/query stripped, trailing
-    slash and a trailing /mcp|/sse segment removed (so an origin entry and its
-    /mcp endpoint collapse to the same service)."""
-    u = (url or "").strip().lower()
-    if not u:
-        return ""
-    if "//" not in u:
-        u = "https://" + u
-    p = urlparse(u)
-    path = p.path.rstrip("/")
-    path = _re.sub(r"/(mcp|sse)$", "", path)
-    return (p.hostname or "") + path
+def _endpoint_key(url: str) -> str:
+    return crawlers._endpoint_url_key(url)
 
 
 def _chain_from_payment(payment: dict | None) -> list:
     if not payment:
         return []
-    net = db.network_id(payment.get("network"))
-    return [_NETWORKS.get(net, net)] if net else []
+    networks = payment.get("networks") or payment.get("network") or []
+    if not isinstance(networks, (list, tuple)):
+        networks = [networks]
+    chains = []
+    for value in networks:
+        net = db.network_id(value)
+        chain = "solana" if net.startswith("solana:") else _NETWORKS.get(net, net)
+        if chain and chain not in chains:
+            chains.append(chain)
+    return chains
 
 
-def _load_existing_service_keys(conn) -> set:
-    keys = set()
-    for r in conn.execute("SELECT url, mcp_url FROM services").fetchall():
-        for v in (r["url"], r["mcp_url"]):
-            k = _norm_url(v)
-            if k:
-                keys.add(k)
-    return keys
+def _endpoint_is_x402(task: dict) -> bool:
+    verdict = task.get("verdict") or {}
+    return (
+        verdict.get("status") == "verified"
+        and _endpoint_key(verdict.get("verified_url"))
+        == _endpoint_key(task.get("endpoint"))
+    )
 
 
 # Friendly catalog category per delivery channel.
@@ -107,8 +104,9 @@ _CATEGORY = {"mcp": "model-context-protocol-mcp", "a2a": "a2a-agent"}
 def _build_service(t: dict, verdict: dict) -> dict:
     """Turn a probed (verified) endpoint into a services-table row dict."""
     pay = verdict.get("payment") or {}
-    host = urlparse(t["endpoint"] if "//" in (t["endpoint"] or "")
-                    else "https://" + (t["endpoint"] or "")).hostname or ""
+    paid_url = verdict.get("verified_url") or t["endpoint"]
+    host = urlparse(paid_url if "//" in (paid_url or "")
+                    else "https://" + (paid_url or "")).hostname or ""
     origin_src = t.get("source") or t["delivery"]
     origin_sid = t.get("source_id") or t.get("slug")
     amount = pay.get("max_amount_usdc")
@@ -120,7 +118,7 @@ def _build_service(t: dict, verdict: dict) -> dict:
     return {
         "slug": _slugify(t.get("slug") or host) + "-x402",
         "name": t.get("name") or host,
-        "url": t["endpoint"],
+        "url": paid_url,
         "description": t.get("description"),
         "category": t.get("category") or _CATEGORY.get(t["delivery"], t["delivery"]),
         "chains": _chain_from_payment(pay),
@@ -138,21 +136,94 @@ def _build_service(t: dict, verdict: dict) -> dict:
     }
 
 
-def _mirror_service(service: dict, protect_owner=None) -> bool | None:
-    """Upsert a verified paid endpoint into services + mark x402_ok. Returns
-    True if a new row was created."""
+_SOURCE_ENDPOINT_COLUMNS = {
+    "services": "url",
+    "mcp_servers": "endpoint_url",
+    "a2a_agents": "endpoint_url",
+}
+
+
+def _source_guard_matches(conn, source_guard: dict | None) -> bool:
+    if not source_guard:
+        return True
+    table = source_guard.get("table")
+    column = _SOURCE_ENDPOINT_COLUMNS.get(table)
+    if column is None or source_guard.get("column", column) != column:
+        raise ValueError("invalid x402 mirror source guard")
+    row = conn.execute(
+        f"SELECT {column} FROM {table} WHERE id=?",
+        (int(source_guard["id"]),),
+    ).fetchone()
+    return bool(row) and db._exact_endpoint(row[column] or "") == db._exact_endpoint(
+        source_guard.get("endpoint") or ""
+    )
+
+
+def _mirror_service_in_tx(conn, service: dict, protect_owner=None,
+                          source_guard: dict | None = None):
+    """Mirror one verified paid URL using the caller's write transaction."""
+    if not _source_guard_matches(conn, source_guard):
+        return {"stale_source": True, "created": False}
+    db.assert_listing_not_retired(conn, "x402", service)
+    if protect_owner:
+        locked = db.find_owner_locked_listing(conn, **protect_owner)
+        if locked:
+            return {
+                "owner_locked": locked,
+                "locked_kind": protect_owner["kind"],
+            }
+    locked = db.find_owner_locked_listing(
+        conn, "x402", service.get("url"), service.get("slug"),
+    )
+    if locked:
+        return {"owner_locked": locked, "locked_kind": "x402"}
+    source_rows = db._source_identity_rows(
+        conn, "x402", service.get("source"), service.get("source_id")
+    )
+    if len(source_rows) > 1:
+        return {"identity_conflict": True, "created": False}
+    by_source = source_rows[0] if source_rows else None
+    existing = db.find_service_by_primary_url(conn, service.get("url"))
+    if (by_source is not None and existing is not None
+            and int(by_source["id"]) != int(existing["id"])):
+        return {"identity_conflict": True, "created": False}
+    if by_source is None and existing is not None:
+        recorded = db._record_source(conn, "x402", int(existing["id"]), (
+            service.get("source"), service.get("source_id"),
+            service.get("source_url"),
+        ))
+        if not recorded:
+            return {"identity_conflict": True, "created": False}
+        conn.execute(
+            "UPDATE services SET x402_ok=1 WHERE id=?",
+            (int(existing["id"]),),
+        )
+        return {
+            "duplicate": True, "created": False,
+            "listing_id": int(existing["id"]),
+            "slug": existing["slug"],
+        }
+    created, service_id = db.upsert_service(conn, dict(service))
+    row = conn.execute(
+        "SELECT slug,url FROM services WHERE id=?", (service_id,)
+    ).fetchone()
+    if (row is None or db._exact_endpoint(row["url"] or "")
+            != db._exact_endpoint(service.get("url") or "")):
+        return {"identity_conflict": True, "created": False}
+    conn.execute("UPDATE services SET x402_ok=1 WHERE id=?", (service_id,))
+    return {
+        "created": bool(created), "duplicate": not bool(created),
+        "listing_id": int(service_id), "slug": row["slug"],
+    }
+
+
+def _mirror_service(service: dict, protect_owner=None, source_guard=None):
+    """Mirror a verified paid endpoint in its own immediate transaction."""
     def op(service=service):
-        with db.writer(immediate=bool(protect_owner)) as c:
-            if protect_owner:
-                locked = db.find_owner_locked_listing(c, **protect_owner)
-                if locked:
-                    return None
-            created, _ = db.upsert_service(c, dict(service))
-            # the verify already proved a 402 challenge -> mark x402_ok
-            c.execute(
-                "UPDATE services SET x402_ok=1 WHERE source=? AND source_id=?",
-                (service["source"], service["source_id"]))
-            return created
+        with db.writer(immediate=True) as conn:
+            return _mirror_service_in_tx(
+                conn, service, protect_owner, source_guard
+            )
     return db.with_retry(op)
 
 
@@ -161,6 +232,7 @@ def verify_and_mirror(endpoint: str, *, slug: str, name: str | None = None,
                       delivery: str = "mcp", source: str | None = None,
                       source_id: str | None = None,
                       verdict: dict | None = None,
+                      conn=None,
                       protect_owner_kind: str | None = None,
                       protect_owner_slug: str | None = None,
                       protect_owner_url: str | None = None,
@@ -168,7 +240,8 @@ def verify_and_mirror(endpoint: str, *, slug: str, name: str | None = None,
     """Probe a single endpoint for x402 and, if verified, mirror it into the
     services (x402) table — the live equivalent of one reverify() iteration.
 
-    Safe to call from a request handler (does its own read + write txns).
+    Safe to call from a request handler. Pass an existing immediate write
+    transaction to commit a source listing and its paid mirror atomically.
     Returns {x402, status, payment, service_slug, created, duplicate}.
     """
     if verdict is None:
@@ -177,10 +250,15 @@ def verify_and_mirror(endpoint: str, *, slug: str, name: str | None = None,
         except Exception as e:
             verdict = {"status": "error", "evidence": [repr(e)], "payment": None}
     is_ver = verdict.get("status") == "verified"
-    out = {"x402": is_ver, "status": verdict.get("status"),
+    paid_resource = bool(is_ver and verdict.get("verified_url"))
+    endpoint_is_x402 = _endpoint_is_x402({
+        "endpoint": endpoint,
+        "verdict": verdict,
+    })
+    out = {"x402": endpoint_is_x402, "status": verdict.get("status"),
            "payment": verdict.get("payment"), "service_slug": None,
            "created": False, "duplicate": False}
-    if not is_ver:
+    if not paid_resource:
         return out
 
     t = {"slug": slug, "name": name, "description": description,
@@ -198,21 +276,19 @@ def verify_and_mirror(endpoint: str, *, slug: str, name: str | None = None,
             "alternate_url": protect_owner_alternate_url,
         }
 
-    with db.connect(read_only=True) as c:
-        existing_keys = _load_existing_service_keys(c)
-    key = _norm_url(endpoint) or _norm_url(homepage)
-    if key and key in existing_keys:
-        # already catalogued under some source — refresh it but report dupe
-        out["duplicate"] = True
-        mirrored = _mirror_service(service, protect_owner)
-        if mirrored is None:
-            out["owner_locked"] = True
-        return out
-    mirrored = _mirror_service(service, protect_owner)
-    if mirrored is None:
+    mirrored = (_mirror_service_in_tx(conn, service, protect_owner)
+                if conn is not None else _mirror_service(service, protect_owner))
+    if mirrored.get("owner_locked"):
         out["owner_locked"] = True
+        out["locked_listing"] = mirrored["owner_locked"]
+        out["locked_kind"] = mirrored.get("locked_kind")
         return out
-    out["created"] = bool(mirrored)
+    if mirrored.get("identity_conflict"):
+        out["identity_conflict"] = True
+        return out
+    out["duplicate"] = bool(mirrored.get("duplicate"))
+    out["created"] = bool(mirrored.get("created"))
+    out["service_slug"] = mirrored.get("slug") or out["service_slug"]
     return out
 
 
@@ -306,7 +382,6 @@ def reverify(targets=("mcp", "a2a"), workers=24, limit=None,
              only_unverified=False) -> dict:
     with db.connect(read_only=True) as c:
         tasks = _gather(c, targets, limit, only_unverified)
-        existing_keys = _load_existing_service_keys(c)
 
     total = len(tasks)
     print(f"[reverify] probing {total} endpoints "
@@ -314,9 +389,9 @@ def reverify(targets=("mcp", "a2a"), workers=24, limit=None,
 
     verified = []   # mcp/a2a tasks whose verdict == verified (mirrored below)
     flag_updates = {"mcp_servers": [], "a2a_agents": []}
-    service_ok_ids = []   # native x402 services proven this pass
-    service_payments = []  # (payment_json, id) for rows missing payment
-    service_resources = []  # (count, samples, ts, id) regardless of payment
+    service_ok_rows = []  # (id, probed endpoint) proven this pass
+    service_payments = []  # payment/chains/resource metadata for native rows
+    service_resources = []  # descriptor metadata regardless of payment
     done = 0
     n_ver = 0
     with ThreadPoolExecutor(max_workers=workers) as ex:
@@ -326,9 +401,16 @@ def reverify(targets=("mcp", "a2a"), workers=24, limit=None,
             done += 1
             is_ver = t["verdict"]["status"] == "verified"
             if t["table"] == "services":
+                same_endpoint = _endpoint_key(t["verdict"].get("verified_url")) == _endpoint_key(
+                    t["endpoint"]
+                )
+                if is_ver and not same_endpoint and t["verdict"].get("verified_url"):
+                    verified.append({**t, "delivery": "x402"})
+                    n_ver += 1
+                    continue
                 # sticky badge: only ever set x402_ok, never revoke
-                if is_ver:
-                    service_ok_ids.append(t["id"])
+                if is_ver and same_endpoint:
+                    service_ok_rows.append((t["id"], t["endpoint"]))
                     n_ver += 1
                 _res = t.get("resources") or {}
                 if _res.get("resource_count") is not None:
@@ -336,8 +418,8 @@ def reverify(targets=("mcp", "a2a"), workers=24, limit=None,
                         _res.get("resource_count"),
                         json.dumps(_res.get("resource_samples"), ensure_ascii=False)
                         if _res.get("resource_samples") else None,
-                        int(time.time()), t["id"]))
-                pay = t["verdict"].get("payment") or None
+                        int(time.time()), t["id"], t["endpoint"]))
+                pay = (t["verdict"].get("payment") or None) if same_endpoint else None
                 if pay and pay.get("pay_to"):
                     res = t.get("resources") or {}
                     lo, hi = res.get("price_min"), res.get("price_max")
@@ -348,14 +430,20 @@ def reverify(targets=("mcp", "a2a"), workers=24, limit=None,
                         lo = hi = pay.get("max_amount_usdc")
                     service_payments.append((
                         json.dumps(pay, ensure_ascii=False),
+                        json.dumps(_chain_from_payment(pay), ensure_ascii=False),
                         res.get("resource_count"),
                         json.dumps(res.get("resource_samples"), ensure_ascii=False)
                         if res.get("resource_samples") else None,
-                        lo, hi, int(time.time()), t["id"]))
+                        lo, hi, int(time.time()), t["id"], t["endpoint"]))
             else:
-                flag_updates[t["table"]].append((1 if is_ver else 0, t["id"]))
+                flag_updates[t["table"]].append((
+                    1 if _endpoint_is_x402(t) else 0,
+                    t["id"],
+                    t["endpoint"],
+                ))
                 if is_ver:
                     n_ver += 1
+                if is_ver and t["verdict"].get("verified_url"):
                     verified.append(t)
             if done % 500 == 0 or done == total:
                 print(f"[reverify] {done}/{total} probed, verified={n_ver}",
@@ -371,25 +459,26 @@ def reverify(targets=("mcp", "a2a"), workers=24, limit=None,
             def op(chunk=chunk, table=table):
                 with db.writer() as c:
                     c.executemany(
-                        f"UPDATE {table} SET x402_supported=? WHERE id=?", chunk)
+                        f"UPDATE {table} SET x402_supported=? "
+                        "WHERE id=? AND endpoint_url=?", chunk)
             db.with_retry(op)
     print(f"[reverify] flags updated: "
           f"mcp={len(flag_updates['mcp_servers'])} "
           f"a2a={len(flag_updates['a2a_agents'])}", flush=True)
 
     # 1b. native x402 services: sticky x402_ok=1 on verified (set-only)
-    for start in range(0, len(service_ok_ids), 500):
-        chunk = service_ok_ids[start:start + 500]
+    for start in range(0, len(service_ok_rows), 500):
+        chunk = service_ok_rows[start:start + 500]
 
         def op(chunk=chunk):
             with db.writer() as c:
                 c.executemany(
-                    "UPDATE services SET x402_ok=1 WHERE id=?",
-                    [(i,) for i in chunk])
+                    "UPDATE services SET x402_ok=1 WHERE id=? AND url=?",
+                    chunk)
         db.with_retry(op)
-    if service_ok_ids:
+    if service_ok_rows:
         print(f"[reverify] native x402 services tagged: "
-              f"{len(service_ok_ids)}", flush=True)
+              f"{len(service_ok_rows)}", flush=True)
 
     # 1b2. descriptor resource counts, independent of payment. Gating this
     # on a payTo left most listings frozen at whatever the first crawl saw.
@@ -398,15 +487,17 @@ def reverify(targets=("mcp", "a2a"), workers=24, limit=None,
 
         def op(chunk=chunk):
             with db.writer() as c:
-                for resource_count, samples, updated_at, service_id in chunk:
+                 for (resource_count, samples, updated_at, service_id,
+                     probed_endpoint) in chunk:
                     if _privacy_suppressed_metadata(
                             c, resource_samples=samples):
                         continue
                     c.execute(
                         "UPDATE services SET resource_count=?, "
                         "resource_samples=COALESCE(?, resource_samples), "
-                        "updated_at=? WHERE id=?",
-                        (resource_count, samples, updated_at, service_id))
+                        "updated_at=? WHERE id=? AND url=?",
+                        (resource_count, samples, updated_at, service_id,
+                         probed_endpoint))
         db.with_retry(op)
     if service_resources:
         print(f"[reverify] resource counts refreshed: "
@@ -421,17 +512,19 @@ def reverify(targets=("mcp", "a2a"), workers=24, limit=None,
         def op(chunk=chunk):
             with db.writer() as c:
                 for update in chunk:
-                    payment, _count, samples, _lo, _hi, _updated, _id = update
+                    (payment, chains, _count, samples, _lo, _hi, _updated,
+                     _id, _endpoint) = update
                     if _privacy_suppressed_metadata(
-                            c, payment=payment, resource_samples=samples):
+                            c, payment=payment, chains=chains,
+                            resource_samples=samples):
                         continue
                     c.execute(
-                        "UPDATE services SET payment=?, "
+                        "UPDATE services SET payment=?, chains=?, "
                         "resource_count=COALESCE(?, resource_count), "
                         "resource_samples=COALESCE(?, resource_samples), "
                         "price_min=COALESCE(?, price_min), "
                         "price_max=COALESCE(?, price_max), "
-                        "updated_at=? WHERE id=?", update)
+                        "updated_at=? WHERE id=? AND url=?", update)
         db.with_retry(op)
     if service_payments:
         print(f"[reverify] payment metadata recorded: "
@@ -440,15 +533,17 @@ def reverify(targets=("mcp", "a2a"), workers=24, limit=None,
     # 2. mirror verified endpoints into services (x402) table
     svc_new = svc_skip = svc_bad = 0
     for t in verified:
-        key = _norm_url(t["endpoint"]) or _norm_url(t["homepage"])
-        if key and key in existing_keys:
-            svc_skip += 1
-            continue
-        if key:
-            existing_keys.add(key)
+        service = _build_service(t, t["verdict"])
         try:
-            service = _build_service(t, t["verdict"])
-            svc_new += int(_mirror_service(service))
+            mirrored = _mirror_service(service, source_guard={
+                "table": t["table"],
+                "id": t["id"],
+                "endpoint": t["endpoint"],
+            })
+            if mirrored.get("created"):
+                svc_new += 1
+            else:
+                svc_skip += 1
         except Exception as exc:
             # One malformed descriptor must not discard a step that already
             # spent ~45min of CPU. Report it and keep mirroring the rest.
@@ -463,7 +558,7 @@ def reverify(targets=("mcp", "a2a"), workers=24, limit=None,
     return {"probed": total, "verified": n_ver,
             "services_inserted": svc_new, "services_skipped": svc_skip,
             "services_failed": svc_bad,
-            "native_services_tagged": len(service_ok_ids)}
+            "native_services_tagged": len(service_ok_rows)}
 
 
 def main(argv=None):

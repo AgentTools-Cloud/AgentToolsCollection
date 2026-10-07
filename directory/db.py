@@ -22,6 +22,8 @@ from pathlib import Path
 from typing import Any, Iterable, Iterator, Callable
 from urllib.parse import urlparse
 
+from .url_identity import exact_endpoint
+
 try:
     from . import mcp_safety as _mcp_safety
 except Exception:  # pragma: no cover
@@ -96,6 +98,8 @@ CREATE INDEX IF NOT EXISTS idx_services_category ON services(category);
 CREATE INDEX IF NOT EXISTS idx_services_health   ON services(health);
 CREATE INDEX IF NOT EXISTS idx_services_region   ON services(region);
 CREATE INDEX IF NOT EXISTS idx_services_source   ON services(source);
+CREATE INDEX IF NOT EXISTS idx_services_url      ON services(url);
+CREATE INDEX IF NOT EXISTS idx_services_mcp_url  ON services(mcp_url);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS services_fts USING fts5(
   name, name_zh, description, description_zh, tags, category,
@@ -241,6 +245,8 @@ CREATE TABLE IF NOT EXISTS a2a_agents (
 );
 CREATE INDEX IF NOT EXISTS idx_a2a_source ON a2a_agents(source);
 CREATE INDEX IF NOT EXISTS idx_a2a_health ON a2a_agents(health);
+CREATE INDEX IF NOT EXISTS idx_a2a_endpoint ON a2a_agents(endpoint_url);
+CREATE INDEX IF NOT EXISTS idx_a2a_card ON a2a_agents(card_url);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS a2a_fts USING fts5(
   name, description, skill_names, provider_name,
@@ -295,6 +301,7 @@ CREATE TABLE IF NOT EXISTS mcp_servers (
 );
 CREATE INDEX IF NOT EXISTS idx_mcp_source ON mcp_servers(source);
 CREATE INDEX IF NOT EXISTS idx_mcp_health ON mcp_servers(health);
+CREATE INDEX IF NOT EXISTS idx_mcp_endpoint ON mcp_servers(endpoint_url);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS mcp_fts USING fts5(
   name, description, tags, tools_text,
@@ -332,6 +339,8 @@ CREATE INDEX IF NOT EXISTS idx_listing_sources_listing
   ON listing_sources(kind, listing_id);
 CREATE INDEX IF NOT EXISTS idx_listing_sources_source
   ON listing_sources(source);
+CREATE INDEX IF NOT EXISTS idx_listing_sources_identity
+    ON listing_sources(kind, source, source_id);
 
 -- Active tombstones are a final ingestion guard and a public 410 archive.
 -- The snapshot supports deliberate restoration; events are append-only audit.
@@ -673,25 +682,62 @@ def _to_json(value: Any) -> str | None:
     return json.dumps(value, ensure_ascii=False)
 
 
-def _record_source(conn: sqlite3.Connection, kind: str, listing_id, src: tuple) -> None:
+def _record_source(conn: sqlite3.Connection, kind: str, listing_id,
+                   src: tuple) -> bool:
     """Remember that `src` vouched for this listing. Additive: never removes."""
     source, source_id, source_url = src
     if not source or not listing_id:
-        return
+        return True
     now = int(time.time())
     try:
+        if source_id:
+            owners = _source_identity_rows(conn, kind, source, source_id)
+            if any(int(owner["id"]) != int(listing_id) for owner in owners):
+                return False
         conn.execute(
             "INSERT INTO listing_sources "
             "(kind, listing_id, source, source_id, source_url, first_seen, last_seen) "
             "VALUES (?,?,?,?,?,?,?) "
             "ON CONFLICT(kind, listing_id, source) DO UPDATE SET "
             "last_seen=excluded.last_seen, "
-            "source_id=COALESCE(excluded.source_id, listing_sources.source_id), "
+            "source_id=COALESCE(listing_sources.source_id, excluded.source_id), "
             "source_url=COALESCE(excluded.source_url, listing_sources.source_url)",
             (kind, int(listing_id), str(source), source_id, source_url, now, now))
+        return True
     except sqlite3.Error:
         # Provenance is additive metadata; never fail a listing write over it.
-        pass
+        return False
+
+
+def _source_identity_rows(conn: sqlite3.Connection, kind: str,
+                          source, source_id) -> list:
+    """Rows already owning a primary or secondary upstream identity."""
+    if not source or not source_id:
+        return []
+    table = {"x402": "services", "mcp": "mcp_servers",
+             "a2a": "a2a_agents"}[kind]
+    ids = {
+        int(row["id"])
+        for row in conn.execute(
+            f"SELECT id FROM {table} WHERE source=? AND source_id=?",
+            (str(source), str(source_id)),
+        )
+    }
+    ids.update(
+        int(row["listing_id"])
+        for row in conn.execute(
+            "SELECT listing_id FROM listing_sources "
+            "WHERE kind=? AND source=? AND source_id=?",
+            (kind, str(source), str(source_id)),
+        )
+    )
+    if not ids:
+        return []
+    marks = ",".join("?" for _ in ids)
+    return list(conn.execute(
+        f"SELECT * FROM {table} WHERE id IN ({marks}) ORDER BY id",
+        sorted(ids),
+    ))
 
 
 def sources_for(conn: sqlite3.Connection, kind: str, listing_id) -> list:
@@ -750,6 +796,77 @@ def _as_int(value):
         return None
 
 
+def _exact_endpoint(url: str) -> str:
+    """HTTP endpoint key preserving path case and query semantics."""
+    return exact_endpoint(url)
+
+
+def _endpoint_authority(url: str) -> str:
+    key = _exact_endpoint(url)
+    if not key:
+        return ""
+    scheme_end = key.find("://") + 3
+    path_start = len(key)
+    for separator in ("/", "?", ";"):
+        position = key.find(separator, scheme_end)
+        if position >= 0:
+            path_start = min(path_start, position)
+    return key[:path_start]
+
+
+def _find_exact_endpoint_row(conn, table: str, columns: tuple[str, ...],
+                             url: str, exclude_id: int | None = None):
+    if table not in _SLUG_TABLES or not columns:
+        raise ValueError("invalid endpoint table")
+    key = _exact_endpoint(url)
+    if not key:
+        return None
+    exact_where = " OR ".join("%s=?" % column for column in columns)
+    exact_params: list[Any] = [key] * len(columns)
+    if exclude_id is not None:
+        exact_where = "(%s) AND id<>?" % exact_where
+        exact_params.append(int(exclude_id))
+    exact = conn.execute(
+        "SELECT * FROM %s WHERE %s ORDER BY id LIMIT 1"
+        % (table, exact_where), exact_params,
+    ).fetchone()
+    if exact is not None:
+        return exact
+    # Compatibility for rows stored before write-time canonicalization.
+    prefix = _endpoint_authority(key) + "%"
+    clauses = ["%s LIKE ? COLLATE NOCASE" % column for column in columns]
+    params: list[Any] = [prefix] * len(columns)
+    if exclude_id is not None:
+        clauses = ["(%s)" % " OR ".join(clauses), "id<>?"]
+        params.append(int(exclude_id))
+        where = " AND ".join(clauses)
+    else:
+        where = " OR ".join(clauses)
+    return next((row for row in conn.execute(
+        "SELECT * FROM %s WHERE %s ORDER BY id" % (table, where), params
+    ) if any(_exact_endpoint(row[column] or "") == key for column in columns)),
+        None)
+
+
+def _ensure_unique_slug(conn, table: str, row: dict, identity: str) -> None:
+    slug = str(row.get("slug") or "").strip() or "unnamed"
+    existing = conn.execute(
+        "SELECT id FROM %s WHERE slug=?" % table, (slug,)
+    ).fetchone()
+    if existing is None:
+        row["slug"] = slug
+        return
+    suffix = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:8]
+    candidate = "%s-%s" % (slug, suffix)
+    counter = 2
+    while conn.execute(
+            "SELECT 1 FROM %s WHERE slug=?" % table,
+            (candidate,)).fetchone():
+        candidate = "%s-%s-%d" % (slug, suffix, counter)
+        counter += 1
+    row["slug"] = candidate
+
+
 def upsert_service(conn: sqlite3.Connection, row: dict) -> tuple:
     """Insert/update an x402 service. Dedup on (source, source_id) then slug.
 
@@ -761,6 +878,16 @@ def upsert_service(conn: sqlite3.Connection, row: dict) -> tuple:
     now = int(time.time())
     # Capture provenance before dedup logic can rewrite it (first-source-wins).
     _src = (row.get("source"), row.get("source_id"), row.get("source_url"))
+    if row.get("url"):
+        canonical_url = _exact_endpoint(row["url"])
+        if not canonical_url:
+            raise ValueError("invalid service endpoint")
+        row["url"] = canonical_url
+    if row.get("mcp_url"):
+        canonical_mcp_url = _exact_endpoint(row["mcp_url"])
+        if not canonical_mcp_url:
+            raise ValueError("invalid MCP endpoint")
+        row["mcp_url"] = canonical_mcp_url
     row.setdefault("created_at", now)
     row["updated_at"] = now
     row["last_seen"] = now
@@ -780,33 +907,40 @@ def upsert_service(conn: sqlite3.Connection, row: dict) -> tuple:
         row["facilitator"] = _to_json(_fac)
 
     cur = conn.cursor()
-    existing = None
-    cross_source = False
+    source_existing = None
+    source_identity_rows = []
     # 1) same source identity
     if row.get("source") and row.get("source_id"):
-        existing = cur.execute(
-            "SELECT * FROM services WHERE source=? AND source_id=?",
-            (row["source"], row["source_id"]),
-        ).fetchone()
+        source_identity_rows = _source_identity_rows(
+            conn, "x402", row["source"], row["source_id"]
+        )
+        source_existing = (source_identity_rows[0]
+                           if source_identity_rows else None)
+        if len(source_identity_rows) > 1:
+            return False, int(source_existing["id"])
     # 2) same paid endpoint, regardless of source. upsert_mcp_server has always
     #    done this, which is why mcp_servers holds 32k endpoints with only 128
     #    duplicate groups while services had grown 17,011 rows across 2,192
     #    endpoints by the 2026-09-16 merge. Without this step every directory
     #    that lists the same URL mints its own row, and the merge regenerates
     #    itself on the next crawl.
-    if existing is None and (row.get("url") or "").strip():
-        existing = cur.execute(
-            "SELECT * FROM services WHERE lower(rtrim(url, '/'))=? "
-            "ORDER BY id LIMIT 1",
-            (_norm_endpoint(row["url"]),),
-        ).fetchone()
-        if existing is not None:
-            cross_source = True
-    # 3) same slug fallback
-    if existing is None:
-        existing = cur.execute(
-            "SELECT * FROM services WHERE slug=?", (row["slug"],)
-        ).fetchone()
+    endpoint_existing = _find_exact_endpoint_row(
+        conn, "services", ("url",), row.get("url") or ""
+    )
+    if (source_existing is not None and endpoint_existing is not None
+            and source_existing["id"] != endpoint_existing["id"]):
+        return False, int(source_existing["id"])
+    if (source_existing is not None
+            and source_existing["source"] != row.get("source")):
+        _record_source(conn, "x402", int(source_existing["id"]), _src)
+        return False, int(source_existing["id"])
+    if source_existing is None and endpoint_existing is not None:
+        if endpoint_existing["source"] == row.get("source"):
+            source_existing = endpoint_existing
+        else:
+            _record_source(conn, "x402", int(endpoint_existing["id"]), _src)
+            return False, int(endpoint_existing["id"])
+    existing = source_existing or endpoint_existing
 
     cols = [
         "slug", "name", "name_zh", "url", "description", "description_zh",
@@ -820,6 +954,10 @@ def upsert_service(conn: sqlite3.Connection, row: dict) -> tuple:
     ]
 
     if existing is None:
+        _ensure_unique_slug(
+            conn, "services", row,
+            "%s\0%s" % (row.get("source"), row.get("source_id")),
+        )
         placeholders = ",".join(["?"] * len(cols))
         cur.execute(
             f"INSERT INTO services ({','.join(cols)}) VALUES ({placeholders})",
@@ -830,17 +968,13 @@ def upsert_service(conn: sqlite3.Connection, row: dict) -> tuple:
         return True, new_id
     else:
         row["created_at"] = existing["created_at"]
-        if cross_source:
-            # First-source-wins: the endpoint keeps the source identity and the
-            # slug it was first listed under, so a second directory finding it
-            # later enriches the row instead of renaming it and breaking the
-            # public URL. The additional source is still recorded in
-            # listing_sources at the end of this function.
-            row["source"] = existing["source"]
-            row["source_id"] = existing["source_id"]
-            row["slug"] = existing["slug"]
-            row["confidence"] = max(row.get("confidence") or 0.0,
-                                    existing["confidence"] or 0.0)
+        if int(existing["owner_verified"] or 0):
+            cur.execute(
+                "UPDATE services SET last_seen=?,updated_at=? WHERE id=?",
+                (now, now, existing["id"]),
+            )
+            _record_source(conn, "x402", existing["id"], _src)
+            return False, int(existing["id"])
         # Crawlers refresh discovery metadata; probes own the measured fields.
         # A crawl that simply has nothing to say about a field must not blank
         # what a probe established -- that is how 252 on-chain tx counts and,
@@ -1367,16 +1501,11 @@ def record_crawl_finish(conn, run_id, added, updated, errors=(), status="ok"):
 
 def _canonical_origin(url: str) -> str | None:
     """Return scheme://host (lowercased) — used to dedup near-identical URLs."""
-    if not url:
+    key = exact_endpoint(url)
+    if not key:
         return None
-    try:
-        from urllib.parse import urlparse
-        p = urlparse(url)
-        if not p.scheme or not p.netloc:
-            return None
-        return f"{p.scheme.lower()}://{p.netloc.lower()}"
-    except Exception:
-        return None
+    parsed = urlparse(key)
+    return "%s://%s" % (parsed.scheme, parsed.netloc)
 
 
 def _canonical_endpoint(url: str) -> str | None:
@@ -1385,17 +1514,7 @@ def _canonical_endpoint(url: str) -> str | None:
     The dedup key is the endpoint, not the origin: one provider commonly sells
     several paid endpoints under the same domain, and each is its own service.
     """
-    if not url:
-        return None
-    try:
-        from urllib.parse import urlparse
-        p = urlparse(url.strip())
-        if not p.scheme or not p.netloc:
-            return None
-        path = (p.path or "").rstrip("/")
-        return f"{p.scheme.lower()}://{p.netloc.lower()}{path}"
-    except Exception:
-        return None
+    return exact_endpoint(url) or None
 
 
 class RetiredListingError(ValueError):
@@ -2320,41 +2439,71 @@ def list_retirements(conn, status: str | None = "active") -> list[dict]:
 
 def find_service_by_url(conn, url: str) -> dict | None:
     """Best-effort lookup: a services row registering this exact endpoint."""
-    key = _canonical_endpoint(url)
-    if not key:
-        return None
-    row = conn.execute(
-        "SELECT * FROM services WHERE "
-        "rtrim(lower(url), '/')=? OR rtrim(lower(mcp_url), '/')=? LIMIT 1",
-        (key, key),
-    ).fetchone()
+    row = _find_exact_endpoint_row(
+        conn, "services", ("url", "mcp_url"), url
+    )
+    return row_to_dict(row) if row else None
+
+
+def find_service_by_primary_url(conn, url: str) -> dict | None:
+    """Find only a paid service URL; protocol aliases are not paid identity."""
+    row = _find_exact_endpoint_row(conn, "services", ("url",), url)
     return row_to_dict(row) if row else None
 
 
 def find_owner_locked_listing(conn, kind: str, url: str | None = None,
                               slug: str | None = None,
                               alternate_url: str | None = None) -> dict | None:
+    """Return an owner-verified listing at an exact protocol endpoint.
+
+    `slug` remains in the call signature for compatibility and response links;
+    it is not an endpoint identity and must never authorize or lock a row.
+    """
     table, columns = {
         "x402": ("services", ("url",)),
         "mcp": ("mcp_servers", ("endpoint_url",)),
         "a2a": ("a2a_agents", ("card_url", "endpoint_url")),
     }[kind]
-    clauses = []
-    params = []
-    for value, column in zip((url, alternate_url), columns):
-        key = _canonical_endpoint(value or "")
-        if key:
-            clauses.append("lower(rtrim(%s,'/'))=?" % column)
-            params.append(key)
-    if slug:
-        clauses.append("lower(slug)=lower(?)")
-        params.append(slug)
-    if not clauses:
+    keys = {
+        key for value in (url, alternate_url)
+        if (key := _exact_endpoint(value or ""))
+    }
+    if not keys:
         return None
+    exact_clauses = []
+    exact_params = []
+    for column in columns:
+        for key in keys:
+            exact_clauses.append("%s=?" % column)
+            exact_params.append(key)
     row = conn.execute(
-        "SELECT * FROM %s WHERE owner_verified=1 AND (%s) "
-        "ORDER BY id LIMIT 1" % (table, " OR ".join(clauses)), params
+        "SELECT * FROM %s WHERE owner_verified=1 AND (%s) ORDER BY id LIMIT 1"
+        % (table, " OR ".join(exact_clauses)), exact_params,
     ).fetchone()
+    if row is not None:
+        if kind == "x402":
+            return row_to_dict(row)
+        if kind == "mcp":
+            return mcp_row_to_dict(row)
+        return a2a_row_to_dict(row)
+
+    # Compatibility for owner rows stored before write-time canonicalization.
+    prefixes = {_endpoint_authority(key) + "%" for key in keys}
+    url_clauses = []
+    url_params = []
+    for column in columns:
+        for prefix in prefixes:
+            url_clauses.append("%s LIKE ? COLLATE NOCASE" % column)
+            url_params.append(prefix)
+    where = " OR ".join(url_clauses)
+    params = url_params
+    row = next((candidate for candidate in conn.execute(
+        "SELECT * FROM %s WHERE owner_verified=1 AND (%s) ORDER BY id"
+        % (table, where), params
+    ) if any(
+        _exact_endpoint(candidate[column] or "") in keys
+        for column in columns
+    )), None)
     if row is None:
         return None
     if kind == "x402":
@@ -2366,7 +2515,7 @@ def find_owner_locked_listing(conn, kind: str, url: str | None = None,
 
 def endpoint_owner_locked(conn, kind: str, url: str,
                           slug: str | None = None) -> bool:
-    if not url and not slug:
+    if not url:
         return False
     return find_owner_locked_listing(conn, kind, url, slug) is not None
 
@@ -2395,14 +2544,18 @@ def find_pending_submission(conn, url: str) -> dict | None:
     origin = _canonical_origin(url)
     if not origin:
         return None
-    row = conn.execute(
+    rows = conn.execute(
         "SELECT id, payload, created_at FROM submissions "
-        "WHERE status = 'pending' "
-        "AND json_extract(payload, '$.url') LIKE ? "
-        "ORDER BY id DESC LIMIT 1",
-        (origin + "%",),
-    ).fetchone()
-    return dict(row) if row else None
+        "WHERE status = 'pending' ORDER BY id DESC"
+    ).fetchall()
+    for row in rows:
+        try:
+            payload = json.loads(row["payload"])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if (_canonical_origin(payload.get("url") or "") == origin):
+            return dict(row)
+    return None
 
 
 def create_submission(conn, payload: dict) -> int:
@@ -2500,6 +2653,12 @@ def upsert_a2a_agent(conn: sqlite3.Connection, row: dict) -> tuple:
     row.setdefault("created_at", now)
     row["updated_at"] = now
     row["last_seen"] = now
+    for field in ("endpoint_url", "card_url"):
+        if row.get(field):
+            canonical_endpoint = _exact_endpoint(row[field])
+            if not canonical_endpoint:
+                raise ValueError("invalid A2A %s" % field)
+            row[field] = canonical_endpoint
 
     # derive skill_names blob for FTS if not explicitly supplied
     if not row.get("skill_names"):
@@ -2519,26 +2678,53 @@ def upsert_a2a_agent(conn: sqlite3.Connection, row: dict) -> tuple:
                     names.append(str(sk))
         row["skill_names"] = " ".join(names) if names else None
 
-    row["x402_supported"] = 1 if row.get("x402_supported") else 0
+    row["x402_supported"] = 0
     for k in _A2A_JSON_COLS:
         row[k] = _to_json(row.get(k))
 
     cur = conn.cursor()
     existing = None
     existing_by_source_id = False
+    source_identity_rows = []
     if row.get("source") and row.get("source_id"):
-        existing = cur.execute(
-            "SELECT * FROM a2a_agents WHERE source=? AND source_id=?",
-            (row["source"], row["source_id"]),
-        ).fetchone()
+        source_identity_rows = _source_identity_rows(
+            conn, "a2a", row["source"], row["source_id"]
+        )
+        existing = source_identity_rows[0] if source_identity_rows else None
         existing_by_source_id = existing is not None
-    if existing is None:
-        existing = cur.execute(
-            "SELECT * FROM a2a_agents WHERE slug=?",
-            (row["slug"],),
-        ).fetchone()
+        if len(source_identity_rows) > 1:
+            return False, int(existing["id"])
+    endpoint_rows = {}
+    for endpoint in (row.get("endpoint_url"), row.get("card_url")):
+        endpoint_existing = _find_exact_endpoint_row(
+            conn, "a2a_agents", ("endpoint_url", "card_url"), endpoint or ""
+        )
+        if endpoint_existing is not None:
+            endpoint_rows[int(endpoint_existing["id"])] = endpoint_existing
+    if len(endpoint_rows) > 1:
+        return False, int(existing["id"] if existing is not None
+                          else min(endpoint_rows))
+    endpoint_existing = next(iter(endpoint_rows.values()), None)
+    if (existing is not None and endpoint_existing is not None
+            and existing["id"] != endpoint_existing["id"]):
+        return False, int(existing["id"])
+    if existing is not None and existing["source"] != row.get("source"):
+        _record_source(conn, "a2a", int(existing["id"]), _src)
+        return False, int(existing["id"])
+    if existing is None and endpoint_existing is not None:
+        if endpoint_existing["source"] == row.get("source"):
+            existing = endpoint_existing
+            existing_by_source_id = True
+        else:
+            _record_source(conn, "a2a", int(endpoint_existing["id"]), _src)
+            return False, int(endpoint_existing["id"])
+    existing = existing or endpoint_existing
 
     if existing is None:
+        _ensure_unique_slug(
+            conn, "a2a_agents", row,
+            "%s\0%s" % (row.get("source"), row.get("source_id")),
+        )
         placeholders = ",".join(["?"] * len(_A2A_COLS))
         cur.execute(
             f"INSERT INTO a2a_agents ({','.join(_A2A_COLS)}) VALUES ({placeholders})",
@@ -2549,6 +2735,13 @@ def upsert_a2a_agent(conn: sqlite3.Connection, row: dict) -> tuple:
         return True, new_id
 
     row["created_at"] = existing["created_at"]
+    if int(existing["owner_verified"] or 0):
+        cur.execute(
+            "UPDATE a2a_agents SET last_seen=?,updated_at=? WHERE id=?",
+            (now, now, existing["id"]),
+        )
+        _record_source(conn, "a2a", existing["id"], _src)
+        return False, int(existing["id"])
     # A stable (source, source_id) identity should keep its public slug. Some
     # crawlers derive slug from mutable Agent Card names; changing it can collide
     # with another indexed agent and break the whole crawl batch.
@@ -2560,6 +2753,7 @@ def upsert_a2a_agent(conn: sqlite3.Connection, row: dict) -> tuple:
     for _keep in ("health", "health_checked", "last_success_at", "latency_ms"):
         if row.get(_keep) is None:
             row[_keep] = existing[_keep]
+    row["x402_supported"] = existing["x402_supported"]
     _restore_owner_edits(row, existing)
     _keep_owned_slug(cur, "a2a_agents", row, existing)
     set_clause = ",".join(f"{c}=?" for c in _A2A_COLS if c != "created_at")
@@ -2633,18 +2827,15 @@ def get_a2a_by_slug(conn, slug):
 
 
 def _norm_endpoint(url: str) -> str:
-    """Endpoint dedup key: lowercased, no trailing slash."""
-    return (url or "").strip().lower().rstrip("/")
+    """Backward-compatible name for the exact endpoint dedup key."""
+    return _exact_endpoint(url)
 
 
 def find_mcp_by_endpoint(conn, endpoint: str) -> dict | None:
     """The row a submitted endpoint would land on, using upsert's own key."""
-    ep = _norm_endpoint(endpoint)
-    if not ep:
-        return None
-    row = conn.execute(
-        "SELECT * FROM mcp_servers WHERE lower(rtrim(endpoint_url, '/'))=? LIMIT 1",
-        (ep,)).fetchone()
+    row = _find_exact_endpoint_row(
+        conn, "mcp_servers", ("endpoint_url",), endpoint
+    )
     return dict(row) if row else None
 
 
@@ -2709,9 +2900,9 @@ def revoke_api_key(conn, key_id: int, user_id: int) -> bool:
 def find_a2a_by_card_url(conn, card_url: str) -> dict | None:
     if not card_url:
         return None
-    row = conn.execute(
-        "SELECT * FROM a2a_agents WHERE card_url=? LIMIT 1", (card_url,)
-    ).fetchone()
+    row = _find_exact_endpoint_row(
+        conn, "a2a_agents", ("card_url",), card_url
+    )
     return a2a_row_to_dict(row) if row else None
 
 
@@ -2875,40 +3066,56 @@ def upsert_mcp_server(conn: sqlite3.Connection, row: dict) -> tuple:
     row.setdefault("created_at", now)
     row["updated_at"] = now
     row["last_seen"] = now
-    row["x402_supported"] = 1 if row.get("x402_supported") else 0
+    if row.get("endpoint_url"):
+        canonical_endpoint = _exact_endpoint(row["endpoint_url"])
+        if not canonical_endpoint:
+            raise ValueError("invalid MCP endpoint")
+        row["endpoint_url"] = canonical_endpoint
+    row["x402_supported"] = 0
     row["kind"] = "callable" if (row.get("endpoint_url") or "").strip() else "catalog"
     for k in _MCP_JSON_COLS:
         row[k] = _to_json(row.get(k))
 
     cur = conn.cursor()
     _sel = "SELECT * FROM mcp_servers "
-    existing = None
-    cross_source = False
+    source_existing = None
+    source_identity_rows = []
     # 1) same source identity
     if row.get("source") and row.get("source_id"):
-        existing = cur.execute(
-            _sel + "WHERE source=? AND source_id=?",
-            (row["source"], row["source_id"]),
-        ).fetchone()
+        source_identity_rows = _source_identity_rows(
+            conn, "mcp", row["source"], row["source_id"]
+        )
+        source_existing = (source_identity_rows[0]
+                           if source_identity_rows else None)
+        if len(source_identity_rows) > 1:
+            return False, int(source_existing["id"])
     # 2) same callable endpoint, regardless of source (normalised: lower + no
     #    trailing slash). Lets the same server discovered on multiple
     #    directories collapse onto one row.
-    if existing is None and (row.get("endpoint_url") or "").strip():
-        ep = _norm_endpoint(row["endpoint_url"])
-        existing = cur.execute(
-            _sel + "WHERE lower(rtrim(endpoint_url, '/'))=?",
-            (ep,),
-        ).fetchone()
-        if existing is not None:
-            cross_source = True
-    # 3) same slug fallback
-    if existing is None:
-        existing = cur.execute(
-            _sel + "WHERE slug=?",
-            (row["slug"],),
-        ).fetchone()
+    endpoint_existing = _find_exact_endpoint_row(
+        conn, "mcp_servers", ("endpoint_url",),
+        row.get("endpoint_url") or "",
+    )
+    if (source_existing is not None and endpoint_existing is not None
+            and source_existing["id"] != endpoint_existing["id"]):
+        return False, int(source_existing["id"])
+    if (source_existing is not None
+            and source_existing["source"] != row.get("source")):
+        _record_source(conn, "mcp", int(source_existing["id"]), _src)
+        return False, int(source_existing["id"])
+    if source_existing is None and endpoint_existing is not None:
+        if endpoint_existing["source"] == row.get("source"):
+            source_existing = endpoint_existing
+        else:
+            _record_source(conn, "mcp", int(endpoint_existing["id"]), _src)
+            return False, int(endpoint_existing["id"])
+    existing = source_existing or endpoint_existing
 
     if existing is None:
+        _ensure_unique_slug(
+            conn, "mcp_servers", row,
+            "%s\0%s" % (row.get("source"), row.get("source_id")),
+        )
         placeholders = ",".join(["?"] * len(_MCP_COLS))
         cur.execute(
             f"INSERT INTO mcp_servers ({','.join(_MCP_COLS)}) VALUES ({placeholders})",
@@ -2919,21 +3126,13 @@ def upsert_mcp_server(conn: sqlite3.Connection, row: dict) -> tuple:
         return True, new_id
 
     row["created_at"] = existing["created_at"]
-    # When the match was by endpoint across a different source, keep the
-    # original row's source identity stable (so re-crawls don't ping-pong the
-    # owning source) and only adopt the incoming metadata if it is at least as
-    # confident as what we already stored.
-    if cross_source:
-        # First-source-wins: a server discovered earlier under source A keeps
-        # source=A even when source B later finds the same endpoint, so the
-        # owning source does not ping-pong between crawlers on every run.
-        # We still enrich: adopt the higher confidence signal either way.
-        new_conf = row.get("confidence") or 0.0
-        old_conf = existing["confidence"] or 0.0
-        row["source"] = existing["source"]
-        row["source_id"] = existing["source_id"]
-        row["confidence"] = max(new_conf, old_conf)
-        row["slug"] = None  # keep existing slug (set below)
+    if int(existing["owner_verified"] or 0):
+        cur.execute(
+            "UPDATE mcp_servers SET last_seen=?,updated_at=? WHERE id=?",
+            (now, now, existing["id"]),
+        )
+        _record_source(conn, "mcp", existing["id"], _src)
+        return False, int(existing["id"])
     # metadata-only refresh must not reset a previously probed health
     for _keep in ("health", "health_checked", "last_success_at",
                   "latency_ms", "http_status"):
@@ -2946,9 +3145,8 @@ def upsert_mcp_server(conn: sqlite3.Connection, row: dict) -> tuple:
     if row.get("package_download_count") is None:
         row["package_download_count"] = existing["package_download_count"]
     # x402_supported is owned by directory.reverify_x402 (real 402 probe).
-    # A plain re-crawl must never downgrade a verified flag back to 0.
-    row["x402_supported"] = 1 if (row.get("x402_supported")
-                                  or existing["x402_supported"]) else 0
+    # Metadata re-crawls preserve its latest authoritative value.
+    row["x402_supported"] = existing["x402_supported"]
     cols = [c for c in _MCP_COLS if c != "created_at"]
     if row.get("slug") is None:
         cols = [c for c in cols if c != "slug"]
@@ -2974,8 +3172,7 @@ def _access_case(alias, kind):
             f"ELSE 'open' END"
         )
     return (
-        f"CASE WHEN {a}.x402_supported=1 OR ({a}.auth_schemes IS NOT NULL "
-        f"AND lower({a}.auth_schemes) LIKE '%x402%') THEN 'x402' "
+        f"CASE WHEN {a}.x402_supported=1 THEN 'x402' "
         f"WHEN {a}.auth_schemes IS NOT NULL AND ("
         f"lower({a}.auth_schemes) LIKE '%key%' OR lower({a}.auth_schemes) LIKE '%bearer%' "
         f"OR lower({a}.auth_schemes) LIKE '%oauth%' OR lower({a}.auth_schemes) LIKE '%token%' "
@@ -3929,15 +4126,19 @@ _ENDPOINT_FIELDS = {
 # endpoint 一变，实测结论就不再适用于新地址，全部清空等待重测。
 _MEASURED_RESET = {
     "x402": ("health", "health_checked", "latency_ms", "http_status", "x402_ok",
-             "quality_score", "resource_count", "resource_samples", "tx_30d",
+         "quality_score", "resource_count", "resource_samples", "payment",
+            "call_info", "chains", "price_min", "price_max", "facilitator",
+            "well_known_url",
+         "tx_30d",
              "payto_tx_30d", "payto_payers_30d", "payto_checked", "down_since",
              "last_seen", "latency_ms"),
     "mcp": ("health", "health_checked", "latency_ms", "http_status", "tool_count",
             "tools_json", "tools_text", "latency_p95_ms", "quality_score",
             "conformance", "down_since", "last_success_at", "safety_verdict",
-            "safety_score", "safety_reasons"),
+        "safety_score", "safety_reasons", "x402_supported"),
     "a2a": ("health", "health_checked", "latency_ms", "conformance",
-            "quality_score", "down_since", "last_success_at"),
+        "quality_score", "down_since", "last_success_at",
+        "x402_supported"),
 }
 _KIND_TABLE = {"x402": "services", "mcp": "mcp_servers", "a2a": "a2a_agents"}
 # Only the field the measurements were taken against invalidates them. An x402
@@ -4017,7 +4218,6 @@ def apply_listing_edits(conn: sqlite3.Connection, kind: str, listing_id: int,
     applied: list[str] = []
     rejected: list[str] = []
     endpoint_changed = False
-    moved_url = None
     for field, value in changes.items():
         if field not in allowed:
             continue
@@ -4034,18 +4234,31 @@ def apply_listing_edits(conn: sqlite3.Connection, kind: str, listing_id: int,
             if new is None:
                 rejected.append("%s cannot be empty" % field)
                 continue
-            host, _ = _host_and_path(new)
-            if not host:
+            new = _exact_endpoint(new)
+            if not new:
                 rejected.append("%s is not a valid URL" % field)
                 continue
+            host, _ = _host_and_path(new)
             if host not in hosts:
                 rejected.append(
                     "%s: you have not verified control of %s" % (field, host))
                 continue
+            identity_columns = {
+                "x402": (field,),
+                "mcp": ("endpoint_url",),
+                "a2a": ("endpoint_url", "card_url"),
+            }[kind]
+            occupant = _find_exact_endpoint_row(
+                conn, table, identity_columns, new, exclude_id=listing_id
+            )
+            if occupant is not None:
+                rejected.append(
+                    "%s: endpoint is already used by %s"
+                    % (field, occupant["slug"])
+                )
+                continue
             if field == _PRIMARY_ENDPOINT.get(kind):
                 endpoint_changed = True
-                if kind == "x402":
-                    moved_url = (new, host)
         conn.execute("UPDATE %s SET %s=? WHERE id=?" % (table, field),
                      (new, listing_id))
         conn.execute(
@@ -4063,6 +4276,10 @@ def apply_listing_edits(conn: sqlite3.Connection, kind: str, listing_id: int,
                 "UPDATE %s SET %s WHERE id=?"
                 % (table, ", ".join("%s=NULL" % c for c in resets)),
                 (listing_id,))
+        if kind == "x402":
+            conn.execute(
+                "DELETE FROM service_paytos WHERE service_id=?", (listing_id,)
+            )
     if applied:
         try:
             marked = set(json.loads(current["owner_edited"] or "[]"))
@@ -4071,18 +4288,6 @@ def apply_listing_edits(conn: sqlite3.Connection, kind: str, listing_id: int,
         marked.update(applied)
         conn.execute("UPDATE %s SET owner_edited=? WHERE id=?" % table,
                      (json.dumps(sorted(marked)), listing_id))
-    if moved_url:
-        # The host check above proves this account controls the new address. It
-        # does not prove the address is still free, and only an edit can put two
-        # rows on one endpoint -- upsert_service dedups on it.
-        from . import collisions  # here so db has no import-time httpx dependency
-
-        collisions.on_endpoint_changed(
-            conn, listing_id=listing_id,
-            endpoint_key=_norm_endpoint(moved_url[0]), host=moved_url[1],
-            user_id=user_id, field="url", old_value=current["url"],
-            new_value=moved_url[0],
-            shared_host=is_shared_host(conn, moved_url[1]))
     # 不在此提交：调用方的 db.writer() 负责，内部提交会让调用方无法组合事务。
     return applied, rejected
 

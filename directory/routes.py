@@ -838,6 +838,36 @@ def _unsafe_url_error(message: str) -> HTTPException:
     )
 
 
+def _privacy_submission_error(kind: str) -> HTTPException:
+    detail = {"x402": "service not found", "mcp": "mcp server not found",
+              "a2a": "a2a agent not found"}[kind]
+    return HTTPException(
+        status_code=404,
+        detail=detail,
+        headers={
+            "X-Agent-Tools-Privacy-Suppressed": "1",
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+def _retired_submission_error() -> HTTPException:
+    return HTTPException(
+        status_code=410,
+        detail="This endpoint was retired by its operator.",
+    )
+
+
+def _assert_submission_allowed(kind: str, row: dict) -> None:
+    try:
+        with _conn() as conn:
+            db.assert_listing_not_retired(conn, kind, row)
+    except db.PrivacySuppressedListingError as exc:
+        raise _privacy_submission_error(kind) from exc
+    except db.RetiredListingError as exc:
+        raise _retired_submission_error() from exc
+
+
 async def _require_public_url(url: str) -> None:
     try:
         await run_in_threadpool(directory_public_http.validate_url, url)
@@ -861,6 +891,10 @@ async def _require_public_url(url: str) -> None:
 )
 async def api_submit(request: Request, payload: SubmissionPayload):
     url = str(payload.url).strip()
+    submission = payload.model_dump(mode="json")
+    submission["url"] = url
+    submission["_source"] = "rest-submit"
+    _assert_submission_allowed("x402", submission)
     await _require_public_url(url)
     if directory_crawlers.url_retired(url):
         raise HTTPException(
@@ -907,12 +941,14 @@ async def api_submit(request: Request, payload: SubmissionPayload):
     )
     if state:
         limits.raise_rate_limited(state, "Too many service submissions from this IP.")
-    submission = payload.model_dump(mode="json")
-    submission["url"] = url
     submission["_client_ip"] = client_ip
-    submission["_source"] = "rest-submit"
-    with db.writer() as c:
-        sub_id = db.create_submission(c, submission)
+    try:
+        with db.writer() as c:
+            sub_id = db.create_submission(c, submission)
+    except db.PrivacySuppressedListingError as exc:
+        raise _privacy_submission_error("x402") from exc
+    except db.RetiredListingError as exc:
+        raise _retired_submission_error() from exc
     # Auto-review immediately — there is no human gate. x402 verification
     # decides: verified -> listed now, rejected -> dropped, uncertain ->
     # stays pending and is retried automatically by the crawl timer.
@@ -1276,6 +1312,12 @@ async def api_submit_mcp(request: Request, payload: McpSubmissionPayload):
     owner are unaffected.
     """
     endpoint = str(payload.url).strip()
+    _assert_submission_allowed("mcp", {
+        "url": endpoint,
+        "endpoint_url": endpoint,
+        "source": "submission",
+        "source_id": endpoint,
+    })
     await _require_public_url(endpoint)
     if directory_crawlers.url_retired(endpoint):
         raise HTTPException(
@@ -1292,19 +1334,7 @@ async def api_submit_mcp(request: Request, payload: McpSubmissionPayload):
     probe = await run_in_threadpool(directory_crawlers.probe_mcp_health, endpoint)
     if probe.get("unsafe_url"):
         raise _unsafe_url_error(probe["unsafe_url"])
-    # Also probe for x402: an MCP server can be a paid (402) endpoint, in which
-    # case it must ALSO land in the x402 services catalog (delivery=mcp).
-    x402 = await run_in_threadpool(
-        directory_reverify.verify_and_mirror, endpoint,
-        slug=slug, name=name,
-        description=(payload.description or "").strip() or None,
-        homepage=endpoint, delivery="mcp", source="submission", source_id=endpoint,
-        protect_owner_kind="mcp", protect_owner_slug=slug,
-        protect_owner_url=endpoint)
-    if x402.get("owner_locked"):
-        with db.connect(read_only=True) as conn:
-            locked = db.find_owner_locked_listing(conn, "mcp", endpoint, slug)
-        raise _owner_locked("mcp", locked)
+    verdict = await run_in_threadpool(directory_crawlers.verify_x402, endpoint)
     row = {
         "slug": slug,
         "name": name,
@@ -1312,7 +1342,7 @@ async def api_submit_mcp(request: Request, payload: McpSubmissionPayload):
         "homepage_url": endpoint,
         "endpoint_url": endpoint,
         "transport": (payload.transport or "streamable-http").strip(),
-        "x402_supported": bool(x402.get("x402")),
+        "x402_supported": 0,
         "source": "submission",
         "source_id": endpoint,
         "source_url": endpoint,
@@ -1323,11 +1353,48 @@ async def api_submit_mcp(request: Request, payload: McpSubmissionPayload):
         "last_success_at": int(time.time()) if probe.get("status") == "ok" else None,
         "confidence": 0.5,
     }
-    with db.writer(immediate=True) as c:
-        locked = db.find_owner_locked_listing(c, "mcp", endpoint, slug)
-        if locked:
-            raise _owner_locked("mcp", locked)
-        created, server_id = db.upsert_mcp_server(c, row)
+    try:
+        with db.writer(immediate=True) as c:
+            db.assert_listing_not_retired(c, "mcp", row)
+            locked = db.find_owner_locked_listing(c, "mcp", endpoint, slug)
+            if locked:
+                raise _owner_locked("mcp", locked)
+            created, server_id = db.upsert_mcp_server(c, row)
+            stored = c.execute(
+                "SELECT endpoint_url FROM mcp_servers WHERE id=?", (server_id,)
+            ).fetchone()
+            if (stored is None or db._exact_endpoint(stored["endpoint_url"] or "")
+                    != db._exact_endpoint(endpoint)):
+                raise HTTPException(status_code=409, detail={
+                    "error": "identity_conflict",
+                    "message": "This submission identity belongs to another endpoint.",
+                })
+            x402 = directory_reverify.verify_and_mirror(
+                endpoint, slug=slug, name=name,
+                description=(payload.description or "").strip() or None,
+                homepage=endpoint, delivery="mcp", source="submission",
+                source_id=endpoint, verdict=verdict, conn=c,
+                protect_owner_kind="mcp", protect_owner_slug=slug,
+                protect_owner_url=endpoint,
+            )
+            if x402.get("owner_locked"):
+                locked = x402.get("locked_listing")
+                if locked:
+                    raise _owner_locked(x402.get("locked_kind") or "x402", locked)
+                raise HTTPException(status_code=409, detail={"error": "owner_verified"})
+            if x402.get("identity_conflict"):
+                raise HTTPException(status_code=409, detail={
+                    "error": "identity_conflict",
+                    "message": "The verified paid resource conflicts with an existing identity.",
+                })
+            c.execute(
+                "UPDATE mcp_servers SET x402_supported=? WHERE id=?",
+                (1 if x402.get("x402") else 0, server_id),
+            )
+    except db.PrivacySuppressedListingError as exc:
+        raise _privacy_submission_error("mcp") from exc
+    except db.RetiredListingError as exc:
+        raise _retired_submission_error() from exc
     await run_in_threadpool(
         directory_mailer.send_admin_notification,
         "MCP submission", name, "listed" if created else "updated",
@@ -1361,6 +1428,13 @@ async def api_submit_a2a(request: Request, payload: A2ASubmissionPayload):
     owner are unaffected.
     """
     url = str(payload.url).strip()
+    _assert_submission_allowed("a2a", {
+        "url": url,
+        "endpoint_url": url,
+        "card_url": url,
+        "source": "submission",
+        "source_id": url,
+    })
     await _require_public_url(url)
     if directory_crawlers.url_retired(url):
         raise HTTPException(
@@ -1385,36 +1459,64 @@ async def api_submit_a2a(request: Request, payload: A2ASubmissionPayload):
     row = directory_a2a.card_to_row(card, card_url, source="submission")
     if row.get("endpoint_url"):
         await _require_public_url(row["endpoint_url"])
+    _assert_submission_allowed("a2a", row)
     with db.connect(read_only=True) as _c:
         _owned = db.find_a2a_by_card_url(_c, card_url)
     if _owned and _owned.get("owner_verified"):
         raise _owner_locked("a2a", _owned)
-    # Probe for x402: an A2A agent can be a paid (402) endpoint, in which case
-    # it must ALSO land in the x402 services catalog (delivery=a2a).
     verify_target = row.get("endpoint_url") or url
-    x402 = await run_in_threadpool(
-        directory_reverify.verify_and_mirror, verify_target,
-        slug=row["slug"], name=row.get("name"),
-        description=row.get("description"),
-        homepage=row.get("homepage_url"), delivery="a2a",
-        source="submission", source_id=row.get("source_id"),
-        protect_owner_kind="a2a", protect_owner_slug=row["slug"],
-        protect_owner_url=card_url,
-        protect_owner_alternate_url=row.get("endpoint_url"))
-    if x402.get("owner_locked"):
-        with db.connect(read_only=True) as conn:
+    verdict = await run_in_threadpool(
+        directory_crawlers.verify_x402, verify_target
+    )
+    try:
+        with db.writer(immediate=True) as c:
+            db.assert_listing_not_retired(c, "a2a", row)
             locked = db.find_owner_locked_listing(
-                conn, "a2a", card_url, row["slug"], row.get("endpoint_url"))
-        raise _owner_locked("a2a", locked)
-    if x402.get("x402"):
-        # real 402 probe is authoritative; never downgrade card self-declaration
-        row["x402_supported"] = True
-    with db.writer(immediate=True) as c:
-        locked = db.find_owner_locked_listing(
-            c, "a2a", card_url, row["slug"], row.get("endpoint_url"))
-        if locked:
-            raise _owner_locked("a2a", locked)
-        created, agent_id = db.upsert_a2a_agent(c, row)
+                c, "a2a", card_url, row["slug"], row.get("endpoint_url"))
+            if locked:
+                raise _owner_locked("a2a", locked)
+            created, agent_id = db.upsert_a2a_agent(c, row)
+            stored = c.execute(
+                "SELECT endpoint_url,card_url FROM a2a_agents WHERE id=?",
+                (agent_id,),
+            ).fetchone()
+            if (stored is None
+                    or db._exact_endpoint(stored["endpoint_url"] or "")
+                    != db._exact_endpoint(row.get("endpoint_url") or "")
+                    or db._exact_endpoint(stored["card_url"] or "")
+                    != db._exact_endpoint(card_url)):
+                raise HTTPException(status_code=409, detail={
+                    "error": "identity_conflict",
+                    "message": "This Agent Card identity belongs to another endpoint.",
+                })
+            x402 = directory_reverify.verify_and_mirror(
+                verify_target, slug=row["slug"], name=row.get("name"),
+                description=row.get("description"),
+                homepage=row.get("homepage_url"), delivery="a2a",
+                source="submission", source_id=row.get("source_id"),
+                verdict=verdict, conn=c,
+                protect_owner_kind="a2a", protect_owner_slug=row["slug"],
+                protect_owner_url=card_url,
+                protect_owner_alternate_url=row.get("endpoint_url"),
+            )
+            if x402.get("owner_locked"):
+                locked = x402.get("locked_listing")
+                if locked:
+                    raise _owner_locked(x402.get("locked_kind") or "x402", locked)
+                raise HTTPException(status_code=409, detail={"error": "owner_verified"})
+            if x402.get("identity_conflict"):
+                raise HTTPException(status_code=409, detail={
+                    "error": "identity_conflict",
+                    "message": "The verified paid resource conflicts with an existing identity.",
+                })
+            c.execute(
+                "UPDATE a2a_agents SET x402_supported=? WHERE id=?",
+                (1 if x402.get("x402") else 0, agent_id),
+            )
+    except db.PrivacySuppressedListingError as exc:
+        raise _privacy_submission_error("a2a") from exc
+    except db.RetiredListingError as exc:
+        raise _retired_submission_error() from exc
     slug = row["slug"]
     await run_in_threadpool(
         directory_mailer.send_admin_notification,
