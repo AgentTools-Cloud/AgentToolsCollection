@@ -12,7 +12,7 @@ from urllib.parse import quote, urlsplit
 
 import httpx
 
-from . import crawlers
+from . import crawlers, db
 
 log = logging.getLogger("directory.wellknown")
 
@@ -264,7 +264,7 @@ def fetch_wellknown_mcp() -> list[dict]:
         if kind != "mcp_server" and "mcp" not in protocols:
             continue
         endpoint = record["endpoint"].strip()
-        endpoint_key = endpoint.lower().rstrip("/")
+        endpoint_key = db._exact_endpoint(endpoint)
         if endpoint_key in seen_endpoints:
             continue
         seen_endpoints.add(endpoint_key)
@@ -298,7 +298,7 @@ def fetch_wellknown_a2a() -> list[dict]:
         if kind != "agent" or "a2a" not in protocols:
             continue
         endpoint = record["endpoint"].strip()
-        endpoint_key = endpoint.lower().rstrip("/")
+        endpoint_key = db._exact_endpoint(endpoint)
         if endpoint_key in seen_endpoints:
             continue
         seen_endpoints.add(endpoint_key)

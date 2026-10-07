@@ -15,7 +15,7 @@ tmp=tempfile.mkdtemp(prefix="retirement-lifecycle-")
 path=os.path.join(tmp,"test.db")
 s=sqlite3.connect(SOURCE); d=sqlite3.connect(path); s.backup(d); d.close(); s.close()
 os.environ["AGENT_TOOLS_DB_PATH"]=path
-sys.path.insert(0,"/opt/mcpserver")
+sys.path.insert(0,os.environ.get("AGENT_TOOLS_SOURCE_ROOT","/opt/mcpserver"))
 from directory import db
 db=importlib.reload(db)
 

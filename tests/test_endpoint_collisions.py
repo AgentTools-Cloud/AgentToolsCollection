@@ -81,11 +81,11 @@ def move(conn, listing_id, uid, own_id, to_path):
     return db.apply_listing_edits(
         conn, "x402", listing_id, uid, own_id,
         {"url": "https://%s%s" % (HOST, to_path)},
-        verified_hosts={HOST}, via="api")
+        via="api")
 
 
-# --- 1. one operator, two of their own listings -----------------------------
-print("\n1. 同一运营方把占位 URL 改成真实端点")
+# --- 1. occupied endpoint is rejected without deleting either row -----------
+print("\n1. 已占用端点在写入前拒绝")
 with db.writer() as c:
     uid = 900001
     own = mkowner(c, uid, HOST)
@@ -93,69 +93,58 @@ with db.writer() as c:
     b = mkservice(c, "fixture-real", "/api/v1/extract", quality_score=80.0,
                   x402_ok=1, resource_count=12)
     applied, rejected = move(c, a, uid, own, "/api/v1/extract")
-    check("edit applied", applied == ["url"], "%s %s" % (applied, rejected))
-    left = [dict(r) for r in c.execute(
-        "SELECT id, slug FROM services WHERE lower(rtrim(url,'/'))=?",
-        ("https://%s/api/v1/extract" % HOST,))]
-    check("the two rows became one", len(left) == 1, str(left))
-    check("the richer row survived", left and left[0]["id"] == b,
-          "survivor=%s expected=%s" % (left[0]["id"] if left else None, b))
-    row = ledger(c, a)
-    check("ledger records the merge", row and row["decision"] == "merge",
-          row and row["reason_code"])
-    check("ledger names both ids",
-          row and row["survivor_id"] == b and row["absorbed_id"] == a)
-    check("evidence says which rank step decided",
-          row and any("survivor decided by" in e
-                      for e in json.loads(row["evidence"])),
-          row and row["evidence"])
+    check("edit rejected", not applied and rejected and
+          "already used" in rejected[0], "%s %s" % (applied, rejected))
+    rows = [dict(r) for r in c.execute(
+        "SELECT id,url,quality_score,x402_ok,resource_count FROM services "
+        "WHERE id IN (?,?) ORDER BY id", (a, b))]
+    check("both rows remain", len(rows) == 2, str(rows))
+    check("source endpoint stays unchanged",
+          rows[0]["url"] == "https://%s/" % HOST, str(rows[0]))
+    check("occupant measurements stay unchanged",
+          rows[1]["quality_score"] == 80.0 and rows[1]["x402_ok"] == 1
+          and rows[1]["resource_count"] == 12, str(rows[1]))
+    check("no collision ledger row", ledger(c, a) is None, str(ledger(c, a)))
 
-# --- 2. shared gateway ------------------------------------------------------
-print("\n2. 多租户网关上不自动合并")
+# --- 2. shared gateway follows the same no-merge rule -----------------------
+print("\n2. 多租户网关同样拒绝占用端点")
 with db.writer() as c:
     c.execute("INSERT OR REPLACE INTO shared_hosts(host, path_count, "
               "listing_count, verdict, updated_at) "
               "VALUES (?,50,50,'shared',1700000000)", (HOST,))
-    uid = 900002
-    own = mkowner(c, uid, HOST + ".two")
+    uid = 900001
     x = mkservice(c, "fixture-tenant-a", "/tenant-a")
     y = mkservice(c, "fixture-tenant-b", "/tenant-b")
-    applied, _ = move(c, x, uid, own, "/tenant-b")
-    check("edit still applied", applied == ["url"], str(applied))
+    applied, rejected = move(c, x, uid, own, "/tenant-b")
+    check("edit rejected", not applied and rejected and
+          "already used" in rejected[0], "%s %s" % (applied, rejected))
     both = c.execute("SELECT COUNT(*) FROM services WHERE id IN (?,?)",
                      (x, y)).fetchone()[0]
     check("nothing was deleted", both == 2, "rows=%s" % both)
-    row = ledger(c, x)
-    check("shelved as pending", row and row["decision"] == "pending",
-          row and row["decision"])
-    check("reason is the shared host", row and row["reason_code"] == "shared_host",
-          row and row["reason_code"])
+    check("no collision ledger row", ledger(c, x) is None, str(ledger(c, x)))
     c.execute("DELETE FROM shared_hosts WHERE host=?", (HOST,))
 
-# --- 3. two different payout addresses --------------------------------------
-print("\n3. 两条收款地址不同时不合并")
+# --- 3. payout metadata cannot override the no-merge rule -------------------
+print("\n3. 收款地址不同也在写入前拒绝")
 with db.writer() as c:
-    uid = 900003
-    own = mkowner(c, uid, HOST + ".three")
+    uid = 900001
     p = mkservice(c, "fixture-pay-a", "/pay-a")
     q = mkservice(c, "fixture-pay-b", "/pay-b")
     for sid, addr in ((p, "0xaaa"), (q, "0xbbb")):
         c.execute("INSERT INTO service_paytos(service_id, chain, address, "
                   "first_seen, last_seen) VALUES (?,'base',?,1,1)", (sid, addr))
-    move(c, p, uid, own, "/pay-b")
+    applied, rejected = move(c, p, uid, own, "/pay-b")
+    check("edit rejected", not applied and rejected and
+          "already used" in rejected[0], "%s %s" % (applied, rejected))
     both = c.execute("SELECT COUNT(*) FROM services WHERE id IN (?,?)",
                      (p, q)).fetchone()[0]
     check("nothing was deleted", both == 2, "rows=%s" % both)
-    row = ledger(c, p)
-    check("reason is the payout conflict",
-          row and row["reason_code"] == "conflicting_payto",
-          row and row["reason_code"])
+    check("no collision ledger row", ledger(c, p) is None, str(ledger(c, p)))
 
 # --- 4. an edit that collides with nothing ----------------------------------
 print("\n4. 没撞上任何条目时不留痕")
 with db.writer() as c:
-    uid = 900004
-    own = mkowner(c, uid, HOST + ".four")
+    uid = 900001
     s = mkservice(c, "fixture-alone", "/alone")
     before = c.execute("SELECT COUNT(*) FROM endpoint_collisions").fetchone()[0]
     applied, _ = move(c, s, uid, own, "/still-alone")

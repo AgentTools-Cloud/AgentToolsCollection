@@ -381,18 +381,38 @@ def _card_endpoint(card: dict, card_url: str) -> str | None:
 
 
 def _detect_x402(card: dict) -> tuple[bool, str | None]:
-    blob = json.dumps(card, ensure_ascii=False).lower()
-    supported = "x402" in blob or "402" in (str(card.get("security") or "")).lower()
     payto = None
     sec = card.get("securitySchemes") or {}
+    supported = False
     if isinstance(sec, dict):
-        for v in sec.values():
-            if isinstance(v, dict):
-                addr = v.get("payTo") or v.get("payto") or v.get("address")
-                if addr:
-                    payto = str(addr)
-                    break
-    return ("x402" in blob), payto
+        schemes = [(name, value) for name, value in sec.items()]
+    elif isinstance(sec, list):
+        schemes = [(None, value) for value in sec]
+    else:
+        schemes = []
+    for name, value in schemes:
+        if not isinstance(value, dict):
+            continue
+        labels = (
+            value.get("type"), value.get("scheme"),
+            value.get("name"), name,
+        )
+        if not any("x402" in str(label or "").lower() for label in labels):
+            continue
+        supported = True
+        addr = value.get("payTo") or value.get("payto") or value.get("address")
+        if addr:
+            payto = str(addr)
+    security = card.get("security") or []
+    if isinstance(security, dict):
+        security = [security]
+    if isinstance(security, list):
+        supported = supported or any(
+            isinstance(item, dict)
+            and any("x402" in str(name).lower() for name in item)
+            for item in security
+        )
+    return supported, payto
 
 
 def _auth_scheme_names(card: dict) -> list[str] | None:

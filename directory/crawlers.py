@@ -17,13 +17,17 @@ from urllib.parse import urlparse
 
 import os
 import httpx
-
 from . import public_http
+from .url_identity import exact_endpoint
 
 log = logging.getLogger("directory.crawlers")
 
 UA = "agent-tools.cloud-crawler/0.1 (+https://agent-tools.cloud)"
 TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=10.0)
+
+
+def _endpoint_url_key(url: str) -> str:
+    return exact_endpoint(url)
 
 
 def _slugify(text: str) -> str:
@@ -528,10 +532,19 @@ def fetch_x402scan() -> list:
         quality_samples: list[dict[str, Any]] = []
         mcp_server_urls: set = set()
         mcp_resource_urls: set = set()
+        paid_resource_urls: set = set()
         for res in resources:
             if not isinstance(res, dict):
                 continue
             res_url = res.get("resource") or ""
+            accepts = _resource_accepts(res)
+            accepts = [accept for accept in accepts if _valid_payment(
+                _extract_payment({"accepts": [accept]})
+            )]
+            if not accepts:
+                continue
+            if res_url.startswith(("http://", "https://")):
+                paid_resource_urls.add(res_url)
             # Heuristic: any resource path ending with /mcp /sse /streamable
             # is almost certainly an MCP transport endpoint. Trim back to
             # that segment so we keep the server root, not a tool-specific
@@ -539,7 +552,6 @@ def fetch_x402scan() -> list:
             mm = re.search(r"^(.+?/(mcp|sse|streamable))(/|$)", res_url.lower())
             if mm:
                 mcp_resource_urls.add(res_url[: mm.end(1)])
-            accepts = _resource_accepts(res)
             accept_summaries: list[dict[str, Any]] = []
             local_description = None
             for accept in accepts:
@@ -599,6 +611,9 @@ def fetch_x402scan() -> list:
                     "quality": _quality_summary(md),
                 })
 
+        if not paid_resource_urls:
+            continue
+
         name = origin.get("title") or urlparse(origin_url).hostname or origin_url
         description = origin.get("description") or (descriptions[0] if descriptions else None)
         if description and len(description) > 400:
@@ -619,9 +634,10 @@ def fetch_x402scan() -> list:
         elif re.search(r"(^|[./_-])mcp[./_-]|//mcp\.", origin_url.lower()):
             mcp_url = origin_url
 
+        primary_url = sorted(paid_resource_urls)[0]
         rows.append({
             "slug": _host_slug(origin_url) + "-scan",
-            "name": name, "url": origin_url,
+            "name": name, "url": primary_url,
             "description": description,
             "category": category,
             "chains": sorted(chains),
@@ -631,7 +647,7 @@ def fetch_x402scan() -> list:
             "well_known_url": origin_url.rstrip("/") + "/.well-known/x402",
             "confidence": max(confidences) if confidences else None,
             "tx_30d": tx_30d_total if tx_30d_total > 0 else None,
-            "resource_count": len(resources),
+            "resource_count": len(paid_resource_urls),
             "resource_samples": resource_samples,
             "payment": {
                 "price_min_usd": min(prices) if prices else None,
@@ -640,7 +656,7 @@ def fetch_x402scan() -> list:
                 "accepts": accept_samples,
             },
             "call_info": {
-                "resource_count": len(resources),
+                "resource_count": len(paid_resource_urls),
                 "resource_samples": resource_samples,
                 "mcp_resource_urls": sorted(mcp_resource_urls),
                 "mcp_server_urls": sorted(mcp_server_urls),
@@ -1183,6 +1199,90 @@ def _payment_incomplete(payment) -> bool:
     return not payment or payment.get("max_amount_usdc") is None
 
 
+_LIVE_EVM_IDS = frozenset({
+    1, 10, 56, 100, 130, 137, 143, 146, 196, 480, 999, 1329,
+    2741, 3338, 8453, 42161, 42220, 42793, 43114,
+})
+_LEGACY_EVM_IDS = {
+    "base": 8453, "ethereum": 1, "eth": 1, "optimism": 10,
+    "op": 10, "polygon": 137, "matic": 137, "arbitrum": 42161,
+    "arbitrum-one": 42161, "gnosis": 100, "xdai": 100,
+}
+_SOLANA_MAINNETS = frozenset({
+    "solana", "solana:mainnet",
+    "solana:5eykt4usfv8p8njdtrepy1vzqkqzkvdp",
+})
+_SUI_MAINNETS = frozenset({"sui", "sui:mainnet", "mainnet.sui"})
+
+
+def _mainnet_family(network) -> tuple[str, int | None] | None:
+    value = str(network or "").strip().lower()
+    evm_id = _LEGACY_EVM_IDS.get(value)
+    if value.startswith("eip155:"):
+        value = value.split(":", 1)[1]
+    if evm_id is None and value.isdecimal():
+        evm_id = int(value)
+    if evm_id in _LIVE_EVM_IDS:
+        return "evm", evm_id
+    if value in _SOLANA_MAINNETS:
+        return "solana", None
+    if value in _SUI_MAINNETS:
+        return "sui", None
+    return None
+
+
+def _valid_payment(payment) -> bool:
+    if not isinstance(payment, dict):
+        return False
+    scheme = str(payment.get("scheme") or "").strip().lower()
+    if scheme not in {"exact", "upto", "x402", "eip3009", "exact-onchain"}:
+        return False
+    family = _mainnet_family(payment.get("network"))
+    if family is None:
+        return False
+    amount = payment.get("amount_raw")
+    if amount in (None, ""):
+        amount = payment.get("max_amount_usdc")
+    try:
+        if isinstance(amount, float):
+            amount_valid = amount > 0
+        else:
+            amount_valid = int(str(amount)) > 0
+    except (TypeError, ValueError):
+        amount_valid = False
+    if not amount_valid:
+        return False
+    pay_to = str(payment.get("pay_to") or "").strip()
+    asset = str(payment.get("asset") or "").strip()
+    if family[0] == "evm":
+        return bool(
+            re.fullmatch(r"0x[0-9a-fA-F]{40}", pay_to)
+            and re.fullmatch(r"0x[0-9a-fA-F]{40}", asset)
+        )
+    if family[0] == "solana":
+        return _valid_base58_pubkey(pay_to) and _valid_base58_pubkey(asset)
+    if family[0] == "sui":
+        return bool(
+            re.fullmatch(r"0x[0-9a-fA-F]{64}", pay_to)
+            and re.fullmatch(r"0x[0-9a-fA-F]{1,128}", asset)
+        )
+    return False
+
+
+def _valid_base58_pubkey(value: str) -> bool:
+    alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+    if not value or any(char not in alphabet for char in value):
+        return False
+    number = 0
+    for char in value:
+        number = number * 58 + alphabet.index(char)
+    decoded = (b"" if number == 0 else number.to_bytes(
+        (number.bit_length() + 7) // 8, "big"
+    ))
+    decoded = b"\0" * (len(value) - len(value.lstrip("1"))) + decoded
+    return len(decoded) == 32
+
+
 def _merge_payment(base, extra):
     """Fill blanks in ``base`` from ``extra``, keeping ``base``'s values.
 
@@ -1197,6 +1297,24 @@ def _merge_payment(base, extra):
         return extra
     out = dict(base)
     for k, v in extra.items():
+        if k in ("accepts", "networks") and isinstance(v, list):
+            current = out.get(k) if isinstance(out.get(k), list) else []
+            if k == "accepts":
+                keyed = {
+                    json.dumps(item, sort_keys=True, default=str): item
+                    for item in current if isinstance(item, dict)
+                }
+                for item in v:
+                    if isinstance(item, dict):
+                        keyed.setdefault(
+                            json.dumps(item, sort_keys=True, default=str), item
+                        )
+                    if len(keyed) >= 10:
+                        break
+                out[k] = list(keyed.values())
+            else:
+                out[k] = list(dict.fromkeys([*current, *v]))[:10]
+            continue
         if out.get(k) in (None, "") and v not in (None, ""):
             out[k] = v
     return out
@@ -1331,28 +1449,77 @@ def _extract_payment(obj: Any) -> dict[str, Any] | None:
                 return got
     if not isinstance(accepts, list) or not accepts:
         return None
-    first = accepts[0] if isinstance(accepts[0], dict) else {}
-    # Some descriptors wrap real accept objects: [{resource, accepts:[{scheme,...}]}]
-    for _ in range(3):
-        if (isinstance(first, dict) and "scheme" not in first
-                and isinstance(first.get("accepts"), list) and first["accepts"]):
-            first = first["accepts"][0] if isinstance(first["accepts"][0], dict) else {}
-        else:
-            break
-    amount_raw = (first.get("maxAmountRequired") or first.get("amount")
-                  or first.get("price"))
-    price_usdc = _bazaar_price_usd(first)
-    if price_usdc is None:
-        price_usdc = _declared_price_usd(first, obj)
+    normalized_accepts: list[dict[str, Any]] = []
+
+    def collect(items, depth=0):
+        if depth > 3 or len(normalized_accepts) >= 10:
+            return
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            nested = item.get("accepts")
+            if "scheme" not in item and isinstance(nested, list):
+                collect(nested, depth + 1)
+            else:
+                compact = {
+                    key: item.get(key)
+                    for key in (
+                        "scheme", "network", "chain", "amount",
+                        "maxAmountRequired", "price", "asset", "currency",
+                        "payTo", "pay_to", "maxTimeoutSeconds", "facilitator",
+                    )
+                    if item.get(key) not in (None, "")
+                }
+                extra = item.get("extra")
+                if isinstance(extra, dict):
+                    compact_extra = {
+                        key: extra.get(key)
+                        for key in ("name", "version", "feePayer")
+                        if extra.get(key) not in (None, "")
+                    }
+                    if compact_extra:
+                        compact["extra"] = compact_extra
+                normalized_accepts.append(compact)
+            if len(normalized_accepts) >= 10:
+                break
+
+    collect(accepts)
+    if not normalized_accepts:
+        return None
+
+    def from_accept(accept: dict[str, Any]) -> dict[str, Any]:
+        amount_raw = (accept.get("maxAmountRequired") or accept.get("amount")
+                      or accept.get("price"))
+        price_usdc = _bazaar_price_usd(accept)
+        if price_usdc is None:
+            price_usdc = _declared_price_usd(accept, obj)
+        return {
+            "scheme": accept.get("scheme"),
+            "network": accept.get("network") or accept.get("chain"),
+            "asset": accept.get("asset") or accept.get("currency") or "USDC",
+            "amount_raw": amount_raw,
+            "max_amount_usdc": price_usdc,
+            "currency": "USDC" if price_usdc is not None else None,
+            "pay_to": accept.get("payTo") or accept.get("pay_to"),
+            "facilitator": accept.get("facilitator"),
+        }
+
+    candidates = [from_accept(item) for item in normalized_accepts]
+    primary = next((item for item in candidates if _valid_payment(item)),
+                   candidates[0])
+    networks: list[Any] = []
+    for item in normalized_accepts:
+        network = item.get("network") or item.get("chain")
+        if (_mainnet_family(network) is not None
+                and network not in networks):
+            networks.append(network)
     return {
-        "scheme": first.get("scheme"),
-        "network": first.get("network") or first.get("chain"),
-        "asset": first.get("asset") or first.get("currency") or "USDC",
-        "amount_raw": amount_raw,
-        "max_amount_usdc": price_usdc,
-        "currency": "USDC" if price_usdc is not None else None,
-        "pay_to": first.get("payTo") or first.get("pay_to"),
-        "facilitator": first.get("facilitator") or (obj.get("facilitator") if isinstance(obj, dict) else None),
+        **primary,
+        "networks": networks,
+        "accepts": normalized_accepts,
+        "facilitator": (primary.get("facilitator")
+                        or (obj.get("facilitator")
+                            if isinstance(obj, dict) else None)),
     }
 
 
@@ -1376,6 +1543,46 @@ def _decode_payment_required_header(headers: Any) -> dict[str, Any] | None:
     if not isinstance(obj, dict) or obj.get("x402Version") != 2:
         return None
     return obj
+
+
+def _challenge_payment(response, url: str) -> dict[str, Any] | None:
+    header_obj = _decode_payment_required_header(response.headers)
+    header_payment = (_extract_payment(header_obj)
+                      if header_obj is not None else None)
+    if (_valid_payment(header_payment)
+            and _challenge_matches_url(header_obj, url)):
+        return header_payment
+    body = _parse_json_body(response.content, url)
+    body_payment = _extract_payment(body) if body is not None else None
+    return (body_payment if _valid_payment(body_payment)
+            and _challenge_matches_url(body, url) else None)
+
+
+def _challenge_matches_url(obj: Any, url: str) -> bool:
+    resources: list[str] = []
+
+    def collect(value, depth=0):
+        if depth > 3 or len(resources) >= 10:
+            return
+        if isinstance(value, dict):
+            resource = value.get("resource")
+            if isinstance(resource, dict):
+                resource = resource.get("url") or resource.get("uri")
+            if isinstance(resource, str) and resource.strip():
+                resources.append(resource.strip())
+            for key in ("accepts", "paymentRequirements", "payment_requirements"):
+                nested = value.get(key)
+                if isinstance(nested, list):
+                    collect(nested, depth + 1)
+        elif isinstance(value, list):
+            for item in value:
+                collect(item, depth + 1)
+
+    collect(obj)
+    return not resources or all(
+        _endpoint_url_key(resource) == _endpoint_url_key(url)
+        for resource in resources
+    )
 
 
 def fetch_wellknown_resources(url: str, well_known: str | None = None) -> dict[str, Any]:
@@ -1492,12 +1699,19 @@ def verify_x402(url: str, well_known: str | None = None) -> dict[str, Any]:
     """Machine-verify whether `url` exposes a real x402 service.
 
     Returns {"status": "verified"|"rejected"|"uncertain",
-             "evidence": [str, ...], "payment": {...}|None}.
+             "evidence": [str, ...], "payment": {...}|None,
+             "verified_url": str|None}.
+
+    `verified_url` is the URL that actually returned a valid payment challenge.
+    It can differ from `url` when an MCP/A2A endpoint shares an origin with a
+    separate paid REST resource advertised by the descriptor.
     """
     evidence: list[str] = []
     payment: dict[str, Any] | None = None
+    verified_url: str | None = None
     net_error = False
     doc_seen: Any = None
+    advertised_targets: list[tuple[str, str]] = []
 
     def unsafe(exc: public_http.UnsafeURL) -> dict[str, Any]:
         return {"status": "rejected",
@@ -1550,20 +1764,17 @@ def verify_x402(url: str, well_known: str | None = None) -> dict[str, Any]:
                     doc_seen = obj
                 if _looks_like_x402(obj):
                     evidence.append(f"well-known x402 descriptor at {wk} (200, x402 markers)")
-                    payment = payment or _extract_payment(obj)
 
         # --- 1b. resources advertised by the descriptor ---
         # A minimal manifest may carry no x402 marker at all (just a list of
         # resource URLs). The resources themselves are the evidence: probe them
         # for a real 402 rather than widening the marker list, which would make
         # any JSON with a "resources" key look like an x402 service.
-        # Gate on the payTo, not on evidence: a descriptor can carry x402
-        # markers (so verification already succeeded) while holding no
-        # accepts[], leaving the address only in each resource's 402 response.
-        if _payment_incomplete(payment) and doc_seen is not None:
+        # Descriptor URLs are untrusted metadata. A URL becomes verified only
+        # after public_http reaches it and receives a parseable 402 challenge.
+        if doc_seen is not None:
             probed_402 = False
-            advertised = _advertised_entries(doc_seen)
-            for res in advertised[:5]:
+            for res in _advertised_entries(doc_seen)[:10]:
                 if isinstance(res, str):
                     res_url, res_method = res.strip(), "POST"
                     # Entries like "POST /v1/chat" are method + path relative
@@ -1583,6 +1794,8 @@ def verify_x402(url: str, well_known: str | None = None) -> dict[str, Any]:
                     continue
                 if not res_url.startswith(("http://", "https://")):
                     continue
+                advertised_targets.append((res_url, res_method))
+            for res_url, res_method in advertised_targets:
                 for meth in (res_method, "GET" if res_method != "GET" else "POST"):
                     try:
                         r = (c.post(res_url, json={}) if meth == "POST"
@@ -1592,31 +1805,18 @@ def verify_x402(url: str, well_known: str | None = None) -> dict[str, Any]:
                     except Exception:
                         net_error = True
                         continue
-                    if r.status_code == 402:
-                        # Most implementations put accepts[] in the body; the
-                        # header form is the exception. Reading only the header
-                        # here left minimal-manifest services with no payTo on
-                        # record, so their on-chain demand was never queryable.
-                        header_obj = _decode_payment_required_header(r.headers)
-                        if header_obj is not None:
-                            payment = _merge_payment(
-                                _extract_payment(header_obj), payment)
-                        if _payment_incomplete(payment):
-                            _body = _parse_json_body(r.content, res_url)
-                            if _body is not None:
-                                try:
-                                    payment = _merge_payment(
-                                        _extract_payment(_body), payment)
-                                except Exception:  # noqa: BLE001
-                                    pass
-                        evidence.append(
-                            f"advertised resource {res_url} returns HTTP 402 "
-                            f"with payment requirements")
-                        probed_402 = True
-                        break
-                # `evidence` is already non-empty whenever the descriptor
-                # carried x402 markers, so testing it here stopped after the
-                # first resource without ever seeing a 402.
+                    if r.status_code != 402:
+                        continue
+                    challenge = _challenge_payment(r, res_url)
+                    if not _valid_payment(challenge):
+                        continue
+                    payment = challenge
+                    evidence.append(
+                        f"advertised resource {res_url} returns HTTP 402 "
+                        f"with payment requirements")
+                    verified_url = res_url
+                    probed_402 = True
+                    break
                 if probed_402:
                     break
 
@@ -1651,28 +1851,31 @@ def verify_x402(url: str, well_known: str | None = None) -> dict[str, Any]:
                 if r is None:
                     continue
             if r.status_code == 402:
-                body_ok = False
-                header_obj = _decode_payment_required_header(r.headers)
-                if header_obj is not None and _looks_like_x402(header_obj):
-                    body_ok = True
-                    payment = _merge_payment(_extract_payment(header_obj), payment)
-                obj = _parse_json_body(r.content, url)
-                parsed_body = _looks_like_x402(obj) if obj is not None else False
-                body_ok = body_ok or parsed_body
-                if parsed_body:
-                    payment = _merge_payment(_extract_payment(obj), payment)
-                # A bare 402 is suggestive; 402 + payment body is conclusive.
-                if body_ok:
+                challenge = _challenge_payment(r, target)
+                if not _valid_payment(challenge):
+                    evidence.append(
+                        f"endpoint {target} returns HTTP 402 "
+                        f"(no valid payment requirements)"
+                    )
+                    continue
+                if _valid_payment(challenge):
                     evidence.append(f"endpoint {target} returns HTTP 402 with payment requirements")
+                    if target == url:
+                        verified_url = target
+                        payment = challenge
+                    elif verified_url is None:
+                        verified_url = target
+                        payment = challenge
                 else:
                     evidence.append(f"endpoint {target} returns HTTP 402 (no parseable accepts body)")
                 break
 
     if evidence:
         # Conclusive only if we saw real x402 markers somewhere.
-        conclusive = any("markers" in e or "payment requirements" in e for e in evidence)
+        conclusive = bool(verified_url and _valid_payment(payment))
         return {"status": "verified" if conclusive else "uncertain",
-                "evidence": evidence, "payment": payment}
+                "evidence": evidence, "payment": payment,
+                "verified_url": verified_url}
     if net_error:
         return {"status": "uncertain",
                 "evidence": ["no x402 evidence; network errors during probe"],

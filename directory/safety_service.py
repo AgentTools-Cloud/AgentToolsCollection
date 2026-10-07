@@ -221,13 +221,13 @@ def scan_endpoint(endpoint_url: str, name: str = "", description: str = "",
     name = (name or "").strip()
     description = (description or "").strip()[:2000]
     tools_text = (tools_text or "").strip()
-    ep = endpoint_url.lower().rstrip("/")
+    ep = directory_db._exact_endpoint(endpoint_url)
     dbp = db_path or directory_db.DEFAULT_DB_PATH
 
     # ---- 1. Already indexed? return latest stored verdict ------------------
     with directory_db.connect(dbp, read_only=True) as conn:
         row = conn.execute(
-            "SELECT * FROM mcp_servers WHERE lower(rtrim(endpoint_url, '/'))=?",
+            "SELECT * FROM mcp_servers WHERE endpoint_url=?",
             (ep,),
         ).fetchone()
         mcp = directory_db.mcp_row_to_dict(row) if row else None

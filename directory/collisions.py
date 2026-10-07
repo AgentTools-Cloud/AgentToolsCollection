@@ -1,15 +1,8 @@
-"""Endpoint collisions created by owner edits.
+"""Adjudication and merge tools for historical endpoint collisions.
 
-`upsert_service` dedups on the normalised endpoint, so crawls cannot put two
-rows on one URL. An owner edit can: `apply_listing_edits` checks that the new
-endpoint sits on a host the account has verified, not that the endpoint is
-still free.
-
-Applying the edit is safe -- the worst it produces is a duplicate, and the
-directory carried 2,192 duplicate groups for months. Deleting a row is not.
-So the edit always goes through, and the collision is settled afterwards:
-provenance decides the cases it can, an adjudicator model looks at the rest,
-and every outcome is recorded with what could not be established.
+New owner edits reject an endpoint another listing already holds before any
+write. This module remains for collision ledger rows created by older releases
+and for deliberate operator merges of those historical duplicates.
 
 Deliberately imports nothing from `directory` so `db` can call into it.
 """
@@ -88,7 +81,7 @@ def find_occupant(conn: sqlite3.Connection, listing_id: int,
     if not endpoint_key:
         return None
     return conn.execute(
-        "SELECT * FROM services WHERE lower(rtrim(url, '/'))=? AND id<>? "
+        "SELECT * FROM services WHERE url=? AND id<>? "
         "ORDER BY id LIMIT 1",
         (endpoint_key, int(listing_id))).fetchone()
 

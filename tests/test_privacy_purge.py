@@ -812,7 +812,7 @@ def test_owner_locked_submission_cannot_overwrite_listing(
         ).fetchone()[0] == "owner_locked"
 
 
-def test_owner_lock_matches_slug_even_when_endpoint_changes(tmp_path):
+def test_owner_lock_ignores_slug_and_matches_exact_endpoint(tmp_path):
     database = tmp_path / "directory.db"
     db.init_db(str(database))
     with db.writer(str(database)) as conn:
@@ -822,8 +822,11 @@ def test_owner_lock_matches_slug_even_when_endpoint_changes(tmp_path):
             "source": "test", "source_id": "owned-mcp"})
         conn.execute("UPDATE mcp_servers SET owner_verified=1 WHERE id=?",
                      (mcp_id,))
-        locked = db.find_owner_locked_listing(
+        assert (db.find_owner_locked_listing(
             conn, "mcp", "https://attacker.example.test/mcp", "owned-mcp")
+            is None)
+        locked = db.find_owner_locked_listing(
+            conn, "mcp", "https://owner.example.test/mcp", "other-slug")
         assert locked["id"] == mcp_id
 
 
