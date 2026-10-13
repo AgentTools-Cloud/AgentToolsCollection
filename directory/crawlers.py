@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 
 import yaml
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import os
 import httpx
@@ -116,19 +116,42 @@ def _parse_awesome_md(text, source_tag):
 # our directory is host-level, so we aggregate by host.
 CDP_BAZAAR_V2 = "https://api.cdp.coinbase.com/platform/v2/x402/discovery/resources"
 
-# USDC contracts (6 decimals) on supported chains, lowercased. Used to turn a
-# bazaar accept ``amount`` (atomic units) into a USD price.
-_BAZAAR_USDC = {
-    "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",  # base
-    "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",  # ethereum
-    "0x0b2c639c533813f4aa9d7837caf62653d097ff85",  # optimism
-    "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359",  # polygon
-    "0xaf88d065e77c8cc2239327c5edb3a432268e5831",  # arbitrum
+# Stablecoins need an explicit chain/contract registration before an atomic
+# amount can be treated as USD. Tickers in untrusted metadata are display-only.
+_BAZAAR_STABLECOINS = {
+    ("eip155:8453", "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"):
+        ("USDC", 6),
+    ("eip155:1", "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"):
+        ("USDC", 6),
+    ("eip155:10", "0x0b2c639c533813f4aa9d7837caf62653d097ff85"):
+        ("USDC", 6),
+    ("eip155:137", "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359"):
+        ("USDC", 6),
+    ("eip155:42161", "0xaf88d065e77c8cc2239327c5edb3a432268e5831"):
+        ("USDC", 6),
+    ("eip155:196", "0x779ded0c9e1022225f8e0630b35a9b54be713736"):
+        ("USDT0", 6),  # X Layer
+}
+
+_STABLECOIN_NETWORKS = {
+    "base": "eip155:8453", "ethereum": "eip155:1", "eth": "eip155:1",
+    "optimism": "eip155:10", "op": "eip155:10",
+    "polygon": "eip155:137", "matic": "eip155:137",
+    "arbitrum": "eip155:42161", "arbitrum-one": "eip155:42161",
 }
 
 
+def _stablecoin_metadata(accept: dict) -> tuple[str, int] | None:
+    asset = str(accept.get("asset") or "").lower()
+    network = str(accept.get("network") or accept.get("chain") or "").lower()
+    if network.isdecimal():
+        network = f"eip155:{int(network)}"
+    network = _STABLECOIN_NETWORKS.get(network, network)
+    return _BAZAAR_STABLECOINS.get((network, asset))
+
+
 def _bazaar_price_usd(accept: dict):
-    """USD price from a bazaar accept entry (USDC atomic amount / 1e6)."""
+    """USD price from a registered stablecoin's atomic amount."""
     amt = accept.get("amount")
     if amt in (None, ""):
         amt = accept.get("maxAmountRequired")
@@ -138,12 +161,11 @@ def _bazaar_price_usd(accept: dict):
         amt = float(amt)
     except (TypeError, ValueError):
         return None
-    asset = str(accept.get("asset") or "").lower()
-    extra = accept.get("extra") if isinstance(accept.get("extra"), dict) else {}
-    name = (extra.get("name") or "").lower()
-    if asset not in _BAZAAR_USDC and name not in ("usdc", "usd coin"):
+    metadata = _stablecoin_metadata(accept)
+    if metadata is None:
         return None
-    return (amt / 1_000_000) or None
+    _symbol, decimals = metadata
+    return (amt / (10 ** decimals)) or None
 
 
 _PRICE_NUM = re.compile(r"\d+(?:\.\d+)?")
@@ -163,8 +185,6 @@ def _declared_price_usd(*objs):
             if isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 0:
                 return float(v)
         v = o.get("price")
-        if isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 0:
-            return float(v)
         if isinstance(v, str):
             s = v.strip()
             if s.startswith("$") or "usd" in s.lower():
@@ -675,7 +695,56 @@ def fetch_x402scan() -> list:
     return rows
 
 
-def probe_health(url, well_known=None):
+def _same_origin(left: str, right: str) -> bool:
+    """Whether two HTTP URLs have the same scheme, host and effective port."""
+    try:
+        a, b = urlparse(str(left)), urlparse(str(right))
+        if a.scheme not in ("http", "https") or b.scheme not in ("http", "https"):
+            return False
+        a_host = public_http.normalize_hostname(a.hostname or "")
+        b_host = public_http.normalize_hostname(b.hostname or "")
+        a_port = a.port or (443 if a.scheme == "https" else 80)
+        b_port = b.port or (443 if b.scheme == "https" else 80)
+        return (a.scheme.lower(), a_host, a_port) == (
+            b.scheme.lower(), b_host, b_port,
+        )
+    except (ValueError, public_http.UnsafeURL):
+        return False
+
+
+def _request_same_origin(client, method: str, url: str, origin: str,
+                         json_body=None, max_redirects: int = 3):
+    """Request an untrusted URL while allowing only same-origin redirects."""
+    current = str(url)
+    current_method = method.upper()
+    body = json_body
+    for _ in range(max_redirects + 1):
+        if not _same_origin(current, origin):
+            raise public_http.UnsafeURL("request URL is not same-origin")
+        if current_method == "POST":
+            response = client.post(current, json=body)
+        elif current_method == "HEAD":
+            response = client.head(current)
+        else:
+            response = client.get(current)
+        final_url = str(getattr(response, "url", None) or current)
+        if not _same_origin(final_url, origin):
+            raise public_http.UnsafeURL("response URL is not same-origin")
+        if response.status_code not in (301, 302, 303, 307, 308):
+            return response
+        location = str(getattr(response, "headers", {}).get("location") or "")
+        if not location:
+            return response
+        current = urljoin(final_url, location)
+        if not _same_origin(current, origin):
+            raise public_http.UnsafeURL("redirect target is not same-origin")
+        if response.status_code in (301, 302, 303) and current_method == "POST":
+            current_method, body = "GET", None
+    raise public_http.UnsafeURL("too many descriptor redirects")
+
+
+def probe_health(url, well_known=None, inspect_payment=True,
+                 method_hint: str | None = None):
     """Probe an endpoint and return a structured callability signal.
 
     Returns a dict:
@@ -684,6 +753,9 @@ def probe_health(url, well_known=None):
       http_status -> int | None   (status code that decided the verdict)
       x402        -> bool         (endpoint answered with a proper HTTP 402)
     """
+    parsed = urlparse(url)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    well_known = well_known if _same_origin(well_known or "", origin) else None
     targets = [well_known] if well_known else []
     targets.append(url)
     last = {"status": "down", "latency_ms": None, "http_status": None, "x402": False}
@@ -691,25 +763,55 @@ def probe_health(url, well_known=None):
         with public_http.client(
             timeout=httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0),
             headers={"User-Agent": UA, "Accept": "application/json"}) as c:
+            hint = str(method_hint or "").upper()
+            if hint == "GET":
+                t0 = time.monotonic()
+                try:
+                    r = _request_same_origin(c, "GET", url, origin)
+                except Exception:
+                    return {"status": "down", "latency_ms": None,
+                            "http_status": None, "x402": False}
+                dt = int((time.monotonic() - t0) * 1000)
+                sc = r.status_code
+                if sc < 400 or sc == 402:
+                    return {"status": "ok", "latency_ms": dt,
+                            "http_status": sc, "x402": sc == 402}
+                if sc in (401, 403, 429):
+                    return {"status": "degraded", "latency_ms": dt,
+                            "http_status": sc, "x402": False}
+                return {"status": "down", "latency_ms": dt,
+                        "http_status": sc, "x402": False}
+            if hint == "POST":
+                t0 = time.monotonic()
+                try:
+                    r = _request_same_origin(c, "HEAD", url, origin)
+                    if r.status_code in (404, 405, 501):
+                        r = _request_same_origin(c, "GET", url, origin)
+                except Exception:
+                    return {"status": "down", "latency_ms": None,
+                            "http_status": None, "x402": False}
+                dt = int((time.monotonic() - t0) * 1000)
+                sc = r.status_code
+                if sc < 400 or sc == 402:
+                    return {"status": "ok", "latency_ms": dt,
+                            "http_status": sc, "x402": sc == 402}
+                if sc in (401, 403, 429, 404, 405, 501):
+                    return {"status": "degraded", "latency_ms": dt,
+                            "http_status": sc, "x402": False}
+                return {"status": "down", "latency_ms": dt,
+                        "http_status": sc, "x402": False}
             for t in targets:
                 if not t:
                     continue
                 try:
                     t0 = time.monotonic()
+                    method = "HEAD"
                     r = c.head(t)
                     # Plenty of hosts answer HEAD with 404 on a path that GETs
                     # fine, so a bare 404 here is not evidence of anything.
                     if r.status_code in (404, 405, 501):
+                        method = "GET"
                         r = c.get(t)
-                    # POST-only paid endpoints answer HEAD/GET with 405/404 and
-                    # would otherwise be scored "down" despite being healthy.
-                    if r.status_code in (404, 405, 501) and t == url:
-                        try:
-                            rp = c.post(t, json={})
-                            if rp.status_code < 500:
-                                r = rp
-                        except Exception:
-                            pass
                     dt = int((time.monotonic() - t0) * 1000)
                     sc = r.status_code
                     # A healthy descriptor is useful fallback evidence, but it
@@ -722,19 +824,37 @@ def probe_health(url, well_known=None):
                                 "http_status": sc, "x402": False}
                         continue
                     if sc < 400 or sc == 402:
+                        # HEAD proves reachability, not the behavior of a paid
+                        # GET resource. Defer a successful endpoint HEAD until
+                        # its descriptor can tell us whether GET is canonical.
+                        if (inspect_payment and t == url and method == "HEAD"
+                            and sc < 400):
+                            last = {"status": "ok", "latency_ms": dt,
+                                "http_status": sc, "x402": False}
+                            continue
                         return {"status": "ok", "latency_ms": dt,
                                 "http_status": sc, "x402": sc == 402}
                     if sc in (401, 403, 429):
                         last = {"status": "degraded", "latency_ms": dt,
                                 "http_status": sc, "x402": False}
+                    elif t == url and sc >= 500:
+                        last = {"status": "down", "latency_ms": dt,
+                                "http_status": sc, "x402": False}
+                    elif t == url and sc >= 400:
+                        last = {"status": "down", "latency_ms": dt,
+                                "http_status": sc, "x402": False}
                 except Exception:
+                    if t == url:
+                        last = {"status": "down", "latency_ms": None,
+                                "http_status": None, "x402": False}
                     continue
+
+            if not inspect_payment:
+                return last
 
             # POST-only x402 resources often reject or drop HEAD/GET. Only send
             # a POST when the same origin's machine-readable descriptor
             # explicitly advertises that exact resource, method, and probe body.
-            parsed = urlparse(url)
-            origin = f"{parsed.scheme}://{parsed.netloc}"
             wk_targets = ([well_known] if well_known else []) + [
                 origin + "/.well-known/x402",
                 origin + "/.well-known/x402.json",
@@ -746,23 +866,44 @@ def probe_health(url, well_known=None):
                     continue
                 seen_wk.add(wk)
                 try:
-                    _st, obj = fetch_well_known(c, wk)
+                    _st, obj = fetch_well_known(c, wk, expected_origin=origin)
                     if _st != 200 or obj is None:
                         continue
-                    endpoints = obj.get("endpoints") if isinstance(obj, dict) else None
-                    if not isinstance(endpoints, list):
-                        continue
-                    advertised = next((
-                        ep for ep in endpoints
-                        if isinstance(ep, dict)
-                        and str(ep.get("resource") or "").rstrip("/") == normalized_url
-                        and str(ep.get("method") or "").upper() == "POST"
-                        and isinstance(ep.get("probe_body", {}), dict)
-                    ), None)
+                    base = (str(obj.get("baseUrl") or "").strip()
+                            if isinstance(obj, dict) else "") or origin
+                    advertised = None
+                    for entry in _advertised_entries(obj):
+                        if isinstance(entry, str):
+                            parts = entry.strip().split(None, 1)
+                            if len(parts) != 2:
+                                continue
+                            method, resource = parts[0].upper(), parts[1]
+                            if method not in ("GET", "POST"):
+                                continue
+                            if resource.startswith("/"):
+                                resource = base.rstrip("/") + resource
+                            entry = {"resource": resource, "method": method}
+                        if not isinstance(entry, dict):
+                            continue
+                        resource = _entry_url(entry, base).rstrip("/")
+                        method = str(entry.get("method") or "").upper()
+                        if resource == normalized_url and method in ("GET", "POST"):
+                            advertised = entry
+                            break
                     if advertised is None:
                         continue
                     t0 = time.monotonic()
-                    r = c.post(url, json=advertised.get("probe_body", {}))
+                    method = str(advertised.get("method") or "").upper()
+                    if method == "GET":
+                        r = _request_same_origin(c, "GET", url, origin)
+                    elif (method == "POST"
+                          and isinstance(advertised.get("probe_body"), dict)):
+                        r = _request_same_origin(
+                            c, "POST", url, origin,
+                            json_body=advertised["probe_body"],
+                        )
+                    else:
+                        continue
                     dt = int((time.monotonic() - t0) * 1000)
                     sc = r.status_code
                     if sc == 402:
@@ -772,18 +913,25 @@ def probe_health(url, well_known=None):
                         return {"status": "ok", "latency_ms": dt,
                                 "http_status": sc, "x402": False}
                     if sc in (401, 403, 429):
-                        last = {"status": "degraded", "latency_ms": dt,
+                        return {"status": "degraded", "latency_ms": dt,
+                                "http_status": sc, "x402": False}
+                    if sc >= 500:
+                        return {"status": "down", "latency_ms": dt,
+                                "http_status": sc, "x402": False}
+                    if sc >= 400:
+                        return {"status": "down", "latency_ms": dt,
                                 "http_status": sc, "x402": False}
                 except Exception:
-                    continue
+                    return {"status": "down", "latency_ms": None,
+                            "http_status": None, "x402": False}
         return last
     except Exception:
         return {"status": "down", "latency_ms": None, "http_status": None, "x402": False}
 
 
-def check_health(url, well_known=None):
+def check_health(url, well_known=None, inspect_payment=True):
     """Backward-compatible string verdict; see probe_health for full signal."""
-    return probe_health(url, well_known)["status"]
+    return probe_health(url, well_known, inspect_payment=inspect_payment)["status"]
 
 
 # ---------------------------------------------------------------------------
@@ -1144,10 +1292,10 @@ def _url_acceptable(url: str) -> bool:
 _WK_CACHE_TTL = int(os.environ.get("AGENT_TOOLS_WK_CACHE_TTL", "900"))
 _WK_CACHE_MAX = 4096
 # url -> (fetched_at, status_code, parsed_json_or_None)
-_WK_CACHE: dict[str, tuple[float, int, Any]] = {}
+_WK_CACHE: dict[str, tuple[float, int, Any, str]] = {}
 
 
-def fetch_well_known(client, url: str):
+def fetch_well_known(client, url: str, expected_origin: str | None = None):
     """GET a .well-known descriptor, memoised per URL for _WK_CACHE_TTL seconds.
 
     health, verify and resource discovery each walk the same one or two
@@ -1155,21 +1303,29 @@ def fetch_well_known(client, url: str):
     without this every listed origin absorbs a multiple of the probes it should.
     Returns (status_code, parsed_json_or_None); status 0 means the fetch failed.
     """
+    if expected_origin and not _same_origin(url, expected_origin):
+        raise public_http.UnsafeURL("descriptor URL is not same-origin")
     now = time.monotonic()
     hit = _WK_CACHE.get(url)
     if hit is not None and (now - hit[0]) <= _WK_CACHE_TTL:
+        if expected_origin and not _same_origin(hit[3], expected_origin):
+            raise public_http.UnsafeURL("descriptor redirect is not same-origin")
         return hit[1], hit[2]
 
     try:
-        r = client.get(url)
+        origin = expected_origin or url
+        r = _request_same_origin(client, "GET", url, origin)
         status = r.status_code
+        final_url = str(getattr(r, "url", None) or url)
+        if expected_origin and not _same_origin(final_url, expected_origin):
+            raise public_http.UnsafeURL("descriptor redirect is not same-origin")
         obj = None
         if status == 200:
             obj = _parse_json_body(r.content, url)
     except public_http.UnsafeURL:
         raise
     except Exception:
-        status, obj = 0, None
+        status, obj, final_url = 0, None, url
 
     if len(_WK_CACHE) >= _WK_CACHE_MAX:
         cutoff = now - _WK_CACHE_TTL
@@ -1177,7 +1333,7 @@ def fetch_well_known(client, url: str):
             _WK_CACHE.pop(k, None)
         if len(_WK_CACHE) >= _WK_CACHE_MAX:
             _WK_CACHE.clear()
-    _WK_CACHE[url] = (now, status, obj)
+    _WK_CACHE[url] = (now, status, obj, final_url)
     return status, obj
 
 
@@ -1264,7 +1420,13 @@ def _valid_payment(payment) -> bool:
     if family[0] == "sui":
         return bool(
             re.fullmatch(r"0x[0-9a-fA-F]{64}", pay_to)
-            and re.fullmatch(r"0x[0-9a-fA-F]{1,128}", asset)
+            and (
+                re.fullmatch(r"0x[0-9a-fA-F]{1,128}", asset)
+                or re.fullmatch(
+                    r"0x[0-9a-fA-F]{1,64}(?:::[A-Za-z_][A-Za-z0-9_]*){2}",
+                    asset,
+                )
+            )
         )
     return False
 
@@ -1405,11 +1567,9 @@ def _advertised_entries(doc: Any) -> list:
             elif isinstance(it, dict):
                 url = _entry_url(it, "")
                 if url:
-                    out.append({
-                        "url": url,
-                        "method": it.get("method"),
-                        "description": it.get("description") or it.get("name"),
-                    })
+                    entry = dict(it)
+                    entry["url"] = url
+                    out.append(entry)
     return out
 
 
@@ -1490,6 +1650,7 @@ def _extract_payment(obj: Any) -> dict[str, Any] | None:
     def from_accept(accept: dict[str, Any]) -> dict[str, Any]:
         amount_raw = (accept.get("maxAmountRequired") or accept.get("amount")
                       or accept.get("price"))
+        stablecoin = _stablecoin_metadata(accept)
         price_usdc = _bazaar_price_usd(accept)
         if price_usdc is None:
             price_usdc = _declared_price_usd(accept, obj)
@@ -1499,7 +1660,7 @@ def _extract_payment(obj: Any) -> dict[str, Any] | None:
             "asset": accept.get("asset") or accept.get("currency") or "USDC",
             "amount_raw": amount_raw,
             "max_amount_usdc": price_usdc,
-            "currency": "USDC" if price_usdc is not None else None,
+            "currency": stablecoin[0] if stablecoin else None,
             "pay_to": accept.get("payTo") or accept.get("pay_to"),
             "facilitator": accept.get("facilitator"),
         }
@@ -1597,7 +1758,8 @@ def fetch_wellknown_resources(url: str, well_known: str | None = None) -> dict[s
     """
     parsed = urlparse(url if "//" in url else "https://" + url)
     origin = f"{parsed.scheme}://{parsed.netloc}"
-    candidates = ([well_known] if well_known else []) + [
+    candidates = ([well_known] if well_known and _same_origin(well_known, origin)
+                  else []) + [
         origin + "/.well-known/x402",
         origin + "/.well-known/x402.json",
     ]
@@ -1607,16 +1769,16 @@ def fetch_wellknown_resources(url: str, well_known: str | None = None) -> dict[s
     seen = set()
     try:
         with public_http.client(
-            timeout=_VERIFY_TIMEOUT, follow_redirects=True,
+            timeout=_VERIFY_TIMEOUT, follow_redirects=False,
             headers={"User-Agent": UA, "Accept": "application/json"}) as c:
             for wk in candidates:
                 if not wk or wk in seen:
                     continue
                 seen.add(wk)
-                _st, obj = fetch_well_known(c, wk)
+                _st, obj = fetch_well_known(c, wk, expected_origin=origin)
                 if _st != 200 or obj is None:
                     continue
-                if isinstance(obj, (dict, list)):
+                if isinstance(obj, (dict, list)) and _advertised_entries(obj):
                     doc, wk_url = obj, wk
                     break
     except Exception:  # noqa: BLE001 - provenance extras never break a listing
@@ -1629,6 +1791,8 @@ def fetch_wellknown_resources(url: str, well_known: str | None = None) -> dict[s
     # relative `path` instead of a `resources` array of URLs.
     _meta = doc if isinstance(doc, dict) else {}
     doc_base = str(_meta.get("baseUrl") or "").strip() or origin
+    if not _same_origin(doc_base, origin):
+        doc_base = origin
     advertised = _advertised_entries(doc)
     advertised_total = 0
     for res in advertised:
@@ -1650,7 +1814,8 @@ def fetch_wellknown_resources(url: str, well_known: str | None = None) -> dict[s
             desc = res.get("description") or res.get("name")
         else:
             continue
-        if not res_url.startswith("http"):
+        if (not res_url.startswith("http")
+                or not _same_origin(res_url, origin)):
             continue
         # The sample cap below is a storage limit; a price span derived from
         # only the first 50 entries understated the maximum by up to 15x.
@@ -1688,6 +1853,7 @@ def fetch_wellknown_resources(url: str, well_known: str | None = None) -> dict[s
 
     return {
         "well_known_url": wk_url or (origin + "/.well-known/x402"),
+        "descriptor_observed": doc is not None,
         "resource_count": advertised_total,
         "resource_samples": samples,
         "price_min": min(prices) if prices else None,
@@ -1710,8 +1876,8 @@ def verify_x402(url: str, well_known: str | None = None) -> dict[str, Any]:
     payment: dict[str, Any] | None = None
     verified_url: str | None = None
     net_error = False
-    doc_seen: Any = None
-    advertised_targets: list[tuple[str, str]] = []
+    docs_seen: list[Any] = []
+    advertised_targets: list[tuple[str, str, dict | None]] = []
 
     def unsafe(exc: public_http.UnsafeURL) -> dict[str, Any]:
         return {"status": "rejected",
@@ -1736,13 +1902,13 @@ def verify_x402(url: str, well_known: str | None = None) -> dict[str, Any]:
 
     origin = f"{parsed.scheme}://{parsed.netloc}"
     wk_candidates = []
-    if well_known:
+    if well_known and _same_origin(well_known, origin):
         wk_candidates.append(well_known)
     wk_candidates += [origin + "/.well-known/x402",
                       origin + "/.well-known/x402.json"]
 
     with public_http.client(
-            timeout=_VERIFY_TIMEOUT, follow_redirects=True,
+            timeout=_VERIFY_TIMEOUT, follow_redirects=False,
             headers={"User-Agent": UA, "Accept": "application/json"}) as c:
         # --- 1. well-known descriptor ---
         seen_wk = set()
@@ -1751,7 +1917,7 @@ def verify_x402(url: str, well_known: str | None = None) -> dict[str, Any]:
                 continue
             seen_wk.add(wk)
             try:
-                _st, obj = fetch_well_known(c, wk)
+                _st, obj = fetch_well_known(c, wk, expected_origin=origin)
             except public_http.UnsafeURL as exc:
                 return unsafe(exc)
             if _st == 0:
@@ -1760,8 +1926,8 @@ def verify_x402(url: str, well_known: str | None = None) -> dict[str, Any]:
             if _st == 200:
                 if obj is None:
                     continue
-                if doc_seen is None and isinstance(obj, (dict, list)):
-                    doc_seen = obj
+                if isinstance(obj, (dict, list)):
+                    docs_seen.append(obj)
                 if _looks_like_x402(obj):
                     evidence.append(f"well-known x402 descriptor at {wk} (200, x402 markers)")
 
@@ -1772,84 +1938,81 @@ def verify_x402(url: str, well_known: str | None = None) -> dict[str, Any]:
         # any JSON with a "resources" key look like an x402 service.
         # Descriptor URLs are untrusted metadata. A URL becomes verified only
         # after public_http reaches it and receives a parseable 402 challenge.
-        if doc_seen is not None:
+        if docs_seen:
             probed_402 = False
-            for res in _advertised_entries(doc_seen)[:10]:
-                if isinstance(res, str):
-                    res_url, res_method = res.strip(), "POST"
-                    # Entries like "POST /v1/chat" are method + path relative
-                    # to the descriptor's baseUrl.
-                    parts = res_url.split(None, 1)
-                    if len(parts) == 2 and parts[0].upper() in (
-                            "GET", "POST", "PUT", "PATCH", "DELETE"):
-                        res_method, res_url = parts[0].upper(), parts[1].strip()
-                    if res_url.startswith("/"):
-                        base = doc_seen.get("baseUrl") if isinstance(doc_seen, dict) else None
-                        res_url = str(base or origin).rstrip("/") + res_url
-                elif isinstance(res, dict):
-                    _b = doc_seen.get("baseUrl") if isinstance(doc_seen, dict) else None
-                    res_url = _entry_url(res, str(_b or origin))
-                    res_method = str(res.get("method") or "POST").upper()
-                else:
+            for descriptor in docs_seen:
+                for res in _advertised_entries(descriptor)[:10]:
+                    if isinstance(res, str):
+                        res_url, res_method, probe_body = res.strip(), "GET", None
+                        parts = res_url.split(None, 1)
+                        if len(parts) == 2 and parts[0].upper() in (
+                                "GET", "POST", "PUT", "PATCH", "DELETE"):
+                            res_method, res_url = parts[0].upper(), parts[1].strip()
+                        if res_url.startswith("/"):
+                            base = (descriptor.get("baseUrl")
+                                    if isinstance(descriptor, dict) else None)
+                            res_url = str(base or origin).rstrip("/") + res_url
+                    elif isinstance(res, dict):
+                        base = (descriptor.get("baseUrl")
+                                if isinstance(descriptor, dict) else None)
+                        res_url = _entry_url(res, str(base or origin))
+                        res_method = str(res.get("method") or "GET").upper()
+                        probe_body = (res.get("probe_body")
+                                      if isinstance(res.get("probe_body"), dict)
+                                      else None)
+                    else:
+                        continue
+                    if (not res_url.startswith(("http://", "https://"))
+                            or not _same_origin(res_url, origin)):
+                        continue
+                    target = (res_url, res_method, probe_body)
+                    if target not in advertised_targets:
+                        advertised_targets.append(target)
+            for res_url, res_method, probe_body in advertised_targets:
+                try:
+                    if res_method == "GET":
+                        r = _request_same_origin(c, "GET", res_url, origin)
+                    elif res_method == "POST" and probe_body is not None:
+                        r = _request_same_origin(
+                            c, "POST", res_url, origin, json_body=probe_body,
+                        )
+                    else:
+                        evidence.append(
+                            f"advertised POST resource {res_url} has no safe probe_body"
+                        )
+                        continue
+                except public_http.UnsafeURL as exc:
+                    return unsafe(exc)
+                except Exception:
+                    net_error = True
                     continue
-                if not res_url.startswith(("http://", "https://")):
+                if r.status_code != 402:
                     continue
-                advertised_targets.append((res_url, res_method))
-            for res_url, res_method in advertised_targets:
-                for meth in (res_method, "GET" if res_method != "GET" else "POST"):
-                    try:
-                        r = (c.post(res_url, json={}) if meth == "POST"
-                             else c.get(res_url))
-                    except public_http.UnsafeURL as exc:
-                        return unsafe(exc)
-                    except Exception:
-                        net_error = True
-                        continue
-                    if r.status_code != 402:
-                        continue
-                    challenge = _challenge_payment(r, res_url)
-                    if not _valid_payment(challenge):
-                        continue
-                    payment = challenge
-                    evidence.append(
-                        f"advertised resource {res_url} returns HTTP 402 "
-                        f"with payment requirements")
-                    verified_url = res_url
-                    probed_402 = True
-                    break
+                challenge = _challenge_payment(r, res_url)
+                if not _valid_payment(challenge):
+                    continue
+                payment = challenge
+                evidence.append(
+                    f"advertised resource {res_url} returns HTTP 402 "
+                    f"with payment requirements")
+                verified_url = res_url
+                probed_402 = True
                 if probed_402:
                     break
 
         # --- 2. endpoint 402 challenge ---
-        # Many paid endpoints are POST-only and publish no descriptor at all;
-        # a GET-only probe reports them as "no 402 challenge" and rejects a
-        # perfectly valid service. Try GET first, then POST on the submitted URL.
+        # Direct GET is side-effect free. POST is only attempted above when a
+        # same-origin descriptor explicitly supplies an object probe_body.
         for target in (url, origin):
             if not target:
                 continue
             try:
-                r = c.get(target)
-                if r.status_code != 402 and target == url:
-                    try:
-                        rp = c.post(target, json={})
-                        if rp.status_code == 402:
-                            r = rp
-                    except public_http.UnsafeURL as exc:
-                        return unsafe(exc)
-                    except Exception:
-                        pass
+                r = _request_same_origin(c, "GET", target, origin)
             except public_http.UnsafeURL as exc:
                 return unsafe(exc)
             except Exception:
                 net_error = True
-                try:
-                    r = c.post(target, json={}) if target == url else None
-                except public_http.UnsafeURL as exc:
-                    return unsafe(exc)
-                except Exception:
-                    r = None
-                if r is None:
-                    continue
+                continue
             if r.status_code == 402:
                 challenge = _challenge_payment(r, target)
                 if not _valid_payment(challenge):
@@ -1869,6 +2032,10 @@ def verify_x402(url: str, well_known: str | None = None) -> dict[str, Any]:
                 else:
                     evidence.append(f"endpoint {target} returns HTTP 402 (no parseable accepts body)")
                 break
+            if target == url and r.status_code in (404, 405, 501):
+                evidence.append(
+                    f"endpoint {target} requires a method that was not safely advertised"
+                )
 
     if evidence:
         # Conclusive only if we saw real x402 markers somewhere.
@@ -2085,9 +2252,26 @@ def fetch_x402_fuchss() -> list:
     try:
         with httpx.Client(timeout=TIMEOUT, follow_redirects=True,
                           headers={"User-Agent": UA}) as c:
-            r = c.get(X402_FUCHSS_LEADERBOARD)
-            r.raise_for_status()
-            data = r.json()
+            for attempt in range(3):
+                try:
+                    r = c.get(X402_FUCHSS_LEADERBOARD)
+                    # 1033 denotes an unavailable upstream tunnel: retrying
+                    # immediately cannot repair it; let the next daily run try.
+                    if r.status_code == 530:
+                        r.raise_for_status()
+                    r.raise_for_status()
+                    data = r.json()
+                    break
+                except httpx.TransportError:
+                    if attempt == 2:
+                        raise
+                except httpx.HTTPStatusError as exc:
+                    if (exc.response.status_code == 530 or attempt == 2
+                            or (exc.response.status_code < 500 and exc.response.status_code != 429)):
+                        raise
+                time.sleep(2 ** attempt)
+            if not isinstance(data, dict) or not isinstance(data.get('top'), list):
+                raise ValueError('leaderboard missing top array')
     except Exception as e:  # noqa: BLE001
         raise RuntimeError(f"x402-fuchss leaderboard fetch failed: {e!r}") from e
     top = data.get("top") or []
@@ -2310,7 +2494,7 @@ class PartialCrawl(Exception):
     never fetched, and those entries are then never requested again.
     """
 
-    def __init__(self, items: list, reason: str):
+    def __init__(self, items: Any, reason: str):
         super().__init__(reason)
         self.items = items
         self.reason = reason
@@ -2404,6 +2588,18 @@ def fetch_mcp_registry(updated_since: str | None = None,
                     continue
                 remotes = srv.get("remotes") or []
                 remote = remotes[0] if isinstance(remotes, list) and remotes else {}
+                # Prefer an actually configured HTTP remote over templates.
+                # Template-only records are retained in the ingestion audit,
+                # rather than represented as callable hosts.
+                from .ingestion import validate_endpoint
+                from .db import MetadataValidationError
+                for candidate in remotes if isinstance(remotes, list) else []:
+                    try:
+                        validate_endpoint(candidate.get('url'))
+                    except (MetadataValidationError, AttributeError):
+                        continue
+                    remote = candidate
+                    break
                 endpoint = (remote.get("url") or "").strip() or None
                 if remote_only and not endpoint:
                     continue
@@ -2904,6 +3100,7 @@ def fetch_smithery(max_pages: int = 80, per_page: int = 100,
                     "description": desc,
                     "homepage_url": homepage,
                     "endpoint_url": endpoint,
+                    "kind": "callable" if endpoint else "catalog",
                     "transport": "streamable-http" if endpoint else None,
                     "auth_method": "smithery_api_key" if endpoint else None,
                     "cost_hint": None,

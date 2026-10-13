@@ -1,6 +1,8 @@
 from contextlib import closing
 import json
 
+import pytest
+
 from directory import db
 from directory import reverify_x402
 
@@ -120,7 +122,6 @@ def test_mirror_cannot_overwrite_owner_verified_target(tmp_path, monkeypatch):
         conn.execute(
             "UPDATE services SET owner_verified=1 WHERE id=?", (listing_id,)
         )
-
     real_connect = db.connect
     real_writer = db.writer
     monkeypatch.setattr(
@@ -250,6 +251,404 @@ def test_cross_source_mirror_only_adds_provenance(tmp_path, monkeypatch):
             "WHERE kind='x402' AND listing_id=? AND source='a2a'",
             (listing_id,),
         ).fetchone()[0] == 1
+
+
+def test_owner_canonical_seller_absorbs_declared_mcp_paid_resource(tmp_path):
+    database = tmp_path / "directory.db"
+    db.init_db(str(database))
+    host = "seller.example.test"
+    paid = f"https://{host}/compatibility-receipt"
+    mcp = f"https://{host}/mcp"
+    pay_to = "0x" + "1" * 40
+    with db.writer(str(database)) as conn:
+        user_id = db.upsert_user(conn, "api_key", "seller-owner")
+        ownership_id, _token = __import__(
+            "directory.ownership", fromlist=["issue"]
+        ).issue(conn, user_id, host, "wellknown_file")
+        conn.execute(
+            "UPDATE domain_ownership SET status='verified',verified_at=1 "
+            "WHERE id=?", (ownership_id,),
+        )
+        _, listing_id = db.upsert_service(conn, {
+            "slug": "canonical-seller", "name": "Canonical seller",
+            "url": f"https://{host}",
+            "resource_count": 1,
+            "resource_samples": [{"url": paid, "method": "GET"}],
+            "payment": {"network": "eip155:8453", "pay_to": pay_to},
+            "source": "directory", "source_id": "canonical-seller",
+        })
+        conn.execute(
+            "UPDATE services SET owner_verified=1 WHERE id=?", (listing_id,)
+        )
+
+        result = reverify_x402._mirror_service_in_tx(conn, {
+            "slug": "mcp-mirror", "name": "MCP mirror",
+            "url": paid, "mcp_url": mcp,
+            "payment": {"network": "base", "pay_to": pay_to},
+            "source": "mcp", "source_id": "registry:server-1",
+        })
+
+        assert result["duplicate"] is True
+        assert result["listing_id"] == listing_id
+        assert result["canonical_seller"] is True
+        rows = conn.execute(
+            "SELECT id,url,mcp_url,name FROM services ORDER BY id"
+        ).fetchall()
+        assert len(rows) == 1
+        assert rows[0]["url"] == f"https://{host}"
+        assert rows[0]["mcp_url"] == mcp
+        assert rows[0]["name"] == "Canonical seller"
+
+
+def test_same_host_mirror_is_not_folded_without_manifest_membership(tmp_path):
+    database = tmp_path / "directory.db"
+    db.init_db(str(database))
+    host = "seller.example.test"
+    with db.writer(str(database)) as conn:
+        user_id = db.upsert_user(conn, "api_key", "seller-owner")
+        ownership_id, _token = __import__(
+            "directory.ownership", fromlist=["issue"]
+        ).issue(conn, user_id, host, "wellknown_file")
+        conn.execute(
+            "UPDATE domain_ownership SET status='verified',verified_at=1 "
+            "WHERE id=?", (ownership_id,),
+        )
+        pay_to = "0x" + "1" * 40
+        _, listing_id = db.upsert_service(conn, {
+            "slug": "canonical-seller", "name": "Canonical seller",
+            "url": f"https://{host}",
+            "resource_samples": [{"url": f"https://{host}/known"}],
+            "payment": {"network": "base", "pay_to": pay_to},
+            "source": "directory", "source_id": "canonical-seller",
+        })
+        conn.execute(
+            "UPDATE services SET owner_verified=1 WHERE id=?", (listing_id,)
+        )
+
+        result = reverify_x402._mirror_service_in_tx(conn, {
+            "slug": "independent-resource", "name": "Independent resource",
+            "url": f"https://{host}/different",
+            "mcp_url": f"https://{host}/mcp",
+            "payment": {"network": "eip155:8453", "pay_to": pay_to},
+            "source": "mcp", "source_id": "registry:server-2",
+        })
+
+        assert result["created"] is True
+        assert conn.execute("SELECT COUNT(*) FROM services").fetchone()[0] == 2
+
+
+@pytest.mark.parametrize("canonical_payto,incoming_payto", [
+    (None, "0x" + "1" * 40),
+    ("0x" + "1" * 40, None),
+    ("0x" + "1" * 40, "0x" + "2" * 40),
+])
+def test_declared_resource_is_not_folded_without_matching_payto(
+        tmp_path, canonical_payto, incoming_payto):
+    database = tmp_path / "directory.db"
+    db.init_db(str(database))
+    host = "seller.example.test"
+    paid = f"https://{host}/declared"
+    with db.writer(str(database)) as conn:
+        user_id = db.upsert_user(conn, "api_key", "seller-owner")
+        ownership_id, _token = __import__(
+            "directory.ownership", fromlist=["issue"]
+        ).issue(conn, user_id, host, "wellknown_file")
+        conn.execute(
+            "UPDATE domain_ownership SET status='verified',verified_at=1 "
+            "WHERE id=?", (ownership_id,),
+        )
+        _, listing_id = db.upsert_service(conn, {
+            "slug": "canonical-seller", "name": "Canonical seller",
+            "url": f"https://{host}",
+            "resource_samples": [{"url": paid}],
+            "payment": ({"network": "base", "pay_to": canonical_payto}
+                        if canonical_payto else None),
+            "source": "directory", "source_id": "canonical-seller",
+        })
+        conn.execute(
+            "UPDATE services SET owner_verified=1 WHERE id=?", (listing_id,)
+        )
+
+        result = reverify_x402._mirror_service_in_tx(conn, {
+            "slug": "independent-resource", "name": "Independent resource",
+            "url": paid, "mcp_url": f"https://{host}/mcp",
+            "payment": ({"network": "eip155:8453", "pay_to": incoming_payto}
+                        if incoming_payto else None),
+            "source": "mcp", "source_id": "registry:server-3",
+        })
+
+        assert result["created"] is True
+        assert conn.execute("SELECT COUNT(*) FROM services").fetchone()[0] == 2
+
+
+def test_historical_payto_does_not_authorize_seller_fold(tmp_path):
+    database = tmp_path / "directory.db"
+    db.init_db(str(database))
+    host = "seller.example.test"
+    paid = f"https://{host}/declared"
+    old_payto = "0x" + "1" * 40
+    current_payto = "0x" + "2" * 40
+    with db.writer(str(database)) as conn:
+        user_id = db.upsert_user(conn, "api_key", "seller-owner")
+        ownership_id, _token = __import__(
+            "directory.ownership", fromlist=["issue"]
+        ).issue(conn, user_id, host, "wellknown_file")
+        conn.execute(
+            "UPDATE domain_ownership SET status='verified',verified_at=1 "
+            "WHERE id=?", (ownership_id,),
+        )
+        _, listing_id = db.upsert_service(conn, {
+            "slug": "canonical-seller", "name": "Canonical seller",
+            "url": f"https://{host}",
+            "resource_samples": [{"url": paid}],
+            "payment": {"network": "base", "pay_to": current_payto},
+            "source": "directory", "source_id": "canonical-seller",
+        })
+        conn.execute(
+            "UPDATE services SET owner_verified=1 WHERE id=?", (listing_id,)
+        )
+        conn.execute(
+            "INSERT INTO service_paytos(service_id,chain,address) "
+            "VALUES(?,'base',?)", (listing_id, old_payto),
+        )
+
+        result = reverify_x402._mirror_service_in_tx(conn, {
+            "slug": "old-wallet-resource", "name": "Old wallet resource",
+            "url": paid, "mcp_url": f"https://{host}/mcp",
+            "payment": {"network": "eip155:8453", "pay_to": old_payto},
+            "source": "mcp", "source_id": "registry:old-wallet",
+        })
+
+        assert result["created"] is True
+        assert conn.execute("SELECT COUNT(*) FROM services").fetchone()[0] == 2
+
+
+def test_same_address_on_different_chain_does_not_fold(tmp_path):
+    database = tmp_path / "directory.db"
+    db.init_db(str(database))
+    host = "seller.example.test"
+    paid = f"https://{host}/declared"
+    pay_to = "0x" + "1" * 40
+    with db.writer(str(database)) as conn:
+        user_id = db.upsert_user(conn, "api_key", "seller-owner")
+        ownership_id, _token = __import__(
+            "directory.ownership", fromlist=["issue"]
+        ).issue(conn, user_id, host, "wellknown_file")
+        conn.execute(
+            "UPDATE domain_ownership SET status='verified',verified_at=1 "
+            "WHERE id=?", (ownership_id,),
+        )
+        _, listing_id = db.upsert_service(conn, {
+            "slug": "canonical-seller", "name": "Canonical seller",
+            "url": f"https://{host}", "resource_samples": [{"url": paid}],
+            "payment": {"network": "eip155:8453", "pay_to": pay_to},
+            "source": "directory", "source_id": "canonical-seller",
+        })
+        conn.execute(
+            "UPDATE services SET owner_verified=1 WHERE id=?", (listing_id,)
+        )
+        result = reverify_x402._mirror_service_in_tx(conn, {
+            "slug": "other-chain", "name": "Other chain", "url": paid,
+            "payment": {"network": "eip155:1", "pay_to": pay_to},
+            "source": "a2a", "source_id": "registry:other-chain",
+        })
+        assert result["created"] is True
+
+
+def test_shared_host_never_folds_declared_resource(tmp_path):
+    database = tmp_path / "directory.db"
+    db.init_db(str(database))
+    host = "shared.example.test"
+    paid = f"https://{host}/declared"
+    pay_to = "0x" + "1" * 40
+    with db.writer(str(database)) as conn:
+        user_id = db.upsert_user(conn, "api_key", "seller-owner")
+        ownership_id, _token = __import__(
+            "directory.ownership", fromlist=["issue"]
+        ).issue(conn, user_id, host, "wellknown_file")
+        conn.execute(
+            "UPDATE domain_ownership SET status='verified',verified_at=1 "
+            "WHERE id=?", (ownership_id,),
+        )
+        _, listing_id = db.upsert_service(conn, {
+            "slug": "canonical-seller", "name": "Canonical seller",
+            "url": f"https://{host}", "resource_samples": [{"url": paid}],
+            "payment": {"network": "base", "pay_to": pay_to},
+            "source": "directory", "source_id": "canonical-seller",
+        })
+        conn.execute(
+            "UPDATE services SET owner_verified=1 WHERE id=?", (listing_id,)
+        )
+        conn.execute(
+            "INSERT INTO shared_hosts(host,path_count,listing_count,verdict,updated_at) "
+            "VALUES(?,20,20,'shared',1)", (host,),
+        )
+        result = reverify_x402._mirror_service_in_tx(conn, {
+            "slug": "tenant-resource", "name": "Tenant resource", "url": paid,
+            "payment": {"network": "eip155:8453", "pay_to": pay_to},
+            "source": "mcp", "source_id": "registry:tenant",
+        })
+        assert result["created"] is True
+
+
+def test_multiple_canonical_candidates_prevent_fold(tmp_path):
+    database = tmp_path / "directory.db"
+    db.init_db(str(database))
+    host = "seller.example.test"
+    paid = f"https://{host}/declared"
+    pay_to = "0x" + "1" * 40
+    payment = json.dumps({"network": "base", "pay_to": pay_to})
+    samples = json.dumps([{"url": paid}])
+    with db.writer(str(database)) as conn:
+        user_id = db.upsert_user(conn, "api_key", "seller-owner")
+        ownership_id, _token = __import__(
+            "directory.ownership", fromlist=["issue"]
+        ).issue(conn, user_id, host, "wellknown_file")
+        conn.execute(
+            "UPDATE domain_ownership SET status='verified',verified_at=1 "
+            "WHERE id=?", (ownership_id,),
+        )
+        for slug, url in (("root-one", f"https://{host}"),
+                          ("root-two", f"https://{host}/")):
+            conn.execute(
+                "INSERT INTO services(slug,name,url,source,source_id,payment,"
+                "resource_samples,owner_verified,created_at,updated_at) "
+                "VALUES(?,?,?,'directory',?,?,?,1,1,1)",
+                (slug, slug, url, slug, payment, samples),
+            )
+        result = reverify_x402._mirror_service_in_tx(conn, {
+            "slug": "mirror", "name": "Mirror", "url": paid,
+            "payment": {"network": "eip155:8453", "pay_to": pay_to},
+            "source": "mcp", "source_id": "registry:ambiguous",
+        })
+        assert result["created"] is True
+        assert conn.execute("SELECT COUNT(*) FROM services").fetchone()[0] == 3
+
+
+def test_base58_payto_comparison_preserves_case():
+    upper = reverify_x402._current_payment_identities({
+        "payment": {"network": "solana", "pay_to": "AbCdEf123"},
+    })
+    lower = reverify_x402._current_payment_identities({
+        "payment": {"network": "solana", "pay_to": "abcdef123"},
+    })
+    assert upper.isdisjoint(lower)
+
+
+def test_conflicting_secondary_chain_prevents_fold(tmp_path):
+    database = tmp_path / "directory.db"
+    db.init_db(str(database))
+    host = "seller.example.test"
+    paid = f"https://{host}/declared"
+    base_payto = "0x" + "1" * 40
+    with db.writer(str(database)) as conn:
+        user_id = db.upsert_user(conn, "api_key", "seller-owner")
+        ownership_id, _token = __import__(
+            "directory.ownership", fromlist=["issue"]
+        ).issue(conn, user_id, host, "wellknown_file")
+        conn.execute(
+            "UPDATE domain_ownership SET status='verified',verified_at=1 "
+            "WHERE id=?", (ownership_id,),
+        )
+        _, listing_id = db.upsert_service(conn, {
+            "slug": "canonical-seller", "name": "Canonical seller",
+            "url": f"https://{host}", "resource_samples": [{"url": paid}],
+            "payment": {"accepts": [
+                {"network": "base", "payTo": base_payto},
+                {"network": "polygon", "payTo": "0x" + "2" * 40},
+            ]},
+            "source": "directory", "source_id": "canonical-seller",
+        })
+        conn.execute(
+            "UPDATE services SET owner_verified=1 WHERE id=?", (listing_id,)
+        )
+        conn.execute(
+            "INSERT INTO shared_hosts(host,path_count,listing_count,verdict,updated_at) "
+            "VALUES(?,1,1,'single_operator',1)", (host,),
+        )
+        result = reverify_x402._mirror_service_in_tx(conn, {
+            "slug": "conflict", "name": "Conflict", "url": paid,
+            "payment": {"accepts": [
+                {"network": "eip155:8453", "payTo": base_payto},
+                {"network": "eip155:137", "payTo": "0x" + "3" * 40},
+            ]},
+            "source": "mcp", "source_id": "registry:conflict",
+        })
+        assert result["created"] is True
+
+
+def test_unreviewed_two_path_host_does_not_fold(tmp_path):
+    database = tmp_path / "directory.db"
+    db.init_db(str(database))
+    host = "gateway.example.test"
+    paid = f"https://{host}/tenant-a/pay"
+    pay_to = "0x" + "1" * 40
+    with db.writer(str(database)) as conn:
+        user_id = db.upsert_user(conn, "api_key", "seller-owner")
+        ownership_id, _token = __import__(
+            "directory.ownership", fromlist=["issue"]
+        ).issue(conn, user_id, host, "wellknown_file")
+        conn.execute(
+            "UPDATE domain_ownership SET status='verified',verified_at=1 "
+            "WHERE id=?", (ownership_id,),
+        )
+        _, listing_id = db.upsert_service(conn, {
+            "slug": "canonical-seller", "name": "Canonical seller",
+            "url": f"https://{host}", "resource_samples": [{"url": paid}],
+            "payment": {"network": "base", "pay_to": pay_to},
+            "source": "directory", "source_id": "canonical-seller",
+        })
+        conn.execute(
+            "UPDATE services SET owner_verified=1 WHERE id=?", (listing_id,)
+        )
+        db.upsert_mcp_server(conn, {
+            "slug": "tenant-b", "name": "Tenant B",
+            "endpoint_url": f"https://{host}/tenant-b/mcp",
+            "source": "test", "source_id": "tenant-b",
+        })
+        result = reverify_x402._mirror_service_in_tx(conn, {
+            "slug": "tenant-a", "name": "Tenant A", "url": paid,
+            "payment": {"network": "eip155:8453", "pay_to": pay_to},
+            "source": "mcp", "source_id": "registry:tenant-a",
+        })
+        assert result["created"] is True
+
+
+def test_unreviewed_query_tenants_do_not_fold(tmp_path):
+    database = tmp_path / "directory.db"
+    db.init_db(str(database))
+    host = "gateway.example.test"
+    paid = f"https://{host}/?tenant=a"
+    pay_to = "0x" + "1" * 40
+    with db.writer(str(database)) as conn:
+        user_id = db.upsert_user(conn, "api_key", "seller-owner")
+        ownership_id, _token = __import__(
+            "directory.ownership", fromlist=["issue"]
+        ).issue(conn, user_id, host, "wellknown_file")
+        conn.execute(
+            "UPDATE domain_ownership SET status='verified',verified_at=1 "
+            "WHERE id=?", (ownership_id,),
+        )
+        _, listing_id = db.upsert_service(conn, {
+            "slug": "canonical-seller", "name": "Canonical seller",
+            "url": f"https://{host}", "resource_samples": [{"url": paid}],
+            "payment": {"network": "base", "pay_to": pay_to},
+            "source": "directory", "source_id": "canonical-seller",
+        })
+        conn.execute(
+            "UPDATE services SET owner_verified=1 WHERE id=?", (listing_id,)
+        )
+        db.upsert_mcp_server(conn, {
+            "slug": "tenant-b", "name": "Tenant B",
+            "endpoint_url": f"https://{host}/?tenant=b",
+            "source": "test", "source_id": "tenant-b",
+        })
+        result = reverify_x402._mirror_service_in_tx(conn, {
+            "slug": "tenant-a", "name": "Tenant A", "url": paid,
+            "payment": {"network": "eip155:8453", "pay_to": pay_to},
+            "source": "mcp", "source_id": "registry:tenant-a",
+        })
+        assert result["created"] is True
 
 
 def test_paid_primary_url_does_not_dedup_against_mcp_alias(

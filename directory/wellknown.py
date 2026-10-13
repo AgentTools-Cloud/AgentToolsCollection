@@ -153,7 +153,7 @@ def _fetch_pages(client=None, *, page_limit: int = PAGE_LIMIT,
 
             for row in rows:
                 record_id = str(row.get("id") or "").strip()
-                dedup_key = record_id or hashlib.sha256(
+                dedup_key = (record_id + '\0' + str(row.get('endpoint') or '')) if record_id else hashlib.sha256(
                     repr(sorted(row.items())).encode("utf-8")
                 ).hexdigest()
                 if dedup_key not in seen:
@@ -257,14 +257,14 @@ def _live_records() -> tuple[list[dict], str | None]:
 def fetch_wellknown_mcp() -> list[dict]:
     records, reason = _live_records()
     rows = []
-    seen_endpoints: set[str] = set()
+    seen_endpoints: set[tuple[str, str]] = set()
     for record in records:
         protocols = _protocols(record)
         kind = str(record.get("kind") or "").strip().lower()
         if kind != "mcp_server" and "mcp" not in protocols:
             continue
         endpoint = record["endpoint"].strip()
-        endpoint_key = db._exact_endpoint(endpoint)
+        endpoint_key = (str(record.get('id') or _source_url(record)), endpoint)
         if endpoint_key in seen_endpoints:
             continue
         seen_endpoints.add(endpoint_key)
@@ -291,14 +291,14 @@ def fetch_wellknown_mcp() -> list[dict]:
 def fetch_wellknown_a2a() -> list[dict]:
     records, reason = _live_records()
     rows = []
-    seen_endpoints: set[str] = set()
+    seen_endpoints: set[tuple[str, str]] = set()
     for record in records:
         protocols = _protocols(record)
         kind = str(record.get("kind") or "").strip().lower()
         if kind != "agent" or "a2a" not in protocols:
             continue
         endpoint = record["endpoint"].strip()
-        endpoint_key = db._exact_endpoint(endpoint)
+        endpoint_key = (str(record.get('id') or _source_url(record)), endpoint)
         if endpoint_key in seen_endpoints:
             continue
         seen_endpoints.add(endpoint_key)

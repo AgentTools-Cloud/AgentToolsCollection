@@ -175,6 +175,28 @@ def cmd_health_quarantined() -> int:
     return 0
 
 
+def _ingest_rows(kind, source, items, upsert, batch_size=100):
+    from .ingestion import ingest_batch
+    total = dict(added=0, updated=0, rejected=0, errors=[])
+    for start in range(0, len(items), batch_size):
+        batch = items[start:start + batch_size]
+        def op(batch=batch):
+            with db.writer(immediate=True) as conn:
+                return ingest_batch(conn, kind, source, batch, upsert)
+        try:
+            result = db.with_retry(op)
+        except Exception as exc:
+            # Do not advance incremental watermarks after an uncommitted batch.
+            total['errors'].append('batch failed: ' + type(exc).__name__)
+            break
+        for key in ('added', 'updated', 'rejected'):
+            total[key] += result[key]
+        total['errors'].extend(result['errors'])
+    log.info('ingestion %s: added=%d updated=%d rejected=%d errors=%d', source,
+             total['added'], total['updated'], total['rejected'], len(total['errors']))
+    return total
+
+
 def _run_one(name):
     fn = crawlers.ALL_CRAWLERS[name]
     errors = []
@@ -211,35 +233,13 @@ def _run_one(name):
             if db._canonical_origin(item.get("url") or "") not in claimed_origins
         ]
 
-    # Write in short batches instead of holding a writer transaction while a
-    # full source is processed. This keeps the website responsive and avoids
-    # timer jobs fighting each other for a long sqlite write lock.
-    batch_size = 50
-    for start in range(0, len(items), batch_size):
-        batch = items[start:start + batch_size]
-        def op(batch=batch):
-            batch_added = batch_updated = 0
-            batch_errors = []
-            with db.writer() as c:
-                for item in batch:
-                    try:
-                        if not crawlers._url_acceptable(item.get("url") or ""):
-                            log.info("skip non-discoverable url: %s", item.get("url"))
-                            continue
-                        created, _ = db.upsert_service(c, item)
-                        if created:
-                            batch_added += 1
-                        else:
-                            batch_updated += 1
-                    except db.RetiredListingError:
-                        log.info("skip retired x402 listing: %s", item.get("slug"))
-                    except Exception as e:
-                        batch_errors.append(f"upsert {item.get('slug')}: {e!r}")
-            return batch_added, batch_updated, batch_errors
-        batch_added, batch_updated, batch_errors = db.with_retry(op)
-        added += batch_added
-        updated += batch_updated
-        errors.extend(batch_errors)
+    def upsert(conn, row):
+        if not crawlers._url_acceptable(row.get('url') or ''):
+            raise db.MetadataValidationError('non_discoverable_endpoint')
+        return db.upsert_service(conn, row)
+    result = _ingest_rows('x402', name, items, upsert, batch_size=50)
+    added, updated = result['added'], result['updated']
+    errors.extend(result['errors'])
 
     _finish_run(run_id, added, updated, errors,
                 status="ok" if not errors else "partial")
@@ -289,62 +289,17 @@ def cmd_crawl(only=None) -> int:
 
 
 def _upsert_wellknown_listing(conn, kind: str, row: dict) -> tuple[bool, int]:
-    """Link an existing endpoint without replacing its richer primary record."""
-    db.assert_listing_not_retired(conn, kind, row)
-    table = {"mcp": "mcp_servers", "a2a": "a2a_agents"}[kind]
-    endpoint = db._exact_endpoint(row.get("endpoint_url") or "")
-    existing = None
-    if endpoint:
-        existing = conn.execute(
-            f"SELECT id FROM {table} WHERE endpoint_url=? "
-            "ORDER BY id LIMIT 1",
-            (endpoint,),
-        ).fetchone()
-    if existing is not None:
-        listing_id = int(existing["id"])
-        recorded = db._record_source(
-            conn,
-            kind,
-            listing_id,
-            (row.get("source"), row.get("source_id"), row.get("source_url")),
-        )
-        if not recorded:
-            raise ValueError("source identity belongs to another listing")
-        return False, listing_id
-    if kind == "mcp":
-        return db.upsert_mcp_server(conn, row)
-    return db.upsert_a2a_agent(conn, row)
+    from .wellknown_binding import upsert_listing
+    return upsert_listing(conn, kind, row)
 
 
 def _upsert_wellknown_a2a_rows(rows: list[dict]) -> tuple[int, int, list[str]]:
-    added = updated = 0
-    errors: list[str] = []
-    for start in range(0, len(rows), 100):
-        batch = rows[start:start + 100]
-
-        def op(batch=batch):
-            batch_added = batch_updated = 0
-            batch_errors: list[str] = []
-            with db.writer() as conn:
-                for row in batch:
-                    try:
-                        created, _ = _upsert_wellknown_listing(conn, "a2a", row)
-                        batch_added += int(created)
-                        batch_updated += int(not created)
-                    except db.RetiredListingError:
-                        log.info("skip retired A2A listing: %s", row.get("slug"))
-                    except Exception as exc:
-                        batch_errors.append(f"upsert {row.get('slug')}: {exc!r}")
-            return batch_added, batch_updated, batch_errors
-
-        batch_added, batch_updated, batch_errors = db.with_retry(op)
-        added += batch_added
-        updated += batch_updated
-        errors.extend(batch_errors)
-    return added, updated, errors
+    result = _ingest_rows('a2a', 'wellknown', rows,
+                          lambda conn, row: _upsert_wellknown_listing(conn, 'a2a', row))
+    return result['added'], result['updated'], result['errors']
 
 
-def cmd_crawl_mcp(only=None) -> int:
+def cmd_crawl_mcp(only=None, *, probe_new=True) -> int:
     """Import MCP servers from the standalone MCP directory sources."""
     names = [only] if only else list(crawlers.MCP_CRAWLERS)
     total_added = total_updated = 0
@@ -410,34 +365,13 @@ def cmd_crawl_mcp(only=None) -> int:
                 deleted = db.with_retry(_del)
             items = [it for it in items
                      if not (it.get("_status") and it["_status"] != "active")]
-        batch_size = 100
-        for start in range(0, len(items), batch_size):
-            batch = items[start:start + batch_size]
-            def op(batch=batch):
-                b_add = b_upd = 0
-                b_err: list[str] = []
-                with db.writer() as c:
-                    for item in batch:
-                        try:
-                            endpoint = (item.get("endpoint_url") or "").strip()
-                            if not endpoint or crawlers.url_retired(endpoint):
-                                continue
-                            if name == "wellknown":
-                                created, _ = _upsert_wellknown_listing(c, "mcp", item)
-                            else:
-                                created, _ = db.upsert_mcp_server(c, item)
-                            b_add += int(created)
-                            b_upd += int(not created)
-                        except db.RetiredListingError:
-                            log.info("skip retired MCP listing: %s", item.get("slug"))
-                        except Exception as e:
-                            b_err.append(f"upsert {item.get('slug')}: {e!r}")
-                return b_add, b_upd, b_err
-            b_add, b_upd, b_err = db.with_retry(op)
-            added += b_add; updated += b_upd; errors.extend(b_err)
+        upsert = (lambda conn, row: _upsert_wellknown_listing(conn, 'mcp', row)) if name == 'wellknown' else db.upsert_mcp_server
+        result = _ingest_rows('mcp', name, items, upsert)
+        added, updated = result['added'], result['updated']
+        errors.extend(result['errors'])
         _finish_run(run_id, added, updated, errors,
                     status="ok" if not errors else "partial")
-        if name == "mcp-registry" and max_updated and not truncated:
+        if name == "mcp-registry" and max_updated and not truncated and not errors:
             with db.writer() as c:
                 db.set_meta(c, "mcp_registry:updated_since", max_updated)
         if name == "pulsemcp" and not errors and "known_ids" not in kwargs:
@@ -448,7 +382,7 @@ def cmd_crawl_mcp(only=None) -> int:
                  name, added, updated, deleted, len(errors))
         total_added += added; total_updated += updated
     log.info("mcp crawl done. added=%d updated=%d", total_added, total_updated)
-    if total_added:
+    if total_added and probe_new:
         cmd_health_mcp(only_unknown=True)
     return 0
 
@@ -476,6 +410,7 @@ def cmd_crawl_a2a() -> int:
     try:
         g = agenstry_mod.crawl_agenstry_a2a()
         added += g["inserted"]; updated += g["updated"]
+        errors.extend('agenstry: ' + error for error in g.get('errors', []))
         log.info("a2a agenstry: candidates=%d resolved=%d inserted=%d updated=%d",
                  g["candidates"], g["resolved"], g["inserted"], g["updated"])
     except Exception as e:
@@ -502,6 +437,12 @@ def cmd_crawl_a2a() -> int:
         added += ar["inserted"]; updated += ar["updated"]
         log.info("a2a a2aregistry: candidates=%d resolved=%d inserted=%d updated=%d",
                  ar["candidates"], ar["resolved"], ar["inserted"], ar["updated"])
+    except crawlers.PartialCrawl as e:
+        ar = e.items
+        added += ar["inserted"]; updated += ar["updated"]
+        errors.append(f"a2aregistry: incomplete crawl: {e.reason}")
+        log.warning("a2a a2aregistry incomplete (%s); inserted=%d updated=%d",
+                    e.reason, ar["inserted"], ar["updated"])
     except Exception as e:
         errors.append(f"a2aregistry: {e!r}"); log.warning("a2a a2aregistry crawl failed: %r", e)
     try:
@@ -547,11 +488,17 @@ def cmd_health(only_unknown: bool = False, quarantined_only: bool = False) -> in
     n_ok = n_down = n_degraded = 0
     _qc = int(time.time()) - QUARANTINE_DAYS * 86400
     if quarantined_only:
-        sql = ("SELECT id, url, well_known_url, mcp_url FROM services "
-               f"WHERE down_since IS NOT NULL AND down_since <= {_qc}")
+        sql = (
+            "SELECT id, url, well_known_url, mcp_url, x402_ok, "
+            "resource_samples FROM services "
+            f"WHERE down_since IS NOT NULL AND down_since <= {_qc}"
+        )
     else:
-        sql = ("SELECT id, url, well_known_url, mcp_url FROM services "
-               f"WHERE (down_since IS NULL OR down_since > {_qc})")
+        sql = (
+            "SELECT id, url, well_known_url, mcp_url, x402_ok, "
+            "resource_samples FROM services "
+            f"WHERE (down_since IS NULL OR down_since > {_qc})"
+        )
         if only_unknown:
             # crawler inserts leave health NULL (bypasses the column DEFAULT), so
             # treat NULL / '' / 'unknown' all as "never probed yet".
@@ -575,7 +522,23 @@ def cmd_health(only_unknown: bool = False, quarantined_only: bool = False) -> in
             conf = res.get("conformance")
             x = 1 if res.get("http_status") == 402 else 0
         else:
-            res = crawlers.probe_health(r["url"], r["well_known_url"])
+            method_hint = None
+            if r["x402_ok"]:
+                try:
+                    samples = json.loads(r["resource_samples"] or "[]")
+                except (TypeError, json.JSONDecodeError):
+                    samples = []
+                target = db._exact_endpoint(r["url"] or "")
+                for sample in samples:
+                    if (isinstance(sample, dict)
+                            and db._exact_endpoint(sample.get("url") or "") == target):
+                        method_hint = str(sample.get("method") or "").upper() or None
+                        break
+            res = crawlers.probe_health(
+                r["url"], r["well_known_url"],
+                inspect_payment=not bool(r["x402_ok"]),
+                method_hint=method_hint,
+            )
             x = 1 if res["x402"] else 0
         h = res["status"]
         now = int(time.time())
@@ -1497,10 +1460,22 @@ def _approve(sub_id: int, note: str | None = None,
     detected_price = (payment or {}).get("max_amount_usdc")
     price_min = p.get("price_min_usdc")
     price_max = p.get("price_max_usdc")
-    if price_min is None:
-        price_min = fixed_price if fixed_price is not None else detected_price
-    if price_max is None:
-        price_max = fixed_price if fixed_price is not None else detected_price
+    has_explicit_usdc_price = any(value is not None for value in (
+        fixed_price, p.get("price_min_usdc"), p.get("price_max_usdc"),
+    ))
+    if has_explicit_usdc_price:
+        if price_min is None:
+            price_min = fixed_price
+        if price_max is None:
+            price_max = fixed_price
+        if (price_min is not None and price_max is not None
+                and price_min > price_max):
+            raise ValueError("price_min_usdc cannot exceed price_max_usdc")
+        currency = "USDC"
+    else:
+        price_min = detected_price
+        price_max = detected_price
+        currency = (payment or {}).get("currency")
     # A submitter registers one URL, but an origin usually sells several paid
     # endpoints; take the full list from its x402 descriptor.
     try:
@@ -1525,7 +1500,7 @@ def _approve(sub_id: int, note: str | None = None,
         "chains": p.get("chains") or [],
         "price_min": price_min,
         "price_max": price_max,
-        "currency": "USDC" if price_min is not None or price_max is not None else None,
+        "currency": currency,
         "mcp_url": p.get("mcp_url"),
         "well_known_url": res_info.get("well_known_url"),
         "resource_count": res_info.get("resource_count"),

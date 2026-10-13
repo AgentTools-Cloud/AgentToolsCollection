@@ -30,8 +30,19 @@ _NETWORKS = {
     "eip155:8453": "base", "8453": "base", "base": "base",
     "eip155:84532": "base-sepolia", "84532": "base-sepolia",
     "eip155:1": "ethereum", "1": "ethereum", "ethereum": "ethereum",
+    "eth": "ethereum",
     "eip155:137": "polygon", "137": "polygon", "polygon": "polygon",
+    "matic": "polygon",
+    "eip155:10": "optimism", "10": "optimism", "optimism": "optimism",
+    "op": "optimism",
+    "eip155:42161": "arbitrum", "42161": "arbitrum", "arbitrum": "arbitrum",
+    "arbitrum-one": "arbitrum",
+    "eip155:100": "gnosis", "100": "gnosis", "gnosis": "gnosis",
+    "xdai": "gnosis",
     "solana": "solana",
+    "solana:mainnet": "solana",
+    "solana:5eykt4usfv8p8njdtrepy1vzqkqzkvdp": "solana",
+    "mainnet.sui": "sui",
 }
 
 
@@ -124,6 +135,7 @@ def _build_service(t: dict, verdict: dict) -> dict:
         "chains": _chain_from_payment(pay),
         "price_min": amount,
         "price_max": amount,
+        "currency": pay.get("currency"),
         "facilitator": fac,
         "mcp_url": t["endpoint"] if t["delivery"] == "mcp" else None,
         "well_known_url": (f"https://{host}/.well-known/x402" if host else None),
@@ -159,6 +171,145 @@ def _source_guard_matches(conn, source_guard: dict | None) -> bool:
     )
 
 
+def _current_payment_identities(service: dict) -> set[tuple[str, str]]:
+    """Current (chain, payTo) identities, excluding historical observations."""
+    payment = service.get("payment")
+    if isinstance(payment, str):
+        try:
+            payment = json.loads(payment)
+        except (TypeError, json.JSONDecodeError):
+            payment = None
+    if not isinstance(payment, dict):
+        return set()
+
+    accepts = payment.get("accepts")
+    entries = ([item for item in accepts if isinstance(item, dict)]
+               if isinstance(accepts, list) and accepts else [payment])
+    identities: set[tuple[str, str]] = set()
+    for entry in entries:
+        address = str(
+            entry.get("pay_to") or entry.get("payTo") or ""
+        ).strip()
+        networks = (entry.get("network") or entry.get("chain")
+                    or payment.get("network") or payment.get("chain")
+                    or payment.get("networks") or payment.get("chains") or [])
+        if not isinstance(networks, (list, tuple)):
+            networks = [networks]
+        if not address:
+            continue
+        if _re.fullmatch(r"0x[0-9a-fA-F]{40,64}", address):
+            address = address.lower()
+        for value in networks:
+            network = db.network_id(value)
+            chain = _NETWORKS.get(network, network)
+            if chain:
+                identities.add((chain, address))
+    return identities
+
+
+def _canonical_seller_for_resource(conn, service: dict):
+    """Owner-verified root listing whose manifest declares this paid URL."""
+    if service.get("source") not in ("mcp", "a2a"):
+        return None
+    paid_url = db._exact_endpoint(service.get("url") or "")
+    parsed = urlparse(paid_url or "")
+    host = (parsed.hostname or "").lower()
+    if not paid_url or not host or db.is_shared_host(conn, host):
+        return None
+    reviewed = conn.execute(
+        "SELECT verdict FROM shared_hosts WHERE host=?", (host,),
+    ).fetchone()
+    if not reviewed or reviewed["verdict"] != "single_operator":
+        paths: set[str] = set()
+        for sql in (
+            "SELECT url FROM services WHERE lower(url) LIKE ?",
+            "SELECT endpoint_url FROM mcp_servers WHERE lower(endpoint_url) LIKE ?",
+            "SELECT COALESCE(endpoint_url,card_url) FROM a2a_agents "
+            "WHERE lower(COALESCE(endpoint_url,card_url)) LIKE ?",
+        ):
+            for value in conn.execute(sql, ("%" + host + "%",)):
+                parsed_value = urlparse(value[0] or "")
+                if (parsed_value.hostname or "").lower() == host:
+                    paths.add((parsed_value.path or "/") + (
+                        "?" + parsed_value.query if parsed_value.query else ""
+                    ))
+                    if len(paths) > 1:
+                        return None
+    owner = conn.execute(
+        "SELECT 1 FROM domain_ownership WHERE host=? AND status='verified' "
+        "AND scope_path IS NULL LIMIT 1", (host,),
+    ).fetchone()
+    if owner is None:
+        return None
+
+    incoming_identities = _current_payment_identities(service)
+    if not incoming_identities:
+        return None
+    candidates = []
+    for candidate in conn.execute(
+            "SELECT * FROM services WHERE owner_verified=1 "
+            "AND lower(url) LIKE ? ORDER BY id", ("%" + host + "%",)):
+        row = dict(candidate)
+        root = urlparse(row.get("url") or "")
+        if ((root.hostname or "").lower() != host
+                or root.path not in ("", "/") or root.query or root.fragment):
+            continue
+        samples = row.get("resource_samples")
+        if isinstance(samples, str):
+            try:
+                samples = json.loads(samples)
+            except (TypeError, json.JSONDecodeError):
+                samples = []
+        declared = {
+            db._exact_endpoint(sample.get("url") or "")
+            for sample in (samples or []) if isinstance(sample, dict)
+        }
+        if paid_url not in declared:
+            continue
+        canonical_identities = _current_payment_identities(row)
+        if not canonical_identities:
+            continue
+        incoming_by_chain: dict[str, set[str]] = {}
+        canonical_by_chain: dict[str, set[str]] = {}
+        for chain, address in incoming_identities:
+            incoming_by_chain.setdefault(chain, set()).add(address)
+        for chain, address in canonical_identities:
+            canonical_by_chain.setdefault(chain, set()).add(address)
+        if not incoming_by_chain.keys() <= canonical_by_chain.keys():
+            continue
+        if any(incoming_by_chain[chain] != canonical_by_chain[chain]
+               for chain in incoming_by_chain):
+            continue
+        candidates.append(row)
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _fold_into_canonical_seller(conn, service: dict):
+    canonical = _canonical_seller_for_resource(conn, service)
+    if canonical is None:
+        return None
+    recorded = db._record_source(conn, "x402", canonical["id"], (
+        service.get("source"), service.get("source_id"),
+        service.get("source_url"),
+    ))
+    if not recorded:
+        return {"identity_conflict": True, "created": False}
+    mcp_url = db._exact_endpoint(service.get("mcp_url") or "")
+    if (service.get("source") == "mcp" and mcp_url
+            and not canonical.get("mcp_url")):
+        conn.execute(
+            "UPDATE services SET mcp_url=? WHERE id=?",
+            (mcp_url, canonical["id"]),
+        )
+    conn.execute(
+        "UPDATE services SET x402_ok=1 WHERE id=?", (canonical["id"],)
+    )
+    return {
+        "canonical_seller": True, "duplicate": True, "created": False,
+        "listing_id": int(canonical["id"]), "slug": canonical["slug"],
+    }
+
+
 def _mirror_service_in_tx(conn, service: dict, protect_owner=None,
                           source_guard: dict | None = None):
     """Mirror one verified paid URL using the caller's write transaction."""
@@ -177,6 +328,9 @@ def _mirror_service_in_tx(conn, service: dict, protect_owner=None,
     )
     if locked:
         return {"owner_locked": locked, "locked_kind": "x402"}
+    canonical = _fold_into_canonical_seller(conn, service)
+    if canonical is not None:
+        return canonical
     source_rows = db._source_identity_rows(
         conn, "x402", service.get("source"), service.get("source_id")
     )
@@ -332,13 +486,48 @@ def _gather(conn, targets, limit, only_unverified):
         # been re-read in a while -- operators fix their manifests and nothing
         # here noticed until they emailed.
         stale_before = int(time.time()) - _DESCRIPTOR_TTL
-        sql = ("SELECT id, slug, name, url, well_known_url FROM services "
-               "WHERE url IS NOT NULL AND url != '' AND health='ok' "
-               "AND (COALESCE(x402_ok,0)=0 OR payment IS NULL OR payment='' "
-               "     OR COALESCE(updated_at,0) < ?) "
-               "ORDER BY COALESCE(updated_at,0) ASC")
+        sql = (
+            "SELECT id, slug, name, url, well_known_url, source, source_id "
+            "FROM services "
+            "WHERE url IS NOT NULL AND url != '' AND health='ok' "
+            "AND (COALESCE(x402_ok,0)=0 OR payment IS NULL OR payment='' "
+            "     OR COALESCE(updated_at,0) < ?) "
+            "ORDER BY COALESCE(updated_at,0) ASC"
+        )
         rows = conn.execute(sql, (stale_before,)).fetchall()
         for r in rows:
+            explicit_price = False
+            source_ids = []
+            if r["source"] == "submission":
+                source_ids.append(str(r["source_id"] or ""))
+            source_ids.extend(
+                str(row[0] or "") for row in conn.execute(
+                    "SELECT source_id FROM listing_sources "
+                    "WHERE kind='x402' AND listing_id=? AND source='submission'",
+                    (r["id"],),
+                )
+            )
+            for source_id in source_ids:
+                if not source_id.startswith("sub:"):
+                    continue
+                try:
+                    submission_id = int(source_id.split(":", 1)[1])
+                except ValueError:
+                    continue
+                submission = conn.execute(
+                    "SELECT payload FROM submissions WHERE id=?",
+                    (submission_id,),
+                ).fetchone()
+                if submission:
+                    try:
+                        payload = json.loads(submission["payload"] or "{}")
+                    except (TypeError, json.JSONDecodeError):
+                        payload = {}
+                    explicit_price = any(payload.get(key) is not None for key in (
+                        "price_usdc", "price_min_usdc", "price_max_usdc",
+                    ))
+                    if explicit_price:
+                        break
             tasks.append({
                 "table": "services", "id": r["id"], "slug": r["slug"],
                 "name": r["name"], "description": None,
@@ -346,6 +535,7 @@ def _gather(conn, targets, limit, only_unverified):
                 "well_known": r["well_known_url"],
                 "category": None, "source": None, "source_id": None,
                 "delivery": "x402", "was": 0,
+                "explicit_price": explicit_price,
             })
     if limit:
         tasks = tasks[:limit]
@@ -413,7 +603,8 @@ def reverify(targets=("mcp", "a2a"), workers=24, limit=None,
                     service_ok_rows.append((t["id"], t["endpoint"]))
                     n_ver += 1
                 _res = t.get("resources") or {}
-                if _res.get("resource_count") is not None:
+                if (_res.get("descriptor_observed")
+                    and _res.get("resource_count") is not None):
                     service_resources.append((
                         _res.get("resource_count"),
                         json.dumps(_res.get("resource_samples"), ensure_ascii=False)
@@ -422,19 +613,23 @@ def reverify(targets=("mcp", "a2a"), workers=24, limit=None,
                 pay = (t["verdict"].get("payment") or None) if same_endpoint else None
                 if pay and pay.get("pay_to"):
                     res = t.get("resources") or {}
-                    lo, hi = res.get("price_min"), res.get("price_max")
-                    if lo is None:
+                    observed = bool(res.get("descriptor_observed"))
+                    lo = res.get("price_min") if observed else None
+                    hi = res.get("price_max") if observed else None
+                    if observed and lo is None:
                         # Older cached results carry no span of their own.
                         lo, hi = _price_span(res.get("resource_samples"))
-                    if lo is None:
+                    if observed and lo is None:
                         lo = hi = pay.get("max_amount_usdc")
                     service_payments.append((
                         json.dumps(pay, ensure_ascii=False),
                         json.dumps(_chain_from_payment(pay), ensure_ascii=False),
-                        res.get("resource_count"),
+                        res.get("resource_count") if observed else None,
                         json.dumps(res.get("resource_samples"), ensure_ascii=False)
-                        if res.get("resource_samples") else None,
-                        lo, hi, int(time.time()), t["id"], t["endpoint"]))
+                        if observed and res.get("resource_samples") else None,
+                        lo, hi, pay.get("currency"), observed,
+                        bool(t.get("explicit_price")), int(time.time()),
+                        t["id"], t["endpoint"]))
             else:
                 flag_updates[t["table"]].append((
                     1 if _endpoint_is_x402(t) else 0,
@@ -512,19 +707,31 @@ def reverify(targets=("mcp", "a2a"), workers=24, limit=None,
         def op(chunk=chunk):
             with db.writer() as c:
                 for update in chunk:
-                    (payment, chains, _count, samples, _lo, _hi, _updated,
-                     _id, _endpoint) = update
+                    (payment, chains, _count, samples, _lo, _hi, _currency,
+                     _observed, _explicit_price, _updated, _id, _endpoint) = update
                     if _privacy_suppressed_metadata(
                             c, payment=payment, chains=chains,
                             resource_samples=samples):
                         continue
-                    c.execute(
-                        "UPDATE services SET payment=?, chains=?, "
-                        "resource_count=COALESCE(?, resource_count), "
-                        "resource_samples=COALESCE(?, resource_samples), "
-                        "price_min=COALESCE(?, price_min), "
-                        "price_max=COALESCE(?, price_max), "
-                        "updated_at=? WHERE id=? AND url=?", update)
+                    if _observed and not _explicit_price:
+                        c.execute(
+                            "UPDATE services SET payment=?, chains=?, "
+                            "resource_count=COALESCE(?, resource_count), "
+                            "resource_samples=COALESCE(?, resource_samples), "
+                            "price_min=?, price_max=?, currency=?, "
+                            "updated_at=? WHERE id=? AND url=?",
+                            update[:7] + update[9:],
+                        )
+                    else:
+                        c.execute(
+                            "UPDATE services SET payment=?, chains=?, "
+                            "resource_count=COALESCE(?, resource_count), "
+                            "resource_samples=COALESCE(?, resource_samples), "
+                            "updated_at=? "
+                            "WHERE id=? AND url=?",
+                            (payment, chains, _count, samples,
+                             _updated, _id, _endpoint),
+                        )
         db.with_retry(op)
     if service_payments:
         print(f"[reverify] payment metadata recorded: "
