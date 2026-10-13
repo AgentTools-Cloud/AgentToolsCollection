@@ -53,7 +53,36 @@ DEFAULT_DB_PATH = os.environ.get(
     "AGENT_TOOLS_DB_PATH", "/opt/mcpserver/data/agent-tools.db"
 )
 
+
+class MetadataValidationError(ValueError):
+        """A deterministic metadata rejection, not a transient database failure."""
+
+
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS ingestion_issues (
+    kind TEXT NOT NULL,
+    source TEXT NOT NULL,
+    identity_hash TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    endpoint_hash TEXT,
+    disposition TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    first_seen INTEGER NOT NULL,
+    last_seen INTEGER NOT NULL,
+    occurrences INTEGER NOT NULL DEFAULT 1,
+    resolved_at INTEGER,
+    PRIMARY KEY(kind, source, identity_hash, content_hash, reason)
+);
+CREATE TABLE IF NOT EXISTS wellknown_endpoint_sources (
+    kind TEXT NOT NULL,
+    identity_hash TEXT NOT NULL,
+    endpoint_hash TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    listing_id INTEGER NOT NULL,
+    first_seen INTEGER NOT NULL,
+    last_seen INTEGER NOT NULL,
+    PRIMARY KEY(kind, identity_hash, endpoint_hash)
+);
 CREATE TABLE IF NOT EXISTS meta (
   key        TEXT PRIMARY KEY,
   value      TEXT,
@@ -541,6 +570,12 @@ def with_retry(fn: Callable[[], Any], *, attempts: int = 6, base_delay: float = 
 def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
     with closing(connect(db_path)) as c:
         c.executescript(SCHEMA)
+        # Supplemental bindings must not outlive a deleted/retired listing.
+        for kind, table in (('mcp', 'mcp_servers'), ('a2a', 'a2a_agents')):
+            c.execute(f"CREATE TRIGGER IF NOT EXISTS {table}_wellknown_binding_delete "
+                      f"AFTER DELETE ON {table} BEGIN "
+                      f"DELETE FROM wellknown_endpoint_sources WHERE kind='{kind}' "
+                      "AND listing_id=old.id; END")
         for table in ("services", "mcp_servers", "a2a_agents"):
             c.execute(
                 "CREATE INDEX IF NOT EXISTS idx_%s_name_exact "
@@ -561,6 +596,7 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
             "ON mcp_health_history(server_id, checked_at)"
         )
         for ddl in (
+            "ALTER TABLE ingestion_issues ADD COLUMN endpoint_hash TEXT",
             "ALTER TABLE services ADD COLUMN confidence REAL",
             "ALTER TABLE listing_edits ADD COLUMN via TEXT",
             "ALTER TABLE services ADD COLUMN tx_30d INTEGER",
@@ -576,6 +612,7 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
             "ALTER TABLE services ADD COLUMN payto_payers_30d INTEGER",
             "ALTER TABLE services ADD COLUMN payto_checked INTEGER",
             "ALTER TABLE services ADD COLUMN quality_score REAL",
+            "ALTER TABLE services ADD COLUMN conformance TEXT",
             "ALTER TABLE a2a_agents ADD COLUMN quality_score REAL",
             "ALTER TABLE mcp_servers ADD COLUMN conformance TEXT",
             "ALTER TABLE mcp_servers ADD COLUMN tool_count INTEGER",
@@ -881,12 +918,12 @@ def upsert_service(conn: sqlite3.Connection, row: dict) -> tuple:
     if row.get("url"):
         canonical_url = _exact_endpoint(row["url"])
         if not canonical_url:
-            raise ValueError("invalid service endpoint")
+            raise MetadataValidationError("invalid service endpoint")
         row["url"] = canonical_url
     if row.get("mcp_url"):
         canonical_mcp_url = _exact_endpoint(row["mcp_url"])
         if not canonical_mcp_url:
-            raise ValueError("invalid MCP endpoint")
+            raise MetadataValidationError("invalid MCP endpoint")
         row["mcp_url"] = canonical_mcp_url
     row.setdefault("created_at", now)
     row["updated_at"] = now
@@ -2176,6 +2213,16 @@ def privacy_purge_listing(conn, kind: str, slug: str, actor: str,
             if row is None:
                 continue
             target_slug = row["slug"]
+            # New supplemental aliases must be suppressed too, otherwise an
+            # entity could reappear at another host after a privacy purge.
+            for binding in conn.execute(
+                    'SELECT source_id FROM wellknown_endpoint_sources WHERE kind=? AND listing_id=?',
+                    (target_kind, listing_id)).fetchall():
+                _add_privacy_suppression(
+                    conn, target_kind, 'source',
+                    _privacy_source('wellknown', binding['source_id']),
+                    reason, actor,
+                )
             conn.execute(
                 "DELETE FROM listing_sources WHERE kind=? AND listing_id=?",
                 (target_kind, listing_id))
@@ -2657,7 +2704,7 @@ def upsert_a2a_agent(conn: sqlite3.Connection, row: dict) -> tuple:
         if row.get(field):
             canonical_endpoint = _exact_endpoint(row[field])
             if not canonical_endpoint:
-                raise ValueError("invalid A2A %s" % field)
+                raise MetadataValidationError("invalid A2A %s" % field)
             row[field] = canonical_endpoint
 
     # derive skill_names blob for FTS if not explicitly supplied
@@ -2733,6 +2780,14 @@ def upsert_a2a_agent(conn: sqlite3.Connection, row: dict) -> tuple:
         new_id = cur.lastrowid
         _record_source(conn, "a2a", new_id, _src)
         return True, new_id
+
+    if row.pop("_snapshot_fallback", False) and existing_by_source_id:
+        cur.execute(
+            "UPDATE a2a_agents SET last_seen=?,updated_at=? WHERE id=?",
+            (now, now, existing["id"]),
+        )
+        _record_source(conn, "a2a", existing["id"], _src)
+        return False, int(existing["id"])
 
     row["created_at"] = existing["created_at"]
     if int(existing["owner_verified"] or 0):
@@ -3063,13 +3118,15 @@ def upsert_mcp_server(conn: sqlite3.Connection, row: dict) -> tuple:
     # to the first-seen owner -- that rewrite is what used to discard the fact
     # that a second directory also indexes this endpoint.
     _src = (row.get("source"), row.get("source_id"), row.get("source_url"))
+    catalog_observation = (row.get("kind") == "catalog"
+                           and row.get("endpoint_url") is None)
     row.setdefault("created_at", now)
     row["updated_at"] = now
     row["last_seen"] = now
     if row.get("endpoint_url"):
         canonical_endpoint = _exact_endpoint(row["endpoint_url"])
         if not canonical_endpoint:
-            raise ValueError("invalid MCP endpoint")
+            raise MetadataValidationError("invalid MCP endpoint")
         row["endpoint_url"] = canonical_endpoint
     row["x402_supported"] = 0
     row["kind"] = "callable" if (row.get("endpoint_url") or "").strip() else "catalog"
@@ -3126,7 +3183,12 @@ def upsert_mcp_server(conn: sqlite3.Connection, row: dict) -> tuple:
         return True, new_id
 
     row["created_at"] = existing["created_at"]
-    if int(existing["owner_verified"] or 0):
+    if (int(existing["owner_verified"] or 0)
+            or (catalog_observation and existing["endpoint_url"])):
+        # A local/catalog observation does not establish that a previously
+        # discovered remote endpoint disappeared. Preserve its transport,
+        # ownership, measurements and metadata; refresh observation only.
+        assert_listing_not_retired(conn, "mcp", dict(existing))
         cur.execute(
             "UPDATE mcp_servers SET last_seen=?,updated_at=? WHERE id=?",
             (now, now, existing["id"]),
@@ -3139,6 +3201,7 @@ def upsert_mcp_server(conn: sqlite3.Connection, row: dict) -> tuple:
         if row.get(_keep) is None:
             row[_keep] = existing[_keep]
     _restore_owner_edits(row, existing)
+    row["kind"] = "callable" if (row.get("endpoint_url") or "").strip() else "catalog"
     _keep_owned_slug(cur, "mcp_servers", row, existing)
     # package_download_count is only provided by pulsemcp; don't let a re-crawl
     # from another source (which never carries it) wipe a stored value.

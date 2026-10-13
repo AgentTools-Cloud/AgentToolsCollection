@@ -21,7 +21,6 @@ URLs, so they do not map onto our concrete x402 `services` table.
 
 from __future__ import annotations
 
-import sqlite3
 import concurrent.futures as cf
 import logging
 import re
@@ -32,6 +31,7 @@ import httpx
 
 from . import a2a as a2a_mod
 from . import db
+from . import ingestion
 from . import public_http
 
 log = logging.getLogger("directory.agenstry")
@@ -72,80 +72,106 @@ def _fetch_sitemap_paths() -> list[str]:
 # ---------------------------------------------------------------------------
 # A2A agents
 # ---------------------------------------------------------------------------
+_A2A_WRITE_BATCH = 100
+
+
+def _write_a2a_batch(rows: list[dict]) -> dict:
+    """Commit one batch; shared ingestion isolates classified row rejections."""
+    # Start an outer transaction explicitly: releasing an outermost savepoint
+    # would otherwise commit a row before the whole batch has succeeded.
+    with db.writer(immediate=True) as conn:
+        return ingestion.ingest_batch(conn, "a2a", "agenstry", rows, db.upsert_a2a_agent)
+
+
 def crawl_agenstry_a2a(max_hosts: int = 4000, workers: int = 12) -> dict:
-    """Discover A2A agents via agenstry, fetch each domain's live Agent Card."""
-    try:
-        paths = _fetch_sitemap_paths()
-    except httpx.HTTPError as e:
-        log.warning("agenstry sitemap fetch failed: %r", e)
-        return {"candidates": 0, "resolved": 0, "inserted": 0, "updated": 0}
+    """Discover live cards and commit bounded batches.
 
-    domains: list[str] = []
-    seen: set[str] = set()
-    for u in paths:
-        path = urlparse(u).path
-        if not path.startswith("/agents/"):
-            continue
-        dom = path[len("/agents/"):].strip("/").lower()
-        if not dom or "/" in dom or "." not in dom or dom in seen:
-            continue
-        seen.add(dom)
-        domains.append(dom)
-    domains = domains[:max_hosts]
-    log.info("agenstry a2a: %d candidate domains", len(domains))
+    Permanent metadata/retirement rejections are counted separately from source
+    and probe errors. An absent card is still an ordinary discovery miss.
+    Unexpected exceptions propagate; previously committed batches remain intact.
+    """
+    def start_run():
+        with db.writer() as conn:
+            return db.record_crawl_start(conn, "a2a:agenstry")
 
-    rows: list[dict] = []
+    run_id = db.with_retry(start_run)
+    inserted = updated = rejected = 0
+    errors: list[str] = []
 
-    def _probe(dom: str):
+    def finish_run(status):
+        def op():
+            with db.writer() as conn:
+                db.record_crawl_finish(
+                    conn, run_id, inserted, updated, errors, status=status,
+                )
+        db.with_retry(op)
+
+    def _probe(dom: str) -> tuple[dict | None, str | None]:
         base = f"https://{dom}"
-        # card_to_row stays inside the try: a single malformed card must not
-        # abort ex.map and take the whole source down with it.
         try:
             with public_http.client(
                     timeout=TIMEOUT, follow_redirects=True,
                     headers={"User-Agent": UA, "Accept": "application/json"}) as c:
-                card, card_url = a2a_mod.fetch_agent_card(base, client=c)
+                card, card_url = a2a_mod.fetch_agent_card(
+                    base, client=c, include_invalid_for_audit=True,
+                )
             if card and card_url:
-                return a2a_mod.card_to_row(card, card_url, source="agenstry", source_id=dom)
-        except Exception as e:
+                return a2a_mod.card_to_row(
+                    card, card_url, source="agenstry", source_id=dom,
+                ), None
+        except (httpx.HTTPError, public_http.UnsafeURL) as e:
             log.warning("agenstry a2a: skipping %s: %r", dom, e)
-        return None
+            return None, f"{dom}: {e!r}"
+        return None, None
 
-    with cf.ThreadPoolExecutor(max_workers=workers) as ex:
-        for row in ex.map(_probe, domains):
-            if row:
-                rows.append(row)
+    try:
+        paths = _fetch_sitemap_paths()
+        domains: list[str] = []
+        seen: set[str] = set()
+        for u in paths:
+            path = urlparse(u).path
+            if not path.startswith("/agents/"):
+                continue
+            dom = path[len("/agents/"):].strip("/").lower()
+            if not dom or "/" in dom or "." not in dom or dom in seen:
+                continue
+            seen.add(dom)
+            domains.append(dom)
+        domains = domains[:max_hosts]
+        log.info("agenstry a2a: %d candidate domains", len(domains))
 
-    log.info("agenstry a2a: resolved %d live cards / %d domains", len(rows), len(domains))
+        rows: list[dict] = []
+        with cf.ThreadPoolExecutor(max_workers=workers) as ex:
+            for row, error in ex.map(_probe, domains):
+                if row:
+                    rows.append(row)
+                if error:
+                    errors.append(error)
 
-    inserted = updated = 0
-    if rows:
-        def _write():
-            ins = upd = bad = 0
-            with db.writer() as c:
-                for row in rows:
-                    # Only the binding/schema errors are per-row; a locked DB
-                    # must still propagate so db.with_retry can retry.
-                    try:
-                        is_new, _ = db.upsert_a2a_agent(c, row)
-                    except db.RetiredListingError:
-                        log.info("skip retired Agenstry A2A listing: %s",
-                                 row.get("slug"))
-                        continue
-                    except (sqlite3.ProgrammingError, sqlite3.InterfaceError) as e:
-                        bad += 1
-                        log.warning("agenstry a2a: unwritable card %s: %r",
-                                    row.get("source_id"), e)
-                        continue
-                    ins += int(is_new)
-                    upd += int(not is_new)
-                c.commit()
-            if bad:
-                log.warning("agenstry a2a: %d card(s) skipped on write", bad)
-            return ins, upd
-        inserted, updated = db.with_retry(_write)
+        log.info("agenstry a2a: resolved %d live cards / %d domains", len(rows), len(domains))
+        if domains and not rows:
+            errors.append(f"agenstry a2a: no live cards resolved from {len(domains)} candidates")
+
+        for offset in range(0, len(rows), _A2A_WRITE_BATCH):
+            batch = rows[offset:offset + _A2A_WRITE_BATCH]
+            result = db.with_retry(lambda batch=batch: _write_a2a_batch(batch))
+            inserted += result["added"]
+            updated += result["updated"]
+            rejected += result["rejected"]
+            errors.extend(result["errors"])
+    except Exception as exc:
+        errors.append(f"agenstry a2a: {exc!r}")
+        try:
+            finish_run("error")
+        except Exception:
+            # A failed status write must not mask the original source/DB error.
+            log.exception("agenstry a2a: failed to record crawl error")
+        raise
+
+    finish_run("partial" if errors else "ok")
     return {"candidates": len(domains), "resolved": len(rows),
-            "inserted": inserted, "updated": updated}
+            "inserted": inserted, "updated": updated,
+            "rejected": rejected, "errors": errors}
 
 
 # ---------------------------------------------------------------------------

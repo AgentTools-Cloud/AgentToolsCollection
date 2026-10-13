@@ -9,6 +9,7 @@ from directory import crawlers, db, jobs, reverify_x402
 
 
 USDC_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+USDT0_XLAYER = "0x779ded0c9e1022225f8e0630b35a9b54be713736"
 
 
 def _payment_required() -> dict:
@@ -28,10 +29,11 @@ def _payment_required() -> dict:
 
 
 class _Response:
-    def __init__(self, status: int, payload=None, headers=None):
+    def __init__(self, status: int, payload=None, headers=None, url=None):
         self.status_code = status
         self._payload = payload
         self.headers = headers or {}
+        self.url = url
         self.content = json.dumps(payload).encode() if payload is not None else b"{}"
 
 
@@ -127,6 +129,42 @@ class SubmissionPriceTests(unittest.TestCase):
         )
         self.assertEqual(row["price_min"], 0.25)
         self.assertEqual(row["price_max"], 2.5)
+        self.assertEqual(row["currency"], "USDC")
+
+    def test_explicit_usdc_price_wins_over_detected_currency(self):
+        row = self._approve(
+            {
+                "name": "Owner priced API",
+                "url": "https://example.com/paid",
+                "price_usdc": 1.0,
+            },
+            payment={"max_amount_usdc": 0.02, "currency": "USDT0"},
+        )
+        self.assertEqual(row["price_min"], 1.0)
+        self.assertEqual(row["price_max"], 1.0)
+        self.assertEqual(row["currency"], "USDC")
+
+    def test_one_sided_usdc_range_does_not_mix_detected_currency(self):
+        row = self._approve(
+            {
+                "name": "Owner priced API",
+                "url": "https://example.com/paid",
+                "price_min_usdc": 1.0,
+            },
+            payment={"max_amount_usdc": 0.02, "currency": "USDT0"},
+        )
+        self.assertEqual(row["price_min"], 1.0)
+        self.assertIsNone(row["price_max"])
+        self.assertEqual(row["currency"], "USDC")
+
+    def test_inverted_explicit_usdc_range_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "price_min_usdc"):
+            self._approve({
+                "name": "Invalid range",
+                "url": "https://example.com/paid",
+                "price_min_usdc": 2.0,
+                "price_max_usdc": 1.0,
+            })
 
     def test_approval_uses_verified_paid_resource_url(self):
         submitted = "https://agents.example.test/a2a"
@@ -468,6 +506,225 @@ class SubmissionPriceTests(unittest.TestCase):
         self.assertEqual(verdict["status"], "verified")
         self.assertEqual(verdict["verified_url"], paid_url)
 
+    def test_verifier_does_not_post_without_explicit_probe_body(self):
+        origin = "https://safe.example.test"
+        endpoint = origin + "/mutating"
+
+        class Client(_RoutingClient):
+            posted = False
+
+            def post(self, url, **kwargs):
+                self.posted = True
+                return super().post(url, **kwargs)
+
+        client = Client({
+            ("GET", origin + "/.well-known/x402"): _Response(200, {
+                "resources": [{"url": endpoint, "method": "POST"}],
+            }),
+            ("GET", origin + "/.well-known/x402.json"): _Response(404),
+            ("GET", endpoint): _Response(405),
+            ("GET", origin): _Response(200),
+        })
+        crawlers._WK_CACHE.clear()
+        with (
+            patch.object(crawlers, "_host_safety", return_value="public"),
+            patch.object(crawlers.httpx, "Client", return_value=client),
+        ):
+            verdict = crawlers.verify_x402(endpoint)
+        self.assertFalse(client.posted)
+        self.assertEqual(verdict["status"], "uncertain")
+
+    def test_post_only_without_descriptor_stays_uncertain(self):
+        origin = "https://safe.example.test"
+        endpoint = origin + "/post-only"
+        client = _RoutingClient({
+            ("GET", origin + "/.well-known/x402"): _Response(404),
+            ("GET", origin + "/.well-known/x402.json"): _Response(404),
+            ("GET", endpoint): _Response(405),
+            ("GET", origin): _Response(200),
+        })
+        crawlers._WK_CACHE.clear()
+        with (
+            patch.object(crawlers, "_host_safety", return_value="public"),
+            patch.object(crawlers.httpx, "Client", return_value=client),
+        ):
+            verdict = crawlers.verify_x402(endpoint)
+        self.assertEqual(verdict["status"], "uncertain")
+
+    def test_empty_first_descriptor_does_not_hide_second_valid_descriptor(self):
+        origin = "https://safe.example.test"
+        endpoint = origin + "/paid"
+        payment_required = _payment_required()
+        payment_required["resource"]["url"] = endpoint
+        client = _RoutingClient({
+            ("GET", origin + "/.well-known/x402"): _Response(200, {}),
+            ("GET", origin + "/.well-known/x402.json"): _Response(200, {
+                "resources": [{"url": endpoint, "method": "GET"}],
+            }),
+            ("GET", endpoint): _Response(402, payment_required),
+            ("GET", origin): _Response(200),
+        })
+        crawlers._WK_CACHE.clear()
+        with (
+            patch.object(crawlers, "_host_safety", return_value="public"),
+            patch.object(crawlers.httpx, "Client", return_value=client),
+        ):
+            verdict = crawlers.verify_x402(endpoint)
+        self.assertEqual(verdict["status"], "verified")
+        self.assertEqual(verdict["verified_url"], endpoint)
+
+    def test_verifier_ignores_cross_origin_well_known_hint(self):
+        origin = "https://safe.example.test"
+        endpoint = origin + "/pay"
+        payment_required = _payment_required()
+        payment_required["resource"]["url"] = endpoint
+        client = _RoutingClient({
+            ("GET", origin + "/.well-known/x402"): _Response(404),
+            ("GET", origin + "/.well-known/x402.json"): _Response(404),
+            ("GET", endpoint): _Response(402, payment_required),
+            ("GET", origin): _Response(200),
+        })
+        crawlers._WK_CACHE.clear()
+        with (
+            patch.object(crawlers, "_host_safety", return_value="public"),
+            patch.object(crawlers.httpx, "Client", return_value=client),
+        ):
+            verdict = crawlers.verify_x402(
+                endpoint, "https://attacker.example.test/x402.json",
+            )
+        self.assertEqual(verdict["status"], "verified")
+        self.assertEqual(verdict["verified_url"], endpoint)
+
+    def test_resource_discovery_ignores_cross_origin_well_known_hint(self):
+        origin = "https://safe.example.test"
+        endpoint = origin + "/pay"
+        client = _RoutingClient({
+            ("GET", origin + "/.well-known/x402"): _Response(200, {
+                "resources": [{"url": endpoint, "method": "GET"}],
+            }),
+        })
+        crawlers._WK_CACHE.clear()
+        with patch.object(crawlers.httpx, "Client", return_value=client):
+            resources = crawlers.fetch_wellknown_resources(
+                endpoint, "https://attacker.example.test/x402.json",
+            )
+        self.assertEqual(resources["resource_count"], 1)
+        self.assertEqual(resources["resource_samples"][0]["url"], endpoint)
+
+    def test_resource_discovery_drops_cross_origin_advertised_resource(self):
+        origin = "https://safe.example.test"
+        endpoint = origin + "/pay"
+        client = _RoutingClient({
+            ("GET", origin + "/.well-known/x402"): _Response(200, {
+                "baseUrl": "https://attacker.example.test",
+                "resources": [
+                    {"url": "https://victim.example.test/pay", "method": "GET"},
+                    {"path": "/relative", "method": "GET"},
+                    {"url": endpoint, "method": "GET"},
+                ],
+            }),
+        })
+        crawlers._WK_CACHE.clear()
+        with patch.object(crawlers.httpx, "Client", return_value=client):
+            resources = crawlers.fetch_wellknown_resources(endpoint)
+        self.assertEqual(resources["resource_count"], 2)
+        self.assertEqual(
+            {item["url"] for item in resources["resource_samples"]},
+            {origin + "/relative", endpoint},
+        )
+
+    def test_empty_primary_descriptor_falls_back_to_json_descriptor(self):
+        origin = "https://safe.example.test"
+        endpoint = origin + "/paid"
+        client = _RoutingClient({
+            ("GET", origin + "/.well-known/x402"): _Response(200, {}),
+            ("GET", origin + "/.well-known/x402.json"): _Response(200, {
+                "resources": [{"url": endpoint, "method": "GET"}],
+            }),
+        })
+        crawlers._WK_CACHE.clear()
+        with patch.object(crawlers.httpx, "Client", return_value=client):
+            resources = crawlers.fetch_wellknown_resources(endpoint)
+        self.assertTrue(resources["descriptor_observed"])
+        self.assertEqual(resources["resource_count"], 1)
+
+    def test_verifier_uses_explicit_same_origin_probe_body(self):
+        origin = "https://safe.example.test"
+        endpoint = origin + "/paid"
+        payment_required = _payment_required()
+        payment_required["resource"]["url"] = endpoint
+        client = _RoutingClient({
+            ("GET", origin + "/.well-known/x402"): _Response(200, {
+                "resources": [{
+                    "url": endpoint, "method": "POST", "probe_body": {},
+                }],
+            }),
+            ("POST", endpoint): _Response(402, payment_required),
+            ("GET", endpoint): _Response(405),
+            ("GET", origin): _Response(200),
+        })
+        crawlers._WK_CACHE.clear()
+        with (
+            patch.object(crawlers, "_host_safety", return_value="public"),
+            patch.object(crawlers.httpx, "Client", return_value=client),
+        ):
+            verdict = crawlers.verify_x402(endpoint)
+        self.assertEqual(verdict["status"], "verified")
+        self.assertEqual(verdict["verified_url"], endpoint)
+
+    def test_verifier_rejects_cross_origin_get_redirect(self):
+        origin = "https://safe.example.test"
+        endpoint = origin + "/pay"
+        client = _RoutingClient({
+            ("GET", origin + "/.well-known/x402"): _Response(404),
+            ("GET", origin + "/.well-known/x402.json"): _Response(404),
+            ("GET", endpoint): _Response(
+                302, headers={"location": "https://attacker.example/pay"},
+                url=endpoint,
+            ),
+            ("GET", origin): _Response(200),
+        })
+        crawlers._WK_CACHE.clear()
+        with (
+            patch.object(crawlers, "_host_safety", return_value="public"),
+            patch.object(crawlers.httpx, "Client", return_value=client),
+        ):
+            verdict = crawlers.verify_x402(endpoint)
+        self.assertEqual(verdict["status"], "rejected")
+        self.assertIn("unsafe URL", verdict["evidence"][0])
+
+    def test_verifier_does_not_forward_post_body_cross_origin(self):
+        origin = "https://safe.example.test"
+        endpoint = origin + "/paid"
+
+        class Client(_RoutingClient):
+            attacker_posts = 0
+
+            def post(self, url, **kwargs):
+                if url.startswith("https://attacker.example"):
+                    self.attacker_posts += 1
+                return super().post(url, **kwargs)
+
+        client = Client({
+            ("GET", origin + "/.well-known/x402"): _Response(200, {
+                "resources": [{
+                    "url": endpoint, "method": "POST", "probe_body": {},
+                }],
+            }),
+            ("POST", endpoint): _Response(
+                307, headers={"location": "https://attacker.example/paid"},
+                url=endpoint,
+            ),
+        })
+        crawlers._WK_CACHE.clear()
+        with (
+            patch.object(crawlers, "_host_safety", return_value="public"),
+            patch.object(crawlers.httpx, "Client", return_value=client),
+        ):
+            verdict = crawlers.verify_x402(endpoint)
+        self.assertEqual(verdict["status"], "rejected")
+        self.assertEqual(client.attacker_posts, 0)
+
     def test_non_usdc_amount_is_not_reported_as_usd(self):
         payment_required = _payment_required()
         payment_required["accepts"][0]["asset"] = "0xTokenWith18Decimals"
@@ -476,6 +733,366 @@ class SubmissionPriceTests(unittest.TestCase):
         self.assertIsNotNone(payment)
         self.assertIsNone(payment["max_amount_usdc"])
         self.assertIsNone(payment["currency"])
+
+    def test_untrusted_usdc_ticker_does_not_define_value(self):
+        payment_required = _payment_required()
+        payment_required["accepts"][0].update({
+            "asset": "0x" + "9" * 40,
+            "extra": {"name": "USDC", "version": "2"},
+        })
+        payment = crawlers._extract_payment(payment_required)
+        self.assertIsNone(payment["max_amount_usdc"])
+        self.assertIsNone(payment["currency"])
+
+    def test_unmarked_numeric_price_is_not_treated_as_usd(self):
+        payment_required = _payment_required()
+        payment_required["accepts"][0].update({
+            "asset": "0x" + "9" * 40,
+            "amount": None,
+            "price": 0.25,
+            "extra": {"name": "USDC"},
+        })
+        payment = crawlers._extract_payment(payment_required)
+        self.assertIsNone(payment["max_amount_usdc"])
+        self.assertIsNone(payment["currency"])
+
+    def test_usdc_contract_on_wrong_chain_is_not_priced(self):
+        payment_required = _payment_required()
+        payment_required["accepts"][0]["network"] = "eip155:1"
+        payment = crawlers._extract_payment(payment_required)
+        self.assertIsNone(payment["max_amount_usdc"])
+        self.assertIsNone(payment["currency"])
+
+    def test_xlayer_usdt0_amount_is_priced_without_relabeling_as_usdc(self):
+        payment_required = _payment_required()
+        payment_required["accepts"][0].update({
+            "network": "eip155:196",
+            "asset": USDT0_XLAYER,
+            "amount": "20000",
+            "extra": {"name": "USD₮0", "version": "1"},
+        })
+        payment = crawlers._extract_payment(payment_required)
+        self.assertIsNotNone(payment)
+        self.assertEqual(payment["max_amount_usdc"], 0.02)
+        self.assertEqual(payment["currency"], "USDT0")
+        self.assertEqual(payment["asset"], USDT0_XLAYER)
+
+    def test_xlayer_usdt0_numeric_network_alias_is_priced(self):
+        payment_required = _payment_required()
+        payment_required["accepts"][0].update({
+            "network": 196,
+            "asset": USDT0_XLAYER,
+            "amount": "20000",
+        })
+        payment = crawlers._extract_payment(payment_required)
+        self.assertEqual(payment["max_amount_usdc"], 0.02)
+        self.assertEqual(payment["currency"], "USDT0")
+
+    def test_sui_coin_type_asset_is_valid(self):
+        payment = {
+            "scheme": "exact", "network": "sui:mainnet",
+            "asset": "0x2::sui::SUI", "amount_raw": "1",
+            "pay_to": "0x" + "1" * 64,
+        }
+        self.assertTrue(crawlers._valid_payment(payment))
+
+    def test_approval_persists_detected_usdt0_currency(self):
+        row = self._approve(
+            {
+                "name": "Entropy Signal",
+                "url": "https://example.com/signal",
+            },
+            payment={
+                "scheme": "exact", "network": "eip155:196",
+                "asset": USDT0_XLAYER, "amount_raw": "20000",
+                "max_amount_usdc": 0.02, "currency": "USDT0",
+                "pay_to": "0x" + "1" * 40,
+            },
+        )
+        self.assertEqual(row["price_min"], 0.02)
+        self.assertEqual(row["price_max"], 0.02)
+        self.assertEqual(row["currency"], "USDT0")
+
+    def test_mirror_service_persists_detected_usdt0_currency(self):
+        service = reverify_x402._build_service({
+            "slug": "entropy", "name": "Entropy",
+            "endpoint": "https://example.com/mcp",
+            "delivery": "mcp", "source": "registry", "source_id": "one",
+        }, {
+            "status": "verified",
+            "verified_url": "https://example.com/signal",
+            "payment": {
+                "scheme": "exact", "network": "eip155:196",
+                "asset": USDT0_XLAYER, "amount_raw": "20000",
+                "max_amount_usdc": 0.02, "currency": "USDT0",
+                "pay_to": "0x" + "1" * 40,
+            },
+        })
+        self.assertEqual(service["price_min"], 0.02)
+        self.assertEqual(service["price_max"], 0.02)
+        self.assertEqual(service["currency"], "USDT0")
+
+    def test_native_reverify_persists_detected_usdt0_currency(self):
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        db_path = str(Path(temp_dir.name) / "directory.db")
+        db.init_db(db_path)
+        endpoint = "https://example.com/signal"
+        with db.writer(db_path) as conn:
+            _, service_id = db.upsert_service(conn, {
+                "slug": "entropy", "name": "Entropy", "url": endpoint,
+                "source": "submission", "source_id": "entropy",
+                "health": "ok",
+            })
+        real_connect, real_writer = db.connect, db.writer
+        task = {
+            "table": "services", "id": service_id, "slug": "entropy",
+            "name": "Entropy", "description": None, "endpoint": endpoint,
+            "homepage": None, "well_known": None, "category": None,
+            "source": None, "source_id": None, "delivery": "x402", "was": 0,
+        }
+
+        def probe(value):
+            value["verdict"] = {
+                "status": "verified", "verified_url": endpoint,
+                "payment": {
+                    "scheme": "exact", "network": "eip155:196",
+                    "asset": USDT0_XLAYER, "amount_raw": "20000",
+                    "max_amount_usdc": 0.02, "currency": "USDT0",
+                    "pay_to": "0x" + "1" * 40,
+                },
+            }
+            value["resources"] = {
+                "descriptor_observed": True,
+                "resource_count": 1,
+                "resource_samples": [{
+                    "url": endpoint,
+                    "accepts": [value["verdict"]["payment"]],
+                }],
+                "price_min": 0.02, "price_max": 0.02,
+            }
+            return value
+
+        with (
+            patch.object(
+                reverify_x402.db, "connect",
+                side_effect=lambda *_args, **kwargs: real_connect(
+                    db_path, read_only=kwargs.get("read_only", False)
+                ),
+            ),
+            patch.object(
+                reverify_x402.db, "writer",
+                side_effect=lambda *_args, **kwargs: real_writer(
+                    db_path, immediate=kwargs.get("immediate", False)
+                ),
+            ),
+            patch.object(reverify_x402, "_gather", return_value=[task]),
+            patch.object(reverify_x402, "_probe", side_effect=probe),
+            patch.object(
+                reverify_x402, "_privacy_suppressed_metadata",
+                return_value=False,
+            ),
+        ):
+            reverify_x402.reverify(targets=("services",), workers=1)
+
+        with real_connect(db_path, read_only=True) as conn:
+            row = conn.execute(
+                "SELECT price_min,price_max,currency,payment "
+                "FROM services WHERE id=?", (service_id,),
+            ).fetchone()
+            self.assertEqual(row["price_min"], 0.02)
+            self.assertEqual(row["price_max"], 0.02)
+            self.assertEqual(row["currency"], "USDT0")
+            self.assertEqual(json.loads(row["payment"])["currency"], "USDT0")
+
+    def test_native_reverify_clears_stale_unpriced_currency(self):
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        db_path = str(Path(temp_dir.name) / "directory.db")
+        db.init_db(db_path)
+        endpoint = "https://example.com/signal"
+        with db.writer(db_path) as conn:
+            _, service_id = db.upsert_service(conn, {
+                "slug": "entropy", "name": "Entropy", "url": endpoint,
+                "source": "submission", "source_id": "entropy",
+                "health": "ok", "price_min": 0.02, "price_max": 0.02,
+                "currency": "USDT0",
+            })
+        real_connect, real_writer = db.connect, db.writer
+        task = {
+            "table": "services", "id": service_id, "slug": "entropy",
+            "name": "Entropy", "description": None, "endpoint": endpoint,
+            "homepage": None, "well_known": None, "category": None,
+            "source": None, "source_id": None, "delivery": "x402", "was": 1,
+        }
+        payment = {
+            "scheme": "exact", "network": "eip155:196",
+            "asset": "0x" + "3" * 40, "amount_raw": "20000",
+            "max_amount_usdc": None, "currency": None,
+            "pay_to": "0x" + "1" * 40,
+        }
+
+        def probe(value):
+            value["verdict"] = {
+                "status": "verified", "verified_url": endpoint,
+                "payment": payment,
+            }
+            value["resources"] = {
+                "descriptor_observed": True,
+                "resource_count": 1,
+                "resource_samples": [{"url": endpoint, "accepts": [payment]}],
+                "price_min": None, "price_max": None,
+            }
+            return value
+
+        with (
+            patch.object(
+                reverify_x402.db, "connect",
+                side_effect=lambda *_args, **kwargs: real_connect(
+                    db_path, read_only=kwargs.get("read_only", False)
+                ),
+            ),
+            patch.object(
+                reverify_x402.db, "writer",
+                side_effect=lambda *_args, **kwargs: real_writer(
+                    db_path, immediate=kwargs.get("immediate", False)
+                ),
+            ),
+            patch.object(reverify_x402, "_gather", return_value=[task]),
+            patch.object(reverify_x402, "_probe", side_effect=probe),
+            patch.object(
+                reverify_x402, "_privacy_suppressed_metadata",
+                return_value=False,
+            ),
+        ):
+            reverify_x402.reverify(targets=("services",), workers=1)
+
+        with real_connect(db_path, read_only=True) as conn:
+            row = conn.execute(
+                "SELECT price_min,price_max,currency,payment "
+                "FROM services WHERE id=?", (service_id,),
+            ).fetchone()
+            self.assertIsNone(row["price_min"])
+            self.assertIsNone(row["price_max"])
+            self.assertIsNone(row["currency"])
+            self.assertIsNone(json.loads(row["payment"])["currency"])
+
+    def test_native_reverify_preserves_submitter_explicit_price(self):
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        db_path = str(Path(temp_dir.name) / "directory.db")
+        db.init_db(db_path)
+        endpoint = "https://example.com/owner-priced"
+        with db.writer(db_path) as conn:
+            submission_id = db.create_submission(conn, {
+                "name": "Owner priced", "url": endpoint,
+                "price_usdc": 7.0,
+            })
+            _, service_id = db.upsert_service(conn, {
+                "slug": "owner-priced", "name": "Owner priced",
+                "url": endpoint, "source": "submission",
+                "source_id": f"sub:{submission_id}", "health": "ok",
+                "price_min": 7.0, "price_max": 7.0, "currency": "USDC",
+            })
+        real_connect, real_writer = db.connect, db.writer
+
+        with (
+            patch.object(
+                reverify_x402.db, "connect",
+                side_effect=lambda *_args, **kwargs: real_connect(
+                    db_path, read_only=kwargs.get("read_only", False)
+                ),
+            ),
+            patch.object(
+                reverify_x402.db, "writer",
+                side_effect=lambda *_args, **kwargs: real_writer(
+                    db_path, immediate=kwargs.get("immediate", False)
+                ),
+            ),
+            patch.object(reverify_x402, "_probe", side_effect=lambda task: {
+                **task,
+                "verdict": {
+                    "status": "verified", "verified_url": endpoint,
+                    "payment": {
+                        "scheme": "exact", "network": "eip155:196",
+                        "asset": "0x" + "3" * 40, "amount_raw": "20000",
+                        "max_amount_usdc": None, "currency": None,
+                        "pay_to": "0x" + "1" * 40,
+                    },
+                },
+                "resources": {
+                    "descriptor_observed": True,
+                    "resource_count": 1,
+                    "resource_samples": [{"url": endpoint}],
+                    "price_min": None, "price_max": None,
+                },
+            }),
+            patch.object(
+                reverify_x402, "_privacy_suppressed_metadata",
+                return_value=False,
+            ),
+        ):
+            reverify_x402.reverify(targets=("services",), workers=1)
+
+        with real_connect(db_path, read_only=True) as conn:
+            row = conn.execute(
+                "SELECT price_min,price_max,currency FROM services WHERE id=?",
+                (service_id,),
+            ).fetchone()
+            self.assertEqual(tuple(row), (7.0, 7.0, "USDC"))
+
+    def test_native_reverify_preserves_merged_submission_price(self):
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        db_path = str(Path(temp_dir.name) / "directory.db")
+        db.init_db(db_path)
+        endpoint = "https://example.com/merged"
+        with db.writer(db_path) as conn:
+            submission_id = db.create_submission(conn, {
+                "name": "Merged", "url": endpoint, "price_usdc": 7.0,
+            })
+            _, service_id = db.upsert_service(conn, {
+                "slug": "merged", "name": "Merged", "url": endpoint,
+                "source": "x402scan", "source_id": "scan:merged",
+                "health": "ok", "price_min": 7.0, "price_max": 7.0,
+                "currency": "USDC",
+            })
+            db._record_source(conn, "x402", service_id, (
+                "submission", f"sub:{submission_id}", None,
+            ))
+        real_connect, real_writer = db.connect, db.writer
+        with (
+            patch.object(
+                reverify_x402.db, "connect",
+                side_effect=lambda *_args, **kwargs: real_connect(
+                    db_path, read_only=kwargs.get("read_only", False)
+                ),
+            ),
+            patch.object(
+                reverify_x402.db, "writer",
+                side_effect=lambda *_args, **kwargs: real_writer(
+                    db_path, immediate=kwargs.get("immediate", False)
+                ),
+            ),
+            patch.object(reverify_x402, "_probe", side_effect=lambda task: {
+                **task,
+                "verdict": {"status": "verified", "verified_url": endpoint,
+                            "payment": {"scheme": "exact", "network": "base",
+                                        "amount_raw": "500000", "max_amount_usdc": 0.5,
+                                        "currency": "USDC", "pay_to": "0x" + "1" * 40}},
+                "resources": {"descriptor_observed": True, "resource_count": 1,
+                              "resource_samples": [{"url": endpoint}],
+                              "price_min": 0.5, "price_max": 0.5},
+            }),
+            patch.object(reverify_x402, "_privacy_suppressed_metadata", return_value=False),
+        ):
+            reverify_x402.reverify(targets=("services",), workers=1)
+        with real_connect(db_path, read_only=True) as conn:
+            row = conn.execute(
+                "SELECT price_min,price_max,currency FROM services WHERE id=?",
+                (service_id,),
+            ).fetchone()
+            self.assertEqual(tuple(row), (7.0, 7.0, "USDC"))
 
     def test_payment_required_header_lookup_is_case_insensitive(self):
         encoded = base64.b64encode(json.dumps(_payment_required()).encode()).decode()

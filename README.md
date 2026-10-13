@@ -83,8 +83,8 @@ sudo systemctl restart mcpserver
 systemd units live in [`deploy/`](deploy/):
 
 - `mcpserver.service` — the ASGI app (uvicorn, 127.0.0.1:9100)
-- `agent-tools-crawl.{service,timer}` — 6h directory crawler
-- `agent-tools-health.{service,timer}` — endpoint health checks
+- `agent-tools-crawl.{service,timer}` — daily directory crawler at 00:30
+- `agent-tools-health.{service,timer}` — daily endpoint health checks at 05:30
 
 ## Config
 

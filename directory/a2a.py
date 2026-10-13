@@ -24,7 +24,7 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 
-from . import db, public_http
+from . import crawlers, db, public_http
 
 log = logging.getLogger("directory.a2a")
 
@@ -323,23 +323,32 @@ def _host_slug(url: str) -> str:
 
 
 def fetch_agent_card(url: str, client: httpx.Client | None = None,
-                     reject_unsafe: bool = False) -> tuple[dict | None, str | None]:
+                     reject_unsafe: bool = False, *,
+                     include_invalid_for_audit: bool = False,
+                     homepage: bool | None = None) -> tuple[dict | None, str | None]:
     """Fetch a remote Agent Card.
 
-    `url` may be a direct card URL or a homepage/base URL (we then try the
-    well-known card paths). Returns (card_dict, resolved_card_url).
+    `homepage=True` explicitly identifies a path/query-bearing homepage;
+    `homepage=False` keeps a direct card isolated. Origin URLs are discovered
+    automatically. Invalid cards are returned only for a validating ingestion
+    caller that opts into `include_invalid_for_audit`.
     """
     own = client or public_http.client(
         timeout=TIMEOUT, follow_redirects=True,
         headers={"User-Agent": UA, "Accept": "application/json"})
     try:
-        candidates: list[str]
-        path = urlparse(url).path or "/"
-        if path.endswith(".json") or "agent" in path.lower():
-            candidates = [url]
-        else:
-            candidates = [urljoin(url, p) for p in CARD_PATHS]
-            candidates.insert(0, url)
+        from .ingestion import validate_endpoint
+
+        parsed = urlparse(url)
+        # A supplied resource/card path (including its query) is direct-only:
+        # never substitute another tenant's root card. For an origin, prefer
+        # genuine card paths before considering a card served at the homepage.
+        direct = (not homepage if homepage is not None else
+              parsed.path not in ("", "/") or bool(parsed.query))
+        origin = f"{parsed.scheme}://{parsed.netloc}/"
+        candidates = ([url] if direct else
+                  [urljoin(origin, p) for p in CARD_PATHS] + [url])
+        fallback: tuple[dict | None, str | None] = (None, None)
         for cand in candidates:
             try:
                 r = own.get(cand)
@@ -351,16 +360,28 @@ def fetch_agent_card(url: str, client: httpx.Client | None = None,
                 continue
             if r.status_code != 200:
                 continue
-            ctype = r.headers.get("content-type", "")
             try:
                 card = r.json()
             except (ValueError, json.JSONDecodeError):
                 continue
-            if isinstance(card, dict) and (card.get("name") or card.get("skills")):
-                return card, str(r.url)
-            if "json" not in ctype:
+            if not isinstance(card, dict) or not (card.get("name") or card.get("skills")):
                 continue
-        return None, None
+            resolved_url = str(r.url)
+            try:
+                validate_endpoint(_card_endpoint(card, resolved_url))
+            except db.MetadataValidationError:
+                # An invalid genuine card remains available to the ingestion
+                # audit if no better card exists. Name/skills-only homepage
+                # JSON is ordinary site metadata, not an Agent Card.
+                declared_endpoint = any(key in card for key in (
+                    "url", "endpoint", "endpointUrl", "supportedInterfaces",
+                    "additionalInterfaces", "interfaces",
+                ))
+                if fallback[0] is None and (direct or cand != url or declared_endpoint):
+                    fallback = (card, resolved_url)
+                continue
+            return card, resolved_url
+        return fallback if include_invalid_for_audit else (None, None)
     finally:
         if client is None:
             own.close()
@@ -369,6 +390,10 @@ def fetch_agent_card(url: str, client: httpx.Client | None = None,
 def _card_endpoint(card: dict, card_url: str) -> str | None:
     url = card.get("url") or card.get("endpoint") or card.get("endpointUrl")
     if url:
+        # A root-relative endpoint is unambiguous within the fetched card's
+        # origin. Never reinterpret method strings or scheme-relative hosts.
+        if isinstance(url, str) and url.startswith('/') and not url.startswith('//'):
+            return urljoin(card_url, url)
         return str(url)
     interfaces = (card.get("supportedInterfaces")
                   or card.get("additionalInterfaces")
@@ -535,7 +560,11 @@ def crawl_seeds(seed_path: str) -> dict:
             if not url:
                 continue
             source = entry.get("source") or "manual"
-            card, card_url = fetch_agent_card(url, client=client)
+            # Existing direct card seeds remain isolated. A seed can explicitly
+            # identify a non-root homepage without guessing from its path.
+            mode = entry.get("url_kind")
+            homepage = True if mode == "homepage" else False if mode == "card" else None
+            card, card_url = fetch_agent_card(url, client=client, homepage=homepage)
             if not card or not card_url:
                 failed += 1
                 failures.append(url)
@@ -651,11 +680,16 @@ A2AREGISTRY_API = "https://a2aregistry.org/api/agents"
 
 
 def crawl_a2aregistry(page_size: int = 100, max_pages: int = 20) -> dict:
-    """Index a2aregistry.org. Each /api/agents item already IS a full A2A Agent
-    Card (plus registry metadata), so we map it directly with card_to_row -- no
-    per-agent re-fetch needed."""
+    """Index a2aregistry.org, preferring each agent's live canonical card.
+
+    Registry rows remain the fallback when a publisher is temporarily
+    unreachable. This keeps discovery resilient without letting a cached
+    ``agent.json`` snapshot overwrite a newer ``agent-card.json``.
+    """
     rows: list[dict] = []
     seen_ids: set[str] = set()
+    partial_error: str | None = None
+    expected_total: int | None = None
     with public_http.client(
             timeout=TIMEOUT, follow_redirects=True,
             headers={"User-Agent": UA, "Accept": "application/json"}) as c:
@@ -667,9 +701,14 @@ def crawl_a2aregistry(page_size: int = 100, max_pages: int = 20) -> dict:
                 payload = r.json()
             except (httpx.HTTPError, ValueError) as e:
                 log.warning("a2aregistry: fetch error at offset %d: %r", offset, e)
+                partial_error = f"fetch error at offset {offset}: {e!r}"
                 break
             agents = payload.get("agents") if isinstance(payload, dict) else None
             if not agents:
+                if expected_total is not None and offset < expected_total:
+                    partial_error = (
+                        f"empty page at offset {offset} before total {expected_total}"
+                    )
                 break
             for a in agents:
                 if not isinstance(a, dict) or a.get("hidden"):
@@ -682,21 +721,60 @@ def crawl_a2aregistry(page_size: int = 100, max_pages: int = 20) -> dict:
                 if not card_url:
                     continue
                 try:
-                    row = card_to_row(a, card_url, source="a2aregistry", source_id=aid)
+                    parsed_card_url = urlparse(str(card_url))
+                    live_card = live_url = None
+                    base_url = (
+                        str(card_url)
+                        if parsed_card_url.path.endswith(
+                            "/.well-known/agent-card.json")
+                        else (
+                            f"{parsed_card_url.scheme}://{parsed_card_url.netloc}"
+                            if parsed_card_url.scheme and parsed_card_url.netloc
+                            else str(card_url)
+                        )
+                    )
+                    try:
+                        live_card, live_url = fetch_agent_card(
+                            base_url, client=c,
+                        )
+                    except Exception as exc:
+                        log.warning(
+                            "a2aregistry: live card fetch failed for %s: %r; "
+                            "using registry snapshot", aid, exc,
+                        )
+                    card = live_card or a
+                    resolved_url = live_url or card_url
+                    row = card_to_row(
+                        card, resolved_url,
+                        source="a2aregistry", source_id=aid,
+                    )
+                    if live_card is None:
+                        row["_snapshot_fallback"] = True
                 except Exception as e:
                     log.warning("a2aregistry: card_to_row failed for %s: %r", aid, e)
                     continue
                 rows.append(row)
-            total = payload.get("total") or 0
-            if offset + len(agents) >= total or len(agents) < page_size:
+            total = payload.get("total")
+            expected_total = int(total) if isinstance(total, int) and total >= 0 else None
+            if ((expected_total is not None
+                 and offset + len(agents) >= expected_total)
+                    or len(agents) < page_size):
                 break
+        else:
+            if expected_total is None or max_pages * page_size < expected_total:
+                partial_error = (
+                    f"max_pages={max_pages} exhausted before total {expected_total}"
+                )
     log.info("a2aregistry: mapped %d agents", len(rows))
 
     inserted = updated = 0
     if rows:
         inserted, updated = db.with_retry(lambda: _upsert_rows(rows))
-    return {"candidates": len(rows), "resolved": len(rows),
-            "inserted": inserted, "updated": updated}
+    result = {"candidates": len(rows), "resolved": len(rows),
+              "inserted": inserted, "updated": updated}
+    if partial_error:
+        raise crawlers.PartialCrawl(result, partial_error)
+    return result
 
 
 GITHUB_TOPIC_SEARCH = "https://api.github.com/search/repositories"
@@ -756,7 +834,7 @@ def crawl_github_topic(topic: str = "a2a-protocol", max_repos: int = 100,
             headers={"User-Agent": UA, "Accept": "application/json"}) as c:
         for hp in homepages:
             try:
-                card, card_url = fetch_agent_card(hp, client=c)
+                card, card_url = fetch_agent_card(hp, client=c, homepage=True)
             except Exception:
                 card, card_url = None, None
             if card and card_url:

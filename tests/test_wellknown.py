@@ -74,22 +74,14 @@ class WellknownCrawlerTests(unittest.TestCase):
             "source_url": "https://wellknown.network/agents/example",
             "endpoint_url": "https://api.example/mcp/",
         }
+        # Real attribution/ownership behavior is covered with SQLite fixtures
+        # in test_ingestion_pipeline; this tests the job's delegation contract.
         conn = Mock()
-        conn.execute.return_value.fetchone.return_value = {"id": 42}
-        with (
-            patch.object(jobs.db, "assert_listing_not_retired"),
-            patch.object(jobs.db, "_record_source") as record_source,
-            patch.object(jobs.db, "upsert_mcp_server") as upsert,
-        ):
+        from directory import wellknown_binding
+        with patch.object(wellknown_binding, 'upsert_listing', return_value=(False, 42)) as bind:
             result = jobs._upsert_wellknown_listing(conn, "mcp", row)
         self.assertEqual(result, (False, 42))
-        record_source.assert_called_once_with(
-            conn,
-            "mcp",
-            42,
-            ("wellknown", "ag_1", "https://wellknown.network/agents/example"),
-        )
-        upsert.assert_not_called()
+        bind.assert_called_once_with(conn, 'mcp', row)
 
     def test_suppression_gate_runs_before_attribution_fast_path(self):
         row = {
@@ -213,7 +205,7 @@ class WellknownCrawlerTests(unittest.TestCase):
         wellknown._RECORD_CACHE = (records, None)
         mcp = wellknown.fetch_wellknown_mcp()
         a2a = wellknown.fetch_wellknown_a2a()
-        self.assertEqual({row["source_id"] for row in mcp}, {"mcp", "both"})
+        self.assertEqual({row["source_id"] for row in mcp}, {"mcp", "both", "duplicate"})
         self.assertEqual({row["source_id"] for row in a2a}, {"both", "a2a"})
         self.assertTrue(all(row["source"] == "wellknown" for row in mcp + a2a))
         self.assertTrue(all(row["source_url"].startswith(

@@ -48,18 +48,24 @@ def build_call_template(row: dict[str, Any]) -> dict[str, Any]:
     call_info = row.get("call_info") if isinstance(row.get("call_info"), dict) else {}
     resource_samples = row.get("resource_samples") or call_info.get("resource_samples") or []
     primary_resource = None
+    primary_method = "GET"
     if resource_samples and isinstance(resource_samples[0], dict):
         primary_resource = resource_samples[0].get("url") or resource_samples[0].get("resource")
+        primary_method = str(resource_samples[0].get("method") or "GET").upper()
     url = (primary_resource or row.get("url") or "").strip()
     if url:
         price_min = row.get("price_min")
+        payment = row.get("payment") if isinstance(row.get("payment"), dict) else {}
+        currency = row.get("currency") or payment.get("currency")
         price_hint = (
-            f"(about ${price_min}/call in USDC)" if price_min is not None
+            (f"(about {price_min} {currency}/call)" if currency
+             else f"(about ${price_min}/call)") if price_min is not None
             else "(price advertised in the 402 response)"
         )
         out["http_x402"] = {
             "url": url,
-            "method_hint": "Try the method advertised by the service card; POST is common for paid x402 APIs.",
+            "method": primary_method,
+            "method_hint": f"Use the {primary_method} method advertised by the service card.",
             "flow": [
                 f"1. Probe {url} and expect HTTP 402 + accepts[] if it is gated.",
                 "2. Pick an accepts[] option matching your network and budget.",
@@ -68,13 +74,13 @@ def build_call_template(row: dict[str, Any]) -> dict[str, Any]:
                 "5. Parse the service response; if the probe returned docs-only JSON, follow its request schema.",
             ],
             "curl_probe": (
-                f'curl -sS -i -X POST "{url}"  '
+                f'curl -sS -i -X {primary_method} "{url}"  '
                 "# expect HTTP 402 Payment Required " + price_hint
             ),
             "well_known": row.get("well_known_url"),
             "openapi": row.get("openapi_url"),
-            "chains": row.get("chains") or [],
-            "facilitator": row.get("facilitator"),
+            "chains": row.get("chains") or payment.get("chains") or [],
+            "facilitator": row.get("facilitator") or payment.get("facilitator"),
         }
 
     if not out:
@@ -105,26 +111,28 @@ def build_service_card(row: dict[str, Any]) -> dict[str, Any]:
         "tags": row.get("tags") or [],
     })
     base["payment"] = _clean({
-        "currency": row.get("currency") or "USDC",
+        **{k: v for k, v in payment.items() if k != "accepts"},
+        "currency": row.get("currency") or payment.get("currency"),
         "price_min_usd": row.get("price_min"),
         "price_max_usd": row.get("price_max"),
-        "chains": row.get("chains") or [],
-        "facilitator": row.get("facilitator"),
+        "chains": row.get("chains") or payment.get("chains") or [],
+        "facilitator": row.get("facilitator") or payment.get("facilitator"),
         "accepts": accepts[:10],
-        **{k: v for k, v in payment.items() if k != "accepts"},
     })
     base["call"] = _clean({
+        **{k: v for k, v in call_info.items() if k != "resource_samples"},
         "primary_url": row.get("url"),
         "mcp_url": row.get("mcp_url"),
         "openapi_url": row.get("openapi_url"),
         "well_known_url": row.get("well_known_url"),
-        "resource_count": row.get("resource_count"),
+        "resource_count": (row.get("resource_count")
+                   if row.get("resource_count") is not None
+                   else call_info.get("resource_count")),
         # Origin-aggregated listings may publish dozens of canonical resources.
         # The database ingestion cap is 50; expose the same bounded set so an
         # agent can discover every advertised endpoint from the canonical card.
         "resource_samples": resource_samples[:50] if isinstance(resource_samples, list) else [],
         "template": build_call_template(row),
-        **{k: v for k, v in call_info.items() if k != "resource_samples"},
     })
     base["quality"] = _clean({
         "health": row.get("health"),

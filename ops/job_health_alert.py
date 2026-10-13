@@ -4,8 +4,9 @@
 The jobs swallow per-stage exceptions into WARNING logs and still return 0, so
 systemd reports success while a whole pass silently did nothing (see doc §4.25:
 the MCP pass aborted on 10 of 64 runs for a week without any visible signal).
-This reads one day of journal in a single pass and emails the admin when
-something is wrong. It stays silent when everything is healthy.
+This reads one day of journal in a single pass and distinguishes crawl failures
+and binding holds from isolated data-quality warnings. It stays silent when no
+new problem group is observed.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ import subprocess
 import sys
 import time
 from collections import Counter
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -36,6 +38,9 @@ WINDOW_SECONDS = 24 * 3600
 # normal daily rhythm.
 STALE_HOURS = 30
 FRESH_TABLES = ("mcp_servers", "services", "a2a_agents")
+# Child runs must not be hidden by successful writes from their parents.
+# Only start enforcing freshness after the child has appeared in crawl_runs.
+FRESH_SOURCES = {"a2a:agenstry": ("a2a:crawl", "agenstry:crawl")}
 
 # A stage that aborts logs "<stage> failed: <exc>" and is otherwise invisible.
 ABORT_RE = re.compile(r"directory\.jobs ((?:mcp|a2a) health) failed: (.+)")
@@ -121,15 +126,22 @@ def db_checks() -> tuple[list[str], list[str]]:
     problems: list[str] = []
     detail: list[str] = []
     now = time.time()
-    with db.connect(read_only=True) as c:
+    latest = latest_completed_runs()
+    with closing(db.connect(read_only=True)) as c:
         # status=error means the fetch itself failed; the failing-source
         # baseline above already owns those, and repeating them here would put
         # the chronically broken sources into a daily mail.
         runs = c.execute(
             "SELECT source, added, updated, errors FROM crawl_runs "
-            "WHERE COALESCE(finished_at, started_at) >= ? AND status <> ?",
-            (now - WINDOW_SECONDS, "error")).fetchall()
+            "WHERE COALESCE(finished_at, started_at) BETWEEN ? AND ? "
+            "AND status NOT IN ('error', 'running') "
+            "ORDER BY COALESCE(finished_at, started_at), id",
+            (now - WINDOW_SECONDS, now)).fetchall()
         for source, added, updated, errors in runs:
+            # These children alert on their very first partial via stuck_sources;
+            # repeating each bad run here would bypass the known-failure baseline.
+            if source in FRESH_SOURCES:
+                continue
             n_err = len(errors.splitlines()) if errors else 0
             wrote = (added or 0) + (updated or 0)
             if not n_err:
@@ -150,7 +162,37 @@ def db_checks() -> tuple[list[str], list[str]]:
                     f"{table} 最新写入已是 {hours:.1f} 小时前（阈值 {STALE_HOURS}）")
             else:
                 detail.append(f"  {table} 最新写入 {hours:.1f} 小时前")
+
+        for source in FRESH_SOURCES:
+            first_seen = c.execute(
+                "SELECT MIN(started_at) FROM crawl_runs WHERE source=? AND started_at<=?",
+                (source, now)).fetchone()[0]
+            if first_seen is None:
+                continue
+            completed = latest.get(source)
+            ts = completed[2] if completed else first_seen
+            hours = (now - ts) / 3600
+            label = "最近完成" if completed else "首次出现后尚无已完成轮次"
+            if hours > STALE_HOURS:
+                problems.append(f"{source} {label}已过 {hours:.1f} 小时（阈值 {STALE_HOURS}）")
+            else:
+                detail.append(f"  {source} {label} {hours:.1f} 小时")
     return problems, detail
+
+
+def latest_completed_runs() -> dict[str, tuple[str, str | None, float]]:
+    """All-time completed status, including sources that aged out of the window.
+
+    Missing/running rows do not prove recovery. IDs break same-second ties;
+    future timestamps cannot hide the latest observable completion.
+    """
+    with closing(db.connect(read_only=True)) as c:
+        rows = c.execute(
+            "SELECT source, status, errors, COALESCE(finished_at, started_at) ts "
+            "FROM crawl_runs WHERE status != 'running' "
+            "AND COALESCE(finished_at, started_at) <= ? ORDER BY ts, id",
+            (time.time(),)).fetchall()
+    return {source: (status, errors, ts) for source, status, errors, ts in rows}
 
 
 def failing_sources() -> list[str]:
@@ -163,19 +205,15 @@ def failing_sources() -> list[str]:
     owns it. x402scan failed every round for 48 days without a word.
     """
     now = time.time()
-    with db.connect(read_only=True) as c:
-        rows = c.execute(
-            "SELECT source, status, COALESCE(finished_at, started_at) ts "
-            "FROM crawl_runs WHERE COALESCE(finished_at, started_at) >= ? "
-            "ORDER BY ts", (now - WINDOW_SECONDS,)).fetchall()
-    latest: dict[str, str] = {}
-    for source, status, _ts in rows:
-        latest[source] = status
-    return sorted(s for s, status in latest.items() if status == "error")
+    return sorted(source for source, (status, _, ts) in latest_completed_runs().items()
+                  if status == "error" and ts >= now - WINDOW_SECONDS)
 
 
 def stuck_sources() -> list[tuple[str, int, str]]:
-    """Sources whose last PARTIAL_STREAK runs were every one of them partial.
+    """Consecutive completed partial runs and the latest run's first error.
+
+    Ordinary sources require PARTIAL_STREAK; monitored children alert on their
+    first partial, independently of parent status and total table writes.
 
     A source that limps every round hides from all three checks above: its
     status is partial rather than error so the failing-source set never moves,
@@ -184,12 +222,13 @@ def stuck_sources() -> list[tuple[str, int, str]]:
     for 21 days (doc §4.49).
     """
     now = time.time()
-    with db.connect(read_only=True) as c:
+    with closing(db.connect(read_only=True)) as c:
         rows = c.execute(
             "SELECT source, status, errors, COALESCE(finished_at, started_at) ts "
             "FROM crawl_runs "
-            "WHERE COALESCE(finished_at, started_at) BETWEEN ? AND ? "
-            "ORDER BY source, ts", (now - 14 * 86400, now)).fetchall()
+            "WHERE status != 'running' "
+            "AND COALESCE(finished_at, started_at) BETWEEN ? AND ? "
+            "ORDER BY source, ts, id", (now - 14 * 86400, now)).fetchall()
 
     seqs: dict[str, list] = {}
     for source, status, errors, ts in rows:
@@ -206,10 +245,84 @@ def stuck_sources() -> list[tuple[str, int, str]]:
             if status != "partial":
                 break
             streak += 1
-        if streak >= PARTIAL_STREAK:
-            first = (seq[-streak][1] or "").splitlines()
-            out.append((source, streak, first[0][:120] if first else ""))
+        threshold = 1 if source in FRESH_SOURCES else PARTIAL_STREAK
+        if streak >= threshold:
+            latest_error = (seq[-1][1] or "").splitlines()
+            out.append((source, streak, latest_error[0][:120] if latest_error else ""))
     return sorted(out)
+
+
+def ingestion_checks(state: dict) -> tuple[list[str], list[str], set[str]]:
+    """Summarize active holds without payloads or per-identity mail noise.
+
+    Observe reason groups in watchdog state, never write to the crawl database.
+    MIN(first_seen) includes resolved history: another identity/content hash in
+    an existing group is not a new reason. Missing groups are not recoveries.
+    """
+    now = time.time()
+    with closing(db.connect(read_only=True)) as c:
+        if not c.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ingestion_issues'"
+        ).fetchone():
+            return [], [], set()
+        groups = c.execute(
+            "SELECT kind, source, disposition, reason, "
+            "SUM(CASE WHEN resolved_at IS NULL THEN 1 ELSE 0 END) active, "
+            "COUNT(DISTINCT CASE WHEN resolved_at IS NULL THEN identity_hash END), "
+            "SUM(CASE WHEN resolved_at IS NULL THEN occurrences ELSE 0 END), "
+            "MIN(first_seen), MAX(CASE WHEN resolved_at IS NULL THEN last_seen END) "
+            "FROM ingestion_issues GROUP BY kind, source, disposition, reason "
+            "HAVING active > 0 ORDER BY kind, source, disposition, reason"
+        ).fetchall()
+        totals = c.execute(
+            "SELECT disposition, COUNT(DISTINCT kind || char(0) || source || char(0) || identity_hash), "
+            "COUNT(*) FROM ingestion_issues WHERE resolved_at IS NULL GROUP BY disposition"
+        ).fetchall()
+
+    problems: list[str] = []
+    detail: list[str] = []
+    holds: set[str] = set()
+    seen = set(state.get("ingestion_reason_groups") or [])
+    pending = set(state.get("pending_ingestion_reason_groups") or [])
+    active_keys: set[str] = set()
+    for kind, source, disposition, reason, versions, count, occurrences, first_seen, last_seen in groups:
+        key = json.dumps([kind, source, disposition, reason], ensure_ascii=True)
+        active_keys.add(key)
+        label = f"{kind}:{source} {disposition}/{reason}"
+        stamp = datetime.fromtimestamp(last_seen, timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        held = disposition == "hold"
+        category = "摄入待审" if held else "数据质量拒绝"
+        detail.append(f"  活跃{category}: {label}; 来源身份 {count}, 内容版本 {versions}, "
+                      f"累计出现 {occurrences}; 最新出现 {stamp}")
+        if key in pending or (key not in seen and now - WINDOW_SECONDS <= first_seen <= now):
+            prefix = "新增摄入待审原因组" if held else "新增数据质量拒绝组"
+            problems.append(f"{prefix}: {label}（来源身份 {count}，内容版本 {versions}）")
+            pending.add(key)
+        seen.add(key)
+        # Rejected metadata is isolated data quality, not a failed crawl. Only
+        # unresolved binding holds prevent an explicit completed ok recovery.
+        if not held:
+            continue
+        qualified = f"{kind}:{source}"
+        holds.update((source, qualified))
+        if kind == "a2a":
+            holds.add("a2a:crawl")
+        holds.update(FRESH_SOURCES.get(qualified, ()))
+    # Observation is not a delivery acknowledgement. Retry an unaccepted
+    # notification even beyond the first-seen window or after the issue clears.
+    for key in sorted(pending - active_keys):
+        kind, source, disposition, reason = json.loads(key)
+        prefix = "新增摄入待审原因组" if disposition == "hold" else "新增数据质量拒绝组"
+        problems.append(f"{prefix}: {kind}:{source} {disposition}/{reason}"
+                        "（首次提醒待送达；当前无活跃记录）")
+    for disposition, count, versions in totals:
+        category = "摄入待审" if disposition == "hold" else "数据质量拒绝"
+        detail.append(f"  活跃{category}合计（跨原因组去重）: 来源身份 {count}, 内容版本 {versions}")
+    if seen:
+        state["ingestion_reason_groups"] = sorted(seen)
+    if pending:
+        state["pending_ingestion_reason_groups"] = sorted(pending)
+    return problems, detail, holds
 
 
 def main() -> int:
@@ -247,50 +360,58 @@ def main() -> int:
     # pure noise. Track the set instead and speak up only when it changes.
     now_failing = failing_sources()
     state = load_state()
+    previous_state = state.copy()
+    issue_problems, issue_detail, holds = ingestion_checks(state)
+    problems += issue_problems
+    detail += issue_detail
+    latest = latest_completed_runs()
+
+    def recovered(source):
+        return source in latest and latest[source][0] == "ok" and source not in holds
+
     baseline = state.get("failing_sources")
+    known_failing = set(baseline or [])
+    added = sorted(set(now_failing) - known_failing)
+    gone = sorted(s for s in known_failing if recovered(s))
+    if added:
+        problems.append(f"新增失败爬源: {', '.join(added)}")
+    if gone:
+        detail.append(f"  已恢复的爬源: {', '.join(gone)}（仅抓取状态：最新完成 ok；数据质量另列）")
+    state["failing_sources"] = sorted((known_failing | set(now_failing)) - set(gone))
     if baseline is None:
-        state["failing_sources"] = now_failing
         state["baseline_set_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        save_state(state)
-    elif now_failing != baseline:
-        added = [s for s in now_failing if s not in baseline]
-        gone = [s for s in baseline if s not in now_failing]
-        if added:
-            problems.append(f"新增失败爬源: {', '.join(added)}")
-        if gone:
-            detail.append(f"  已恢复的爬源: {', '.join(gone)}（基线已更新）")
-        state["failing_sources"] = now_failing
+    elif state["failing_sources"] != baseline:
         state["changed_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        save_state(state)
 
     # Same treatment as the failing-source set: a source stuck on partial stays
     # stuck until someone fixes it, so report the set changing rather than its
     # contents, or this becomes a daily mail nobody reads.
     stuck = stuck_sources()
-    stuck_names = sorted(s for s, _, _ in stuck)
-    stuck_base = state.get("stuck_sources")
-    if stuck_base is None:
-        state["stuck_sources"] = stuck_names
-        save_state(state)
-    elif stuck_names != stuck_base:
-        for source, streak, first in stuck:
-            if source not in stuck_base:
-                problems.append(
-                    f"{source} 连续 {streak} 轮 partial（约 {streak * 24}h 没跑全）")
-                if first:
-                    detail.append(f"  {source} 首条报错: {first}")
-        recovered = [s for s in stuck_base if s not in stuck_names]
-        if recovered:
-            detail.append(f"  已恢复的 partial 源: {', '.join(recovered)}（基线已更新）")
-        state["stuck_sources"] = stuck_names
+    stuck_names = {s for s, _, _ in stuck}
+    stuck_base = set(state.get("stuck_sources") or [])
+    for source, streak, latest_error in stuck:
+        if source not in stuck_base:
+            problems.append(f"{source} 连续 {streak} 轮已完成运行均为 partial")
+        if latest_error:
+            detail.append(f"  {source} 最新 partial 轮次的首条报错: {latest_error}")
+    gone_partial = sorted(s for s in stuck_base if recovered(s))
+    if gone_partial:
+        detail.append(f"  已恢复的 partial 源: {', '.join(gone_partial)}（仅抓取状态：最新完成 ok；数据质量另列）")
+    state["stuck_sources"] = sorted((stuck_base | stuck_names) - set(gone_partial))
+    if state != previous_state:
         save_state(state)
 
     if not problems:
         print(f"ok - {counts}, failing sources: {now_failing or 'none'}")
+        for line in detail:
+            if "已恢复" in line:
+                print(line)
         return 0
 
+    quality_only = all(problem.startswith("新增数据质量拒绝组:") for problem in problems)
+    title = "摄入数据质量提醒" if quality_only else "后台任务异常"
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    body = [f"agent-tools 后台任务异常（{stamp}，过去 24 小时）", ""]
+    body = [f"agent-tools {title}（{stamp}，过去 24 小时）", ""]
     body += [f"- {p}" for p in problems]
     if detail:
         body += ["", "细节:"] + detail
@@ -299,16 +420,22 @@ def main() -> int:
         f"完成轮次: {counts}",
         f"当前失败爬源: {', '.join(now_failing) or '无'}",
         "",
+        "说明: 数据质量拒绝已逐条隔离，不代表整轮失败；绑定待审仍保留保护。",
         "排查: journalctl -u 'agent-tools-*' --since '24 hours ago' | grep -E 'failed'",
         "背景: 任务把分段异常吞成 WARNING 且仍返回 0，systemd 看不出问题（文档 §4.25）。",
     ]
     text = "\n".join(body)
     html = "<pre style='font:13px/1.6 ui-monospace,monospace'>" + \
         text.replace("&", "&amp;").replace("<", "&lt;") + "</pre>"
-    subject = f"[agent-tools] 后台任务异常: {problems[0]}"
+    primary = problems[0] if quality_only else next(
+        problem for problem in problems if not problem.startswith("新增数据质量拒绝组:"))
+    subject = f"[agent-tools] {title}: {primary}"
     sent = mailer._send(mailer.ADMIN_EMAIL, subject, text, html)
+    if sent and state.get("pending_ingestion_reason_groups"):
+        state.pop("pending_ingestion_reason_groups")
+        save_state(state)
     print(("alert sent" if sent else "ALERT NOT SENT (smtp failed)") + "\n" + text)
-    return 1
+    return 0 if quality_only and sent else 1
 
 
 if __name__ == "__main__":

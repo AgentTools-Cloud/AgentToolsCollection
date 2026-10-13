@@ -1,9 +1,8 @@
 [Unit]
-Description=agent-tools directory crawler (every 6h)
+Description=agent-tools directory crawler (daily at 00:30)
 
 [Timer]
-OnBootSec=5min
-OnUnitActiveSec=6h
+OnCalendar=*-*-* 00:30:00
 Persistent=true
 Unit=agent-tools-crawl.service
 

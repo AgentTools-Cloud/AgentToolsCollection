@@ -1,9 +1,8 @@
 [Unit]
-Description=agent-tools directory health probe (every 6h)
+Description=agent-tools directory health probe (daily at 05:30)
 
 [Timer]
-OnBootSec=15min
-OnUnitActiveSec=6h
+OnCalendar=*-*-* 05:30:00
 Persistent=true
 Unit=agent-tools-health.service
 
