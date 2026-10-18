@@ -159,6 +159,9 @@ def crawl_agenstry_a2a(max_hosts: int = 4000, workers: int = 12) -> dict:
             updated += result["updated"]
             rejected += result["rejected"]
             errors.extend(result["errors"])
+            if result.get('warnings'):
+                log.warning('source endpoint mismatch: a2a:agenstry new_pairs=%d; current primary retained',
+                            result['warnings'])
     except Exception as exc:
         errors.append(f"agenstry a2a: {exc!r}")
         try:

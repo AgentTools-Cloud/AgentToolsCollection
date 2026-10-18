@@ -362,7 +362,7 @@ async def search(
             s for s in items
             if (s.get("price_min") is None) or float(s["price_min"]) <= max_price_usd
         ]
-    items = items[:top_k]
+    items = [cards.public_service_row(item) for item in items[:top_k]]
     for item in items:
         if item.get("slug"):
             item["service_card_url"] = f"/api/v1/services/{item['slug']}"

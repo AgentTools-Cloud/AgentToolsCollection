@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import shlex
 from typing import Any
+
+from .url_identity import exact_endpoint
 
 
 def _clean(value: Any) -> Any:
@@ -13,6 +16,27 @@ def _clean(value: Any) -> Any:
     if isinstance(value, list):
         return [_clean(v) for v in value if _clean(v) not in (None, "", [], {})]
     return value
+
+
+def primary_http_request(row: dict[str, Any]) -> dict[str, Any]:
+    info = row.get('call_info') if isinstance(row.get('call_info'), dict) else {}
+    samples = row.get('resource_samples') or info.get('resource_samples') or []
+    samples = samples if isinstance(samples, list) else []
+    url = str(row.get('url') or '').strip()
+    matching = [sample for sample in samples if isinstance(sample, dict)
+                and exact_endpoint(str(sample.get('url') or sample.get('resource') or '')) == exact_endpoint(url)]
+    methods = {str(sample.get('method') or '').upper() for sample in matching} & {'GET', 'POST'}
+    known = len(methods) == 1
+    method = next(iter(methods)) if known else 'GET'
+    info_matches = bool(info.get('primary_url') and exact_endpoint(str(info['primary_url'])) == exact_endpoint(url)
+                        and str(info.get('method') or '').upper() in ('GET', 'POST'))
+    if info_matches:
+        method = str(info['method']).upper()
+        known = True
+    empty_probe = method == 'POST' and (
+        any(str(sample.get('method') or '').upper() == 'POST' and sample.get('probe_body') == {} for sample in matching)
+        or info_matches and str(info['method']).upper() == 'POST' and info.get('probe_body') == {})
+    return {'url': url, 'method': method, 'method_known': known, 'empty_post_probe': empty_probe}
 
 
 def build_call_template(row: dict[str, Any]) -> dict[str, Any]:
@@ -45,14 +69,9 @@ def build_call_template(row: dict[str, Any]) -> dict[str, Any]:
             },
         }
 
-    call_info = row.get("call_info") if isinstance(row.get("call_info"), dict) else {}
-    resource_samples = row.get("resource_samples") or call_info.get("resource_samples") or []
-    primary_resource = None
-    primary_method = "GET"
-    if resource_samples and isinstance(resource_samples[0], dict):
-        primary_resource = resource_samples[0].get("url") or resource_samples[0].get("resource")
-        primary_method = str(resource_samples[0].get("method") or "GET").upper()
-    url = (primary_resource or row.get("url") or "").strip()
+    request = primary_http_request(row)
+    url, primary_method = request['url'], request['method']
+    method_known, empty_probe = request['method_known'], request['empty_post_probe']
     if url:
         price_min = row.get("price_min")
         payment = row.get("payment") if isinstance(row.get("payment"), dict) else {}
@@ -65,7 +84,8 @@ def build_call_template(row: dict[str, Any]) -> dict[str, Any]:
         out["http_x402"] = {
             "url": url,
             "method": primary_method,
-            "method_hint": f"Use the {primary_method} method advertised by the service card.",
+            "method_hint": (f"Use the {primary_method} method advertised for the primary endpoint." if method_known
+                            else "No unambiguous primary method is recorded; GET is a fallback. Check the linked request schema."),
             "flow": [
                 f"1. Probe {url} and expect HTTP 402 + accepts[] if it is gated.",
                 "2. Pick an accepts[] option matching your network and budget.",
@@ -74,7 +94,9 @@ def build_call_template(row: dict[str, Any]) -> dict[str, Any]:
                 "5. Parse the service response; if the probe returned docs-only JSON, follow its request schema.",
             ],
             "curl_probe": (
-                f'curl -sS -i -X {primary_method} "{url}"  '
+                f'curl -sS -i -X {primary_method} {shlex.quote(url)}'
+                + (" -H 'Content-Type: application/json' --data '{}'" if empty_probe else "")
+                + "  "
                 "# expect HTTP 402 Payment Required " + price_hint
             ),
             "well_known": row.get("well_known_url"),
@@ -88,16 +110,33 @@ def build_call_template(row: dict[str, Any]) -> dict[str, Any]:
     return _clean(out)
 
 
+def public_service_row(row: dict[str, Any]) -> dict[str, Any]:
+    base = dict(row)
+    base.pop("owner_declaration", None)
+    if isinstance(base.get("call_info"), dict):
+        base["call_info"] = dict(base["call_info"])
+        base["call_info"].pop("owner_declaration_revision", None)
+    from . import owner_declarations
+    state = owner_declarations.public_state(row)
+    if state:
+        state.pop("fields", None)
+        base["interface_declaration"] = state
+    return base
+
+
 def build_service_card(row: dict[str, Any]) -> dict[str, Any]:
     """Build an agent-readable card while preserving legacy top-level fields."""
-    base = dict(row)
+    base = public_service_row(row)
     # Provenance is public (2026-08-18): keep the aggregated `sources` list and
     # drop only the internal dedup keys.
     base.pop("source", None)
     base.pop("source_id", None)
     base["sources"] = row.get("sources") or []
     payment = row.get("payment") if isinstance(row.get("payment"), dict) else {}
-    call_info = row.get("call_info") if isinstance(row.get("call_info"), dict) else {}
+    call_info = dict(row.get("call_info")) if isinstance(row.get("call_info"), dict) else {}
+    call_info.pop("owner_declaration_revision", None)
+    if "call_info" in base:
+        base["call_info"] = call_info
     quality = row.get("quality") if isinstance(row.get("quality"), dict) else {}
     resource_samples = row.get("resource_samples") or call_info.get("resource_samples") or []
     accepts = payment.get("accepts") if isinstance(payment.get("accepts"), list) else []

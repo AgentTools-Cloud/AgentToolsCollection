@@ -191,6 +191,12 @@ def _ingest_rows(kind, source, items, upsert, batch_size=100):
             break
         for key in ('added', 'updated', 'rejected'):
             total[key] += result[key]
+        for key in ('stale', 'warnings'):
+            if key in result:
+                total[key] = total.get(key, 0) + result[key]
+        if result.get('warnings'):
+            log.warning('source endpoint mismatch: kind=%s source=%s new_pairs=%d; current primary retained',
+                        kind, source, result['warnings'])
         total['errors'].extend(result['errors'])
     log.info('ingestion %s: added=%d updated=%d rejected=%d errors=%d', source,
              total['added'], total['updated'], total['rejected'], len(total['errors']))
@@ -484,19 +490,29 @@ def cmd_crawl_agenstry() -> int:
     return 0
 
 
+def _health_snapshot_matches(snapshot, current):
+    if current is None or db._exact_endpoint(snapshot['url'] or '') != db._exact_endpoint(current['url'] or ''):
+        return False
+    old = db.row_to_dict(snapshot)
+    fresh = db.row_to_dict(current)
+    old_info = old.get('call_info') if isinstance(old.get('call_info'), dict) else {}
+    fresh_info = fresh.get('call_info') if isinstance(fresh.get('call_info'), dict) else {}
+    return old_info.get('owner_declaration_revision') == fresh_info.get('owner_declaration_revision')
+
+
 def cmd_health(only_unknown: bool = False, quarantined_only: bool = False) -> int:
     n_ok = n_down = n_degraded = 0
     _qc = int(time.time()) - QUARANTINE_DAYS * 86400
     if quarantined_only:
         sql = (
             "SELECT id, url, well_known_url, mcp_url, x402_ok, "
-            "resource_samples FROM services "
+            "resource_samples,call_info,owner_verified,owner_declaration FROM services "
             f"WHERE down_since IS NOT NULL AND down_since <= {_qc}"
         )
     else:
         sql = (
             "SELECT id, url, well_known_url, mcp_url, x402_ok, "
-            "resource_samples FROM services "
+            "resource_samples,call_info,owner_verified,owner_declaration FROM services "
             f"WHERE (down_since IS NULL OR down_since > {_qc})"
         )
         if only_unknown:
@@ -517,27 +533,26 @@ def cmd_health(only_unknown: bool = False, quarantined_only: bool = False) -> in
         # 所以登记了 mcp_url 的条目走真正的 initialize 握手。
         mcp_url = r["mcp_url"] if "mcp_url" in r.keys() else None
         conf = None
-        if mcp_url:
+        from . import cards, owner_declarations
+        row = db.row_to_dict(r)
+        verified_interface = owner_declarations.has_verified_interface(row)
+        if mcp_url and not verified_interface:
             res = crawlers.probe_mcp_health(mcp_url)
             conf = res.get("conformance")
             x = 1 if res.get("http_status") == 402 else 0
         else:
             method_hint = None
             if r["x402_ok"]:
-                try:
-                    samples = json.loads(r["resource_samples"] or "[]")
-                except (TypeError, json.JSONDecodeError):
-                    samples = []
-                target = db._exact_endpoint(r["url"] or "")
-                for sample in samples:
-                    if (isinstance(sample, dict)
-                            and db._exact_endpoint(sample.get("url") or "") == target):
-                        method_hint = str(sample.get("method") or "").upper() or None
-                        break
+                request = cards.primary_http_request(row)
+                method_hint = request['method'] if request['method_known'] else None
+            options = {}
+            if verified_interface and cards.primary_http_request(row)['empty_post_probe']:
+                options['empty_post_probe'] = True
             res = crawlers.probe_health(
                 r["url"], r["well_known_url"],
                 inspect_payment=not bool(r["x402_ok"]),
                 method_hint=method_hint,
+                **options,
             )
             x = 1 if res["x402"] else 0
         h = res["status"]
@@ -568,17 +583,24 @@ def cmd_health(only_unknown: bool = False, quarantined_only: bool = False) -> in
 
         def op(updates=updates, history=history):
             with db.writer() as c:
+                accepted = set()
+                snapshots = {row['id']: row for row in batch_rows}
+                for update in updates:
+                    listing_id = update[-1]
+                    current = c.execute('SELECT url,call_info FROM services WHERE id=?', (listing_id,)).fetchone()
+                    if _health_snapshot_matches(snapshots[listing_id], current):
+                        accepted.add(listing_id)
                 c.executemany(
                     "UPDATE services SET health=?, health_checked=?, latency_ms=?, "
                     "http_status=?, x402_ok=max(COALESCE(x402_ok,0), ?), "
                     "conformance=COALESCE(?, conformance) WHERE id=?",
-                    updates,
+                    [update for update in updates if update[-1] in accepted],
                 )
                 c.executemany(
                     "INSERT INTO health_history "
                     "(service_id, checked_at, status, latency_ms, http_status, x402) "
                     "VALUES (?, ?, ?, ?, ?, ?)",
-                    history,
+                    [row for row in history if row[0] in accepted],
                 )
         db.with_retry(op)
         log.info("health progress: checked=%d/%d ok=%d degraded=%d down=%d",
@@ -919,9 +941,20 @@ def cmd_onchain(limit=None, stale_days=3, refresh_all=False, rate=1.2) -> int:
     stale_cutoff = now - stale_days * 86400
     with db.connect(read_only=True) as c:
         rows = list(c.execute(
-            "SELECT id, payment, payto_checked FROM services "
+            "SELECT id, url, payment, call_info, payto_checked FROM services "
             "WHERE payment IS NOT NULL AND payment != ''"
         ).fetchall())
+
+    snapshots = {row["id"]: row for row in rows}
+
+    def snapshot_matches(conn, service_id):
+        current = conn.execute(
+            "SELECT url, payment, call_info FROM services WHERE id=?",
+            (service_id,)).fetchone()
+        previous = snapshots[service_id]
+        return current is not None and all(
+            current[field] == previous[field]
+            for field in ("url", "payment", "call_info"))
 
     # Addresses a service advertised earlier in the demand window still
     # carry its demand: rotating a wallet must not read as losing customers.
@@ -954,8 +987,10 @@ def cmd_onchain(limit=None, stale_days=3, refresh_all=False, rate=1.2) -> int:
 
     if observed:
         def op_hist():
-            with db.writer() as c:
-                db.record_service_paytos(c, observed, now)
+            with db.writer(immediate=True) as c:
+                current_observed = {sid: keys for sid, keys in observed.items()
+                                    if snapshot_matches(c, sid)}
+                db.record_service_paytos(c, current_observed, now)
         db.with_retry(op_hist)
 
     work = list(key_services)
@@ -1018,10 +1053,10 @@ def cmd_onchain(limit=None, stale_days=3, refresh_all=False, rate=1.2) -> int:
             payers = len({p for i in ids for p in i})
         else:
             payers = sum(a["payers"] for a in accs)
-        if tx > 0:
-            n_active += 1
         def op(sid=sid, tx=tx, payers=payers, now=now):
-            with db.writer() as c:
+            with db.writer(immediate=True) as c:
+                if not snapshot_matches(c, sid):
+                    return False
                 # payto_* keeps the raw on-chain provenance; tx_30d is the field
                 # every consumer reads (scoring, ranking, match_reason, API,
                 # MCP tools). Without folding the measurement in, the on-chain
@@ -1032,8 +1067,11 @@ def cmd_onchain(limit=None, stale_days=3, refresh_all=False, rate=1.2) -> int:
                     "WHERE id=?",
                     (tx, payers, now, tx, sid),
                 )
-        db.with_retry(op)
-        n_written += 1
+                return True
+        if db.with_retry(op):
+            n_written += 1
+            if tx > 0:
+                n_active += 1
     log.info("onchain: wrote %d services, %d with paying demand", n_written, n_active)
     cmd_rescore()
     return 0

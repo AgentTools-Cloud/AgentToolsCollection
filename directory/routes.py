@@ -11,7 +11,7 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field, HttpUrl
 from starlette.concurrency import run_in_threadpool
@@ -212,7 +212,9 @@ def service_detail(request: Request, slug: str):
             return retired
         raise HTTPException(404, "service not found")
     return TEMPLATES.TemplateResponse(request, "service.html", {
-        "request": request, "svc": svc, "rating": db.score_breakdown(svc)})
+        "request": request, "svc": svc, "rating": db.score_breakdown(svc),
+        "call_template": cards.build_call_template(svc),
+        "interface_declaration": directory_auth.owner_declarations.public_state(svc)})
 
 
 _CATEGORY_PAGE_SIZE = 60
@@ -469,6 +471,7 @@ def api_search(
         db.attach_sources(c, "x402", services)
         exact_name_groups = directory_resources.exact_name_groups(
             c, q, (item.get("name") for item in services))
+    services = [cards.public_service_row(svc) for svc in services]
     for svc in services:
         svc.pop("source", None)
         svc.pop("source_id", None)
@@ -777,7 +780,7 @@ def api_export(
         elif kind == "mcp":
             item = directory_resources.normalize_mcp_server(row)
         else:
-            item = dict(row)
+            item = cards.public_service_row(row)
             item.pop("source", None)
             item.pop("source_id", None)
             if item.get("slug"):
@@ -1244,22 +1247,22 @@ def _api_editable(request: Request, kind: str, slug: str):
 async def api_get_listing(request: Request, kind: str, slug: str):
     """Read a listing you own, in the shape PATCH expects back."""
     _user, row, host, _owner = _api_editable(request, kind, slug)
-    fields = db._EDITABLE_FIELDS[kind]
-    return {
+    return JSONResponse({
         "kind": kind,
         "slug": slug,
         "host": host,
-        "fields": {f: row[f] for f in fields},
+        "fields": directory_auth.editable_values(kind, row),
+        "declaration": directory_auth.owner_declarations.public_state(row) if kind == "x402" else None,
         "endpoint_fields": list(db._ENDPOINT_FIELDS.get(kind, ())),
         "note": ("Changing an endpoint clears the measured columns: a listing "
                  "cannot carry a reputation to a different address. The new "
                  "endpoint must be on a host you have already verified."),
-    }
+    }, headers={"Cache-Control": "private, no-store"})
 
 
 @router.patch("/api/v1/listings/{kind}/{slug}", tags=["ownership"])
 async def api_patch_listing(request: Request, kind: str, slug: str,
-                            payload: dict[str, str]):
+                            payload: dict[str, object]):
     """Edit a listing you own. Send only the fields you want to change.
 
     PATCH rather than PUT because the crawler keeps writing the columns you do
@@ -1287,7 +1290,12 @@ async def api_patch_listing(request: Request, kind: str, slug: str,
                 conn, kind, row["id"], user["id"], owner["id"], payload,
                 via="api")
 
-    applied, rejected = db.with_retry(op)
+    try:
+        applied, rejected = db.with_retry(op)
+    except PermissionError:
+        raise HTTPException(403, "Verified ownership or account status changed") from None
+    except ValueError as exc:
+        raise HTTPException(422, {"error": "invalid_edit", "message": str(exc)}) from None
     table = db._KIND_TABLE[kind]
     with db.connect(read_only=True) as conn:
         fresh = conn.execute("SELECT * FROM %s WHERE id=?" % table,
@@ -1295,11 +1303,20 @@ async def api_patch_listing(request: Request, kind: str, slug: str,
     body = {
         "kind": kind, "slug": slug, "host": host,
         "applied": applied, "rejected": rejected,
-        "fields": {f: fresh[f] for f in allowed},
+        "fields": directory_auth.editable_values(kind, fresh),
+        "declaration": directory_auth.owner_declarations.public_state(fresh) if kind == "x402" else None,
     }
     if rejected and not applied:
         raise HTTPException(422, dict(body, error="nothing_applied"))
-    return body
+    return JSONResponse(body, headers={"Cache-Control": "private, no-store"})
+
+
+@router.post("/api/v1/listings/{kind}/{slug}/verify", tags=["ownership"])
+async def api_verify_listing(request: Request, kind: str, slug: str):
+    user, row, _host, owner = _api_editable(request, kind, slug)
+    result = await directory_auth.verify_owner_listing(request, kind, row, user, owner)
+    return JSONResponse(result, status_code=422 if result["status"] == "blocked" else 200,
+                        headers={"Cache-Control": "private, no-store"})
 
 
 @router.post("/api/v1/mcp/submit", tags=["mcp"])

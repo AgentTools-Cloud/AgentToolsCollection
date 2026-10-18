@@ -325,6 +325,48 @@ def ingestion_checks(state: dict) -> tuple[list[str], list[str], set[str]]:
     return problems, detail, holds
 
 
+def source_warning_checks(state: dict) -> tuple[list[str], list[str]]:
+    """Warn per old/current endpoint pair without blocking normal recovery.
+
+    Keep opaque dedup keys only; deleted/purged records cancel even pending
+    delivery. Renderer data is read afresh through privacy/retirement guards.
+    """
+    with closing(db.connect(read_only=True)) as conn:
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                            "AND name='source_endpoint_warnings'").fetchone():
+            return [], []
+        rows = db.visible_source_endpoint_warnings(conn)
+    available = {row['warning_key'] for row in rows}
+    seen = set(state.get('source_endpoint_warning_seen') or []) & available
+    pending = set(state.get('pending_source_endpoint_warnings') or []) & available
+    warnings, detail = [], []
+    labels = {'authority': '主机/协议', 'path': '路径', 'query': '查询参数',
+              'normalized_endpoint': '规范化端点'}
+    for row in rows:
+        key = row['warning_key']
+        if key not in seen or key in pending:
+            change = '、'.join(labels.get(part, '端点') for part in row['change_type'].split('+'))
+            outcome = ('旧关联标记stale，当前有效主记录保留'
+                       if row['resolved_at'] is None and row.get('current_context', True) else
+                       '历史失配已解除' if row['resolved_at'] is not None else
+                       '已记录历史端点变化，当前条目后续另有变化')
+            warnings.append(f"来源端点失配警告: {row['kind']} 条目 #{row['listing_id']} "
+                            f"（Wellknown；差异：{change}；{outcome}）")
+            detail.append(f"  条目: https://agent-tools.cloud{row['detail_path']}；"
+                          f"旧/当前端点指纹 {row['old_endpoint_hash'][:12]} → "
+                          f"{row['current_endpoint_hash'][:12]}；累计观察 {row['occurrences']} 次。"
+                          "不代表发布者主动迁移或旧地址已下线。")
+            pending.add(key)
+        seen.add(key)
+    if seen or 'source_endpoint_warning_seen' in state:
+        state['source_endpoint_warning_seen'] = sorted(seen)
+    if pending:
+        state['pending_source_endpoint_warnings'] = sorted(pending)
+    else:
+        state.pop('pending_source_endpoint_warnings', None)
+    return warnings, detail
+
+
 def main() -> int:
     lines = journal()
     problems: list[str] = []
@@ -364,6 +406,9 @@ def main() -> int:
     issue_problems, issue_detail, holds = ingestion_checks(state)
     problems += issue_problems
     detail += issue_detail
+    source_warnings, source_detail = source_warning_checks(state)
+    problems += source_warnings
+    detail += source_detail
     latest = latest_completed_runs()
 
     def recovered(source):
@@ -408,8 +453,10 @@ def main() -> int:
                 print(line)
         return 0
 
-    quality_only = all(problem.startswith("新增数据质量拒绝组:") for problem in problems)
-    title = "摄入数据质量提醒" if quality_only else "后台任务异常"
+    advisory = lambda problem: problem.startswith(("新增数据质量拒绝组:", "来源端点失配警告:"))
+    advisory_only = all(advisory(problem) for problem in problems)
+    title = ("来源端点失配警告" if advisory_only and source_warnings else
+             "摄入数据质量提醒" if advisory_only else "后台任务异常")
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     body = [f"agent-tools {title}（{stamp}，过去 24 小时）", ""]
     body += [f"- {p}" for p in problems]
@@ -421,21 +468,27 @@ def main() -> int:
         f"当前失败爬源: {', '.join(now_failing) or '无'}",
         "",
         "说明: 数据质量拒绝已逐条隔离，不代表整轮失败；绑定待审仍保留保护。",
+        "来源失配: 当前有效资料优先，旧关联保留历史；同一端点对首次提醒，新变化另行提醒。",
         "排查: journalctl -u 'agent-tools-*' --since '24 hours ago' | grep -E 'failed'",
         "背景: 任务把分段异常吞成 WARNING 且仍返回 0，systemd 看不出问题（文档 §4.25）。",
     ]
     text = "\n".join(body)
     html = "<pre style='font:13px/1.6 ui-monospace,monospace'>" + \
         text.replace("&", "&amp;").replace("<", "&lt;") + "</pre>"
-    primary = problems[0] if quality_only else next(
-        problem for problem in problems if not problem.startswith("新增数据质量拒绝组:"))
+    primary = (source_warnings[0] if advisory_only and source_warnings else
+               problems[0] if advisory_only else next(problem for problem in problems if not advisory(problem)))
     subject = f"[agent-tools] {title}: {primary}"
-    sent = mailer._send(mailer.ADMIN_EMAIL, subject, text, html)
-    if sent and state.get("pending_ingestion_reason_groups"):
-        state.pop("pending_ingestion_reason_groups")
-        save_state(state)
-    print(("alert sent" if sent else "ALERT NOT SENT (smtp failed)") + "\n" + text)
-    return 0 if quality_only and sent else 1
+    recorded = mailer.send_internal_notice(subject, text, html)
+    if recorded:
+        acknowledged = False
+        for key in ('pending_ingestion_reason_groups', 'pending_source_endpoint_warnings'):
+            if state.pop(key, None):
+                acknowledged = True
+        if acknowledged:
+            save_state(state)
+    print(("notice recorded" if recorded else "NOTICE NOT RECORDED (local storage failed)")
+          + "\n" + text)
+    return 0 if advisory_only and recorded else 1
 
 
 if __name__ == "__main__":

@@ -744,7 +744,7 @@ def _request_same_origin(client, method: str, url: str, origin: str,
 
 
 def probe_health(url, well_known=None, inspect_payment=True,
-                 method_hint: str | None = None):
+                 method_hint: str | None = None, empty_post_probe: bool = False):
     """Probe an endpoint and return a structured callability signal.
 
     Returns a dict:
@@ -784,14 +784,20 @@ def probe_health(url, well_known=None, inspect_payment=True,
             if hint == "POST":
                 t0 = time.monotonic()
                 try:
-                    r = _request_same_origin(c, "HEAD", url, origin)
-                    if r.status_code in (404, 405, 501):
-                        r = _request_same_origin(c, "GET", url, origin)
+                    if empty_post_probe:
+                        r = _request_same_origin(c, "POST", url, origin, json_body={})
+                    else:
+                        r = _request_same_origin(c, "HEAD", url, origin)
+                        if r.status_code in (404, 405, 501):
+                            r = _request_same_origin(c, "GET", url, origin)
                 except Exception:
                     return {"status": "down", "latency_ms": None,
                             "http_status": None, "x402": False}
                 dt = int((time.monotonic() - t0) * 1000)
                 sc = r.status_code
+                if empty_post_probe and sc == 402 and not _valid_payment(_challenge_payment(r, url)):
+                    return {"status": "degraded", "latency_ms": dt,
+                            "http_status": sc, "x402": False}
                 if sc < 400 or sc == 402:
                     return {"status": "ok", "latency_ms": dt,
                             "http_status": sc, "x402": sc == 402}
@@ -2609,7 +2615,7 @@ def fetch_mcp_registry(updated_since: str | None = None,
                 if endpoint:
                     slug = f"{slug}-{_host_slug(endpoint)}"[:80]
                 repo = srv.get("repository")
-                out.append({
+                row = {
                     "slug": slug,
                     "name": title or name,
                     "description": desc,
@@ -2630,7 +2636,16 @@ def fetch_mcp_registry(updated_since: str | None = None,
                     "confidence": 0.55 if endpoint else 0.4,
                     "_status": status,
                     "_updated_at": updated_at,
-                })
+                }
+                if endpoint:
+                    from .source_lifecycle import registry_observation
+                    try:
+                        observation = registry_observation(name, endpoint, srv, rmeta, _MCP_REGISTRY_API)
+                    except MetadataValidationError:
+                        observation = None
+                    if observation is not None:
+                        row["_endpoint_observation"] = observation
+                out.append(row)
             cursor = (data.get("metadata") or {}).get("nextCursor")
             if not cursor:
                 break

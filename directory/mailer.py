@@ -1,7 +1,7 @@
-"""Outbound email for directory notifications (Aliyun DirectMail / SMTP_SSL).
+"""External email plus local internal notice routing.
 
-Reads SMTP_* from the environment. If SMTP is not configured the helpers
-become no-ops (logged), so approval flows never fail because of email.
+Submitter/owner email still uses configured SMTP. Agent Tools internal admin
+notifications and watchdog alerts are recorded locally, never sent by SMTP.
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ import logging
 import os
 import smtplib
 import ssl
+import uuid
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import formataddr, formatdate, make_msgid
@@ -45,31 +46,61 @@ def _conf() -> dict | None:
     }
 
 
-def _send(to_email: str, subject: str, text: str, html: str) -> bool:
-    conf = _conf()
-    if conf is None:
-        log.warning("SMTP not configured; skipping email to %s", to_email)
-        return False
-    sender = conf["from"]
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject
-    msg["From"] = formataddr((FROM_NAME, sender))
-    msg["To"] = to_email
-    msg["Reply-To"] = REPLY_TO
-    msg["Date"] = formatdate(localtime=False)
-    msg["Message-ID"] = make_msgid(domain="mail.agent-tools.cloud")
-    msg.attach(MIMEText(text, "plain", "utf-8"))
-    msg.attach(MIMEText(html, "html", "utf-8"))
+def _record_external_result(subject: str, state: str, event_id: str) -> None:
+    """Best-effort local receipt; never resend or copy a mail to the admin."""
     try:
+        from . import notices
+        purpose = {
+            "You're listed on Agent Tools (x402 directory)": 'approval',
+            "Your Agent Tools submission wasn't listed (here's why)": 'rejection',
+        }.get(subject, 'external')
+        if not notices.publish_mail_result(purpose, state, event_id):
+            log.warning('external mail result was not recorded locally')
+    except Exception as exc:
+        log.warning('external mail result notice failed: %s', type(exc).__name__)
+
+
+def _send(to_email: str, subject: str, text: str, html: str) -> bool:
+    if str(to_email).strip().lower() in {ADMIN_EMAIL.lower(), 'admin@agent-tools.cloud'}:
+        from . import notices
+        return notices.capture_legacy_admin(subject, text)
+    event_id = uuid.uuid4().hex
+    accepted = False
+    state = 'failed_or_unknown'
+    try:
+        conf = _conf()
+        if conf is None:
+            state = 'skipped'
+            log.warning('SMTP not configured; external email not sent')
+            return False
+        sender = conf["from"]
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = subject
+        msg["From"] = formataddr((FROM_NAME, sender))
+        msg["To"] = to_email
+        msg["Reply-To"] = REPLY_TO
+        msg["Date"] = formatdate(localtime=False)
+        msg["Message-ID"] = make_msgid(domain="mail.agent-tools.cloud")
+        msg.attach(MIMEText(text, "plain", "utf-8"))
+        msg.attach(MIMEText(html, "html", "utf-8"))
         ctx = ssl.create_default_context()
         with smtplib.SMTP_SSL(conf["host"], conf["port"], context=ctx, timeout=30) as s:
             s.login(conf["user"], conf["pass"])
-            s.sendmail(sender, [to_email], msg.as_string())
-        log.info("sent notification email to %s (%s)", to_email, subject)
-        return True
-    except Exception as e:  # noqa: BLE001 - email must never break approval
-        log.warning("failed to send email to %s: %r", to_email, e)
-        return False
+            # Envelope contains the external recipient only. No CC/BCC or
+            # separate self-copy is sent; the local receipt is the admin copy.
+            refused = s.sendmail(sender, [to_email], msg.as_string())
+            accepted = not bool(refused)
+            state = 'accepted' if accepted else 'failed_or_unknown'
+        if accepted:
+            log.info('external notification accepted by SMTP; delivery unverified')
+        return accepted
+    except Exception as exc:  # noqa: BLE001 - email must never break approval
+        log.warning('external email transport ended with %s; accepted=%s', type(exc).__name__, accepted)
+        # A QUIT/disconnect failure after sendmail succeeded does not undo
+        # acceptance. Never turn a receipt-storage/cleanup error into a resend.
+        return accepted
+    finally:
+        _record_external_result(subject, state, event_id)
 
 
 def _approval_html(service_name: str, service_url: str, verified_line: str | None) -> str:
@@ -372,23 +403,28 @@ def send_admin_notification(
     verdict: str,
     fields: list[tuple],
 ) -> bool:
-    """Email admin@agent-tools.cloud about a submission + its review verdict.
+    """Record an internal notice about a submission, never email the admin.
 
     kind    short channel label, e.g. "x402 submission", "MCP submission".
     title   service / endpoint name.
     verdict listed | rejected | pending | updated | verified | uncertain.
     fields  list of (label, value) rows to render (url, contact, x402, ...).
-    Never raises — email failures must not break the submit/review flow.
+    Never raises; storage failure does not fall back to SMTP.
     """
     try:
-        subject = f"[Agent Tools] {kind}: {title} — {verdict}"
-        text_lines = [f"{kind}", f"{title}", f"verdict: {verdict}", ""]
-        for label, value in fields:
-            if value not in (None, ""):
-                text_lines.append(f"{label}: {value}")
-        text = "\n".join(text_lines) + "\n"
-        html = _admin_html(title, kind, verdict, fields)
-        return _send(ADMIN_EMAIL, subject, text, html)
+        from . import notices
+        return notices.publish_admin(kind, title, verdict, fields)
     except Exception as e:  # noqa: BLE001
-        log.warning("admin notification failed for %r: %r", title, e)
+        log.warning("internal notice failed: %s", type(e).__name__)
         return False
+
+
+def send_internal_notice(subject: str, text: str, html: str) -> bool:
+    """Compatibility-shaped watchdog sink; persist typed counts, not email HTML."""
+    from . import notices
+    titles = ('来源端点失配警告', '摄入数据质量提醒', '后台任务异常')
+    title = next((value for value in titles if f'[agent-tools] {value}:' in subject), '后台巡检通知')
+    problems = [line[2:] for line in str(text).splitlines() if line.startswith('- ')]
+    advisory_only = all(problem.startswith(('新增数据质量拒绝组:', '来源端点失配警告:'))
+                        for problem in problems)
+    return notices.publish_watchdog(title, problems, advisory_only=advisory_only)
