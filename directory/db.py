@@ -707,6 +707,9 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
         from . import collisions
 
         collisions.ensure_schema(c)
+        from . import owner_lifecycle
+
+        owner_lifecycle.ensure_schema(c)
         c.commit()
 
 
@@ -1883,6 +1886,15 @@ def assert_listing_not_retired(conn, kind: str, row: dict) -> None:
         conn, kind, row.get("slug"), _retirement_urls(kind, row))
     if retired is not None:
         raise RetiredListingError(retired)
+    if row.get("source") and row.get("source_id"):
+        identity_hash = hashlib.sha256(str(row["source_id"]).encode()).hexdigest()
+        retired = conn.execute(
+            "SELECT retired_listings.* FROM owner_retired_sources sources "
+            "JOIN retired_listings ON retired_listings.id=sources.retirement_id "
+            "WHERE retired_listings.status='active' AND sources.kind=? AND sources.source=? "
+            "AND sources.identity_hash=? LIMIT 1", (kind, row["source"], identity_hash)).fetchone()
+        if retired is not None:
+            raise RetiredListingError(retired)
 
 
 def _privacy_pattern(value: str, hostname: bool = False):
@@ -1984,10 +1996,12 @@ def _privacy_audit_rowids(conn, hosts: set[str], slugs: set[str]) -> dict:
         "crawl_runs": ("errors",),
         "listing_sources": ("source_url",),
         "listing_retirement_events": ("note",),
+        "owner_lifecycle_requests": ("slug", "target_slug", "result_json"),
+        "owner_listing_merges": ("source_slug", "target_slug"),
     }.items():
         for row in conn.execute(
             "SELECT rowid AS _privacy_rowid,* FROM %s" % table):
-            if any(_contains_sensitive_text(row[column], hosts, ())
+            if any(_contains_sensitive_text(row[column], hosts, slugs_lower if table in ("owner_lifecycle_requests", "owner_listing_merges") else ())
                    for column in columns):
                 add(table, row["_privacy_rowid"])
 
@@ -2039,6 +2053,16 @@ def _privacy_impact_plan(conn, tables: dict[str, str], target_ids,
                     (kind, listing_id))]
                 if notice_ids:
                     impact['rows'].setdefault('internal_notices', []).extend(notice_ids)
+                lifecycle_ids = [int(item[0]) for item in conn.execute(
+                    "SELECT rowid FROM owner_lifecycle_requests WHERE kind=? "
+                    "AND (listing_id=? OR target_id=?)", (kind, listing_id, listing_id))]
+                if lifecycle_ids:
+                    impact['rows'].setdefault('owner_lifecycle_requests', []).extend(lifecycle_ids)
+                merge_ids = [int(item[0]) for item in conn.execute(
+                    "SELECT rowid FROM owner_listing_merges WHERE kind=? AND target_id=?",
+                    (kind, listing_id))]
+                if merge_ids:
+                    impact['rows'].setdefault('owner_listing_merges', []).extend(merge_ids)
                 # Bindings must remain until source suppression is installed.
                 # Fingerprint the full alias scope in the approval plan without
                 # putting bindings into its early generic deletion list.

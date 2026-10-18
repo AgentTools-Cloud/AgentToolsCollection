@@ -10,6 +10,7 @@ mode; it is always NULL today.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 import hashlib
 import http.client
 import idna
@@ -470,6 +471,65 @@ def owner_for_url(conn: sqlite3.Connection, url: str):
 def may_edit(conn: sqlite3.Connection, user_id: int, url: str) -> bool:
     owner = owner_for_url(conn, url)
     return bool(owner) and owner["user_id"] == user_id
+
+
+FRESH_PROOF_SECONDS = 60
+
+
+class OwnershipBlocked(PermissionError):
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.code = code
+
+
+@dataclass(frozen=True)
+class OwnershipReceipt:
+    ownership_id: int
+    user_id: int
+    host: str
+    method: str
+    token_hash: str
+    verified_at: int
+    checked_at: int
+
+
+def _active_whole_host_claim(conn, user_id: int, host: str):
+    user = conn.execute("SELECT status FROM users WHERE id=?", (user_id,)).fetchone()
+    owner = owner_of_host(conn, host)
+    if (user is None or user["status"] != "active" or owner is None
+            or owner["user_id"] != user_id or owner["scope_path"] is not None
+            or not owner["verified_at"] or db.is_shared_host(conn, host)):
+        raise OwnershipBlocked("not_verified_owner")
+    token = owner["token"]
+    if (not token or not secrets.compare_digest(token_hash(token), owner["token_hash"])):
+        raise OwnershipBlocked("claim_changed")
+    return owner
+
+
+def fresh_ownership(conn, user_id: int, host: str) -> OwnershipReceipt:
+    host = normalize_host(host)
+    owner = _active_whole_host_claim(conn, user_id, host)
+    ok, _detail = probe(owner["method"], host, owner["token"])
+    if not ok:
+        raise OwnershipBlocked("control_unavailable")
+    return OwnershipReceipt(
+        int(owner["id"]), user_id, host, owner["method"], owner["token_hash"],
+        int(owner["verified_at"]), int(time.time()))
+
+
+def assert_fresh_ownership(conn, receipt: OwnershipReceipt, user_id: int,
+                           host: str) -> None:
+    if (not isinstance(receipt, OwnershipReceipt) or receipt.user_id != user_id
+            or receipt.host != normalize_host(host)
+            or not 0 <= int(time.time()) - receipt.checked_at <= FRESH_PROOF_SECONDS):
+        raise OwnershipBlocked("proof_expired")
+    owner = _active_whole_host_claim(conn, user_id, receipt.host)
+    current = (int(owner["id"]), owner["method"], owner["token_hash"],
+               int(owner["verified_at"]))
+    expected = (receipt.ownership_id, receipt.method, receipt.token_hash,
+                receipt.verified_at)
+    if current != expected:
+        raise OwnershipBlocked("claim_changed")
 
 
 def _notify_displaced(conn: sqlite3.Connection, host: str, old_user_id: int,

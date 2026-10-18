@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shlex
 from typing import Any
 
@@ -39,6 +40,35 @@ def primary_http_request(row: dict[str, Any]) -> dict[str, Any]:
     return {'url': url, 'method': method, 'method_known': known, 'empty_post_probe': empty_probe}
 
 
+def _primary_json_body(row: dict[str, Any], url: str) -> str | None:
+    info = row.get('call_info') if isinstance(row.get('call_info'), dict) else {}
+    samples = row.get('resource_samples') or info.get('resource_samples') or []
+    sources = [sample for sample in samples if isinstance(sample, dict)
+               and str(sample.get('method') or '').upper() == 'POST'
+               and exact_endpoint(str(sample.get('url') or sample.get('resource') or '')) == exact_endpoint(url)] if isinstance(samples, list) else []
+    if (str(info.get('method') or '').upper() == 'POST'
+            and info.get('primary_url')
+            and exact_endpoint(str(info['primary_url'])) == exact_endpoint(url)):
+        sources.append(info)
+    bodies = set()
+    for source in sources:
+        for field in ('probe_body', 'input_example'):
+            if field not in source:
+                continue
+            value = source[field]
+            if not isinstance(value, (dict, list)):
+                return None
+            try:
+                encoded = json.dumps(value, ensure_ascii=True, allow_nan=False,
+                                     sort_keys=True, separators=(',', ':'))
+            except (TypeError, ValueError, RecursionError):
+                return None
+            if len(encoded) > 64 * 1024:
+                return None
+            bodies.add(encoded)
+    return next(iter(bodies)) if len(bodies) == 1 else None
+
+
 def build_call_template(row: dict[str, Any]) -> dict[str, Any]:
     """Return ready-to-use call hints for MCP and x402 HTTP modes."""
     out: dict[str, Any] = {}
@@ -73,6 +103,7 @@ def build_call_template(row: dict[str, Any]) -> dict[str, Any]:
     url, primary_method = request['url'], request['method']
     method_known, empty_probe = request['method_known'], request['empty_post_probe']
     if url:
+        json_body = ('{}' if empty_probe else _primary_json_body(row, url)) if primary_method == 'POST' else None
         price_min = row.get("price_min")
         payment = row.get("payment") if isinstance(row.get("payment"), dict) else {}
         currency = row.get("currency") or payment.get("currency")
@@ -95,7 +126,8 @@ def build_call_template(row: dict[str, Any]) -> dict[str, Any]:
             ],
             "curl_probe": (
                 f'curl -sS -i -X {primary_method} {shlex.quote(url)}'
-                + (" -H 'Content-Type: application/json' --data '{}'" if empty_probe else "")
+                + (" -H 'Content-Type: application/json' --data " + shlex.quote(json_body)
+                   if json_body is not None else "")
                 + "  "
                 "# expect HTTP 402 Payment Required " + price_hint
             ),

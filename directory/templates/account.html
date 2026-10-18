@@ -80,6 +80,20 @@
   </div>
   {% endif %}
 
+  {% if managed_listings %}
+  <section class="mb-8 border-t border-slate-200 pt-5">
+    <h2 class="font-semibold mb-3">Your listings</h2>
+    <ul class="divide-y divide-slate-200 text-sm">
+      {% for entry in managed_listings %}
+      <li class="py-3 flex flex-wrap items-center gap-3">
+        <a href="/listings/{{ entry.kind }}/{{ entry.slug }}/manage" class="text-blue-600 hover:underline break-words min-w-0">{{ entry.name }}</a>
+        <span class="text-xs text-slate-500">{{ entry.kind|upper }} &middot; {{ entry.status|capitalize }}</span>
+      </li>
+      {% endfor %}
+    </ul>
+  </section>
+  {% endif %}
+
   <div class="rounded-lg border border-slate-200 bg-white p-5">
     <h2 class="font-semibold mb-3">Claim a domain</h2>
     {% if error %}<p class="text-sm text-red-600 mb-3">{{ error }}</p>{% endif %}

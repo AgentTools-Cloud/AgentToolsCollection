@@ -1236,6 +1236,20 @@ def cmd_retire(kind: str, slug: str, reason: str, actor: str,
     return 0
 
 
+def cmd_owner_migrations(request_id=None, review_version=None, resolution=None):
+    from . import owner_lifecycle
+    if request_id is None:
+        with db.connect(read_only=True) as conn:
+            result = owner_lifecycle.review_requests(conn)
+    else:
+        if not review_version or not resolution:
+            raise ValueError("Closing a request requires --expect-version and --resolution")
+        with db.writer(immediate=True) as conn:
+            result = owner_lifecycle.close_review(conn, request_id, review_version, resolution)
+    print(json.dumps(result))
+    return 0
+
+
 def cmd_privacy_purge(kind: str, slug: str | None, reason: str, actor: str,
                       submission_ids=(), ownership_ids=(),
                       anchor_submission_id: int | None = None,
@@ -1818,6 +1832,10 @@ def main(argv=None) -> int:
     p_retired = sub.add_parser("retirements")
     p_retired.add_argument("--status", choices=("active", "restored", "all"),
                            default="active")
+    p_migrations = sub.add_parser("owner-migrations")
+    p_migrations.add_argument("--close", default=None)
+    p_migrations.add_argument("--expect-version", default=None)
+    p_migrations.add_argument("--resolution", choices=("handled", "declined"), default=None)
     p_subs = sub.add_parser("submissions")
     p_subs.add_argument("--status", default="pending")
     p_subs.add_argument("--limit", type=int, default=50)
@@ -1884,6 +1902,8 @@ def main(argv=None) -> int:
         return cmd_restore(args.kind, args.slug, args.actor, args.note)
     if args.cmd == "retirements":
         return cmd_retirements(None if args.status == "all" else args.status)
+    if args.cmd == "owner-migrations":
+        return cmd_owner_migrations(args.close, args.expect_version, args.resolution)
     if args.cmd == "submissions":
         return cmd_submissions(status=args.status, limit=args.limit)
     if args.cmd == "approve":
