@@ -47,6 +47,7 @@ CARD_PATHS = (
 def _upsert_rows(rows: list[dict]) -> tuple[int, int]:
     """Write a batch while treating operator-retired agents as normal skips."""
     inserted = updated = 0
+    warnings = 0
     with db.writer() as conn:
         for row in rows:
             try:
@@ -56,6 +57,9 @@ def _upsert_rows(rows: list[dict]) -> tuple[int, int]:
                 continue
             inserted += int(is_new)
             updated += int(not is_new)
+            warnings += row.get('_stale_warning_count', 0)
+    if warnings:
+        log.warning('source endpoint mismatch: %d new endpoint pair(s); current primary retained', warnings)
     return inserted, updated
 
 
@@ -380,6 +384,12 @@ def fetch_agent_card(url: str, client: httpx.Client | None = None,
                 if fallback[0] is None and (direct or cand != url or declared_endpoint):
                     fallback = (card, resolved_url)
                 continue
+            from .source_lifecycle import ObservedAgentCard
+            if crawlers._same_origin(cand, resolved_url):
+                return ObservedAgentCard(card, cand, resolved_url,
+                                         db._exact_endpoint(_card_endpoint(card, resolved_url))), resolved_url
+            # Cross-origin public cards remain discoverable, but are not
+            # authoritative evidence for same-entity endpoint transitions.
             return card, resolved_url
         return fallback if include_invalid_for_audit else (None, None)
     finally:
@@ -493,7 +503,7 @@ def card_to_row(card: dict, card_url: str, source: str = "manual",
         if not slug or slug == "agent":
             slug = _host_slug(endpoint or card_url)
 
-    return {
+    row = {
         "slug": slug,
         "name": name,
         "description": _text(card.get("description")),
@@ -519,6 +529,11 @@ def card_to_row(card: dict, card_url: str, source: str = "manual",
         "source_id": source_id or card_url,
         "confidence": 0.6,
     }
+    from .source_lifecycle import card_observation
+    observation = card_observation(card, source, row["source_id"])
+    if observation is not None:
+        row["_endpoint_observation"] = observation
+    return row
 
 
 def public_agent(row: dict) -> dict:

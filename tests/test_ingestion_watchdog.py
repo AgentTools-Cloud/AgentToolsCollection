@@ -52,6 +52,7 @@ class IngestionWatchdogTests(unittest.TestCase):
             -- An unrelated ingestion observation table must be harmless.
             CREATE TABLE ingestion_observations (payload TEXT);
             INSERT INTO ingestion_observations VALUES ('MUST_NOT_APPEAR');
+            CREATE TABLE source_endpoint_warnings (warning_key TEXT);
         """)
         for table in ("mcp_servers", "services", "a2a_agents"):
             self.conn.execute(f"INSERT INTO {table} VALUES (?)", (NOW - 10,))
@@ -70,7 +71,9 @@ class IngestionWatchdogTests(unittest.TestCase):
             self.assertIs(read_only, True)
             return sqlite3.connect(f"{self.path.as_uri()}?mode=ro", uri=True)
 
-        self.db = types.SimpleNamespace(connect=Mock(side_effect=connect))
+        self.warning_rows = []
+        self.db = types.SimpleNamespace(connect=Mock(side_effect=connect),
+                        visible_source_endpoint_warnings=Mock(side_effect=lambda conn: self.warning_rows))
         self.mail = Mock(return_value=True)
         self.save = Mock(side_effect=lambda state: setattr(self, "state", deepcopy(state)))
         forbidden = Mock(side_effect=AssertionError("external I/O is forbidden"))
@@ -84,11 +87,11 @@ class IngestionWatchdogTests(unittest.TestCase):
             ]),
             "unit_results": Mock(return_value=[]), "backup_is_fresh": Mock(return_value=True),
             "load_state": Mock(side_effect=lambda: deepcopy(self.state)), "save_state": self.save,
-            "mailer": types.SimpleNamespace(_send=self.mail, ADMIN_EMAIL="offline@example.invalid"),
+            "mailer": types.SimpleNamespace(send_internal_notice=self.mail),
             "subprocess": types.SimpleNamespace(run=forbidden),
         }
         functions = {"db_checks", "latest_completed_runs", "failing_sources", "stuck_sources",
-                     "ingestion_checks", "main"}
+                     "ingestion_checks", "source_warning_checks", "main"}
         constants = {"WINDOW_SECONDS", "STALE_HOURS", "FRESH_TABLES", "FRESH_SOURCES",
                      "ABORT_RE", "DONE_RE", "MIN_PASSES", "PARTIAL_STREAK"}
         selected = []
@@ -490,6 +493,91 @@ class IngestionWatchdogTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertIn("首次提醒待送达；当前无活跃记录", text)
         self.assertNotIn("pending_ingestion_reason_groups", self.state)
+
+    def warning(self, key='opaque-pair-key', **changes):
+        row = {'warning_key': key, 'kind': 'a2a', 'listing_id': 9,
+               'old_endpoint_hash': 'a' * 64, 'current_endpoint_hash': 'b' * 64,
+               'change_type': 'path', 'detail_path': '/a2a/agents/fixture',
+               'occurrences': 1, 'resolved_at': None, 'current_context': True}
+        row.update(changes)
+        self.warning_rows.append(row)
+        return row
+
+    def test_stale_warning_dedup_is_endpoint_pair_scoped(self):
+        row = self.warning()
+        result, text = self.main()
+        self.assertEqual(result, 0)
+        self.assertIn('来源端点失配警告', self.mail.call_args.args[1])
+        self.assertIn('旧关联标记stale，当前有效主记录保留', text)
+        self.assertIn('aaaaaaaaaaaa → bbbbbbbbbbbb', text)
+        self.assertNotIn('PRIVATE', text)
+        row['occurrences'] = 12
+        self.assertEqual(self.main()[0], 0)
+        self.mail.assert_not_called()
+        self.warning('new-current-pair', current_endpoint_hash='c' * 64)
+        _, text = self.main()
+        self.assertIn('cccccccccccc', text)
+        self.assertNotIn('bbbbbbbbbbbb', text)
+
+    def test_stale_warning_does_not_block_completed_ok_recovery(self):
+        self.state = {'failing_sources': ['a2a:crawl'], 'stuck_sources': ['a2a:crawl']}
+        self.warning()
+        self.run_row('a2a:crawl', status='ok')
+        result, text = self.main()
+        self.assertEqual(result, 0)
+        self.assertIn('已恢复的 partial 源: a2a:crawl', text)
+        self.assertEqual(self.state['failing_sources'], [])
+        self.assertEqual(self.state['stuck_sources'], [])
+
+    def test_stale_warning_pending_retries_past_window_until_accepted(self):
+        row = self.warning()
+        self.mail.return_value = False
+        self.assertEqual(self.main()[0], 1)
+        self.assertEqual(self.state['pending_source_endpoint_warnings'], ['opaque-pair-key'])
+        self.now += 25 * HOUR
+        row['resolved_at'] = self.now
+        self.assertEqual(self.main()[0], 1)
+        self.assertTrue(self.mail.called)
+        self.mail.return_value = True
+        self.assertEqual(self.main()[0], 0)
+        self.assertNotIn('pending_source_endpoint_warnings', self.state)
+        self.main()
+        self.mail.assert_not_called()
+
+    def test_deleted_or_privacy_hidden_warning_cancels_pending_delivery(self):
+        self.warning()
+        self.mail.return_value = False
+        self.main()
+        self.warning_rows.clear()
+        self.assertEqual(self.main()[0], 0)
+        self.mail.assert_not_called()
+        self.assertNotIn('pending_source_endpoint_warnings', self.state)
+        self.assertEqual(self.state['source_endpoint_warning_seen'], [])
+
+    def test_stale_warning_with_true_hold_keeps_failure_severity(self):
+        self.warning()
+        self.issue(source='wellknown', disposition='hold', reason='wellknown_owner_endpoint_changed')
+        result, text = self.main()
+        self.assertEqual(result, 1)
+        self.assertIn('后台任务异常', self.mail.call_args.args[1])
+        self.assertIn('wellknown_owner_endpoint_changed', self.mail.call_args.args[1])
+        self.assertIn('来源端点失配警告', text)
+
+    def test_warning_renderer_never_calls_write_or_send_in_check_function(self):
+        self.warning()
+        before = list(self.conn.iterdump())
+        warnings, detail = self.ns['source_warning_checks'](self.state)
+        self.assertEqual(len(warnings), 1)
+        self.assertIn('不代表发布者主动迁移', detail[0])
+        self.assertEqual(list(self.conn.iterdump()), before)
+        self.mail.assert_not_called()
+        self.save.assert_not_called()
+
+    def test_historical_warning_does_not_claim_old_hash_is_current_state(self):
+        self.warning(current_context=False)
+        _, text = self.main()
+        self.assertIn('已记录历史端点变化，当前条目后续另有变化', text)
+        self.assertNotIn('当前有效主记录保留', text)
 
 
 if __name__ == "__main__":

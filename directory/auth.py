@@ -19,13 +19,14 @@ import logging
 import os
 import secrets
 import time
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 import httpx
 from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
+from starlette.concurrency import run_in_threadpool
 
-from . import db
+from . import db, limits, owner_declarations
 
 log = logging.getLogger(__name__)
 
@@ -396,7 +397,35 @@ _FIELD_LABELS = {
     "mcp_url": "MCP endpoint URL (must be on a host you have verified)",
     "endpoint_url": "Endpoint URL (must be on a host you have verified)",
     "card_url": "Agent Card URL (must be on a host you have verified)",
+    "method": "Primary HTTP method",
+    "price_usdc": "Primary price (USDC)",
+    "resources": "Resources (JSON array)",
+    "well_known_url": "x402 descriptor URL",
+    "openapi_url": "OpenAPI URL",
 }
+
+
+def _require_same_origin_write(request: Request) -> None:
+    if request.method in ("GET", "HEAD", "OPTIONS"):
+        return
+    if not unsign(request.cookies.get(SESSION_COOKIE)):
+        return
+
+    def origin(value):
+        try:
+            parsed = urlsplit(value)
+            if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password:
+                return None
+            return (parsed.scheme, parsed.hostname.lower(),
+                    parsed.port or (443 if parsed.scheme == "https" else 80))
+        except ValueError:
+            return None
+
+    expected = origin(os.getenv("PUBLIC_BASE_URL", "https://agent-tools.cloud"))
+    supplied = origin(request.headers.get("origin") or request.headers.get("referer") or "")
+    if expected is None or supplied != expected:
+        raise HTTPException(403, "Cookie-authenticated writes require the same origin",
+                            headers={"Cache-Control": "private, no-store"})
 
 
 def _load_editable(request: Request, kind: str, slug: str):
@@ -418,6 +447,7 @@ def _load_editable(request: Request, kind: str, slug: str):
     user = current_user(request)
     if user is None:
         return None, None, None, None
+    _require_same_origin_write(request)
     table, _ = _KIND_LOOKUP[kind]
     with db.connect(read_only=True) as conn:
         row = conn.execute(
@@ -427,7 +457,8 @@ def _load_editable(request: Request, kind: str, slug: str):
             raise HTTPException(404, "No such listing")
         host, _ = db._host_and_path(row["_listing_url"] or "")
         owner = conn.execute(
-            "SELECT * FROM domain_ownership WHERE host=? AND status='verified'",
+            "SELECT * FROM domain_ownership WHERE host=? AND status='verified' "
+            "AND scope_path IS NULL",
             (host,)).fetchone()
     if owner is None or owner["user_id"] != user["id"]:
         raise HTTPException(403, "You have not verified control of %s" % host)
@@ -445,16 +476,51 @@ def may_edit_listing(request: Request, kind: str, listing_url: str) -> bool:
     with db.connect(read_only=True) as conn:
         owner = conn.execute(
             "SELECT user_id FROM domain_ownership "
-            "WHERE host=? AND status='verified'", (host,)).fetchone()
+            "WHERE host=? AND status='verified' AND scope_path IS NULL", (host,)).fetchone()
     return owner is not None and owner["user_id"] == user["id"]
 
 
+def editable_values(kind, row):
+    if kind == "x402":
+        return owner_declarations.editable_fields(row)
+    return {name: row[name] for name in db._EDITABLE_FIELDS[kind]}
+
+
+async def verify_owner_listing(request, kind, row, user, owner):
+    if kind != "x402":
+        raise HTTPException(404, "Interface declaration verification is available for x402 listings only")
+    if not owner_declarations.stored(row):
+        raise HTTPException(422, "Save an interface declaration before verification")
+    for identity, scope, windows in (
+        ("owner:%s" % user["id"], "owner-declaration", (("minute", 2, 60), ("day", 20, 86400))),
+        (limits.client_ip_from_request(request), "owner-declaration-ip", (("minute", 6, 60), ("day", 60, 86400))),
+    ):
+        state = limits.check_ip_limits(identity, scope, windows, db_path=db.DEFAULT_DB_PATH)
+        if state:
+            limits.raise_rate_limited(state, "Too many interface verification requests. Try again later.")
+    try:
+        return await run_in_threadpool(owner_declarations.verify_listing, row["id"], user["id"], owner["id"])
+    except PermissionError:
+        raise HTTPException(403, "Verified ownership or account status changed") from None
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from None
+
+
 def _edit_context(request, kind, slug, user, row, host, saved=None, error=None):
+    values = editable_values(kind, row)
     fields = [
-        {"name": f, "label": _FIELD_LABELS.get(f, f), "value": row[f],
+        {"name": f, "label": _FIELD_LABELS.get(f, f), "value": values[f],
          "multiline": f == "description"}
-        for f in db._EDITABLE_FIELDS[kind]
+        for f in db._EDITABLE_FIELDS[kind] if f not in owner_declarations.FIELDS
     ]
+    declaration = owner_declarations.public_state(row) if kind == "x402" else None
+    interface_fields = []
+    if kind == "x402":
+        for name in owner_declarations.FIELDS:
+            value = values[name]
+            if name == "resources":
+                value = json.dumps(value, ensure_ascii=False, indent=2) if value is not None else ""
+            interface_fields.append({"name": name, "label": _FIELD_LABELS[name], "value": value})
     with db.connect(read_only=True) as conn:
         history = db.listing_edit_history(conn, kind, row["id"])
     for h in history:
@@ -462,6 +528,9 @@ def _edit_context(request, kind, slug, user, row, host, saved=None, error=None):
     return {
         "request": request, "user": user, "listing": row, "host": host,
         "fields": fields, "history": history, "saved": saved, "error": error,
+        "interface_fields": interface_fields, "declaration": declaration,
+        "declaration_blocker": owner_declarations.BLOCKERS.get((declaration or {}).get("blocker")),
+        "verify_url": "/listings/%s/%s/verify" % (kind, slug),
         "back_url": _KIND_LOOKUP[kind][1] % slug,
     }
 
@@ -476,7 +545,8 @@ def edit_listing_form(request: Request, kind: str, slug: str):
             status_code=302)
     return TEMPLATES.TemplateResponse(
         request, "edit_listing.html",
-        _edit_context(request, kind, slug, user, row, host))
+        _edit_context(request, kind, slug, user, row, host),
+        headers={"Cache-Control": "private, no-store"})
 
 
 @router.post("/listings/{kind}/{slug}/edit", include_in_schema=False)
@@ -488,12 +558,20 @@ async def edit_listing(request: Request, kind: str, slug: str):
     form = await request.form()
     changes = {f: str(form.get(f) or "") for f in db._EDITABLE_FIELDS[kind]
                if f in form}
+    if kind == "x402" and not owner_declarations.stored(row):
+        changes = {name: value for name, value in changes.items()
+                   if name not in owner_declarations.FIELDS or value.strip()}
 
     def op():
         with db.writer(immediate=True) as conn:
             return db.apply_listing_edits(conn, kind, row["id"], user["id"],
                                           owner["id"], changes, via="web")
-    applied, rejected = db.with_retry(op)
+    try:
+        applied, rejected = db.with_retry(op)
+    except PermissionError:
+        raise HTTPException(403, "Verified ownership or account status changed") from None
+    except ValueError as exc:
+        applied, rejected = [], [str(exc)]
 
     with db.connect(read_only=True) as conn:
         table = _KIND_LOOKUP[kind][0]
@@ -505,7 +583,19 @@ async def edit_listing(request: Request, kind: str, slug: str):
         _edit_context(request, kind, slug, user, fresh, host,
                       saved=applied or None,
                       error="; ".join(rejected) if rejected
-                      else (None if applied else "Nothing changed.")))
+                      else (None if applied else "Nothing changed.")),
+        status_code=422 if rejected and not applied else 200,
+        headers={"Cache-Control": "private, no-store"})
+
+
+@router.post("/listings/{kind}/{slug}/verify", include_in_schema=False)
+async def verify_listing_form(request: Request, kind: str, slug: str):
+    user, row, _host, owner = _load_editable(request, kind, slug)
+    if user is None:
+        raise HTTPException(401, "Sign in first")
+    await verify_owner_listing(request, kind, row, user, owner)
+    return RedirectResponse("/listings/%s/%s/edit" % (kind, slug), status_code=303,
+                            headers={"Cache-Control": "private, no-store"})
 
 
 @router.get("/api/v1/me", include_in_schema=False)

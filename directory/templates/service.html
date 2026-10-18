@@ -141,11 +141,13 @@
 
 <section class="svc-card p-6 mb-6">
   <h2 class="text-base font-semibold mb-4">How to call</h2>
+  {% if interface_declaration %}
+  <p class="text-xs text-slate-500 mb-3">Owner interface declaration: {{ interface_declaration.status }}{% if interface_declaration.checked_at %} (checked {{ interface_declaration.checked_at }}){% endif %}.</p>
+  {% endif %}
   <div class="space-y-5">
     <div>
       <div class="text-xs text-slate-500 mb-1.5">cURL · x402-fetch / x402-axios will auto-handle 402</div>
-      {% set demo = svc.resource_samples[0] if svc.resource_samples else None %}
-      <pre class="bg-slate-900 text-slate-100 text-xs p-3 rounded-lg overflow-x-auto"><code>curl -X {{ (demo.method if demo and demo.method else 'POST')|upper }} {{ demo.url if demo and demo.url else svc.url }}</code></pre>
+      <pre class="bg-slate-900 text-slate-100 text-xs p-3 rounded-lg overflow-x-auto"><code>{{ call_template.http_x402.curl_probe }}</code></pre>
     </div>
     {% if svc.mcp_url %}
     <div>

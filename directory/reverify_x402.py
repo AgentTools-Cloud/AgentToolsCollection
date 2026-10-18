@@ -487,7 +487,8 @@ def _gather(conn, targets, limit, only_unverified):
         # here noticed until they emailed.
         stale_before = int(time.time()) - _DESCRIPTOR_TTL
         sql = (
-            "SELECT id, slug, name, url, well_known_url, source, source_id "
+            "SELECT id, slug, name, url, well_known_url, source, source_id, "
+            "owner_verified,owner_declaration,call_info "
             "FROM services "
             "WHERE url IS NOT NULL AND url != '' AND health='ok' "
             "AND (COALESCE(x402_ok,0)=0 OR payment IS NULL OR payment='' "
@@ -496,6 +497,9 @@ def _gather(conn, targets, limit, only_unverified):
         )
         rows = conn.execute(sql, (stale_before,)).fetchall()
         for r in rows:
+            from . import owner_declarations
+            if owner_declarations.has_verified_interface(r):
+                continue
             explicit_price = False
             source_ids = []
             if r["source"] == "submission":
@@ -566,6 +570,12 @@ def _privacy_suppressed_metadata(conn, **values) -> bool:
             conn, "x402", values) is not None
     except RuntimeError:
         return True
+
+
+def _owner_interface_current(conn, listing_id, endpoint):
+    from . import owner_declarations
+    row = conn.execute('SELECT * FROM services WHERE id=? AND url=?', (listing_id, endpoint)).fetchone()
+    return row is not None and owner_declarations.has_verified_interface(row)
 
 
 def reverify(targets=("mcp", "a2a"), workers=24, limit=None,
@@ -684,6 +694,8 @@ def reverify(targets=("mcp", "a2a"), workers=24, limit=None,
             with db.writer() as c:
                  for (resource_count, samples, updated_at, service_id,
                      probed_endpoint) in chunk:
+                    if _owner_interface_current(c, service_id, probed_endpoint):
+                        continue
                     if _privacy_suppressed_metadata(
                             c, resource_samples=samples):
                         continue
@@ -709,6 +721,8 @@ def reverify(targets=("mcp", "a2a"), workers=24, limit=None,
                 for update in chunk:
                     (payment, chains, _count, samples, _lo, _hi, _currency,
                      _observed, _explicit_price, _updated, _id, _endpoint) = update
+                    if _owner_interface_current(c, _id, _endpoint):
+                        continue
                     if _privacy_suppressed_metadata(
                             c, payment=payment, chains=chains,
                             resource_samples=samples):

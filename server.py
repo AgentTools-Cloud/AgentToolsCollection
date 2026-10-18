@@ -136,7 +136,9 @@ async def _no_cache_html(request: Request, call_next):
     ctype = resp.headers.get("content-type", "")
     if ctype.startswith("text/html"):
         path = request.url.path
-        if "atc_session" in request.headers.get("cookie", ""):
+        existing_policy = resp.headers.get("cache-control", "").lower()
+        if ("atc_session" in request.headers.get("cookie", "")
+                or "private" in existing_policy or "no-store" in existing_policy):
             # Belt and braces: nothing rendered for a signed-in visitor may
             # ever enter a shared cache, whatever the page would otherwise be.
             resp.headers["Cache-Control"] = "private, no-store"

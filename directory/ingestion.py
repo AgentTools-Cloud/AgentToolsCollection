@@ -2,6 +2,7 @@
 from copy import deepcopy
 import hashlib
 import json
+import logging
 import sqlite3
 import time
 from urllib.parse import urlsplit
@@ -9,6 +10,8 @@ from urllib.parse import urlsplit
 import idna
 
 from . import db
+
+log = logging.getLogger(__name__)
 
 
 def digest(value):
@@ -83,7 +86,7 @@ def validate_endpoint(value):
 
 
 def ingest_batch(conn, kind, source, rows, upsert):
-    from .wellknown_binding import SourceBindingConflict
+    from .wellknown_binding import SourceBindingConflict, StaleSourceBinding
     result = dict(added=0, updated=0, rejected=0, errors=[])
     if not conn.in_transaction:
         conn.execute('BEGIN')
@@ -102,6 +105,8 @@ def ingest_batch(conn, kind, source, rows, upsert):
             created, _ = upsert(conn, row)
             resolve_issue(conn, kind, source, original)
             result['added' if created else 'updated'] += 1
+            if row.get('_stale_warning_count'):
+                result['warnings'] = result.get('warnings', 0) + row['_stale_warning_count']
         except db.RetiredListingError:
             conn.execute('ROLLBACK TO ingest_row')
             result['rejected'] += 1
@@ -110,6 +115,22 @@ def ingest_batch(conn, kind, source, rows, upsert):
             reason = str(exc)
             record_issue(conn, kind, source, original, 'rejected', reason)
             result['rejected'] += 1
+        except StaleSourceBinding:
+            conn.execute('ROLLBACK TO ingest_row')
+            from .source_lifecycle import record_stale_observation
+            try:
+                fresh = record_stale_observation(conn, kind, original)
+            except db.RetiredListingError:
+                result['rejected'] += 1
+            except SourceBindingConflict as exc:
+                record_issue(conn, kind, source, original, 'hold', str(exc))
+                result['errors'].append('source binding held: ' + str(exc))
+            else:
+                result['stale'] = result.get('stale', 0) + 1
+                result['warnings'] = result.get('warnings', 0) + fresh
+                if fresh:
+                    log.warning('source endpoint mismatch: kind=%s source=%s; current primary retained',
+                                kind, source)
         except SourceBindingConflict as exc:
             conn.execute('ROLLBACK TO ingest_row')
             record_issue(conn, kind, source, original, 'hold', str(exc))

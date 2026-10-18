@@ -81,8 +81,42 @@ CREATE TABLE IF NOT EXISTS wellknown_endpoint_sources (
     listing_id INTEGER NOT NULL,
     first_seen INTEGER NOT NULL,
     last_seen INTEGER NOT NULL,
+    state TEXT NOT NULL DEFAULT 'active',
+    stale_target_hash TEXT,
+    stale_at INTEGER,
+    state_changed_at INTEGER,
+    stale_transition_id INTEGER,
     PRIMARY KEY(kind, identity_hash, endpoint_hash)
 );
+CREATE TABLE IF NOT EXISTS listing_endpoint_observations (
+    kind TEXT NOT NULL, listing_id INTEGER NOT NULL, source TEXT NOT NULL,
+    identity_hash TEXT NOT NULL, endpoint_hash TEXT NOT NULL,
+    reference_hash TEXT NOT NULL, content_hash TEXT NOT NULL,
+    evidence_kind TEXT NOT NULL, observed_at INTEGER NOT NULL, accepted_at INTEGER NOT NULL,
+    last_transition_id INTEGER, PRIMARY KEY(kind,listing_id)
+);
+CREATE TABLE IF NOT EXISTS listing_endpoint_transitions (
+    id INTEGER PRIMARY KEY, kind TEXT NOT NULL, listing_id INTEGER NOT NULL,
+    source TEXT NOT NULL, identity_hash TEXT NOT NULL,
+    old_endpoint_hash TEXT NOT NULL, new_endpoint_hash TEXT NOT NULL,
+    reference_hash TEXT NOT NULL, content_hash TEXT NOT NULL, evidence_kind TEXT NOT NULL,
+    observed_at INTEGER NOT NULL, accepted_at INTEGER NOT NULL,
+    previous_transition_id INTEGER, change_type TEXT NOT NULL, basis_hash TEXT
+);
+CREATE TABLE IF NOT EXISTS source_endpoint_warnings (
+    warning_key TEXT PRIMARY KEY, kind TEXT NOT NULL, listing_id INTEGER NOT NULL,
+    identity_hash TEXT NOT NULL, old_endpoint_hash TEXT NOT NULL,
+    current_endpoint_hash TEXT NOT NULL, transition_id INTEGER NOT NULL,
+    change_type TEXT NOT NULL, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL,
+    occurrences INTEGER NOT NULL DEFAULT 1, resolved_at INTEGER
+);
+CREATE TABLE IF NOT EXISTS internal_notices (
+    id INTEGER PRIMARY KEY, event_key TEXT NOT NULL UNIQUE,
+    category TEXT NOT NULL, severity TEXT NOT NULL, title TEXT NOT NULL, summary TEXT NOT NULL,
+    listing_kind TEXT, listing_id INTEGER, submission_id INTEGER, verdict TEXT, data_json TEXT,
+    first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, occurrences INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_internal_notice_time ON internal_notices(last_seen,id);
 CREATE TABLE IF NOT EXISTS meta (
   key        TEXT PRIMARY KEY,
   value      TEXT,
@@ -576,6 +610,24 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
                       f"AFTER DELETE ON {table} BEGIN "
                       f"DELETE FROM wellknown_endpoint_sources WHERE kind='{kind}' "
                       "AND listing_id=old.id; END")
+            c.execute(f"CREATE TRIGGER IF NOT EXISTS {table}_endpoint_lifecycle_delete "
+                      f"AFTER DELETE ON {table} BEGIN "
+                      f"DELETE FROM listing_endpoint_observations WHERE kind='{kind}' AND listing_id=old.id; "
+                      f"DELETE FROM listing_endpoint_transitions WHERE kind='{kind}' AND listing_id=old.id; "
+                      f"DELETE FROM source_endpoint_warnings WHERE kind='{kind}' AND listing_id=old.id; END")
+        for kind, table in (('x402', 'services'), ('mcp', 'mcp_servers'), ('a2a', 'a2a_agents')):
+            c.execute(f"CREATE TRIGGER IF NOT EXISTS {table}_internal_notice_delete "
+                      f"AFTER DELETE ON {table} BEGIN DELETE FROM internal_notices "
+                      f"WHERE listing_kind='{kind}' AND listing_id=old.id; END")
+        c.execute('CREATE TRIGGER IF NOT EXISTS submission_internal_notice_delete '
+                  'AFTER DELETE ON submissions BEGIN DELETE FROM internal_notices '
+                  'WHERE submission_id=old.id; END')
+        c.execute("CREATE TRIGGER IF NOT EXISTS wellknown_binding_warning_delete "
+                  "AFTER DELETE ON wellknown_endpoint_sources BEGIN "
+                  "DELETE FROM source_endpoint_warnings WHERE kind=old.kind AND listing_id=old.listing_id "
+                  "AND identity_hash=old.identity_hash AND old_endpoint_hash=old.endpoint_hash; END")
+        c.execute('CREATE INDEX IF NOT EXISTS idx_wellknown_binding_listing '
+                  'ON wellknown_endpoint_sources(kind,listing_id)')
         for table in ("services", "mcp_servers", "a2a_agents"):
             c.execute(
                 "CREATE INDEX IF NOT EXISTS idx_%s_name_exact "
@@ -597,6 +649,11 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
         )
         for ddl in (
             "ALTER TABLE ingestion_issues ADD COLUMN endpoint_hash TEXT",
+            "ALTER TABLE wellknown_endpoint_sources ADD COLUMN state TEXT NOT NULL DEFAULT 'active'",
+            "ALTER TABLE wellknown_endpoint_sources ADD COLUMN stale_target_hash TEXT",
+            "ALTER TABLE wellknown_endpoint_sources ADD COLUMN stale_at INTEGER",
+            "ALTER TABLE wellknown_endpoint_sources ADD COLUMN state_changed_at INTEGER",
+            "ALTER TABLE wellknown_endpoint_sources ADD COLUMN stale_transition_id INTEGER",
             "ALTER TABLE services ADD COLUMN confidence REAL",
             "ALTER TABLE listing_edits ADD COLUMN via TEXT",
             "ALTER TABLE services ADD COLUMN tx_30d INTEGER",
@@ -605,6 +662,7 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
             "ALTER TABLE services ADD COLUMN payment TEXT",
             "ALTER TABLE services ADD COLUMN call_info TEXT",
             "ALTER TABLE services ADD COLUMN quality TEXT",
+            "ALTER TABLE services ADD COLUMN owner_declaration TEXT",
             "ALTER TABLE services ADD COLUMN latency_ms INTEGER",
             "ALTER TABLE services ADD COLUMN http_status INTEGER",
             "ALTER TABLE services ADD COLUMN x402_ok INTEGER",
@@ -838,6 +896,12 @@ def _exact_endpoint(url: str) -> str:
     return exact_endpoint(url)
 
 
+def visible_source_endpoint_warnings(conn) -> list[dict]:
+    """Privacy-gated rendering data for read-only watchdog observations."""
+    from .source_lifecycle import visible_warning_rows
+    return visible_warning_rows(conn)
+
+
 def _endpoint_authority(url: str) -> str:
     key = _exact_endpoint(url)
     if not key:
@@ -1045,7 +1109,7 @@ def upsert_service(conn: sqlite3.Connection, row: dict) -> tuple:
 
 def row_to_dict(row) -> dict:
     d = dict(row)
-    for k in ("chains", "tags", "resource_samples", "payment", "call_info", "quality"):
+    for k in ("chains", "tags", "resource_samples", "payment", "call_info", "quality", "owner_declaration"):
         if d.get(k):
             try:
                 d[k] = json.loads(d[k])
@@ -1957,6 +2021,7 @@ def _privacy_impact_plan(conn, tables: dict[str, str], target_ids,
         ) if hosts else sorted(ownership_ids),
         "rows": _privacy_audit_rowids(conn, hosts, slugs),
         "redactions": [],
+        "supplemental_binding_fingerprints": [],
     }
     for kind, ids in target_ids.items():
         table = tables[kind]
@@ -1969,7 +2034,64 @@ def _privacy_impact_plan(conn, tables: dict[str, str], target_ids,
                     dict(row), sort_keys=True, default=str,
                     separators=(",", ":")).encode("utf-8")).hexdigest()
                 impact["targets"].append((kind, listing_id, digest))
+                notice_ids = [int(item[0]) for item in conn.execute(
+                    'SELECT rowid FROM internal_notices WHERE listing_kind=? AND listing_id=?',
+                    (kind, listing_id))]
+                if notice_ids:
+                    impact['rows'].setdefault('internal_notices', []).extend(notice_ids)
+                # Bindings must remain until source suppression is installed.
+                # Fingerprint the full alias scope in the approval plan without
+                # putting bindings into its early generic deletion list.
+                for binding in conn.execute(
+                        'SELECT * FROM wellknown_endpoint_sources WHERE kind=? AND listing_id=?',
+                        (kind, listing_id)):
+                    fingerprint = hashlib.sha256(json.dumps(
+                        dict(binding), sort_keys=True, default=str,
+                        separators=(',', ':')).encode('utf-8')).hexdigest()
+                    impact['supplemental_binding_fingerprints'].append((kind, listing_id, fingerprint))
+                # Hash-only lifecycle rows are still linkable to a listing.
+                # Include their deletion in the approved purge plan, rather
+                # than relying solely on the final delete triggers.
+                for ledger in ('listing_endpoint_observations', 'listing_endpoint_transitions',
+                               'source_endpoint_warnings'):
+                    linked = [int(item[0]) for item in conn.execute(
+                        f'SELECT rowid FROM {ledger} WHERE kind=? AND listing_id=?',
+                        (kind, listing_id))]
+                    if linked:
+                        impact['rows'].setdefault(ledger, []).extend(linked)
+                identities = {(row['source'], row['source_id'])}
+                identities.update((item['source'], item['source_id']) for item in conn.execute(
+                    'SELECT source,source_id FROM listing_sources WHERE kind=? AND listing_id=?',
+                    (kind, listing_id)))
+                identities.update(('wellknown', item['source_id']) for item in conn.execute(
+                    'SELECT source_id FROM wellknown_endpoint_sources WHERE kind=? AND listing_id=?',
+                    (kind, listing_id)))
+                alias_hashes = {item['identity_hash'] for item in conn.execute(
+                    'SELECT identity_hash FROM wellknown_endpoint_sources WHERE kind=? AND listing_id=?',
+                    (kind, listing_id))}
+                for identity_hash in alias_hashes:
+                    linked = [int(item[0]) for item in conn.execute(
+                        'SELECT rowid FROM source_endpoint_warnings WHERE kind=? AND identity_hash=?',
+                        (kind, identity_hash))]
+                    if linked:
+                        impact['rows'].setdefault('source_endpoint_warnings', []).extend(linked)
+                for source, source_id in identities:
+                    if source and source_id:
+                        identity_hash = hashlib.sha256(str(source_id).encode('utf-8')).hexdigest()
+                        linked = [int(item[0]) for item in conn.execute(
+                            'SELECT rowid FROM ingestion_issues WHERE kind=? AND source=? AND identity_hash=?',
+                            (kind, source, identity_hash))]
+                        if linked:
+                            impact['rows'].setdefault('ingestion_issues', []).extend(linked)
     impact["targets"].sort()
+    for submission_id in submission_ids:
+        notice_ids = [int(item[0]) for item in conn.execute(
+            'SELECT rowid FROM internal_notices WHERE submission_id=?', (submission_id,))]
+        if notice_ids:
+            impact['rows'].setdefault('internal_notices', []).extend(notice_ids)
+    impact['supplemental_binding_fingerprints'].sort()
+    for ledger, rowids in impact['rows'].items():
+        impact['rows'][ledger] = sorted(set(rowids))
     for kind, table in tables.items():
         columns = [row[1] for row in conn.execute("PRAGMA table_info(%s)" % table)
                    if "TEXT" in str(row[2]).upper()]
@@ -2223,6 +2345,14 @@ def privacy_purge_listing(conn, kind: str, slug: str, actor: str,
                     _privacy_source('wellknown', binding['source_id']),
                     reason, actor,
                 )
+            # Rebound warnings can refer to a former listing. Their identities
+            # remain private even after the pointer moved to this target.
+            alias_hashes = [item['identity_hash'] for item in conn.execute(
+                'SELECT identity_hash FROM wellknown_endpoint_sources WHERE kind=? AND listing_id=?',
+                (target_kind, listing_id))]
+            for identity_hash in alias_hashes:
+                conn.execute('DELETE FROM source_endpoint_warnings WHERE kind=? AND identity_hash=?',
+                             (target_kind, identity_hash))
             conn.execute(
                 "DELETE FROM listing_sources WHERE kind=? AND listing_id=?",
                 (target_kind, listing_id))
@@ -2811,6 +2941,10 @@ def upsert_a2a_agent(conn: sqlite3.Connection, row: dict) -> tuple:
     row["x402_supported"] = existing["x402_supported"]
     _restore_owner_edits(row, existing)
     _keep_owned_slug(cur, "a2a_agents", row, existing)
+    if (len(source_identity_rows) == 1 and existing["source"] == row.get("source")
+            and existing["source_id"] == row.get("source_id")):
+        from .source_lifecycle import record_primary_observation
+        row["_stale_warning_count"] = record_primary_observation(conn, "a2a", existing, row)
     set_clause = ",".join(f"{c}=?" for c in _A2A_COLS if c != "created_at")
     params = [row.get(c) for c in _A2A_COLS if c != "created_at"]
     params.append(existing["id"])
@@ -3216,6 +3350,10 @@ def upsert_mcp_server(conn: sqlite3.Connection, row: dict) -> tuple:
     set_clause = ",".join(f"{c}=?" for c in cols)
     params = [row.get(c) for c in cols]
     params.append(existing["id"])
+    if (len(source_identity_rows) == 1 and existing["source"] == row.get("source")
+            and existing["source_id"] == row.get("source_id")):
+        from .source_lifecycle import record_primary_observation
+        row["_stale_warning_count"] = record_primary_observation(conn, "mcp", existing, row)
     cur.execute(f"UPDATE mcp_servers SET {set_clause} WHERE id=?", params)
     _record_source(conn, "mcp", existing["id"], _src)
     return False, int(existing["id"])
@@ -4173,7 +4311,8 @@ def upsert_user(conn: sqlite3.Connection, provider: str, provider_uid: str,
 
 
 _EDITABLE_FIELDS = {
-    "x402": ("name", "description", "category", "url", "mcp_url"),
+    "x402": ("name", "description", "category", "url", "mcp_url",
+             "method", "price_usdc", "resources", "well_known_url", "openapi_url"),
     "mcp": ("name", "description", "homepage_url", "endpoint_url"),
     "a2a": ("name", "description", "homepage_url", "documentation_url",
             "provider_name", "endpoint_url", "card_url"),
@@ -4192,6 +4331,7 @@ _MEASURED_RESET = {
          "quality_score", "resource_count", "resource_samples", "payment",
             "call_info", "chains", "price_min", "price_max", "facilitator",
             "well_known_url",
+                 "openapi_url", "quality", "confidence", "currency", "conformance",
          "tx_30d",
              "payto_tx_30d", "payto_payers_30d", "payto_checked", "down_since",
              "last_seen", "latency_ms"),
@@ -4208,6 +4348,24 @@ _KIND_TABLE = {"x402": "services", "mcp": "mcp_servers", "a2a": "a2a_agents"}
 # listing is probed at `url`; `mcp_url` is a second address on the same service
 # and moving it says nothing about the numbers gathered from the first.
 _PRIMARY_ENDPOINT = {"x402": "url", "mcp": "endpoint_url", "a2a": "endpoint_url"}
+
+
+def owner_edit_state(conn, kind, listing_id, user_id, ownership_id):
+    table = _KIND_TABLE[kind]
+    current = conn.execute("SELECT * FROM %s WHERE id=?" % table, (listing_id,)).fetchone()
+    if current is None:
+        raise ValueError("listing no longer exists")
+    user = conn.execute("SELECT status FROM users WHERE id=?", (user_id,)).fetchone()
+    if user is None or user["status"] != "active":
+        raise PermissionError("account is no longer active")
+    ownership = conn.execute(
+        "SELECT * FROM domain_ownership WHERE id=? AND user_id=? "
+        "AND status='verified' AND scope_path IS NULL", (ownership_id, user_id)).fetchone()
+    host, _ = _host_and_path(current[_PRIMARY_ENDPOINT[kind]] or "")
+    if ownership is None or ownership["host"] != host:
+        raise PermissionError("verified ownership changed before the edit")
+    assert_listing_not_retired(conn, kind, dict(current))
+    return current, ownership
 
 
 def _restore_owner_edits(row: dict, existing) -> None:
@@ -4257,19 +4415,18 @@ def apply_listing_edits(conn: sqlite3.Connection, kind: str, listing_id: int,
     table = _KIND_TABLE[kind]
     allowed = _EDITABLE_FIELDS[kind]
     endpoints = _ENDPOINT_FIELDS.get(kind, ())
-    current = conn.execute("SELECT * FROM %s WHERE id=?" % table,
-                           (listing_id,)).fetchone()
-    if current is None:
-        return [], []
-    ownership = conn.execute(
-        "SELECT * FROM domain_ownership WHERE id=? AND user_id=? "
-        "AND status='verified' AND scope_path IS NULL",
-        (ownership_id, user_id),
-    ).fetchone()
-    primary_url = current[_PRIMARY_ENDPOINT[kind]]
-    current_host, _ = _host_and_path(primary_url or "")
-    if ownership is None or ownership["host"] != current_host:
-        raise PermissionError("verified ownership changed before the edit")
+    current, ownership = owner_edit_state(conn, kind, listing_id, user_id, ownership_id)
+    from . import owner_declarations
+    declaration_changes = {key: value for key, value in changes.items()
+                           if kind == "x402" and key in owner_declarations.FIELDS}
+    if declaration_changes:
+        candidate = dict(current)
+        if isinstance(changes.get("url"), str) and changes["url"].strip():
+            candidate["url"] = _exact_endpoint(changes["url"].strip())
+        try:
+            owner_declarations.prepare(candidate, declaration_changes)
+        except (owner_declarations.DeclarationError, ValueError) as exc:
+            return [], [str(exc)]
     hosts = {
         str(row["host"]).lower()
         for row in conn.execute(
@@ -4283,6 +4440,11 @@ def apply_listing_edits(conn: sqlite3.Connection, kind: str, listing_id: int,
     endpoint_changed = False
     for field, value in changes.items():
         if field not in allowed:
+            continue
+        if kind == "x402" and field in owner_declarations.FIELDS:
+            continue
+        if value is not None and not isinstance(value, str):
+            rejected.append("%s must be text" % field)
             continue
         new = (value or "").strip() or None
         old = current[field]
@@ -4343,6 +4505,7 @@ def apply_listing_edits(conn: sqlite3.Connection, kind: str, listing_id: int,
             conn.execute(
                 "DELETE FROM service_paytos WHERE service_id=?", (listing_id,)
             )
+            conn.execute("UPDATE services SET owner_declaration=NULL WHERE id=?", (listing_id,))
     if applied:
         try:
             marked = set(json.loads(current["owner_edited"] or "[]"))
@@ -4351,6 +4514,25 @@ def apply_listing_edits(conn: sqlite3.Connection, kind: str, listing_id: int,
         marked.update(applied)
         conn.execute("UPDATE %s SET owner_edited=? WHERE id=?" % table,
                      (json.dumps(sorted(marked)), listing_id))
+    if declaration_changes:
+        fresh = conn.execute("SELECT * FROM services WHERE id=?", (listing_id,)).fetchone()
+        try:
+            declaration, changed_fields = owner_declarations.prepare(fresh, declaration_changes)
+        except (owner_declarations.DeclarationError, ValueError) as exc:
+            raise MetadataValidationError(str(exc)) from None
+        if changed_fields:
+            previous = owner_declarations.stored(fresh)
+            for field in changed_fields:
+                value = declaration['fields'].get(field)
+                if find_privacy_suppression(conn, kind, {field: _to_json(value)}) is not None:
+                    raise MetadataValidationError("declaration references operator-removed data")
+                old = previous['fields'].get(field) if previous else None
+                conn.execute("INSERT INTO listing_edits(kind,listing_id,user_id,ownership_id,field,old_value,new_value,applied_at,via) "
+                             "VALUES(?,?,?,?,?,?,?,?,?)", (kind, listing_id, user_id, ownership_id,
+                             field, _to_json(old), _to_json(value), now, via))
+            conn.execute("UPDATE services SET owner_declaration=? WHERE id=?",
+                         (json.dumps(declaration, ensure_ascii=False), listing_id))
+            applied.extend(changed_fields)
     # 不在此提交：调用方的 db.writer() 负责，内部提交会让调用方无法组合事务。
     return applied, rejected
 

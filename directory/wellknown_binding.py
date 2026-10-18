@@ -14,6 +14,10 @@ class SourceBindingConflict(RuntimeError):
     pass
 
 
+class StaleSourceBinding(RuntimeError):
+    """Proven old discovery relationship; not a failed primary update."""
+
+
 def _reconcile_existing_target(conn, kind, endpoint, binding, target, owners):
     """Repair only an unambiguous pointer after an unowned registry refresh.
 
@@ -40,12 +44,17 @@ def _reconcile_existing_target(conn, kind, endpoint, binding, target, owners):
         raise SourceBindingConflict('wellknown_binding_target_changed')
     db.assert_listing_not_retired(conn, kind, dict(replacement))
     updated = conn.execute(
-        'UPDATE wellknown_endpoint_sources SET listing_id=? '
+        "UPDATE wellknown_endpoint_sources SET listing_id=?,state='active',stale_target_hash=NULL,"
+        'stale_at=NULL,state_changed_at=?,stale_transition_id=NULL '
         'WHERE kind=? AND identity_hash=? AND endpoint_hash=? AND listing_id=?',
-        (replacement['id'], kind, binding['identity_hash'], binding['endpoint_hash'], target['id']),
+        (replacement['id'], int(time.time()), kind, binding['identity_hash'], binding['endpoint_hash'], target['id']),
     )
     if updated.rowcount != 1:
         raise SourceBindingConflict('wellknown_binding_target_changed')
+    conn.execute('UPDATE source_endpoint_warnings SET resolved_at=? '
+                 'WHERE kind=? AND listing_id=? AND identity_hash=? AND old_endpoint_hash=? '
+                 'AND resolved_at IS NULL',
+                 (int(time.time()), kind, target['id'], binding['identity_hash'], binding['endpoint_hash']))
     return replacement
 
 
@@ -67,6 +76,16 @@ def upsert_listing(conn, kind, row):
     if binding:
         target = conn.execute(f'SELECT * FROM {table} WHERE id=?', (binding['listing_id'],)).fetchone()
         if target is None or db._exact_endpoint(target['endpoint_url']) != endpoint:
+            from .source_lifecycle import stale_proof
+            if stale_proof(conn, kind, binding):
+                candidates = [candidate for candidate in conn.execute(
+                    f'SELECT endpoint_url FROM {table} WHERE endpoint_url LIKE ? COLLATE NOCASE',
+                    (db._endpoint_authority(endpoint) + '%',),
+                ) if db._exact_endpoint(candidate['endpoint_url']) == endpoint]
+                if not candidates:
+                    raise StaleSourceBinding('wellknown_stale_endpoint')
+                # A genuinely independent old endpoint still exists: use the
+                # original exact-target reconciliation/ambiguity guards.
             target = _reconcile_existing_target(conn, kind, endpoint, binding, target, owners)
     if target is None:
         matching = [o for o in owners if db._exact_endpoint(o['endpoint_url']) == endpoint]
