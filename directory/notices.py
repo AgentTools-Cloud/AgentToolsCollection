@@ -183,6 +183,22 @@ def publish_mail_result(purpose, state, event_id):
                  data={'smtp_accepted': state == 'accepted', 'not_sent': state == 'skipped'})
 
 
+def record_lifecycle(conn, action, request_id):
+    labels = {'retire': ('Listing withdrawn', 'A verified operator withdrew one listing.'),
+              'restore': ('Listing restored', 'An operator restored one listing after current control and service verification.'),
+              'merge': ('Listings merged', 'Both owned hosts were rechecked; one listing was retired in favor of its verified primary. No reputation was transferred.'),
+              'migration': ('Listing migration requested', 'One migration request awaits staff review. No listings or reputation were merged.')}
+    title, summary = labels[action]
+    now = int(time.time())
+    key = hashlib.sha256(('owner-lifecycle:' + request_id).encode()).hexdigest()
+    conn.execute('INSERT OR IGNORE INTO internal_notices(event_key,category,severity,title,summary,'
+                 'data_json,first_seen,last_seen) VALUES(?,?,?,?,?,?,?,?)',
+                 (key, 'owner_lifecycle', 'info', title, summary, '{"operation_count":1}', now, now))
+    conn.execute('DELETE FROM internal_notices WHERE last_seen<?', (now - RETENTION_DAYS * 86400,))
+    conn.execute('DELETE FROM internal_notices WHERE id NOT IN '
+                 '(SELECT id FROM internal_notices ORDER BY last_seen DESC,id DESC LIMIT ?)', (MAX_HISTORY,))
+
+
 def capture_legacy_admin(subject, text):
     # Defensive interception of old direct _send(ADMIN_EMAIL, ...). Do not
     # carry arbitrary email bodies into the private feed or back to SMTP.

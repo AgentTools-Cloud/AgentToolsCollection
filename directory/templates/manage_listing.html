@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+{% block title %}Manage {{ state.name }} - Agent Tools{% endblock %}
+{% block robots %}<meta name="robots" content="noindex,nofollow">{% endblock %}
+{% block content %}
+<div class="max-w-2xl min-w-0">
+  <a href="{{ back_url }}" class="text-sm text-slate-500 hover:text-slate-800">&larr; Listing</a>
+  <h1 class="text-xl font-semibold mt-3 break-words">{{ state.name }}</h1>
+  <p class="text-sm text-slate-500 mt-2 break-all">{{ state.host }} &middot; {{ state.status|capitalize }}</p>
+  {% if error %}<p role="alert" class="text-sm text-red-700 mt-4 break-words">{{ error }}</p>{% endif %}
+  {% if not state.operations_enabled %}<p role="status" class="text-sm text-slate-600 mt-4">Listing management is temporarily unavailable.</p>{% endif %}
+
+  <section class="mt-7 border-t border-slate-200 pt-5">
+    <h2 class="font-semibold text-sm">{{ 'Restore listing' if state.status == 'retired' else 'Withdraw listing' }}</h2>
+    <form method="post" class="mt-4 flex flex-col gap-4">
+      <input type="hidden" name="version" value="{{ state.version }}">
+      <input type="hidden" name="request_id" value="{{ request_id }}">
+      <input type="hidden" name="csrf_token" value="{{ state.csrf_token }}">
+      <input type="hidden" name="action" value="{{ 'restore' if state.status == 'retired' else 'retire' }}">
+      <label class="flex items-start gap-2 text-sm">
+        <input type="checkbox" name="confirm" value="yes" required class="mt-1 shrink-0">
+        <span>{{ 'Restore this listing after current verification.' if state.status == 'retired' else 'Remove this listing from the public directory.' }}</span>
+      </label>
+      <button{% if not state.operations_enabled %} disabled{% endif %} class="self-start rounded border px-4 py-2 text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed {{ 'border-blue-600 text-blue-700' if state.status == 'retired' else 'border-red-600 text-red-700' }}">
+        {{ 'Restore listing' if state.status == 'retired' else 'Withdraw listing' }}
+      </button>
+    </form>
+  </section>
+
+  {% if state.status == 'active' %}
+  {% if state.merge_targets %}
+  <section class="mt-7 border-t border-slate-200 pt-5">
+    <h2 class="font-semibold text-sm">Merge into a primary listing</h2>
+    <form method="post" class="mt-4 flex flex-col gap-4">
+      <input type="hidden" name="version" value="{{ state.version }}">
+      <input type="hidden" name="request_id" value="{{ request_id }}">
+      <input type="hidden" name="csrf_token" value="{{ state.csrf_token }}">
+      <input type="hidden" name="action" value="merge">
+      <label class="text-sm">
+        <span class="block font-medium mb-1">Primary listing to keep</span>
+        <select name="merge_target" required class="w-full min-w-0 rounded border border-slate-300 px-3 py-2 text-sm">
+          <option value="">Select a listing</option>
+          {% for target in state.merge_targets %}
+          <option value="{{ target.slug }}:{{ target.version }}">{{ target.name }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label class="flex items-start gap-2 text-sm">
+        <input type="checkbox" name="confirm" value="yes" required class="mt-1 shrink-0">
+        <span>These entries describe the same service. Retire this entry and retain the selected primary.</span>
+      </label>
+      <button{% if not state.operations_enabled %} disabled{% endif %} class="self-start rounded border border-blue-600 text-blue-700 px-4 py-2 text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed">Merge listings</button>
+    </form>
+  </section>
+  {% endif %}
+  <section class="mt-7 border-t border-slate-200 pt-5">
+    <h2 class="font-semibold text-sm">Migration review</h2>
+    <form method="post" class="mt-4 flex flex-col gap-4">
+      <input type="hidden" name="version" value="{{ state.version }}">
+      <input type="hidden" name="request_id" value="{{ request_id }}">
+      <input type="hidden" name="csrf_token" value="{{ state.csrf_token }}">
+      <input type="hidden" name="action" value="migration">
+      <label class="text-sm">
+        <span class="block font-medium mb-1">Old listing slug</span>
+        <input type="text" name="source_slug" required maxlength="180" pattern="[a-z0-9_-]+"
+               class="w-full rounded border border-slate-300 px-3 py-2 mono text-sm">
+      </label>
+      <label class="flex items-start gap-2 text-sm">
+        <input type="checkbox" name="confirm" value="yes" required class="mt-1 shrink-0">
+        <span>Submit this relationship for review, with this listing retained as the primary.</span>
+      </label>
+      <button{% if not state.operations_enabled %} disabled{% endif %} class="self-start rounded border border-blue-600 text-blue-700 px-4 py-2 text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed">Request review</button>
+    </form>
+  </section>
+  {% endif %}
+
+  {% if state.requests %}
+  <section class="mt-7 border-t border-slate-200 pt-5">
+    <h2 class="font-semibold text-sm mb-3">Recent requests</h2>
+    <ul class="divide-y divide-slate-200 text-sm">
+      {% for entry in state.requests %}
+      <li class="py-3 break-words">{{ entry.status|capitalize }}{% if entry.target_slug %} &middot; {{ entry.slug }} &rarr; {{ entry.target_slug }}{% endif %}</li>
+      {% endfor %}
+    </ul>
+  </section>
+  {% endif %}
+</div>
+{% endblock %}

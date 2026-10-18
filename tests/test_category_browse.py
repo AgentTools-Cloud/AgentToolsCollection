@@ -36,6 +36,7 @@ class CategoryBrowseTests(unittest.TestCase):
         self.rows = [{'category': f'tag-{i:04d}', 'count': 1} for i in range(151)]
         self.db = SimpleNamespace(**{n: Mock(return_value=self.rows) for n in
                                      ('list_categories', 'mcp_categories', 'a2a_categories')})
+        self.db.get_meta = Mock(return_value='')
         templates = Jinja2Templates(directory=str(ROOT / 'directory/templates'))
         templates.env.globals.update(build_version='test', current_user=lambda r: None)
         ns = dict(closing=closing, threading=threading, time=time, urlencode=urlencode,
@@ -51,7 +52,7 @@ class CategoryBrowseTests(unittest.TestCase):
         for i in range(151):
             self.assertEqual(sum(f'/a2a?q=tag-{i:04d}' in x for x in bodies), 1)
         self.db.a2a_categories.assert_called_once()
-        self.conn.close.assert_called_once()
+        self.assertEqual(self.conn.close.call_count, 3)
 
     def test_x402_correct_destination_and_encoding(self):
         self.db.list_categories.return_value = [{'category': 'a&b /中文', 'count': 3}]

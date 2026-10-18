@@ -20,13 +20,14 @@ import os
 import secrets
 import time
 from urllib.parse import urlencode, urlsplit
+import uuid
 
 import httpx
 from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from starlette.concurrency import run_in_threadpool
 
-from . import db, limits, owner_declarations
+from . import db, limits, owner_declarations, owner_lifecycle, ownership
 
 log = logging.getLogger(__name__)
 
@@ -298,6 +299,7 @@ def _account_context(request: Request, user, issued=None, error=None) -> dict:
             (user["id"],))]
         verified = [r for r in rows if r["status"] == "verified"]
         counts = _listing_counts(conn, [r["host"] for r in verified])
+        managed = owner_lifecycle.managed_listings(conn, user["id"])
     for r in verified:
         r["verified_ago"] = _ago(r["verified_at"])
         r["listing_count"] = counts.get(r["host"], 0)
@@ -306,6 +308,7 @@ def _account_context(request: Request, user, issued=None, error=None) -> dict:
         "user": user,
         "verified": verified,
         "pending": [r for r in rows if r["status"] == "pending"],
+        "managed_listings": managed,
         "issued": issued,
         "error": error,
     }
@@ -531,6 +534,7 @@ def _edit_context(request, kind, slug, user, row, host, saved=None, error=None):
         "interface_fields": interface_fields, "declaration": declaration,
         "declaration_blocker": owner_declarations.BLOCKERS.get((declaration or {}).get("blocker")),
         "verify_url": "/listings/%s/%s/verify" % (kind, slug),
+        "lifecycle_url": "/listings/%s/%s/manage" % (kind, slug),
         "back_url": _KIND_LOOKUP[kind][1] % slug,
     }
 
@@ -617,3 +621,146 @@ def whoami(request: Request):
         payload = {"signed_in": True, "login": user["login"],
                    "avatar_url": user["avatar_url"], "hosts": hosts}
     return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+
+
+def lifecycle_state(request, kind, slug, user):
+    try:
+        with db.connect(read_only=True) as conn:
+            state = owner_lifecycle.state(conn, kind, slug, user["id"])
+    except (owner_lifecycle.LifecycleBlocked, ownership.OwnershipBlocked) as exc:
+        lifecycle_error(exc)
+    if request.cookies.get(SESSION_COOKIE):
+        state["csrf_token"] = sign({"purpose": "lifecycle", "uid": user["id"],
+                                    "kind": kind, "slug": slug, "version": state["version"]}, 600)
+    return state
+
+
+def lifecycle_error(exc):
+    code = getattr(exc, "code", "operation_conflict")
+    messages = {
+        "control_unavailable": "The published verification marker could not be confirmed. No changes were made; try again later.",
+        "not_verified_owner": "This account does not hold a verified claim covering the listing.",
+        "claim_changed": "The domain claim changed. Refresh the listing before retrying.",
+        "credential_changed": "The API key was revoked or changed during the request.",
+        "proof_expired": "The control check expired. Refresh the listing before retrying.",
+        "listing_changed": "The listing changed. Refresh this page before retrying.",
+        "service_unverified": "The service could not be verified. The listing remains withdrawn.",
+        "shared_endpoint": "An endpoint or source identity is shared with another listing. Staff review is required.",
+        "merge_target_in_use": "Other merged listings point to this primary. Restore those listings before withdrawing it.",
+        "staff_review_required": "This withdrawal requires staff review and cannot be restored here.",
+        "lifecycle_unavailable": "Listing management is temporarily unavailable. No changes were made.",
+        "idempotency_conflict": "This request identifier belongs to another operation. Refresh before retrying.",
+    }
+    status = (503 if code in ("control_unavailable", "lifecycle_unavailable") else
+              409 if code == "proof_expired" else 403 if isinstance(exc, ownership.OwnershipBlocked) else
+              404 if code == "not_found" else 422 if code.startswith("invalid_")
+              or code == "version_required" else 409)
+    raise HTTPException(status, {"error": code, "message": messages.get(code, "The operation was not applied.")},
+                        headers={"Cache-Control": "private, no-store"}) from None
+
+
+def _lifecycle_request_guard(request, user, kind, slug, version, csrf_token):
+    credential_id = None
+    if request.cookies.get(SESSION_COOKIE):
+        _require_same_origin_write(request)
+        payload = unsign(csrf_token)
+        if not payload or any(payload.get(key) != value for key, value in {
+                "purpose": "lifecycle", "uid": user["id"], "kind": kind,
+                "slug": slug, "version": version}.items()):
+            raise HTTPException(403, {"error": "csrf_invalid"})
+    else:
+        scheme, _, raw = request.headers.get("authorization", "").partition(" ")
+        if scheme.lower() == "bearer":
+            with db.connect(read_only=True) as conn:
+                key = db.api_key_row(conn, raw.strip())
+            if key is None or int(key["user_id"]) != int(user["id"]):
+                raise HTTPException(401, {"error": "invalid_api_key"})
+            credential_id = int(key["id"])
+    for identity, scope, windows in (
+            ("owner:%s" % user["id"], "owner-lifecycle", (("minute", 2, 60), ("day", 20, 86400))),
+            (limits.client_ip_from_request(request), "owner-lifecycle-ip", (("minute", 6, 60), ("day", 60, 86400)))):
+        state = limits.check_ip_limits(identity, scope, windows, db_path=db.DEFAULT_DB_PATH)
+        if state:
+            limits.raise_rate_limited(state, "Too many listing management requests. Try again later.")
+    return credential_id
+
+
+async def perform_lifecycle(request, user, kind, slug, action, version, request_id,
+                            confirmed, source_slug=None, csrf_token=None,
+                            target_slug=None, target_version=None):
+    if confirmed is not True:
+        raise HTTPException(422, {"error": "confirmation_required"})
+    credential_id = _lifecycle_request_guard(request, user, kind, slug, version, csrf_token)
+    with db.connect(read_only=True) as conn:
+        try:
+            owner_lifecycle.state(conn, kind, slug, user["id"])
+        except (owner_lifecycle.LifecycleBlocked, ownership.OwnershipBlocked) as exc:
+            lifecycle_error(exc)
+    operations = {"retire": owner_lifecycle.retire, "restore": owner_lifecycle.restore,
+                  "migration": owner_lifecycle.request_migration, "merge": owner_lifecycle.merge}
+    if action not in operations:
+        raise HTTPException(404, {"error": "not_found"})
+    arguments = (kind, slug, user["id"], version, request_id)
+    if action == "migration":
+        arguments = (kind, slug, user["id"], source_slug, version, request_id)
+    if action == "merge":
+        arguments = (kind, slug, user["id"], version, request_id, target_slug, target_version)
+    try:
+        result = await run_in_threadpool(operations[action], *arguments, credential_id=credential_id)
+    except (owner_lifecycle.LifecycleBlocked, ownership.OwnershipBlocked) as exc:
+        lifecycle_error(exc)
+    except db.RetiredListingError:
+        raise HTTPException(409, {"error": "listing_changed"}) from None
+    except ValueError:
+        raise HTTPException(409, {"error": "operation_conflict"}) from None
+    return result
+
+
+@router.get("/listings/{kind}/{slug}/manage", include_in_schema=False)
+def manage_listing(request: Request, kind: str, slug: str):
+    from .routes import TEMPLATES
+    user = current_user(request)
+    if user is None:
+        return RedirectResponse("/auth/github/login?next=/listings/%s/%s/manage" % (kind, slug),
+                                status_code=302, headers={"Cache-Control": "private, no-store"})
+    state = lifecycle_state(request, kind, slug, user)
+    if "csrf_token" not in state:
+        state["csrf_token"] = sign({"purpose": "lifecycle", "uid": user["id"],
+                                   "kind": kind, "slug": slug, "version": state["version"]}, 600)
+    return TEMPLATES.TemplateResponse(request, "manage_listing.html", {
+        "request": request, "user": user, "state": state, "request_id": uuid.uuid4().hex,
+        "back_url": _KIND_LOOKUP[kind][1] % slug},
+        headers={"Cache-Control": "private, no-store", "X-Robots-Tag": "noindex, nofollow"})
+
+
+@router.post("/listings/{kind}/{slug}/manage", include_in_schema=False)
+async def manage_listing_action(request: Request, kind: str, slug: str):
+    user = current_user(request)
+    if user is None:
+        raise HTTPException(401, "Sign in first")
+    form = await request.form()
+    if not request.cookies.get(SESSION_COOKIE):
+        raise HTTPException(403, {"error": "cookie_session_required"})
+    target_slug, target_version = None, None
+    if form.get("action") == "merge":
+        selected = str(form.get("merge_target") or "").split(":", 1)
+        if len(selected) == 2:
+            target_slug, target_version = selected
+    try:
+        await perform_lifecycle(request, user, kind, slug, form.get("action"), form.get("version"),
+                                form.get("request_id"), form.get("confirm") == "yes",
+                                form.get("source_slug"), form.get("csrf_token"),
+                                target_slug, target_version)
+    except HTTPException as exc:
+        if exc.status_code not in (409, 422, 429, 503):
+            raise
+        from .routes import TEMPLATES
+        state = lifecycle_state(request, kind, slug, user)
+        detail = exc.detail if isinstance(exc.detail, dict) else {"message": exc.detail}
+        return TEMPLATES.TemplateResponse(request, "manage_listing.html", {
+            "request": request, "user": user, "state": state, "request_id": uuid.uuid4().hex,
+            "error": detail.get("message") or detail.get("error"),
+            "back_url": _KIND_LOOKUP[kind][1] % slug}, status_code=exc.status_code,
+            headers={"Cache-Control": "private, no-store", "X-Robots-Tag": "noindex, nofollow"})
+    return RedirectResponse("/listings/%s/%s/manage" % (kind, slug), status_code=303,
+                            headers={"Cache-Control": "private, no-store"})

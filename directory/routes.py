@@ -113,10 +113,13 @@ def _home_payload():
     # Held across the rebuild so a burst on an expired entry recomputes once
     # rather than once per waiting thread.
     with _home_cache_lock:
-        cached = _home_cache["payload"]
-        if cached is not None and now - _home_cache["at"] < _HOME_CACHE_TTL:
-            return cached
-        with _conn() as c:
+        with closing(_conn()) as c:
+            c.execute("BEGIN")
+            revision = db.get_meta(c, "owner_catalog_revision", "")
+            cached = _home_cache["payload"]
+            if (cached is not None and now - _home_cache["at"] < _HOME_CACHE_TTL
+                    and _home_cache.get("revision", "") == revision):
+                return cached
             payload = {
                 "stats": db.stats(c),
                 "mcp_stats": db.mcp_stats(c),
@@ -127,6 +130,7 @@ def _home_payload():
                 "grade_mix": db.grade_mix_all(c),
             }
         _home_cache["at"], _home_cache["payload"] = now, payload
+        _home_cache["revision"] = revision
         return payload
 
 
@@ -191,6 +195,8 @@ def _retired_response(request: Request, kind: str, slug: str):
         return suppressed
     with _conn() as conn:
         retired = db.get_retired_listing(conn, kind, slug)
+        if retired:
+            retired["replacement"] = directory_auth.owner_lifecycle.replacement(conn, kind, retired)
     if retired is None:
         return None
     retired["retired_display"] = time.strftime(
@@ -198,8 +204,16 @@ def _retired_response(request: Request, kind: str, slug: str):
     return TEMPLATES.TemplateResponse(
         request, "retired.html", {"request": request, "retired": retired},
         status_code=410,
-        headers={"X-Robots-Tag": "noindex, nofollow"},
+        headers={"X-Robots-Tag": "noindex, nofollow", "Cache-Control": "private, no-store",
+                 "CDN-Cache-Control": "no-store", "Cloudflare-CDN-Cache-Control": "no-store"},
     )
+
+
+def _owned_detail_headers(row):
+    if row.get("owner_verified"):
+        return {"Cache-Control": "private, no-store", "CDN-Cache-Control": "no-store",
+                "Cloudflare-CDN-Cache-Control": "no-store"}
+    return {}
 
 
 @router.get("/services/{slug}", response_class=HTMLResponse, include_in_schema=False)
@@ -214,7 +228,8 @@ def service_detail(request: Request, slug: str):
     return TEMPLATES.TemplateResponse(request, "service.html", {
         "request": request, "svc": svc, "rating": db.score_breakdown(svc),
         "call_template": cards.build_call_template(svc),
-        "interface_declaration": directory_auth.owner_declarations.public_state(svc)})
+        "interface_declaration": directory_auth.owner_declarations.public_state(svc)},
+        headers=_owned_detail_headers(svc))
 
 
 _CATEGORY_PAGE_SIZE = 60
@@ -231,14 +246,17 @@ _CATEGORY_KINDS = {
 def _category_rows(kind: str):
     # Three aggregate entries per worker, never one cache entry per query.
     with _category_cache_lock:
-        cached = _category_cache.get(kind)
-        if cached and time.monotonic() - cached[0] < _CATEGORY_CACHE_TTL:
-            return cached[1]
-        loader = {"x402": db.list_categories, "mcp": db.mcp_categories,
-                  "a2a": db.a2a_categories}[kind]
         with closing(_conn()) as c:
+            c.execute("BEGIN")
+            revision = db.get_meta(c, "owner_catalog_revision", "")
+            cached = _category_cache.get(kind)
+            if (cached and time.monotonic() - cached[0] < _CATEGORY_CACHE_TTL
+                    and len(cached) > 2 and cached[2] == revision):
+                return cached[1]
+            loader = {"x402": db.list_categories, "mcp": db.mcp_categories,
+                      "a2a": db.a2a_categories}[kind]
             rows = sorted(loader(c), key=lambda r: (-r["count"], r["category"]))
-        _category_cache[kind] = (time.monotonic(), rows)
+        _category_cache[kind] = (time.monotonic(), rows, revision)
         return rows
 
 
@@ -343,7 +361,8 @@ def mcp_detail(request: Request, slug: str):
         if retired is not None:
             return retired
         raise HTTPException(404, "mcp server not found")
-    return TEMPLATES.TemplateResponse(request, "mcp_server.html", {"request": request, "m": m})
+    return TEMPLATES.TemplateResponse(request, "mcp_server.html", {"request": request, "m": m},
+                                     headers=_owned_detail_headers(m))
 
 
 @router.get("/_partials/mcp", response_class=HTMLResponse, include_in_schema=False)
@@ -404,7 +423,8 @@ def a2a_detail(request: Request, slug: str):
         if retired is not None:
             return retired
         raise HTTPException(404, "a2a agent not found")
-    return TEMPLATES.TemplateResponse(request, "a2a_agent.html", {"request": request, "a": a})
+    return TEMPLATES.TemplateResponse(request, "a2a_agent.html", {"request": request, "a": a},
+                                     headers=_owned_detail_headers(a))
 
 
 @router.get("/_partials/a2a", response_class=HTMLResponse, include_in_schema=False)
@@ -1317,6 +1337,65 @@ async def api_verify_listing(request: Request, kind: str, slug: str):
     result = await directory_auth.verify_owner_listing(request, kind, row, user, owner)
     return JSONResponse(result, status_code=422 if result["status"] == "blocked" else 200,
                         headers={"Cache-Control": "private, no-store"})
+
+
+class LifecyclePayload(BaseModel):
+    model_config = {"extra": "forbid"}
+    version: str = Field(pattern=r"^[a-f0-9]{64}$")
+    confirm: bool = Field(strict=True)
+    source_slug: str | None = Field(default=None, pattern=r"^[a-z0-9_-]{1,180}$")
+
+
+class MergePayload(BaseModel):
+    model_config = {"extra": "forbid"}
+    version: str = Field(pattern=r"^[a-f0-9]{64}$")
+    target_version: str = Field(pattern=r"^[a-f0-9]{64}$")
+    target_slug: str = Field(pattern=r"^[a-z0-9_-]{1,180}$")
+    confirm: bool = Field(strict=True)
+
+
+@router.get("/api/v1/listings/{kind}/{slug}/lifecycle", tags=["ownership"])
+async def api_lifecycle_state(request: Request, kind: str, slug: str):
+    user = _require_api_user(request)
+    return JSONResponse(directory_auth.lifecycle_state(request, kind, slug, user),
+                        headers={"Cache-Control": "private, no-store"})
+
+
+@router.post("/api/v1/listings/{kind}/{slug}/retire", tags=["ownership"])
+async def api_retire_listing(request: Request, kind: str, slug: str, payload: LifecyclePayload):
+    user = _require_api_user(request)
+    result = await directory_auth.perform_lifecycle(request, user, kind, slug, "retire",
+        payload.version, request.headers.get("idempotency-key"), payload.confirm,
+        csrf_token=request.headers.get("x-csrf-token"))
+    return JSONResponse(result, headers={"Cache-Control": "private, no-store"})
+
+
+@router.post("/api/v1/listings/{kind}/{slug}/restore", tags=["ownership"])
+async def api_restore_listing(request: Request, kind: str, slug: str, payload: LifecyclePayload):
+    user = _require_api_user(request)
+    result = await directory_auth.perform_lifecycle(request, user, kind, slug, "restore",
+        payload.version, request.headers.get("idempotency-key"), payload.confirm,
+        csrf_token=request.headers.get("x-csrf-token"))
+    return JSONResponse(result, headers={"Cache-Control": "private, no-store"})
+
+
+@router.post("/api/v1/listings/{kind}/{slug}/migration", tags=["ownership"], status_code=202)
+async def api_migration_request(request: Request, kind: str, slug: str, payload: LifecyclePayload):
+    user = _require_api_user(request)
+    result = await directory_auth.perform_lifecycle(request, user, kind, slug, "migration",
+        payload.version, request.headers.get("idempotency-key"), payload.confirm,
+        source_slug=payload.source_slug, csrf_token=request.headers.get("x-csrf-token"))
+    return JSONResponse(result, status_code=202, headers={"Cache-Control": "private, no-store"})
+
+
+@router.post("/api/v1/listings/{kind}/{slug}/merge", tags=["ownership"])
+async def api_merge_listing(request: Request, kind: str, slug: str, payload: MergePayload):
+    user = _require_api_user(request)
+    result = await directory_auth.perform_lifecycle(request, user, kind, slug, "merge",
+        payload.version, request.headers.get("idempotency-key"), payload.confirm,
+        csrf_token=request.headers.get("x-csrf-token"), target_slug=payload.target_slug,
+        target_version=payload.target_version)
+    return JSONResponse(result, headers={"Cache-Control": "private, no-store"})
 
 
 @router.post("/api/v1/mcp/submit", tags=["mcp"])
