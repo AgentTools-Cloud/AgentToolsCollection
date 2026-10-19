@@ -15,10 +15,12 @@ if not key:
     raise RuntimeError('Privacy guard unavailable; no notice export')
 os.environ['PRIVACY_SUPPRESSION_KEY'] = key
 from directory import db, notices
+from ops import hub_pending_notice
 
 with closing(db.connect(read_only=True)) as conn:
     conn.execute('PRAGMA query_only=ON')
     conn.execute('BEGIN')
     feed = notices.export_feed(conn)
     conn.rollback()
+feed = hub_pending_notice.merge(feed, hub_pending_notice.pending_row())
 print(json.dumps(feed, ensure_ascii=False, separators=(',', ':')))
