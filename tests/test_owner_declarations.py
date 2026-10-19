@@ -128,14 +128,21 @@ class OwnerDeclarationTests(TemporaryDatabaseTestCase):
         self.assertFalse(applied)
         self.assertTrue(rejected)
 
-    def observe(self, *, price='2000', has_probe=True, extra_response=None):
+    def observe(self, *, price='2000', has_probe=True, extra_response=None, gzip_descriptor=False, openapi=None):
         def handler(request):
             if request.url.path == '/.well-known/x402':
                 entry = {'url': 'https://owned.example/v1/ping', 'method': 'POST'}
                 if has_probe:
                     entry['probe_body'] = {}
-                return httpx.Response(200, json={'resources': [entry]})
+                body = json.dumps({'resources': [entry]}).encode()
+                if gzip_descriptor:
+                    import gzip
+                    return httpx.Response(200, content=gzip.compress(body), headers={
+                        'Content-Type': 'application/json', 'Content-Encoding': 'gzip'})
+                return httpx.Response(200, content=body, headers={'Content-Type': 'application/json'})
             if request.url.path == '/openapi.json':
+                if openapi is not None:
+                    return httpx.Response(200, json=openapi)
                 return httpx.Response(404)
             if request.url.path == '/v1/ping':
                 self.assertEqual(request.method, 'POST')
@@ -151,6 +158,16 @@ class OwnerDeclarationTests(TemporaryDatabaseTestCase):
         with patch.object(declarations.public_http, 'client', side_effect=lambda **kwargs:
                 httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=False)):
             return declarations.observe(self.row())
+
+    def test_compressed_descriptor_is_decoded_once(self):
+        self.edit({'method': 'POST', 'price_usdc': 0.002})
+        result = self.observe(gzip_descriptor=True)
+        self.assertEqual(result['status'], 'verified', result)
+
+    def test_openapi_between_512kb_and_2mb_is_accepted(self):
+        self.edit({'method': 'POST', 'price_usdc': 0.002})
+        result = self.observe(openapi={'openapi': '3.0.0', 'paths': {}, 'x-pad': 'x' * (800 * 1024)})
+        self.assertEqual(result['status'], 'verified', result)
 
     def test_primary_post_requires_explicit_empty_probe(self):
         self.edit({'method': 'POST', 'price_usdc': 0.002})
