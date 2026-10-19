@@ -712,6 +712,7 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
             except sqlite3.OperationalError as e:
                 if "duplicate column" not in str(e).lower():
                     raise
+        backfill_key_user_logins(c)
         _migrate_mcp_fts_tools(c)
         from . import collisions
 
@@ -4312,6 +4313,17 @@ def sync_owner_verified(conn: sqlite3.Connection) -> dict[str, int]:
         out[table] = len(marked)
     conn.commit()
     return out
+
+def key_user_login(user_id: int) -> str:
+    return "agent-%d" % user_id
+
+
+def backfill_key_user_logins(conn: sqlite3.Connection) -> None:
+    # Key-minted accounts have no provider login; give them a stable handle.
+    conn.execute(
+        "UPDATE users SET login='agent-' || id "
+        "WHERE provider='domain' AND (login IS NULL OR login='')")
+
 
 def upsert_user(conn: sqlite3.Connection, provider: str, provider_uid: str,
                 login: str | None = None, avatar_url: str | None = None,
