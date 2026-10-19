@@ -88,6 +88,15 @@ CREATE TABLE IF NOT EXISTS wellknown_endpoint_sources (
     stale_transition_id INTEGER,
     PRIMARY KEY(kind, identity_hash, endpoint_hash)
 );
+CREATE TABLE IF NOT EXISTS wellknown_reviewed_aliases (
+    kind TEXT NOT NULL,
+    identity_hash TEXT NOT NULL,
+    endpoint_hash TEXT NOT NULL,
+    listing_id INTEGER NOT NULL,
+    reviewed_at INTEGER NOT NULL,
+    last_seen INTEGER,
+    PRIMARY KEY(kind, identity_hash, endpoint_hash)
+);
 CREATE TABLE IF NOT EXISTS listing_endpoint_observations (
     kind TEXT NOT NULL, listing_id INTEGER NOT NULL, source TEXT NOT NULL,
     identity_hash TEXT NOT NULL, endpoint_hash TEXT NOT NULL,

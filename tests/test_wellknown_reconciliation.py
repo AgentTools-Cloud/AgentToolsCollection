@@ -144,3 +144,48 @@ class WellknownReconciliationTests(TemporaryDatabaseTestCase):
         self.seed("mcp", _row("mcp", "versions-occupant", second["endpoint_url"], source="manual"))
         self.ingest_wellknown("mcp", [dict(second, description="new successful content")])
         self.assertEqual(sum(issue["resolved_at"] is None for issue in self.issues()), 1)
+
+
+class ReviewedAliasTests(TemporaryDatabaseTestCase):
+    def alias(self, kind, row, lid):
+        from directory import wellknown_binding
+        with db.writer() as conn:
+            wellknown_binding.record_reviewed_alias(conn, kind, row["source_id"], row["endpoint_url"], lid)
+
+    def test_reviewed_alias_resolves_hold_without_touching_listings(self):
+        for kind in ("mcp", "a2a"):
+            with self.subTest(kind=kind):
+                first = _row(kind, f"alias-first-{kind}", source="wellknown", source_id=f"alias-{kind}")
+                _, lid = self.bind(kind, first)
+                second = dict(first, endpoint_url=f"https://alias-alt-{kind}.example/{kind}")
+                self.ingest_wellknown(kind, [second])
+                held = [i for i in self.issues() if i["kind"] == kind and i["resolved_at"] is None]
+                self.assertEqual(len(held), 1)
+                before, sources, bindings = self.listings(kind), self.sources(), self.bindings(kind)
+                self.alias(kind, second, lid)
+                self.assert_result(self.ingest_wellknown(kind, [second]), updated=1)
+                self.assert_result(self.ingest_wellknown(kind, [second]), updated=1)
+                self.assertEqual(self.listings(kind), before)
+                self.assertEqual(self.sources(), sources)
+                self.assertEqual(self.bindings(kind), bindings)
+                self.assertFalse([i for i in self.issues() if i["kind"] == kind and i["resolved_at"] is None])
+
+    def test_alias_is_scoped_to_exact_endpoint(self):
+        first = _row("mcp", "scoped-first", source="wellknown", source_id="scoped")
+        _, lid = self.bind("mcp", first)
+        second = dict(first, endpoint_url="https://scoped-second.example/mcp")
+        third = dict(first, endpoint_url="https://scoped-third.example/mcp")
+        self.alias("mcp", second, lid)
+        self.assert_result(self.ingest_wellknown("mcp", [third]),
+                           errors=["source binding held: wellknown_new_endpoint_requires_review"])
+
+    def test_alias_to_deleted_listing_falls_back_to_hold(self):
+        first = _row("mcp", "gone-first", source="wellknown", source_id="gone")
+        _, lid = self.bind("mcp", first)
+        second = dict(first, endpoint_url="https://gone-second.example/mcp")
+        other = self.seed("mcp", _row("mcp", "gone-target", source="manual"))
+        self.alias("mcp", second, other)
+        with db.writer() as conn:
+            conn.execute("DELETE FROM mcp_servers WHERE id=?", (other,))
+        self.assert_result(self.ingest_wellknown("mcp", [second]),
+                           errors=["source binding held: wellknown_new_endpoint_requires_review"])
