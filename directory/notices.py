@@ -20,6 +20,8 @@ RETENTION_DAYS = 30
 MAX_HISTORY = 1000
 SEVERITIES = {'info', 'warning', 'error'}
 KINDS = {'x402': 'services', 'mcp': 'mcp_servers', 'a2a': 'a2a_agents'}
+# Removed sources keep their history in crawl_runs but are no longer crawled.
+RETIRED_CRAWL_SOURCES = {'mcp:mcp-catalog', 'mcp:pulsemcp'}
 
 
 def safe_text(value, limit=240):
@@ -288,7 +290,7 @@ def _active_rows(conn):
         "SELECT * FROM crawl_runs WHERE status<>'running' ORDER BY COALESCE(finished_at,started_at) DESC,id DESC")
     seen = set()
     for row in latest:
-        if row['source'] in seen:
+        if row['source'] in seen or row['source'] in RETIRED_CRAWL_SOURCES:
             continue
         seen.add(row['source'])
         if row['status'] not in ('error', 'partial'):
