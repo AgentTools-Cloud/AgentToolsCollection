@@ -58,10 +58,14 @@ check("listing_edits.via is migrated onto an existing database", "via" in cols)
 ownership.probe = lambda method, host, token: (True, "stubbed")
 HOST = "agent-tools.cloud"
 owner_key = c.post("/api/v1/keys", json={"name": "owner"}).json()["api_key"]
-_kid, _klogin = raw().execute(
-    "SELECT u.id, u.login FROM users u JOIN api_keys k ON k.user_id=u.id "
+_kpuid, _klogin = raw().execute(
+    "SELECT u.provider_uid, u.login FROM users u JOIN api_keys k ON k.user_id=u.id "
     "ORDER BY k.id DESC LIMIT 1").fetchone()
-check("a minted key gets a placeholder login", _klogin == "agent-%d" % _kid, _klogin)
+check("a minted key gets a hashed placeholder login",
+      _klogin == db.key_user_login(_kpuid) and len(_klogin) == 18, _klogin)
+check("no key-minted login exposes the sequential id",
+      raw().execute("SELECT count(*) FROM users WHERE provider='domain' "
+                    "AND login='agent-' || id").fetchone()[0] == 0)
 check("no key-minted user is left without a login",
       raw().execute("SELECT count(*) FROM users WHERE provider='domain' "
                     "AND (login IS NULL OR login='')").fetchone()[0] == 0)
