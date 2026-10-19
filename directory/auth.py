@@ -41,6 +41,9 @@ SESSION_COOKIE = "atc_session"
 STATE_COOKIE = "atc_oauth_state"
 SESSION_MAX_AGE = 30 * 86400
 STATE_MAX_AGE = 600
+# Separate audience so a hub-readable credential can never act as a main-site session.
+HUB_COOKIE = "atc_hub"
+HUB_AUDIENCE = "hub.agent-tools.cloud"
 
 _TIMEOUT = httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0)
 
@@ -91,12 +94,42 @@ def _set_cookie(resp, name: str, value: str, max_age: int) -> None:
                     httponly=True, secure=True, samesite="lax")
 
 
+def _hub_domain() -> str | None:
+    return os.getenv("HUB_COOKIE_DOMAIN", ".agent-tools.cloud").strip() or None
+
+
+def _set_hub_cookie(resp, user_id: int) -> None:
+    domain = _hub_domain()
+    if not domain:
+        return
+    resp.set_cookie(HUB_COOKIE, sign({"uid": user_id, "aud": HUB_AUDIENCE},
+                                     SESSION_MAX_AGE),
+                    max_age=SESSION_MAX_AGE, path="/", domain=domain,
+                    httponly=True, secure=True, samesite="lax")
+
+
+def _clear_hub_cookie(resp) -> None:
+    domain = _hub_domain()
+    if domain:
+        resp.delete_cookie(HUB_COOKIE, path="/", domain=domain)
+
+
 # ------------------------------------------------------------- helpers
 
 def _safe_next(target: str | None) -> str:
     """Only same-site relative paths, so the callback cannot be used to
-    bounce a visitor to an attacker's site."""
-    if not target or not target.startswith("/") or target.startswith("//"):
+    bounce a visitor to an attacker's site. The hub is the one allowed
+    sibling, so sign-in from it can return there."""
+    if target and target.startswith("https://"):
+        hub = os.getenv("HUB_PUBLIC_URL", "https://hub.agent-tools.cloud").rstrip("/")
+        parts = urlsplit(target)
+        if (hub and parts.scheme == "https" and not parts.username
+                and not parts.password and not parts.port
+                and "%s://%s" % (parts.scheme, parts.netloc) == hub):
+            return target
+        return "/"
+    if not target or not target.startswith("/") or target.startswith("//") \
+            or "\\" in target:
         return "/"
     return target
 
@@ -130,7 +163,7 @@ def _uid_from_bearer(request: Request) -> int | None:
 def current_user(request: Request):
     """The caller's user row, or None. Never implies any edit right."""
     data = unsign(request.cookies.get(SESSION_COOKIE))
-    uid = data.get("uid") if data else None
+    uid = data.get("uid") if data and "aud" not in data else None
     if not uid:
         uid = _uid_from_bearer(request)
     if not uid:
@@ -225,7 +258,26 @@ def github_callback(request: Request, code: str = "", state: str = "",
     resp = RedirectResponse(_safe_next(saved.get("next")), status_code=302)
     _set_cookie(resp, SESSION_COOKIE, sign({"uid": user_id}, SESSION_MAX_AGE),
                 SESSION_MAX_AGE)
+    _set_hub_cookie(resp, user_id)
     resp.delete_cookie(STATE_COOKIE, path="/")
+    return resp
+
+
+@router.get("/auth/hub", include_in_schema=False)
+def hub_handoff(request: Request, next: str = ""):
+    """Grant the hub credential to an already signed-in visitor, or sign in first."""
+    target = _safe_next(next or os.getenv("HUB_PUBLIC_URL",
+                                          "https://hub.agent-tools.cloud") + "/my")
+    user = current_user(request) if unsign(
+        request.cookies.get(SESSION_COOKIE)) else None
+    if user is None:
+        return RedirectResponse(
+            "/auth/github/login?" + urlencode(
+                {"next": "/auth/hub?" + urlencode({"next": target})}),
+            status_code=302)
+    resp = RedirectResponse(target, status_code=302)
+    _set_hub_cookie(resp, int(user["id"]))
+    resp.headers["Cache-Control"] = "private, no-store"
     return resp
 
 
@@ -234,6 +286,7 @@ def github_callback(request: Request, code: str = "", state: str = "",
 def logout(next: str = "/"):
     resp = RedirectResponse(_safe_next(next), status_code=302)
     resp.delete_cookie(SESSION_COOKIE, path="/")
+    _clear_hub_cookie(resp)
     return resp
 
 
