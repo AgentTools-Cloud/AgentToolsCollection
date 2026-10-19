@@ -2331,11 +2331,10 @@ ALL_CRAWLERS = {
 
 # ---------------------------------------------------------------------------
 # MCP server directory sources (standalone MCP directory).
-# PulseMCP and the official MCP registry are public JSON APIs that list
+# The official MCP registry is a public JSON API that lists
 # remotely-callable MCP servers (streamable-http / sse endpoints).
 # ---------------------------------------------------------------------------
 
-_PULSEMCP_API = "https://api.pulsemcp.com/v0beta/servers"
 _MCP_REGISTRY_API = "https://registry.modelcontextprotocol.io/v0/servers"
 _MCP_KEEPALIVE_API = "https://holyai.me/mcp-keepalive/api/servers"
 _MCP_KEEPALIVE_DETAIL_API = "https://holyai.me/mcp-keepalive/api/server/{safe_name}"
@@ -2346,150 +2345,6 @@ def _mcp_x402(*texts: Any) -> bool:
     # proves it by probing each endpoint for an HTTP 402 / .well-known/x402
     # descriptor and owns the x402_supported flag.
     return False
-
-
-def fetch_pulsemcp(max_pages: int = 200, per_page: int = 100,
-                   remote_only: bool = True, known_ids: set | None = None,
-                   stop_after_known: int = 0) -> list:
-    """Import remotely-callable MCP servers from the PulseMCP directory.
-
-    PulseMCP lists ~16k servers; we keep the ones that expose a remote
-    endpoint (url_direct) so the directory stays a list of callable servers.
-
-    The v0beta API has no sort/updated_since params and no per-row timestamp,
-    but its default order is newest-first (offset 0 = most recently released).
-    So two modes share one code path:
-      * Full crawl (default): page through everything (max_pages*per_page).
-      * Incremental "recent" crawl: pass ``known_ids`` (source_ids already in
-        the DB) and ``stop_after_known`` > 0; we stop once we have seen that
-        many consecutive already-known servers, i.e. we have caught up to the
-        existing catalog and everything beyond is older/known.
-
-    The v0beta API is being sunset and randomly rejects ~half of all
-    requests with HTTP 410 (code=API_SUNSET). We retry each page with
-    exponential backoff + jitter, and a page that still fails is skipped
-    (we advance to the next offset) instead of abandoning the whole crawl,
-    so one unlucky page can no longer wipe out the entire pulsemcp refresh.
-    """
-    out: list[dict] = []
-    seen: set[str] = set()
-    consecutive_fail = 0
-    skipped_pages = 0
-    consecutive_known = 0
-    known_ids = known_ids or set()
-    stopped_early = False
-    with httpx.Client(timeout=TIMEOUT, follow_redirects=True,
-                      headers={"User-Agent": UA, "Accept": "application/json"}) as c:
-        offset = 0
-        for _ in range(max_pages):
-            data = None
-            for attempt in range(8):
-                try:
-                    r = c.get(_PULSEMCP_API,
-                              params={"count_per_page": per_page, "offset": offset})
-                    if r.status_code == 410:
-                        # random sunset failure -> back off and retry
-                        time.sleep(min(8.0, 0.5 * (1.6 ** attempt))
-                                   + random.uniform(0, 0.4))
-                        continue
-                    r.raise_for_status()
-                    data = r.json()
-                    break
-                except (httpx.HTTPError, ValueError) as e:
-                    if attempt == 7:
-                        log.warning("pulsemcp page offset=%d failed: %r", offset, e)
-                    else:
-                        time.sleep(min(8.0, 0.5 * (1.6 ** attempt))
-                                   + random.uniform(0, 0.4))
-                    continue
-            if data is None:
-                # Skip this page instead of dropping the whole crawl; bail
-                # only if several consecutive pages are unreachable.
-                consecutive_fail += 1
-                skipped_pages += 1
-                log.warning("pulsemcp page offset=%d gave up after retries "
-                            "(skip; consecutive_fail=%d)", offset, consecutive_fail)
-                if consecutive_fail >= 3:
-                    raise PartialCrawl(
-                        out, "%d consecutive pages failed" % consecutive_fail)
-                offset += per_page
-                continue
-            consecutive_fail = 0
-            servers = data.get("servers") or []
-            if not servers:
-                break
-            for s in servers:
-                remotes = s.get("remotes") or []
-                remote = remotes[0] if isinstance(remotes, list) and remotes else {}
-                endpoint = (remote.get("url_direct") or "").strip() or None
-                if remote_only and not endpoint:
-                    continue
-                name = (s.get("name") or "").strip()
-                homepage = (s.get("external_url") or "").strip() or None
-                source_id = (s.get("url") or "").strip() or (name + ":" + (endpoint or ""))
-                if source_id in seen:
-                    continue
-                seen.add(source_id)
-                # Incremental mode: count consecutive already-known servers in
-                # newest-first order; once we have seen enough in a row we have
-                # caught up to the existing catalog and can stop early. Known is
-                # keyed on endpoint_url (stable across cross-source dedup).
-                if stop_after_known:
-                    if endpoint and endpoint in known_ids:
-                        consecutive_known += 1
-                        if consecutive_known >= stop_after_known:
-                            stopped_early = True
-                            break
-                    else:
-                        consecutive_known = 0
-                desc = (s.get("short_description")
-                        or s.get("EXPERIMENTAL_ai_generated_description") or "").strip() or None
-                slug = _slugify(name) if name else _host_slug(endpoint or homepage or source_id)
-                if endpoint:
-                    slug = f"{slug}-{_host_slug(endpoint)}"[:80]
-                stars = s.get("github_stars")
-                conf = 0.5
-                if endpoint:
-                    conf += 0.1
-                if isinstance(stars, int) and stars >= 50:
-                    conf += 0.1
-                out.append({
-                    "slug": slug,
-                    "name": name or slug,
-                    "description": desc,
-                    "homepage_url": homepage,
-                    "endpoint_url": endpoint,
-                    "transport": remote.get("transport"),
-                    "auth_method": remote.get("authentication_method"),
-                    "cost_hint": remote.get("cost"),
-                    "source_code_url": s.get("source_code_url"),
-                    "package_registry": s.get("package_registry"),
-                    "package_name": s.get("package_name"),
-                    "package_download_count": (
-                        s.get("package_download_count")
-                        if isinstance(s.get("package_download_count"), int) else None),
-                    "github_stars": stars if isinstance(stars, int) else None,
-                    "tags": None,
-                    "x402_supported": _mcp_x402(desc, name, remote.get("cost")),
-                    "source": "pulsemcp",
-                    "source_id": source_id,
-                    "source_url": (s.get("url") or "").strip() or None,
-                    "confidence": round(min(1.0, conf), 3),
-                })
-            if stopped_early:
-                log.info("pulsemcp: caught up (%d consecutive known) at "
-                         "offset=%d, stopping incremental crawl", consecutive_known, offset)
-                break
-            offset += len(servers)
-            total = data.get("total_count")
-            if isinstance(total, int) and offset >= total:
-                break
-            if not data.get("next"):
-                break
-    log.info("pulsemcp: collected %d remote MCP servers", len(out))
-    if skipped_pages:
-        raise PartialCrawl(out, "%d page(s) skipped after retries" % skipped_pages)
-    return out
 
 
 class PartialCrawl(Exception):
@@ -2845,15 +2700,8 @@ def fetch_mcp_keepalive(max_pages: int = 20, per_page: int = 100,
 
 
 MCP_CRAWLERS = {
-    # Paused 2026-09-07: v0beta finished its sunset ("September 2026: Fully
-    # sunset (100%)") and now answers 410 API_SUNSET to every request. The
-    # successor at www.pulsemcp.com/api sits behind Cloudflare bot protection
-    # and answers 403 — same from two hosts and with a browser UA, so it is
-    # their edge, not our egress. Their robots.txt is Allow: / with
-    # search=yes,use=reference, so this is reachability, not permission. The
-    # 907 rows already imported keep their own health checks. Re-enable after
-    # migrating to v0.1 (upstream offers help at hello@pulsemcp.com).
-    # "pulsemcp": fetch_pulsemcp,
+    # PulseMCP removed 2026-10-19: v0beta answers 410 API_SUNSET and v0.1 needs a
+    # partner-issued key; imported rows keep their health checks.
     "mcp-registry": fetch_mcp_registry,
     # mcp-keepalive (holyai.me) is dead: host unreachable (connection timeout),
     # 0 contributions for weeks. Disabled 2026-06-23; re-enable if it returns.
@@ -3357,112 +3205,10 @@ def fetch_chiark_a2a() -> list:
 # 935, against 35.5k we already hold. The fetcher has been removed.
 
 
-# --- mcp-catalog.com (community-curated, Supabase-backed) -----------------
-# A small but high-signal directory: every entry has a real callable endpoint
-# (/mcp or /sse), maintained mostly by the official vendors (Cloudflare, GitHub,
-# Notion, Stripe, ...). Data is served from a public Supabase PostgREST table;
-# the anon key below is the site's own public client key (embedded in its JS),
-# read-only. We re-derive it at runtime so a key rotation doesn't break us.
-MCP_CATALOG_PAGE = "https://mcp-catalog.com/catalog"
-MCP_CATALOG_SUPABASE = "https://zscusvbjclywtnfilbne.supabase.co"
-
-
-def _mcp_catalog_anon_key() -> str | None:
-    """Re-derive the public Supabase anon key from the site's JS bundle so a
-    key rotation is picked up automatically (falls back to None on failure)."""
-    try:
-        with httpx.Client(timeout=TIMEOUT, headers={"User-Agent": UA}) as c:
-            html = c.get(MCP_CATALOG_PAGE).text
-            blob = html
-            for src in re.findall(r'<script[^>]+src="([^"]+)"', html):
-                u = src if src.startswith("http") else "https://mcp-catalog.com" + src
-                try:
-                    blob += c.get(u).text
-                except Exception:
-                    continue
-        keys = re.findall(
-            r"eyJ[A-Za-z0-9_-]{20,}\.eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}", blob)
-        return max(keys, key=len) if keys else None
-    except Exception as e:
-        log.warning("mcp-catalog: anon key derive failed: %r", e)
-        return None
-
-
-def fetch_mcp_catalog() -> list:
-    """Pull mcp-catalog.com's curated MCP servers (Supabase REST) as rows."""
-    key = _mcp_catalog_anon_key()
-    if not key:
-        raise RuntimeError("mcp-catalog public anon key is unavailable")
-    out: list = []
-    seen_ep: set = set()
-    hdr = {"User-Agent": UA, "Accept": "application/json",
-           "apikey": key, "Authorization": f"Bearer {key}"}
-    try:
-        with httpx.Client(timeout=TIMEOUT, headers=hdr) as c:
-            r = c.get(f"{MCP_CATALOG_SUPABASE}/rest/v1/servers",
-                      params={"select": "*", "order": "created_at.desc"})
-            if r.status_code != 200:
-                raise RuntimeError(f"mcp-catalog returned HTTP {r.status_code}")
-            rows = r.json()
-    except Exception as e:
-        if isinstance(e, RuntimeError):
-            raise
-        raise RuntimeError(f"mcp-catalog fetch failed: {e!r}") from e
-    if not isinstance(rows, list):
-        raise RuntimeError("mcp-catalog returned an unexpected payload shape")
-    for it in rows:
-        if not isinstance(it, dict):
-            continue
-        ep = (it.get("url") or "").strip()
-        if not ep or not ep.lower().startswith("http"):
-            continue
-        ep_key = ep.lower().rstrip("/")
-        if ep_key in seen_ep:
-            continue
-        seen_ep.add(ep_key)
-        name = it.get("name") or _host_slug(ep)
-        low = ep.lower()
-        transport = "sse" if low.endswith("/sse") else (
-            "streamable-http" if "/mcp" in low or low.rstrip("/").endswith("mcp") else None)
-        auth_raw = (it.get("authentication") or "").strip()
-        auth_method = None
-        if auth_raw and auth_raw.lower() not in ("open", "none", "public"):
-            auth_method = "required"
-        cat = (it.get("category") or "").strip()
-        maint = (it.get("maintainer") or "").strip()
-        tools = it.get("tools") if isinstance(it.get("tools"), list) else []
-        tool_names = [t.get("name") for t in tools
-                      if isinstance(t, dict) and t.get("name")]
-        desc_bits = []
-        if cat:
-            desc_bits.append(cat)
-        if maint:
-            desc_bits.append(f"maintained by {maint}")
-        if tool_names:
-            desc_bits.append(f"{len(tool_names)} tools: " + ", ".join(tool_names[:8]))
-        tags = [t for t in [cat] if t]
-        out.append({
-            "slug": _host_slug(ep) + "-mcpcatalog",
-            "name": name,
-            "description": " · ".join(desc_bits) or None,
-            "endpoint_url": ep,
-            "homepage_url": it.get("website") or ep,
-            "transport": transport,
-            "auth_method": auth_method,
-            "tags": tags,
-            "source": "mcp-catalog",
-            "source_id": str(it.get("id") or ep_key),
-            "source_url": MCP_CATALOG_PAGE,
-        })
-    log.info("mcp-catalog: collected %d unique-endpoint servers", len(out))
-    return out
-
-
-# Paused 2026-09-07: mcp-catalog.com answers 403 on every path, so the public
-# Supabase anon key can no longer be derived from its JS bundle. Verified to be
-# the site and not our egress — same 403 from three hosts and with a browser UA.
-# The 41 rows already imported keep their own health checks. Re-enable if it returns.
-# MCP_CRAWLERS["mcp-catalog"] = fetch_mcp_catalog
+# mcp-catalog.com is not a source. The site went down 2026-09-07 and by
+# 2026-10-19 the domain was parked at Hostinger with its Supabase project
+# deleted (NXDOMAIN); no successor site was found. The fetcher has been
+# removed; the 41 imported rows stay under their own health checks.
 
 
 # ---------------------------------------------------------------------------

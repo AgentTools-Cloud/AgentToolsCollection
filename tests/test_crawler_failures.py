@@ -191,10 +191,10 @@ class CrawlerFailureTests(unittest.TestCase):
         self.assertEqual(crawlers._registry_auth_method(remote),
                          "required_headers")
 
-    def test_mcp_catalog_missing_key_surfaces(self):
-        with patch.object(crawlers, "_mcp_catalog_anon_key", return_value=None):
-            with self.assertRaisesRegex(RuntimeError, "anon key"):
-                crawlers.fetch_mcp_catalog()
+    def test_removed_mcp_catalog_and_pulsemcp_are_not_sources(self):
+        for name, fetcher in (("mcp-catalog", "fetch_mcp_catalog"), ("pulsemcp", "fetch_pulsemcp")):
+            self.assertNotIn(name, crawlers.MCP_CRAWLERS)
+            self.assertFalse(hasattr(crawlers, fetcher))
 
     def test_retired_chiark_is_not_scheduled(self):
         self.assertNotIn("chiark", crawlers.MCP_CRAWLERS)

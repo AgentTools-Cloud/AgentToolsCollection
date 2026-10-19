@@ -127,6 +127,18 @@ class InternalNoticeTests(TemporaryDatabaseTestCase):
         self.assertNotIn('raw-secret', json.dumps(feed))
         self.assertEqual(self.query('SELECT * FROM crawl_runs'), before)
 
+    def test_removed_crawl_source_is_not_reported_as_active(self):
+        with db.writer() as conn:
+            for source, status in (('mcp:mcp-catalog', 'error'), ('mcp:pulsemcp', 'partial'),
+                                   ('mcp:smithery', 'error')):
+                run = db.record_crawl_start(conn, source)
+                db.record_crawl_finish(conn, run, 0, 0, ['gone'], status)
+        before = self.query('SELECT * FROM crawl_runs')
+        titles = [row['title'] for row in self.feed()['notices'] if row['category'] == 'crawl']
+        self.assertFalse(any('mcp-catalog' in title or 'pulsemcp' in title for title in titles))
+        self.assertTrue(any('mcp:smithery' in title for title in titles))
+        self.assertEqual(self.query('SELECT * FROM crawl_runs'), before)
+
     def test_history_retention_does_not_hide_old_active_ingestion(self):
         with db.writer() as conn:
             conn.execute('INSERT INTO ingestion_issues '
