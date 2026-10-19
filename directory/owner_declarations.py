@@ -203,7 +203,7 @@ def has_verified_interface(row):
                 and exact_endpoint(str(declaration.get('primary_url') or '')) == exact_endpoint(str(row.get('url') or '')))
 
 
-def _response(client, target, primary_url, deadline, request_method='GET'):
+def _response(client, target, primary_url, deadline, request_method='GET', limit=512 * 1024):
     url(target, primary_url)
     if time.monotonic() >= deadline:
         raise VerificationBlocked('network_unavailable')
@@ -212,17 +212,21 @@ def _response(client, target, primary_url, deadline, request_method='GET'):
         raw = bytearray()
         for chunk in response.iter_bytes():
             raw.extend(chunk)
-            if len(raw) > 512 * 1024:
+            if len(raw) > limit:
                 raise VerificationBlocked('document_too_large')
             if time.monotonic() >= deadline:
                 raise VerificationBlocked('network_unavailable')
         if exact_endpoint(str(response.url)) != exact_endpoint(target):
             raise VerificationBlocked('unsafe_target')
-        return httpx.Response(response.status_code, headers=response.headers, content=bytes(raw), request=response.request)
+        # iter_bytes() already decoded the body; keeping these headers would decode it twice.
+        headers = [(k, v) for k, v in response.headers.multi_items()
+                   if k.lower() not in ('content-encoding', 'content-length')]
+        return httpx.Response(response.status_code, headers=headers, content=bytes(raw), request=response.request)
 
 
 def _document(client, target, primary_url, deadline, required):
-    response = _response(client, target, primary_url, deadline)
+    # Generated OpenAPI documents for multi-endpoint sellers routinely exceed 512 KB.
+    response = _response(client, target, primary_url, deadline, limit=2 * 1024 * 1024)
     if response.status_code != 200:
         if required:
             raise VerificationBlocked('document_unavailable')

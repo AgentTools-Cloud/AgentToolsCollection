@@ -554,7 +554,7 @@ def _notify_displaced(conn: sqlite3.Connection, host: str, old_user_id: int,
         text = (
             "Someone proved control of %s and now holds the verified claim "
             "on it.\n\n"
-            "GitHub account: %s\n"
+            "Account: %s\n"
             "Method: %s\n\n"
             "We verify ownership by asking for a token published on the host "
             "itself, so this means the token we issued to them was reachable "
@@ -566,7 +566,7 @@ def _notify_displaced(conn: sqlite3.Connection, host: str, old_user_id: int,
         ) % (host, who, method, host)
         html = (
             "<p>Someone proved control of <b>%s</b> and now holds the verified "
-            "claim on it.</p><ul><li>GitHub account: <b>%s</b></li>"
+            "claim on it.</p><ul><li>Account: <b>%s</b></li>"
             "<li>Method: <code>%s</code></li></ul>"
             "<p>We verify ownership by asking for a token published on the host "
             "itself, so this means the token we issued to them was reachable at "
