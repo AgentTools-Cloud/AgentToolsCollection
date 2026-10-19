@@ -58,6 +58,42 @@ def _reconcile_existing_target(conn, kind, endpoint, binding, target, owners):
     return replacement
 
 
+def record_reviewed_alias(conn, kind, source_id, endpoint_url, listing_id):
+    """Operator decision: this exact upstream endpoint is covered by listing_id.
+
+    Scoped to one (identity, exact endpoint); any other endpoint still holds.
+    Never edits the listing, its endpoint, owner fields or provenance.
+    """
+    table = {'mcp': 'mcp_servers', 'a2a': 'a2a_agents'}[kind]
+    if conn.execute(f'SELECT 1 FROM {table} WHERE id=?', (listing_id,)).fetchone() is None:
+        raise ValueError('unknown listing')
+    endpoint = db._exact_endpoint(endpoint_url)
+    conn.execute(
+        'INSERT INTO wellknown_reviewed_aliases '
+        '(kind,identity_hash,endpoint_hash,listing_id,reviewed_at) VALUES(?,?,?,?,?) '
+        'ON CONFLICT(kind,identity_hash,endpoint_hash) DO UPDATE SET '
+        'listing_id=excluded.listing_id,reviewed_at=excluded.reviewed_at',
+        (kind, digest(source_id), digest(endpoint), int(listing_id), int(time.time())),
+    )
+
+
+def _reviewed_alias_target(conn, kind, table, ih, eh):
+    alias = conn.execute(
+        'SELECT listing_id FROM wellknown_reviewed_aliases '
+        'WHERE kind=? AND identity_hash=? AND endpoint_hash=?', (kind, ih, eh),
+    ).fetchone()
+    if alias is None:
+        return None
+    target = conn.execute(f'SELECT * FROM {table} WHERE id=?', (alias['listing_id'],)).fetchone()
+    if target is None:
+        return None  # reviewed target vanished: fall back to normal review
+    db.assert_listing_not_retired(conn, kind, dict(target))
+    conn.execute('UPDATE wellknown_reviewed_aliases SET last_seen=? '
+                 'WHERE kind=? AND identity_hash=? AND endpoint_hash=?',
+                 (int(time.time()), kind, ih, eh))
+    return target
+
+
 def upsert_listing(conn, kind, row):
     db.assert_listing_not_retired(conn, kind, row)
     validate_endpoint(row.get('endpoint_url'))
@@ -67,6 +103,9 @@ def upsert_listing(conn, kind, row):
     if not sid:
         raise db.MetadataValidationError('missing_upstream_identity')
     ih, eh = digest(sid), digest(endpoint)
+    reviewed = _reviewed_alias_target(conn, kind, table, ih, eh)
+    if reviewed is not None:
+        return False, int(reviewed['id'])
     binding = conn.execute(
         'SELECT * FROM wellknown_endpoint_sources '
         'WHERE kind=? AND identity_hash=? AND endpoint_hash=?', (kind, ih, eh),
