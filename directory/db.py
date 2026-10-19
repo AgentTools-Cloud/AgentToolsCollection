@@ -4314,15 +4314,19 @@ def sync_owner_verified(conn: sqlite3.Connection) -> dict[str, int]:
     conn.commit()
     return out
 
-def key_user_login(user_id: int) -> str:
-    return "agent-%d" % user_id
+def key_user_login(provider_uid: str) -> str:
+    # Hash of the random provider_uid: stable, and does not reveal signup order.
+    return "agent-" + hashlib.sha256(provider_uid.encode()).hexdigest()[:12]
 
 
 def backfill_key_user_logins(conn: sqlite3.Connection) -> None:
-    # Key-minted accounts have no provider login; give them a stable handle.
-    conn.execute(
-        "UPDATE users SET login='agent-' || id "
-        "WHERE provider='domain' AND (login IS NULL OR login='')")
+    rows = conn.execute(
+        "SELECT id, provider_uid, login FROM users WHERE provider='domain'"
+    ).fetchall()
+    for uid, puid, login in rows:
+        if not login or login == "agent-%d" % uid:
+            conn.execute("UPDATE users SET login=? WHERE id=?",
+                         (key_user_login(puid), uid))
 
 
 def upsert_user(conn: sqlite3.Connection, provider: str, provider_uid: str,

@@ -1131,10 +1131,9 @@ async def api_mint_key(request: Request, payload: KeyRequest | None = None):
 
     name = (payload.name if payload else None) or None
     with db.writer() as conn:
-        uid = db.upsert_user(conn, provider="domain",
-                             provider_uid=secrets.token_hex(16))
-        conn.execute("UPDATE users SET login=? WHERE id=?",
-                     (db.key_user_login(uid), uid))
+        puid = secrets.token_hex(16)
+        uid = db.upsert_user(conn, provider="domain", provider_uid=puid,
+                             login=db.key_user_login(puid))
         raw = db.create_api_key(conn, uid, name=name)
     return {
         "api_key": raw,
