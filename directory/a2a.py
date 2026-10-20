@@ -144,7 +144,8 @@ def own_agent_card(base_url: str = SITE) -> dict:
                     "Check an MCP server (by streamable-http endpoint URL) for "
                     "malware / prompt-injection lures. Returns our stored verdict "
                     "if it is already indexed, otherwise probes + statically scans "
-                    "it, adds a Qwen3-8B advisory second opinion, and indexes it."
+                    "it, adds an advisory LLM second opinion, and indexes it if it "
+                    "answered (documentation hosts like example.com are never indexed)."
                 ),
                 "tags": ["mcp", "security", "safety", "malware", "scan"],
                 "examples": [

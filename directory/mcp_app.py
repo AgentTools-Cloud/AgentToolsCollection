@@ -815,9 +815,10 @@ async def scan_mcp_safety(
         rule verdict. Every indexed server is re-scanned hourly, so you get a
         consistent, continuously-refreshed answer without re-probing.
       * **Not yet indexed** → we probe the endpoint live, statically scan its
-        advertised tools + metadata, ADD it to the directory, and return the
-        fresh verdict (so the next caller gets the rule verdict instantly from
-        cache).
+        advertised tools + metadata, and return the fresh verdict. It is ADDED
+        to the directory (so the next caller gets the stored verdict instantly)
+        only if it answered or you supplied metadata; documentation hosts such
+        as example.com / *.test / *.invalid are scanned but never listed.
 
     Two dimensions are reported. `verdict` is authoritative and comes from
     deterministic static rules — pure pattern-matching over the *advertised*
