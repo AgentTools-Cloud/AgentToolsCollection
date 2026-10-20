@@ -555,13 +555,16 @@ async def get_mcp_server(slug: str, ctx: Context | None = None) -> dict[str, Any
             return {"error": "not_found", "message": f"No MCP server with slug {slug!r}"}
         mcp = directory_db.get_mcp_by_slug(conn, slug)
         if mcp:
-            _log_call("get_mcp_server", ctx=ctx, args={"slug": slug}, result_slug=slug)
+            _log_call("get_mcp_server", ctx=ctx, args={"slug": slug},
+                      result_n=1, result_slug=slug)
             return mcp
         row = directory_db.get_by_slug(conn, slug)
     if not row or not (row.get("mcp_url") or "").strip():
+        _log_call("get_mcp_server", ctx=ctx, args={"slug": slug}, result_n=0)
         return {"error": "not_found", "message": f"No MCP server with slug {slug!r}"}
     card = cards.build_service_card(row)
-    _log_call("get_mcp_server", ctx=ctx, args={"slug": slug}, result_slug=slug)
+    _log_call("get_mcp_server", ctx=ctx, args={"slug": slug},
+              result_n=1, result_slug=slug)
     return card
 
 
@@ -864,7 +867,7 @@ async def scan_mcp_safety(
     if isinstance(out, dict) and not out.get("error"):
         _log_call("scan_mcp_safety", ctx=ctx,
                   args={"endpoint_url": endpoint_url, "outcome": out.get("source")},
-                  result_slug=out.get("verdict"))
+                  result_n=1, result_slug=out.get("verdict"))
     return out
 
 
