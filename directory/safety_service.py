@@ -202,6 +202,17 @@ def _tools_to_text(tools) -> str:
 
 # ---- public entry point ------------------------------------------------------
 
+_RESERVED_HOSTS = ("example.com", "example.net", "example.org")
+_RESERVED_SUFFIXES = (".example", ".invalid", ".test", ".localhost")
+
+
+def is_reserved_host(host: str) -> bool:
+    # RFC 2606 / 6761 documentation names: scan them, never list them.
+    host = (host or "").lower().rstrip(".")
+    return (host in _RESERVED_HOSTS or host.endswith(_RESERVED_SUFFIXES)
+            or any(host.endswith("." + h) for h in _RESERVED_HOSTS))
+
+
 def scan_endpoint(endpoint_url: str, name: str = "", description: str = "",
                   tools_text: str = "", db_path: Optional[str] = None,
                   with_llm: bool = True) -> dict[str, Any]:
@@ -300,7 +311,7 @@ def scan_endpoint(endpoint_url: str, name: str = "", description: str = "",
     has_meta = bool(description or scan_tools_text)
     slug = None
     indexed = False
-    if reachable or has_meta:
+    if (reachable or has_meta) and not is_reserved_host(host):
         base = (directory_crawlers._host_slug(endpoint_url) + "-"
                 + directory_crawlers._slugify(name)[:32]).strip("-")[:72]
         slug = f"{base or directory_crawlers._slugify(host)}-{hashlib.md5(ep.encode()).hexdigest()[:6]}"
