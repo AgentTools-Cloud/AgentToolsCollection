@@ -20,7 +20,10 @@ override and two-worker command.
 `AGENT_TOOLS_ASK_USE_SAFETY_BACKEND=1` explicitly selects this project's existing
 `AGENT_TOOLS_SAFETY_BASE_URL` and `AGENT_TOOLS_SAFETY_API_KEY`.
 Both `AGENT_TOOLS_ASK_MODEL` and `AGENT_TOOLS_SAFETY_MODEL` are explicitly set to
-`OpenAI/GPT-5.6-Sol`. Ask still supports independent model selection; if unset
+`Anthropic/Claude-Opus-5.5` (since 2026-10-20; previously `OpenAI/GPT-5.6-Sol`), and
+so is `AGENT_TOOLS_ADJUDICATOR_MODEL` in `/opt/mcpserver/.env`.
+`AGENT_TOOLS_ASK_MAX_TOKENS=2048`: Opus answers run 700-900 tokens, so the old
+768 cap truncated the JSON and Ask fell back to keyword results. Ask still supports independent model selection; if unset
 or empty, it inherits `AGENT_TOOLS_SAFETY_MODEL`.
 It shares the project's existing key quota/billing;
 no key values are stored in this repository or copied between environment files.
