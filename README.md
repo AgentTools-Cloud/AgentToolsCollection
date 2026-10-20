@@ -56,7 +56,8 @@ health. Each result carries a `match_reason` and a `confidence` score.
 `scan_mcp_safety` vets an MCP server (by endpoint URL) for malware /
 prompt-injection lures before you connect: an already-indexed server returns our
 latest stored verdict, an unknown one is probed live, scanned, and added to the
-directory. The verdict comes from deterministic static rules (no code execution)
+directory if it answered or you supplied metadata (documentation hosts such as
+`example.com`, `*.test`, `*.invalid` are scanned but never listed). The verdict comes from deterministic static rules (no code execution)
 over the server's advertised name + description + tool docs. Rules cover
 pipe-to-shell / base64-eval / PowerShell install cradles, bare-IP payload hosts,
 prompt-injection phrasing, and MCP **tool-poisoning** coercion — "always call
