@@ -128,13 +128,14 @@ class OwnerDeclarationTests(TemporaryDatabaseTestCase):
         self.assertFalse(applied)
         self.assertTrue(rejected)
 
-    def observe(self, *, price='2000', has_probe=True, extra_response=None, gzip_descriptor=False, openapi=None):
+    def observe(self, *, price='2000', has_probe=True, extra_response=None, gzip_descriptor=False, openapi=None,
+                extra_resources=()):
         def handler(request):
             if request.url.path == '/.well-known/x402':
                 entry = {'url': 'https://owned.example/v1/ping', 'method': 'POST'}
                 if has_probe:
                     entry['probe_body'] = {}
-                body = json.dumps({'resources': [entry]}).encode()
+                body = json.dumps({'resources': [entry, *extra_resources]}).encode()
                 if gzip_descriptor:
                     import gzip
                     return httpx.Response(200, content=gzip.compress(body), headers={
@@ -163,6 +164,14 @@ class OwnerDeclarationTests(TemporaryDatabaseTestCase):
         self.edit({'method': 'POST', 'price_usdc': 0.002})
         result = self.observe(gzip_descriptor=True)
         self.assertEqual(result['status'], 'verified', result)
+
+    def test_resource_count_reports_all_advertised_resources_beyond_sample_cap(self):
+        self.edit({'method': 'POST', 'price_usdc': 0.002})
+        extra = [{'url': 'https://owned.example/v1/r%d' % i, 'method': 'GET'} for i in range(120)]
+        result = self.observe(extra_resources=extra)
+        self.assertEqual(result['status'], 'verified', result)
+        self.assertEqual(len(result['resource_samples']), declarations.MAX_RESOURCES)
+        self.assertEqual(result['resource_count'], 121)
 
     def test_openapi_between_512kb_and_2mb_is_accepted(self):
         self.edit({'method': 'POST', 'price_usdc': 0.002})
