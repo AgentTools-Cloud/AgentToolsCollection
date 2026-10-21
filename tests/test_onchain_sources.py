@@ -6,7 +6,10 @@ from unittest.mock import patch
 
 import httpx
 
-from directory import crawlers
+from contextlib import closing
+
+from directory import crawlers, db, jobs
+from test_ingestion_pipeline import TemporaryDatabaseTestCase
 
 PAYTO = "0xb8491F953e6860D3b5840b73c60883Ff099ceAfA"
 PAYER = "0x1111111111111111111111111111111111111111"
@@ -177,6 +180,45 @@ class BulkSweepThrottleTests(unittest.TestCase):
             results, ok = crawlers.fetch_chain_activity_bulk([PAYTO], chain="base", days=1)
         self.assertTrue(ok)
         self.assertEqual(results[PAYTO.lower()]["tx"], 1)
+
+
+class IncrementalWriteTests(TemporaryDatabaseTestCase):
+    def setUp(self):
+        super().setUp()
+        import json as _json
+        self.ids = {}
+        with db.writer() as conn:
+            for slug, net, pt in [("on-polygon", "eip155:137", "0x" + "1" * 40),
+                                  ("on-base", "eip155:8453", "0x" + "2" * 40)]:
+                _, sid = db.upsert_service(conn, dict(slug=slug, name=slug, url="https://%s.example/x" % slug,
+                                                      source="fixture", source_id=slug, health="ok"))
+                conn.execute("UPDATE services SET payment=? WHERE id=?",
+                             (_json.dumps({"accepts": [{"network": net, "pay_to": pt}]}), sid))
+                self.ids[slug] = sid
+
+    def checked(self, slug):
+        with closing(db.connect(read_only=True)) as conn:
+            return conn.execute("SELECT payto_checked, payto_tx_30d FROM services WHERE id=?",
+                                (self.ids[slug],)).fetchone()
+
+    def test_per_address_chain_is_written_before_slow_bulk_sweep_runs(self):
+        seen_during_sweep = {}
+
+        def bulk(addrs, chain="base", **kw):
+            seen_during_sweep["polygon"] = tuple(self.checked("on-polygon"))
+            seen_during_sweep["base"] = tuple(self.checked("on-base"))
+            return {a.lower(): {"tx": 3, "payers": 2, "payer_ids": ["a", "b"]} for a in addrs}, True
+
+        with patch.object(jobs.crawlers, "BULK_LOG_CHAINS", {"base": None}), \
+                patch.object(jobs.crawlers, "fetch_chain_activity_bulk", side_effect=bulk), \
+                patch.object(jobs.crawlers, "fetch_payto_activity",
+                             return_value={"tx": 5, "payers": 1, "ok": True, "capped": False, "payer_ids": ["x"]}), \
+                patch.object(jobs.time, "sleep"), patch.object(jobs, "cmd_rescore"):
+            jobs.cmd_onchain()
+        self.assertIsNotNone(seen_during_sweep["polygon"][0])
+        self.assertEqual(seen_during_sweep["polygon"][1], 5)
+        self.assertIsNone(seen_during_sweep["base"][0])
+        self.assertEqual(self.checked("on-base")[1], 3)
 
 
 if __name__ == "__main__":
