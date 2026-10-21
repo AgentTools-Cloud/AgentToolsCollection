@@ -941,11 +941,47 @@ def check_health(url, well_known=None, inspect_payment=True):
 
 
 # ---------------------------------------------------------------------------
-# Signal C: real on-chain demand. For each Base-mainnet USDC payTo address we
-# count incoming USDC transfers + unique payers over a 30d window via the free
-# Blockscout Base indexer (Etherscan-compatible tokentx). This is the hardest
-# signal to fake: spoofing it requires actually paying the service on-chain.
+# Signal C: real on-chain demand. For each USDC payTo address we count incoming
+# USDC transfers + unique payers over a 30d window. Base, Optimism and Gnosis
+# are swept in bulk from transfer logs (BULK_LOG_CHAINS); Ethereum, Polygon and
+# Arbitrum are queried per address through Etherscan API V2 (its free tier does
+# not cover Base/Optimism/Gnosis). This is the hardest signal to fake: spoofing
+# it requires actually paying the service on-chain.
 # ---------------------------------------------------------------------------
+
+ETHERSCAN_V2_URL = "https://api.etherscan.io/v2/api"
+# chain key -> chain id; only chains the Etherscan free tier serves.
+ETHERSCAN_FREE_CHAINS = {"ethereum": 1, "polygon": 137, "arbitrum": 42161}
+# Free tier allows 3 calls/second; stay under it.
+_ETHERSCAN_MIN_INTERVAL = 0.4
+_etherscan_last_call = 0.0
+
+
+def _etherscan_key():
+    return (os.environ.get("ETHERSCAN_API_KEY") or "").strip()
+
+
+def _etherscan_get(client, params):
+    """One throttled Etherscan V2 call. Returns the parsed body or None."""
+    global _etherscan_last_call
+    for attempt in range(5):
+        wait = _ETHERSCAN_MIN_INTERVAL - (time.monotonic() - _etherscan_last_call)
+        if wait > 0:
+            time.sleep(wait)
+        _etherscan_last_call = time.monotonic()
+        r = client.get(ETHERSCAN_V2_URL, params={**params, "apikey": _etherscan_key()})
+        if r.status_code == 429:
+            time.sleep(min(30.0, 2.0 * (2 ** attempt)))
+            continue
+        if r.status_code >= 400:
+            return None
+        data = r.json()
+        result = data.get("result")
+        if isinstance(result, str) and "rate limit" in result.lower():
+            time.sleep(min(30.0, 2.0 * (2 ** attempt)))
+            continue
+        return data
+    return None
 
 EVM_USDC_INDEXERS = {
     # chain key -> (Blockscout Etherscan-compatible API base, native USDC).
@@ -980,6 +1016,57 @@ def network_to_chain(network):
     return _NETWORK_CHAIN.get(str(network).strip().lower())
 
 
+def _etherscan_payto_activity(payto, chain, contract, days, max_pages):
+    payto_l = payto.lower()
+    cutoff = int(time.time()) - days * 86400
+    tx = 0
+    payers = set()
+    capped = False
+    try:
+        with httpx.Client(timeout=httpx.Timeout(connect=5.0, read=30.0, write=5.0, pool=5.0),
+                          headers={"User-Agent": UA}) as c:
+            for page in range(1, max_pages + 1):
+                data = _etherscan_get(c, {
+                    "chainid": ETHERSCAN_FREE_CHAINS[chain], "module": "account",
+                    "action": "tokentx", "contractaddress": contract, "address": payto,
+                    "page": page, "offset": 100, "sort": "desc"})
+                if data is None:
+                    return {"tx": 0, "payers": 0, "ok": False, "capped": False}
+                rows = data.get("result")
+                if not isinstance(rows, list):
+                    return {"tx": 0, "payers": 0, "ok": False, "capped": False}
+                if not rows:
+                    # status 0 with an empty list is the documented "No transactions found".
+                    if str(data.get("message") or "").lower().startswith("no transactions"):
+                        break
+                    if str(data.get("status")) != "1":
+                        return {"tx": 0, "payers": 0, "ok": False, "capped": False}
+                    break
+                stop = False
+                for row in rows:
+                    try:
+                        ts = int(row.get("timeStamp", 0))
+                    except (TypeError, ValueError):
+                        continue
+                    if ts < cutoff:
+                        stop = True
+                        break
+                    if (row.get("to") or "").lower() == payto_l:
+                        tx += 1
+                        frm = (row.get("from") or "").lower()
+                        if frm:
+                            payers.add(frm)
+                if stop or len(rows) < 100:
+                    break
+                if page == max_pages:
+                    capped = True
+        return {"tx": tx, "payers": len(payers), "ok": True,
+                "capped": capped, "payer_ids": sorted(payers)}
+    except Exception as e:
+        log.debug("etherscan payto fetch failed for %s on %s: %r", payto, chain, e)
+        return {"tx": 0, "payers": 0, "ok": False, "capped": False}
+
+
 def fetch_payto_activity(payto, chain="base", days=30, max_pages=8):
     """Count incoming USDC transfers to ``payto`` on ``chain`` over the window.
 
@@ -992,6 +1079,8 @@ def fetch_payto_activity(payto, chain="base", days=30, max_pages=8):
     if indexer is None:
         return {"tx": 0, "payers": 0, "ok": False, "capped": False}
     _api_base, contract = indexer
+    if chain in ETHERSCAN_FREE_CHAINS and _etherscan_key():
+        return _etherscan_payto_activity(payto, chain, contract, days, max_pages)
     payto_l = payto.lower()
     cutoff = int(time.time()) - days * 86400
     tx = 0
@@ -1061,15 +1150,19 @@ def fetch_payto_activity(payto, chain="base", days=30, max_pages=8):
 # address, and public RPC nodes do not rate-limit us.
 # ---------------------------------------------------------------------------
 
-# chain -> (rpc url, usdc contract, seconds per block)
+# chain -> (rpc url, usdc contract, seconds per block, max block window, address batch)
+# mainnet.base.org answers eth_getLogs with HTTP 429 to our egress since mid-October;
+# Tenderly's public gateway serves it with a 1000-block cap (verified 2026-10-21).
 BULK_LOG_CHAINS = {
-    "base": ("https://mainnet.base.org",
-             "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913", 2.0),
+    "base": ("https://base.gateway.tenderly.co",
+             "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913", 2.0, 1000, 2000),
+    "optimism": ("https://mainnet.optimism.io",
+                 "0x0b2c639c533813f4aa9d7837caf62653d097ff85", 2.0, 10000, 400),
+    "gnosis": ("https://rpc.gnosischain.com",
+               "0xddafbb505ad214d7b80b1f830fccc89b60fb7a83", 5.0, 10000, 400),
 }
 _TRANSFER_TOPIC = (
     "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef")
-_LOG_BLOCK_WINDOW = 10000   # wider ranges are rejected with HTTP 413
-_LOG_ADDR_BATCH = 400       # busy windows blow up the node above this
 
 
 def _topic_addr(addr):
@@ -1108,7 +1201,7 @@ def fetch_chain_activity_bulk(paytos, chain="base", days=30, rate=0.15):
     cfg = BULK_LOG_CHAINS.get(chain)
     if cfg is None or not paytos:
         return {}, False
-    rpc_url, contract, block_secs = cfg
+    rpc_url, contract, block_secs, block_window, addr_batch = cfg
 
     wanted = sorted({a.lower() for a in paytos if a})
     counts = {a: {"tx": 0, "payers": set()} for a in wanted}
@@ -1122,9 +1215,9 @@ def fetch_chain_activity_bulk(paytos, chain="base", days=30, rate=0.15):
             span = int(days * 86400 / block_secs)
             start = max(0, head - span)
 
-            batches = [wanted[i:i + _LOG_ADDR_BATCH]
-                       for i in range(0, len(wanted), _LOG_ADDR_BATCH)]
-            windows = list(range(start, head + 1, _LOG_BLOCK_WINDOW))
+            batches = [wanted[i:i + addr_batch]
+                       for i in range(0, len(wanted), addr_batch)]
+            windows = list(range(start, head + 1, block_window))
             total = len(batches) * len(windows)
             log.info("onchain bulk %s: %d addresses, %d windows, %d calls",
                      chain, len(wanted), len(windows), total)
@@ -1133,7 +1226,7 @@ def fetch_chain_activity_bulk(paytos, chain="base", days=30, rate=0.15):
             for batch in batches:
                 topics = [_TRANSFER_TOPIC, None,
                           [_topic_addr(a) for a in batch]]
-                pending = [(lo, min(lo + _LOG_BLOCK_WINDOW - 1, head))
+                pending = [(lo, min(lo + block_window - 1, head))
                            for lo in windows]
                 while pending:
                     lo, hi = pending.pop()
@@ -1141,7 +1234,7 @@ def fetch_chain_activity_bulk(paytos, chain="base", days=30, rate=0.15):
                                "address": contract, "topics": topics}]
                     logs = None
                     err = None
-                    for attempt in range(3):
+                    for attempt in range(6):
                         try:
                             logs = _rpc(c, rpc_url, "eth_getLogs", params)
                             break
@@ -1149,7 +1242,9 @@ def fetch_chain_activity_bulk(paytos, chain="base", days=30, rate=0.15):
                             err = e
                             if _oversized_range(e):
                                 break
-                            time.sleep(1.0 * (2 ** attempt))
+                            resp = getattr(e, "response", None)
+                            throttled = resp is not None and resp.status_code == 429
+                            time.sleep(min(60.0, (5.0 if throttled else 1.0) * (2 ** attempt)))
                     if logs is None:
                         # Busy ranges return more logs than the node will
                         # serialize. Halving keeps the sweep going instead of
