@@ -1001,10 +1001,8 @@ EVM_USDC_INDEXERS = {
     "unichain":   ("", "0x078D782b760474a361dDA0AF3839290b0EF57AD6"),
     "sonic":      ("", "0x29219dd400f2Bf60E5a23d13Be72B486D4038894"),
     "hyperevm":   ("", "0xb88339CB7199b77E23DB6E890353E22632Ba630f"),
-    "bsc":        ("", "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d"),
     "celo":       ("", "0xcebA9300f2b948710d2653dD7B07f33A8B32118C"),
     "arc":        ("", "0x3600000000000000000000000000000000000000"),
-    "robinhood":  ("", "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"),
 }
 
 # Solana USDC mint; counted through Helius getTransfersByAddress.
@@ -1026,10 +1024,8 @@ _NETWORK_CHAIN = {
     "unichain": "unichain", "eip155:130": "unichain", "130": "unichain",
     "sonic": "sonic", "eip155:146": "sonic", "146": "sonic",
     "hyperevm": "hyperevm", "eip155:999": "hyperevm", "999": "hyperevm",
-    "bsc": "bsc", "bnb": "bsc", "eip155:56": "bsc", "56": "bsc",
     "celo": "celo", "eip155:42220": "celo", "42220": "celo",
     "arc": "arc", "eip155:5042": "arc", "5042": "arc",
-    "robinhood": "robinhood", "eip155:4663": "robinhood", "4663": "robinhood",
     "solana": "solana", "solana-mainnet": "solana", "solana:mainnet": "solana",
     "solana:5eykt4usfv8p8njdtrepy1vzqkqzkvdp": "solana",
 }
@@ -1258,8 +1254,6 @@ BULK_LOG_CHAINS = {
              "0xceba9300f2b948710d2653dd7b07f33a8b32118c", 1.0, 1000, 400),
     "arc": ("https://5042.rpc.thirdweb.com",
             "0x3600000000000000000000000000000000000000", 1.0, 1000, 400),
-    "robinhood": ("https://4663.rpc.thirdweb.com",
-                  "0x5fc5360d0400a0fd4f2af552add042d716f1d168", 1.0, 1000, 400),
 }
 _TRANSFER_TOPIC = (
     "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef")

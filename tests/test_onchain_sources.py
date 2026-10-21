@@ -129,13 +129,15 @@ class ChainMappingTests(unittest.TestCase):
     def test_new_networks_map_to_supported_chains(self):
         for net, chain in [("eip155:480", "worldchain"), ("eip155:143", "monad"), ("eip155:1329", "sei"),
                            ("eip155:130", "unichain"), ("eip155:146", "sonic"), ("eip155:999", "hyperevm"),
-                           ("eip155:56", "bsc"), ("eip155:42220", "celo"), ("eip155:5042", "arc"),
-                           ("eip155:4663", "robinhood"), ("solana", "solana"),
+                           ("eip155:42220", "celo"), ("eip155:5042", "arc"),
+                           ("solana", "solana"),
                            ("solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp", "solana")]:
             self.assertEqual(crawlers.network_to_chain(net), chain, net)
 
     def test_testnets_stay_unsupported(self):
-        for net in ("eip155:84532", "base-sepolia", "solana:etwtrabzayq6imfeykouru166vu2xqa1"):
+        # BSC and Robinhood Chain are deliberately not counted (sweep cost far exceeds coverage).
+        for net in ("eip155:84532", "base-sepolia", "solana:etwtrabzayq6imfeykouru166vu2xqa1",
+                    "eip155:56", "eip155:4663"):
             self.assertIsNone(crawlers.network_to_chain(net), net)
 
     def test_solana_payto_keeps_case_and_rejects_garbage(self):
