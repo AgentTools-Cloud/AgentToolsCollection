@@ -951,7 +951,9 @@ def check_health(url, well_known=None, inspect_payment=True):
 
 ETHERSCAN_V2_URL = "https://api.etherscan.io/v2/api"
 # chain key -> chain id; only chains the Etherscan free tier serves.
-ETHERSCAN_FREE_CHAINS = {"ethereum": 1, "polygon": 137, "arbitrum": 42161}
+ETHERSCAN_FREE_CHAINS = {"ethereum": 1, "polygon": 137, "arbitrum": 42161,
+                         "worldchain": 480, "monad": 143, "sei": 1329,
+                         "unichain": 130, "sonic": 146, "hyperevm": 999}
 # Free tier allows 3 calls/second; stay under it.
 _ETHERSCAN_MIN_INTERVAL = 0.4
 _etherscan_last_call = 0.0
@@ -992,7 +994,22 @@ EVM_USDC_INDEXERS = {
     "polygon":  ("https://polygon.blockscout.com/api",  "0x3c499c542cEF5E3811e1192ce70d8cc03d5c3359"),
     "arbitrum": ("https://arbitrum.blockscout.com/api", "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"),
     "gnosis":   ("https://gnosis.blockscout.com/api",   "0xDDAfbb505ad214D7b80b1f830fcCc89B60fb7A83"),
+    # Reached only through Etherscan V2 (free tier) or BULK_LOG_CHAINS; the URL slot is unused.
+    "worldchain": ("", "0x79A02482A880bCE3F13e09Da970dC34db4CD24d1"),
+    "monad":      ("", "0x754704Bc059F8C67012fEd69BC8A327a5aafb603"),
+    "sei":        ("", "0xe15fC38F6D8c56aF07bbCBe3BAf5708A2Bf42392"),
+    "unichain":   ("", "0x078D782b760474a361dDA0AF3839290b0EF57AD6"),
+    "sonic":      ("", "0x29219dd400f2Bf60E5a23d13Be72B486D4038894"),
+    "hyperevm":   ("", "0xb88339CB7199b77E23DB6E890353E22632Ba630f"),
+    "bsc":        ("", "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d"),
+    "celo":       ("", "0xcebA9300f2b948710d2653dD7B07f33A8B32118C"),
+    "arc":        ("", "0x3600000000000000000000000000000000000000"),
+    "robinhood":  ("", "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"),
 }
+
+# Solana USDC mint; counted through Helius getTransfersByAddress.
+SOLANA_USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+HELIUS_RPC_URL = "https://mainnet.helius-rpc.com/"
 
 # payment.accepts[].network identifier -> chain key above.
 _NETWORK_CHAIN = {
@@ -1003,6 +1020,18 @@ _NETWORK_CHAIN = {
     "polygon": "polygon", "matic": "polygon", "eip155:137": "polygon", "137": "polygon",
     "arbitrum": "arbitrum", "arbitrum-one": "arbitrum", "eip155:42161": "arbitrum", "42161": "arbitrum",
     "gnosis": "gnosis", "xdai": "gnosis", "eip155:100": "gnosis", "100": "gnosis",
+    "worldchain": "worldchain", "world": "worldchain", "eip155:480": "worldchain", "480": "worldchain",
+    "monad": "monad", "eip155:143": "monad", "143": "monad",
+    "sei": "sei", "eip155:1329": "sei", "1329": "sei",
+    "unichain": "unichain", "eip155:130": "unichain", "130": "unichain",
+    "sonic": "sonic", "eip155:146": "sonic", "146": "sonic",
+    "hyperevm": "hyperevm", "eip155:999": "hyperevm", "999": "hyperevm",
+    "bsc": "bsc", "bnb": "bsc", "eip155:56": "bsc", "56": "bsc",
+    "celo": "celo", "eip155:42220": "celo", "42220": "celo",
+    "arc": "arc", "eip155:5042": "arc", "5042": "arc",
+    "robinhood": "robinhood", "eip155:4663": "robinhood", "4663": "robinhood",
+    "solana": "solana", "solana-mainnet": "solana", "solana:mainnet": "solana",
+    "solana:5eykt4usfv8p8njdtrepy1vzqkqzkvdp": "solana",
 }
 
 # Back-compat alias (kept for any external import).
@@ -1014,6 +1043,67 @@ def network_to_chain(network):
     if not network:
         return None
     return _NETWORK_CHAIN.get(str(network).strip().lower())
+
+
+_HELIUS_MIN_INTERVAL = 0.6  # free plan: 2 req/s on enhanced methods
+_helius_last_call = 0.0
+
+
+def _helius_solana_activity(payto, days, max_pages):
+    global _helius_last_call
+    key = (os.environ.get("HELIUS_API_KEY") or "").strip()
+    if not key:
+        return {"tx": 0, "payers": 0, "ok": False, "capped": False}
+    cutoff = int(time.time()) - days * 86400
+    tx = 0
+    payers = set()
+    capped = False
+    token = None
+    try:
+        with httpx.Client(timeout=httpx.Timeout(connect=5.0, read=30.0, write=5.0, pool=5.0),
+                          headers={"User-Agent": UA}) as c:
+            for page in range(1, max_pages + 1):
+                cfg = {"mint": SOLANA_USDC_MINT, "direction": "in", "limit": 100,
+                       "filters": {"blockTime": {"gte": cutoff}}}
+                if token:
+                    cfg["paginationToken"] = token
+                for attempt in range(5):
+                    wait = _HELIUS_MIN_INTERVAL - (time.monotonic() - _helius_last_call)
+                    if wait > 0:
+                        time.sleep(wait)
+                    _helius_last_call = time.monotonic()
+                    r = c.post(HELIUS_RPC_URL, params={"api-key": key},
+                               json={"jsonrpc": "2.0", "id": 1, "method": "getTransfersByAddress",
+                                     "params": [payto, cfg]})
+                    if r.status_code != 429:
+                        break
+                    time.sleep(min(30.0, 2.0 * (2 ** attempt)))
+                else:
+                    return {"tx": 0, "payers": 0, "ok": False, "capped": False}
+                if r.status_code >= 400:
+                    return {"tx": 0, "payers": 0, "ok": False, "capped": False}
+                body = r.json()
+                result = body.get("result")
+                if body.get("error") or not isinstance(result, dict):
+                    return {"tx": 0, "payers": 0, "ok": False, "capped": False}
+                for row in result.get("data") or []:
+                    # Mints arrive with no sender; only wallet-to-wallet payments count.
+                    if row.get("type") != "transfer" or row.get("toUserAccount") != payto:
+                        continue
+                    sender = row.get("fromUserAccount")
+                    if sender:
+                        tx += 1
+                        payers.add(sender)
+                token = result.get("paginationToken")
+                if not token or not result.get("data"):
+                    break
+                if page == max_pages:
+                    capped = True
+        return {"tx": tx, "payers": len(payers), "ok": True,
+                "capped": capped, "payer_ids": sorted(payers)}
+    except Exception as e:
+        log.debug("helius payto fetch failed for %s: %r", payto, e)
+        return {"tx": 0, "payers": 0, "ok": False, "capped": False}
 
 
 def _etherscan_payto_activity(payto, chain, contract, days, max_pages):
@@ -1075,10 +1165,14 @@ def fetch_payto_activity(payto, chain="base", days=30, max_pages=8):
     query/network failure or unsupported chain, so callers can skip the write
     instead of recording a false zero.
     """
+    if chain == "solana":
+        return _helius_solana_activity(payto, days, max_pages)
     indexer = EVM_USDC_INDEXERS.get(chain)
     if indexer is None:
         return {"tx": 0, "payers": 0, "ok": False, "capped": False}
     _api_base, contract = indexer
+    if not _api_base and chain not in ETHERSCAN_FREE_CHAINS:
+        return {"tx": 0, "payers": 0, "ok": False, "capped": False}
     if chain in ETHERSCAN_FREE_CHAINS and _etherscan_key():
         return _etherscan_payto_activity(payto, chain, contract, days, max_pages)
     payto_l = payto.lower()
@@ -1160,6 +1254,12 @@ BULK_LOG_CHAINS = {
                  "0x0b2c639c533813f4aa9d7837caf62653d097ff85", 2.0, 10000, 400),
     "gnosis": ("https://rpc.gnosischain.com",
                "0xddafbb505ad214d7b80b1f830fccc89b60fb7a83", 5.0, 10000, 400),
+    "celo": ("https://forno.celo.org",
+             "0xceba9300f2b948710d2653dd7b07f33a8b32118c", 1.0, 1000, 400),
+    "arc": ("https://5042.rpc.thirdweb.com",
+            "0x3600000000000000000000000000000000000000", 1.0, 1000, 400),
+    "robinhood": ("https://4663.rpc.thirdweb.com",
+                  "0x5fc5360d0400a0fd4f2af552add042d716f1d168", 1.0, 1000, 400),
 }
 _TRANSFER_TOPIC = (
     "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef")
@@ -1212,6 +1312,15 @@ def fetch_chain_activity_bulk(paytos, chain="base", days=30, rate=0.15):
                                                 write=10.0, pool=10.0),
                           headers={"User-Agent": UA}) as c:
             head = int(_rpc(c, rpc_url, "eth_blockNumber", []), 16)
+            # Measure the chain's real block time; a stale constant would skew the 30-day window.
+            try:
+                probe = min(head, 100000)
+                t_head = int(_rpc(c, rpc_url, "eth_getBlockByNumber", [hex(head), False])["timestamp"], 16)
+                t_old = int(_rpc(c, rpc_url, "eth_getBlockByNumber", [hex(head - probe), False])["timestamp"], 16)
+                if probe and t_head > t_old:
+                    block_secs = (t_head - t_old) / probe
+            except Exception as e:
+                log.info("onchain bulk %s: block time probe failed (%r), using %.2fs", chain, e, block_secs)
             span = int(days * 86400 / block_secs)
             start = max(0, head - span)
 
