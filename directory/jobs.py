@@ -14,6 +14,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import sys
 import threading
 import time
@@ -879,7 +880,19 @@ def _paytos_for_row(payment_json):
     out, seen = [], set()
 
     def _add(chain, pt):
-        if not chain or not pt or not str(pt).startswith("0x"):
+        if not chain or not pt:
+            return
+        pt = str(pt).strip()
+        # Solana addresses are base58 and case-sensitive; every other chain we count is EVM.
+        if chain == "solana":
+            if not re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{32,44}", pt):
+                return
+            key = (chain, pt)
+            if key not in seen:
+                seen.add(key)
+                out.append(key)
+            return
+        if not pt.startswith("0x"):
             return
         # The zero address collects every mint and burn on the chain; counting
         # it as a payee invents six-figure demand out of nothing.
