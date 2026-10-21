@@ -400,7 +400,8 @@ def observe(row):
                 exact_endpoint(sample['url']) == primary_key and sample['method'] == primary_method)]
             return {'status': 'verified', 'checked_at': int(time.time()), 'method': primary_method,
                     'payment': payment, 'latency_ms': latency, 'resource_samples': samples[:MAX_RESOURCES],
-                    'resource_count': min(len(samples), MAX_RESOURCES),
+                    # Samples stay capped for storage; the count reports everything the descriptor advertises.
+                    'resource_count': max(min(len(samples), MAX_RESOURCES), len(advertised)),
                     'well_known_url': descriptor_url if descriptor is not None else None,
                     'openapi_url': openapi_url if openapi is not None else None}
     except VerificationBlocked as exc:
