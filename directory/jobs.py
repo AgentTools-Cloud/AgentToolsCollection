@@ -1005,69 +1005,91 @@ def cmd_onchain(limit=None, stale_days=3, refresh_all=False, rate=1.2) -> int:
     log.info("onchain: querying %d unique (chain,payTo) over %d chains: %s",
              len(work), len(by_chain), by_chain)
 
-    # 1) query each unique (chain, payto) once.
-    # Chains with a bulk log sweep go first: one pass covers every address on
-    # that chain, which is the only way Base finishes at all now that the
-    # per-address indexer throttles us.
+    # Each service is written as soon as every one of its (chain, payTo) keys
+    # has been attempted, so a slow sweep on one chain never holds back the rest.
     results = {}
-    remaining = list(work)
+    attempted = set()
+    written = set()
+    counts = {"written": 0, "active": 0}
+
+    def flush():
+        for sid, keys in service_keys.items():
+            if sid in written or not all(k in attempted for k in keys):
+                continue
+            written.add(sid)
+            accs = [results[k] for k in keys if k in results and results[k]["ok"]]
+            if not accs:
+                continue  # every query failed -> skip, avoid false zero
+            tx = sum(a["tx"] for a in accs)
+            ids = [a.get("payer_ids") for a in accs]
+            if all(i is not None for i in ids):
+                payers = len({p for i in ids for p in i})
+            else:
+                payers = sum(a["payers"] for a in accs)
+
+            def op(sid=sid, tx=tx, payers=payers):
+                with db.writer(immediate=True) as c:
+                    if not snapshot_matches(c, sid):
+                        return False
+                    # payto_* keeps the raw on-chain provenance; tx_30d is the field
+                    # every consumer reads (scoring, ranking, match_reason, API,
+                    # MCP tools). Without folding the measurement in, the on-chain
+                    # job produced data nothing ever looked at.
+                    c.execute(
+                        "UPDATE services SET payto_tx_30d=?, payto_payers_30d=?, "
+                        "payto_checked=?, tx_30d=MAX(COALESCE(tx_30d,0), ?) "
+                        "WHERE id=?",
+                        (tx, payers, now, tx, sid),
+                    )
+                    return True
+            if db.with_retry(op):
+                counts["written"] += 1
+                if tx > 0:
+                    counts["active"] += 1
+
+    def per_address(keys, label):
+        done = 0
+        for key in keys:
+            ch, pt = key
+            results[key] = crawlers.fetch_payto_activity(pt, chain=ch)
+            attempted.add(key)
+            done += 1
+            if done % 50 == 0:
+                log.info("onchain progress (%s): %d/%d addresses", label, done, len(keys))
+            time.sleep(rate)
+
+    # Fast per-address chains first, one chain at a time, flushing after each.
+    for chain in sorted({ch for ch, _ in work if ch not in crawlers.BULK_LOG_CHAINS}):
+        keys = [k for k in work if k[0] == chain]
+        per_address(keys, chain)
+        before = counts["written"]
+        flush()
+        log.info("onchain: %s done, %d addresses, wrote %d services",
+                 chain, len(keys), counts["written"] - before)
+
+    # Bulk log sweeps: one pass covers every address on the chain.
     for chain in crawlers.BULK_LOG_CHAINS:
-        batch = [pt for ch, pt in remaining if ch == chain]
+        batch = [pt for ch, pt in work if ch == chain]
         if not batch:
             continue
         bulk, ok = crawlers.fetch_chain_activity_bulk(batch, chain=chain)
-        if not ok:
+        if ok:
+            for pt in batch:
+                got = bulk.get(pt.lower()) or {"tx": 0, "payers": 0}
+                results[(chain, pt)] = {"tx": got["tx"], "payers": got["payers"],
+                                        "payer_ids": got.get("payer_ids"),
+                                        "ok": True, "capped": False}
+                attempted.add((chain, pt))
+            log.info("onchain: bulk sweep covered %d %s addresses", len(batch), chain)
+        else:
             log.warning("onchain: bulk sweep for %s incomplete; "
                         "falling back to per-address queries", chain)
-            continue
-        for pt in batch:
-            got = bulk.get(pt.lower()) or {"tx": 0, "payers": 0}
-            results[(chain, pt)] = {"tx": got["tx"], "payers": got["payers"],
-                                    "ok": True, "capped": False}
-        remaining = [k for k in remaining if k[0] != chain]
-        log.info("onchain: bulk sweep covered %d %s addresses",
-                 len(batch), chain)
+            per_address([(chain, pt) for pt in batch], chain)
+        before = counts["written"]
+        flush()
+        log.info("onchain: %s done, wrote %d services", chain, counts["written"] - before)
 
-    done = 0
-    for key in remaining:
-        ch, pt = key
-        results[key] = crawlers.fetch_payto_activity(pt, chain=ch)
-        done += 1
-        if done % 50 == 0:
-            log.info("onchain progress: %d/%d addresses", done, len(remaining))
-        time.sleep(rate)
-
-    # 2) aggregate per service across its chains, then write once
-    n_active = n_written = 0
-    for sid, keys in service_keys.items():
-        accs = [results[k] for k in keys if k in results and results[k]["ok"]]
-        if not accs:
-            continue  # every query failed -> skip, avoid false zero
-        tx = sum(a["tx"] for a in accs)
-        ids = [a.get("payer_ids") for a in accs]
-        if all(i is not None for i in ids):
-            payers = len({p for i in ids for p in i})
-        else:
-            payers = sum(a["payers"] for a in accs)
-        def op(sid=sid, tx=tx, payers=payers, now=now):
-            with db.writer(immediate=True) as c:
-                if not snapshot_matches(c, sid):
-                    return False
-                # payto_* keeps the raw on-chain provenance; tx_30d is the field
-                # every consumer reads (scoring, ranking, match_reason, API,
-                # MCP tools). Without folding the measurement in, the on-chain
-                # job produced data nothing ever looked at.
-                c.execute(
-                    "UPDATE services SET payto_tx_30d=?, payto_payers_30d=?, "
-                    "payto_checked=?, tx_30d=MAX(COALESCE(tx_30d,0), ?) "
-                    "WHERE id=?",
-                    (tx, payers, now, tx, sid),
-                )
-                return True
-        if db.with_retry(op):
-            n_written += 1
-            if tx > 0:
-                n_active += 1
+    n_written, n_active = counts["written"], counts["active"]
     log.info("onchain: wrote %d services, %d with paying demand", n_written, n_active)
     cmd_rescore()
     return 0
