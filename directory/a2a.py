@@ -804,6 +804,7 @@ def crawl_a2a_registry_global(page_size: int = 100, max_pages: int = 60) -> dict
     """
     rows: list[dict] = []
     seen: set[str] = set()
+    seen_before: set[str] = set()
     partial_error: str | None = None
     total: int | None = None
     with public_http.client(
@@ -812,8 +813,9 @@ def crawl_a2a_registry_global(page_size: int = 100, max_pages: int = 60) -> dict
         for page in range(max_pages):
             offset = page * page_size
             try:
+                # offset is ignored upstream; page is 1-based, limit <= 100.
                 r = c.get(A2A_REGISTRY_GLOBAL_API,
-                          params={"limit": page_size, "offset": offset})
+                          params={"limit": page_size, "page": page + 1})
                 r.raise_for_status()
                 payload = r.json()
             except (httpx.HTTPError, ValueError) as e:
@@ -860,6 +862,10 @@ def crawl_a2a_registry_global(page_size: int = 100, max_pages: int = 60) -> dict
                 if live_card is None:
                     row["_snapshot_fallback"] = True
                 rows.append(row)
+            if all(str(x.get("id")) in seen_before for x in agents if isinstance(x, dict)):
+                partial_error = f"page {page + 1} repeated earlier ids"
+                break
+            seen_before.update(str(x.get("id")) for x in agents if isinstance(x, dict))
             if (total is not None and offset + len(agents) >= total) or len(agents) < page_size:
                 break
         else:
