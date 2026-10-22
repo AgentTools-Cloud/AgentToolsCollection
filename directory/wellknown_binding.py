@@ -65,7 +65,8 @@ def record_reviewed_alias(conn, kind, source_id, endpoint_url, listing_id):
     Never edits the listing, its endpoint, owner fields or provenance.
     """
     table = {'mcp': 'mcp_servers', 'a2a': 'a2a_agents'}[kind]
-    if conn.execute(f'SELECT 1 FROM {table} WHERE id=?', (listing_id,)).fetchone() is None:
+    if (int(listing_id) == REVIEW_REJECTED
+            or conn.execute(f'SELECT 1 FROM {table} WHERE id=?', (listing_id,)).fetchone() is None):
         raise ValueError('unknown listing')
     endpoint = db._exact_endpoint(endpoint_url)
     conn.execute(
@@ -77,6 +78,22 @@ def record_reviewed_alias(conn, kind, source_id, endpoint_url, listing_id):
     )
 
 
+# listing_id sentinel in wellknown_reviewed_aliases: operator rejected the endpoint.
+REVIEW_REJECTED = 0
+
+
+def record_reviewed_rejection(conn, kind, source_id, endpoint_url):
+    """Operator decision: never list this exact upstream endpoint; stop holding it."""
+    endpoint = db._exact_endpoint(endpoint_url)
+    conn.execute(
+        'INSERT INTO wellknown_reviewed_aliases '
+        '(kind,identity_hash,endpoint_hash,listing_id,reviewed_at) VALUES(?,?,?,?,?) '
+        'ON CONFLICT(kind,identity_hash,endpoint_hash) DO UPDATE SET '
+        'listing_id=excluded.listing_id,reviewed_at=excluded.reviewed_at',
+        (kind, digest(source_id), digest(endpoint), REVIEW_REJECTED, int(time.time())),
+    )
+
+
 def _reviewed_alias_target(conn, kind, table, ih, eh):
     alias = conn.execute(
         'SELECT listing_id FROM wellknown_reviewed_aliases '
@@ -84,6 +101,12 @@ def _reviewed_alias_target(conn, kind, table, ih, eh):
     ).fetchone()
     if alias is None:
         return None
+    if alias['listing_id'] == REVIEW_REJECTED:
+        conn.execute('UPDATE wellknown_reviewed_aliases SET last_seen=? '
+                     'WHERE kind=? AND identity_hash=? AND endpoint_hash=?',
+                     (int(time.time()), kind, ih, eh))
+        raise db.RetiredListingError({'kind': kind, 'slug': None,
+                                      'reason': 'wellknown_review_rejected'})
     target = conn.execute(f'SELECT * FROM {table} WHERE id=?', (alias['listing_id'],)).fetchone()
     if target is None:
         return None  # reviewed target vanished: fall back to normal review

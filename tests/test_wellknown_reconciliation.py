@@ -179,6 +179,30 @@ class ReviewedAliasTests(TemporaryDatabaseTestCase):
         self.assert_result(self.ingest_wellknown("mcp", [third]),
                            errors=["source binding held: wellknown_new_endpoint_requires_review"])
 
+    def test_reviewed_rejection_drops_endpoint_without_hold(self):
+        from directory import wellknown_binding
+        for kind in ("mcp", "a2a"):
+            with self.subTest(kind=kind):
+                first = _row(kind, f"reject-first-{kind}", source="wellknown", source_id=f"reject-{kind}")
+                self.bind(kind, first)
+                second = dict(first, endpoint_url=f"https://reject-alt-{kind}.example/{kind}")
+                third = dict(first, endpoint_url=f"https://reject-other-{kind}.example/{kind}")
+                before, bindings = self.listings(kind), self.bindings(kind)
+                with db.writer() as conn:
+                    wellknown_binding.record_reviewed_rejection(conn, kind, second["source_id"], second["endpoint_url"])
+                self.assert_result(self.ingest_wellknown(kind, [second]), rejected=1)
+                self.assertEqual(self.listings(kind), before)
+                self.assertEqual(self.bindings(kind), bindings)
+                self.assertFalse([i for i in self.issues() if i["kind"] == kind and i["resolved_at"] is None])
+                self.assert_result(self.ingest_wellknown(kind, [third]),
+                                   errors=["source binding held: wellknown_new_endpoint_requires_review"])
+
+    def test_alias_cannot_target_rejection_sentinel(self):
+        from directory import wellknown_binding
+        with db.writer() as conn, self.assertRaises(ValueError):
+            wellknown_binding.record_reviewed_alias(conn, "mcp", "x", "https://x.example/mcp",
+                                                    wellknown_binding.REVIEW_REJECTED)
+
     def test_alias_to_deleted_listing_falls_back_to_hold(self):
         first = _row("mcp", "gone-first", source="wellknown", source_id="gone")
         _, lid = self.bind("mcp", first)
