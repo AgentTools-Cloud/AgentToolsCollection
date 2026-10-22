@@ -1837,6 +1837,8 @@ def robots_txt() -> Response:
     """Welcome search engines and AI agents; point them at the sitemap."""
     # /auth/ only starts an OAuth redirect. Crawlers followed it 2,243 times in
     # one day and completed it zero times, which was most of our redirect churn.
+    # /listings/ (owner edit/manage), /account and /api/v1/me only answer signed-in
+    # owners; crawlers spent ~30% of requests there in 7 days (2026-10-22).
     body = (
         "# agent-tools.cloud - open directory of MCP servers, A2A agents and\n"
         "# x402 services. Crawlers and AI agents are welcome to index and use\n"
@@ -1844,6 +1846,9 @@ def robots_txt() -> Response:
         "User-agent: *\n"
         "Allow: /\n"
         "Disallow: /auth/\n"
+        "Disallow: /listings/\n"
+        "Disallow: /account\n"
+        "Disallow: /api/v1/me\n"
         "\n"
         "Sitemap: https://agent-tools.cloud/sitemap.xml\n"
     )
