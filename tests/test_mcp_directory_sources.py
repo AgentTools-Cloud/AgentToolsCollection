@@ -43,6 +43,39 @@ class AgenstryFeedTests(unittest.TestCase):
         self.assertEqual(rows[0]["chains"], ["solana"])
 
 
+class FeedDownloadTests(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.enterContext(patch.object(agenstry.db, "DEFAULT_DB_PATH", tmp.name + "/x.db"))
+        self.enterContext(patch.object(agenstry, "_feed_cache", None))
+        self.enterContext(patch.object(agenstry.time, "sleep"))
+
+    def _resp(self, status, content=b"", headers=None):
+        class R:
+            status_code = status
+            def raise_for_status(self): pass
+        r = R(); r.content = content; r.headers = headers or {}
+        return r
+
+    def test_429_is_final_and_not_retried(self):
+        get = patch.object(agenstry.httpx.Client, "get",
+                           return_value=self._resp(429, headers={"retry-after": "3600"}))
+        with get as g, self.assertRaises(RuntimeError):
+            agenstry.fetch_feed()
+        self.assertEqual(g.call_count, 1)
+
+    def test_download_is_cached_on_disk(self):
+        import gzip, json
+        blob = gzip.compress(json.dumps({"kind": "mcp", "id": "a"}).encode())
+        with patch.object(agenstry.httpx.Client, "get", return_value=self._resp(200, blob)) as g:
+            self.assertEqual(len(agenstry.fetch_feed()), 1)
+            agenstry._feed_cache = None
+            self.assertEqual(len(agenstry.fetch_feed()), 1)
+        self.assertEqual(g.call_count, 1)
+
+
 class RegistrationTests(unittest.TestCase):
     def test_registered(self):
         self.assertIs(crawlers.MCP_CRAWLERS["agenstry-feed"], agenstry.fetch_agenstry_feed_mcp)
