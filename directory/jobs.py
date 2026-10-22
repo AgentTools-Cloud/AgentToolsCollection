@@ -28,6 +28,7 @@ from . import ownership as ownership_mod
 from . import agenstry as agenstry_mod
 from . import flows as flows_mod
 from . import paygent as paygent_mod
+from . import zero as zero_mod
 from . import prowl as prowl_mod
 from . import wellknown as wellknown_mod
 from . import mcp_safety
@@ -43,6 +44,7 @@ crawlers.MCP_CRAWLERS["wellknown"] = wellknown_mod.fetch_wellknown_mcp
 crawlers.ALL_CRAWLERS["paygent-discover"] = paygent_mod.fetch_paygent_discover
 crawlers.ALL_CRAWLERS["flows-litprotocol"] = flows_mod.fetch_flows_litprotocol
 crawlers.ALL_CRAWLERS["x402-fuchss"] = crawlers.fetch_x402_fuchss
+crawlers.ALL_CRAWLERS["zero"] = zero_mod.fetch_zero
 
 log = logging.getLogger("directory.jobs")
 SEED_FILE = Path(__file__).resolve().parent / "seed.json"
