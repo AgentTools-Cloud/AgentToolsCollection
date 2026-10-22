@@ -109,7 +109,7 @@ class A2ARegistryGlobalTests(unittest.TestCase):
         with patch.object(a2a.public_http, "client", return_value=C()), \
              patch.object(a2a, "fetch_agent_card", side_effect=card), \
              patch.object(a2a, "card_to_row", side_effect=lambda c, u, **k: {"name": c["name"], "card_url": u, **k}), \
-             patch.object(a2a.db, "with_retry", side_effect=lambda fn: captured.setdefault("n", 0) or (2, 0)):
+             patch.object(a2a.db, "with_retry", side_effect=lambda fn: {"added": 2, "updated": 0, "rejected": 0, "errors": []}):
             out = a2a.crawl_a2a_registry_global()
         self.assertEqual(out["resolved"], 2)
         self.assertEqual(out["inserted"], 2)
