@@ -871,11 +871,19 @@ def crawl_a2a_registry_global(page_size: int = 100, max_pages: int = 60) -> dict
         else:
             partial_error = f"max_pages={max_pages} exhausted before total {total}"
     log.info("a2a-registry: mapped %d agents", len(rows))
-    inserted = updated = 0
-    if rows:
-        inserted, updated = db.with_retry(lambda: _upsert_rows(rows))
+    from . import ingestion
+
+    def write(batch):
+        with db.writer(immediate=True) as conn:
+            return ingestion.ingest_batch(conn, "a2a", "a2a-registry", batch,
+                                          db.upsert_a2a_agent)
+
+    inserted = updated = rejected = 0
+    for i in range(0, len(rows), 100):
+        res = db.with_retry(lambda b=rows[i:i + 100]: write(b))
+        inserted += res["added"]; updated += res["updated"]; rejected += res["rejected"]
     result = {"candidates": len(seen), "resolved": len(rows),
-              "inserted": inserted, "updated": updated}
+              "inserted": inserted, "updated": updated, "rejected": rejected}
     if partial_error:
         raise crawlers.PartialCrawl(result, partial_error)
     return result
