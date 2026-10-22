@@ -27,6 +27,7 @@ import json
 import logging
 import re
 import time
+from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
@@ -297,7 +298,7 @@ def fetch_agenstry_mcp(max_pages: int = 6000, workers: int = 12) -> list:
 # only rows with a concrete endpoint are kept, capped per host because a few
 # hosts publish thousands of near-identical endpoints.
 FEED_URL = f"{API_BASE}/feed/all.jsonl.gz"
-_FEED_TTL = 6 * 3600
+_FEED_TTL = 20 * 3600
 _FEED_PER_HOST = 20
 _FEED_CATALOG_HOSTS = _NOT_AN_ENDPOINT | {"smithery.ai", "www.smithery.ai", "github.com",
                                           "www.npmjs.com", "pypi.org", "n8n.io"}
@@ -317,28 +318,43 @@ def _looks_like_mcp_endpoint(url: str) -> bool:
 
 
 def fetch_feed() -> list[dict]:
-    """Download and parse the export once per process (cached for a few hours)."""
+    """Download and parse the export, shared by every consumer for a few hours.
+
+    The feed is rate limited to 6 calls/hour per caller with Retry-After: 3600,
+    so a 429 is final for this run and the gzip is kept on disk next to the DB.
+    """
     global _feed_cache
     if _feed_cache and time.time() - _feed_cache[0] < _FEED_TTL:
         return _feed_cache[1]
-    timeout = httpx.Timeout(connect=10.0, read=120.0, write=10.0, pool=10.0)
-    last = None
-    for delay in (0.0,) + _API_RETRY_DELAYS:
-        time.sleep(delay)
-        try:
-            with httpx.Client(timeout=timeout, follow_redirects=True,
-                              headers={"User-Agent": UA}) as c:
-                r = c.get(FEED_URL)
+    cache = Path(db.DEFAULT_DB_PATH).with_name("agenstry-feed.jsonl.gz")
+    if cache.exists() and time.time() - cache.stat().st_mtime < _FEED_TTL:
+        raw = gzip.decompress(cache.read_bytes())
+    else:
+        timeout = httpx.Timeout(connect=10.0, read=120.0, write=10.0, pool=10.0)
+        last = None
+        for delay in (0.0,) + _API_RETRY_DELAYS:
+            time.sleep(delay)
+            try:
+                with httpx.Client(timeout=timeout, follow_redirects=True,
+                                  headers={"User-Agent": UA}) as c:
+                    r = c.get(FEED_URL)
+                if r.status_code == 429:
+                    raise RuntimeError(f"agenstry feed rate limited "
+                                       f"(retry-after {r.headers.get('retry-after')})")
                 if r.status_code in _API_TRANSIENT_STATUSES:
                     last = RuntimeError(f"HTTP {r.status_code}")
                     continue
                 r.raise_for_status()
-                raw = gzip.decompress(r.content)
-            break
-        except (httpx.TransportError, OSError) as e:
-            last = e
-    else:
-        raise RuntimeError(f"agenstry feed failed: {last!r}")
+                blob = r.content
+                break
+            except (httpx.TransportError, OSError) as e:
+                last = e
+        else:
+            raise RuntimeError(f"agenstry feed failed: {last!r}")
+        raw = gzip.decompress(blob)
+        tmp = cache.with_suffix(".tmp")
+        tmp.write_bytes(blob)
+        tmp.replace(cache)
     records = []
     for line in raw.splitlines():
         try:
