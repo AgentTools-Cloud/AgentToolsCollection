@@ -117,6 +117,8 @@ class WellknownCrawlerTests(unittest.TestCase):
             patch.object(jobs.a2a_mod, "crawl_directories", return_value=empty),
             patch.object(jobs.agenstry_mod, "crawl_agenstry_a2a", return_value=empty),
             patch.object(jobs.a2a_mod, "crawl_a2aregistry", return_value=empty),
+            patch.object(jobs.a2a_mod, "crawl_a2a_registry_global", return_value=empty),
+            patch.object(jobs.agenstry_mod, "fetch_feed", return_value=[]),
             patch.object(jobs.a2a_mod, "crawl_github_topic", return_value=empty),
             patch.object(jobs.wellknown_mod, "fetch_wellknown_a2a", return_value=[row]),
             patch.object(jobs, "_upsert_wellknown_a2a_rows", return_value=(1, 0, [])) as upsert,

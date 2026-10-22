@@ -76,6 +76,45 @@ class FeedDownloadTests(unittest.TestCase):
         self.assertEqual(g.call_count, 1)
 
 
+class A2ARegistryGlobalTests(unittest.TestCase):
+    def test_live_card_preferred_snapshot_fallback_and_filters(self):
+        from directory import a2a
+        import json as _json
+        agents = [
+            {"id": "1", "status": "ACTIVE", "visibility": "public", "protocolStd": "a2a",
+             "manifestUrl": "https://live.example/.well-known/agent-card.json",
+             "source_agent_card": _json.dumps({"name": "snap1", "url": "https://live.example/a2a"})},
+            {"id": "2", "status": "ACTIVE", "visibility": "public",
+             "manifestUrl": "https://dead.example/.well-known/agent-card.json",
+             "source_agent_card": _json.dumps({"name": "snap2", "url": "https://dead.example/a2a"})},
+            {"id": "3", "status": "INACTIVE", "manifestUrl": "https://x.example/"},
+            {"id": "4", "status": "ACTIVE", "protocolStd": "mcp", "manifestUrl": "https://y.example/"},
+        ]
+
+        class R:
+            status_code = 200
+            def raise_for_status(self): pass
+            def json(self): return {"total": 4, "agents": agents}
+
+        class C:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def get(self, *a, **k): return R()
+
+        def card(base, client=None):
+            if "live" in base:
+                return {"name": "live1", "url": "https://live.example/a2a"}, base
+            raise RuntimeError("down")
+        captured = {}
+        with patch.object(a2a.public_http, "client", return_value=C()), \
+             patch.object(a2a, "fetch_agent_card", side_effect=card), \
+             patch.object(a2a, "card_to_row", side_effect=lambda c, u, **k: {"name": c["name"], "card_url": u, **k}), \
+             patch.object(a2a.db, "with_retry", side_effect=lambda fn: captured.setdefault("n", 0) or (2, 0)):
+            out = a2a.crawl_a2a_registry_global()
+        self.assertEqual(out["resolved"], 2)
+        self.assertEqual(out["inserted"], 2)
+
+
 class RegistrationTests(unittest.TestCase):
     def test_registered(self):
         self.assertIs(crawlers.MCP_CRAWLERS["agenstry-feed"], agenstry.fetch_agenstry_feed_mcp)

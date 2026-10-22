@@ -447,6 +447,18 @@ def cmd_crawl_a2a() -> int:
     except Exception as e:
         errors.append(f"a2aregistry: {e!r}"); log.warning("a2a a2aregistry crawl failed: %r", e)
     try:
+        gr = a2a_mod.crawl_a2a_registry_global()
+        added += gr["inserted"]; updated += gr["updated"]
+        log.info("a2a a2a-registry: candidates=%d resolved=%d inserted=%d updated=%d",
+                 gr["candidates"], gr["resolved"], gr["inserted"], gr["updated"])
+    except crawlers.PartialCrawl as e:
+        gr = e.items
+        added += gr["inserted"]; updated += gr["updated"]
+        errors.append(f"a2a-registry: incomplete crawl: {e.reason}")
+        log.warning("a2a a2a-registry incomplete (%s)", e.reason)
+    except Exception as e:
+        errors.append(f"a2a-registry: {e!r}"); log.warning("a2a a2a-registry crawl failed: %r", e)
+    try:
         gh = a2a_mod.crawl_github_topic()
         added += gh["inserted"]; updated += gh["updated"]
         log.info("a2a github-topic: candidates=%d resolved=%d inserted=%d updated=%d",

@@ -793,6 +793,88 @@ def crawl_a2aregistry(page_size: int = 100, max_pages: int = 20) -> dict:
     return result
 
 
+A2A_REGISTRY_GLOBAL_API = "https://api.a2a-registry.org/public/agents"
+
+
+def crawl_a2a_registry_global(page_size: int = 100, max_pages: int = 60) -> dict:
+    """Index www.a2a-registry.org (Global A2A Registry, not a2aregistry.org).
+
+    Its public list carries ``manifestUrl`` plus a ``source_agent_card``
+    snapshot; the live card wins and the snapshot is only a fallback.
+    """
+    rows: list[dict] = []
+    seen: set[str] = set()
+    partial_error: str | None = None
+    total: int | None = None
+    with public_http.client(
+            timeout=TIMEOUT, follow_redirects=True,
+            headers={"User-Agent": UA, "Accept": "application/json"}) as c:
+        for page in range(max_pages):
+            offset = page * page_size
+            try:
+                r = c.get(A2A_REGISTRY_GLOBAL_API,
+                          params={"limit": page_size, "offset": offset})
+                r.raise_for_status()
+                payload = r.json()
+            except (httpx.HTTPError, ValueError) as e:
+                partial_error = f"fetch error at offset {offset}: {e!r}"
+                break
+            agents = payload.get("agents") if isinstance(payload, dict) else None
+            if isinstance(payload, dict) and isinstance(payload.get("total"), int):
+                total = payload["total"]
+            if not agents:
+                if total is not None and offset < total:
+                    partial_error = f"empty page at offset {offset} before total {total}"
+                break
+            for a in agents:
+                if (not isinstance(a, dict) or a.get("status") != "ACTIVE"
+                        or a.get("visibility") not in (None, "public")
+                        or (a.get("protocolStd") or "a2a") != "a2a"):
+                    continue
+                aid = str(a.get("id") or "")
+                card_url = a.get("manifestUrl")
+                if not aid or not card_url or aid in seen:
+                    continue
+                seen.add(aid)
+                try:
+                    snapshot = json.loads(a.get("source_agent_card") or "null")
+                except ValueError:
+                    snapshot = None
+                p = urlparse(str(card_url))
+                base = (str(card_url) if p.path.endswith("/.well-known/agent-card.json")
+                        else f"{p.scheme}://{p.netloc}")
+                live_card = live_url = None
+                try:
+                    live_card, live_url = fetch_agent_card(base, client=c)
+                except Exception as exc:  # noqa: BLE001 -- snapshot fallback below
+                    log.warning("a2a-registry: live card failed for %s: %r", aid, exc)
+                card = live_card or (snapshot if isinstance(snapshot, dict) else None)
+                if not card:
+                    continue
+                try:
+                    row = card_to_row(card, live_url or str(card_url),
+                                      source="a2a-registry", source_id=aid)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("a2a-registry: card_to_row failed for %s: %r", aid, e)
+                    continue
+                if live_card is None:
+                    row["_snapshot_fallback"] = True
+                rows.append(row)
+            if (total is not None and offset + len(agents) >= total) or len(agents) < page_size:
+                break
+        else:
+            partial_error = f"max_pages={max_pages} exhausted before total {total}"
+    log.info("a2a-registry: mapped %d agents", len(rows))
+    inserted = updated = 0
+    if rows:
+        inserted, updated = db.with_retry(lambda: _upsert_rows(rows))
+    result = {"candidates": len(seen), "resolved": len(rows),
+              "inserted": inserted, "updated": updated}
+    if partial_error:
+        raise crawlers.PartialCrawl(result, partial_error)
+    return result
+
+
 GITHUB_TOPIC_SEARCH = "https://api.github.com/search/repositories"
 
 
