@@ -22,6 +22,8 @@ URLs, so they do not map onto our concrete x402 `services` table.
 from __future__ import annotations
 
 import concurrent.futures as cf
+import gzip
+import json
 import logging
 import re
 import time
@@ -83,7 +85,8 @@ def _write_a2a_batch(rows: list[dict]) -> dict:
         return ingestion.ingest_batch(conn, "a2a", "agenstry", rows, db.upsert_a2a_agent)
 
 
-def crawl_agenstry_a2a(max_hosts: int = 4000, workers: int = 12) -> dict:
+def crawl_agenstry_a2a(max_hosts: int = 8000, workers: int = 12,
+                        extra_domains: list[str] | None = None) -> dict:
     """Discover live cards and commit bounded batches.
 
     Permanent metadata/retirement rejections are counted separately from source
@@ -137,6 +140,10 @@ def crawl_agenstry_a2a(max_hosts: int = 4000, workers: int = 12) -> dict:
                 continue
             seen.add(dom)
             domains.append(dom)
+        for dom in extra_domains or ():
+            if dom not in seen:
+                seen.add(dom)
+                domains.append(dom)
         domains = domains[:max_hosts]
         log.info("agenstry a2a: %d candidate domains", len(domains))
 
@@ -280,3 +287,125 @@ def fetch_agenstry_mcp(max_pages: int = 6000, workers: int = 12) -> list:
         out.append(row)
     log.info("agenstry mcp: refreshed %d servers from anonymous 50-row window", len(out))
     return out
+
+
+# ---------------------------------------------------------------------------
+# Full export feed (anonymous, 2026-10): /api/feed/all.jsonl.gz
+# ---------------------------------------------------------------------------
+# ~283k records of kind mcp / skill / paid_api / a2a_agent / workflow. Most MCP
+# rows point at catalog pages (glama.ai, smithery.ai, github) or have no URL;
+# only rows with a concrete endpoint are kept, capped per host because a few
+# hosts publish thousands of near-identical endpoints.
+FEED_URL = f"{API_BASE}/feed/all.jsonl.gz"
+_FEED_TTL = 6 * 3600
+_FEED_PER_HOST = 20
+_FEED_CATALOG_HOSTS = _NOT_AN_ENDPOINT | {"smithery.ai", "www.smithery.ai", "github.com",
+                                          "www.npmjs.com", "pypi.org", "n8n.io"}
+_FEED_MCP_TRANSPORTS = {"http": "streamable-http", "streamable-http": "streamable-http",
+                        "streamablehttp": "streamable-http", "sse": "sse"}
+_feed_cache: tuple[float, list[dict]] | None = None
+# Most feed "endpoints" are homepages or docs; a 40-row sample of the unfiltered
+# set completed one MCP handshake. Keep only URLs that look like a transport.
+_FEED_MCP_PATH = re.compile(r"/(mcp|sse)(/|$)|/mcp[-_.]|\.mcp$", re.I)
+
+
+def _looks_like_mcp_endpoint(url: str) -> bool:
+    p = urlparse(url)
+    host = (p.hostname or "").lower()
+    return bool(_FEED_MCP_PATH.search(p.path or "")) or host.startswith(("mcp.", "mcp-"))
+
+
+
+def fetch_feed() -> list[dict]:
+    """Download and parse the export once per process (cached for a few hours)."""
+    global _feed_cache
+    if _feed_cache and time.time() - _feed_cache[0] < _FEED_TTL:
+        return _feed_cache[1]
+    timeout = httpx.Timeout(connect=10.0, read=120.0, write=10.0, pool=10.0)
+    last = None
+    for delay in (0.0,) + _API_RETRY_DELAYS:
+        time.sleep(delay)
+        try:
+            with httpx.Client(timeout=timeout, follow_redirects=True,
+                              headers={"User-Agent": UA}) as c:
+                r = c.get(FEED_URL)
+                if r.status_code in _API_TRANSIENT_STATUSES:
+                    last = RuntimeError(f"HTTP {r.status_code}")
+                    continue
+                r.raise_for_status()
+                raw = gzip.decompress(r.content)
+            break
+        except (httpx.TransportError, OSError) as e:
+            last = e
+    else:
+        raise RuntimeError(f"agenstry feed failed: {last!r}")
+    records = []
+    for line in raw.splitlines():
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(rec, dict):
+            records.append(rec)
+    log.info("agenstry feed: %d records", len(records))
+    _feed_cache = (time.time(), records)
+    return records
+
+
+def _feed_host(url: str) -> str:
+    return (urlparse(url or "").hostname or "").lower()
+
+
+def feed_mcp_rows(records: list[dict]) -> list[dict]:
+    out: list[dict] = []
+    per_host: dict[str, int] = {}
+    seen: set[str] = set()
+    for rec in records:
+        if rec.get("kind") != "mcp":
+            continue
+        transport = _FEED_MCP_TRANSPORTS.get((rec.get("transport") or "").strip().lower())
+        endpoint = (rec.get("url") or "").strip().rstrip("/")
+        host = _feed_host(endpoint)
+        if (not transport or not endpoint.startswith("https://") or not host
+                or host in _FEED_CATALOG_HOSTS or host.endswith(".agenstry.com")
+                or not _looks_like_mcp_endpoint(endpoint)):
+            continue
+        key = endpoint.lower()
+        if key in seen or per_host.get(host, 0) >= _FEED_PER_HOST:
+            continue
+        seen.add(key)
+        per_host[host] = per_host.get(host, 0) + 1
+        aid = str(rec.get("id") or endpoint)
+        out.append({
+            "slug": f"{_slugify(aid.replace('/', '-'))}-{_host_slug(endpoint)}"[:80],
+            "name": rec.get("name") or _host_slug(endpoint),
+            "description": (rec.get("description") or "").strip() or None,
+            "homepage_url": f"https://{host}",
+            "endpoint_url": endpoint,
+            "transport": transport,
+            "auth_method": None,
+            "x402_supported": False,
+            "source": "agenstry",
+            "source_id": aid,
+            "source_url": f"https://agenstry.com/mcp/{aid}",
+            "confidence": 0.5,
+        })
+    return out
+
+
+def feed_a2a_domains(records: list[dict]) -> list[str]:
+    out, seen = [], set()
+    for rec in records:
+        if rec.get("kind") != "a2a_agent":
+            continue
+        host = _feed_host(rec.get("url"))
+        if host and "." in host and host not in seen and not host.endswith(".agenstry.com"):
+            seen.add(host)
+            out.append(host)
+    return out
+
+
+def fetch_agenstry_feed_mcp() -> list[dict]:
+    rows = feed_mcp_rows(fetch_feed())
+    log.info("agenstry feed mcp: %d endpoints", len(rows))
+    return rows
