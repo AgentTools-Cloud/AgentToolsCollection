@@ -80,10 +80,12 @@ def record_reviewed_alias(conn, kind, source_id, endpoint_url, listing_id):
 
 # listing_id sentinel in wellknown_reviewed_aliases: operator rejected the endpoint.
 REVIEW_REJECTED = 0
+# After this, a still-advertised rejected endpoint goes back to review.
+REVIEW_REJECTED_TTL = 30 * 86400
 
 
 def record_reviewed_rejection(conn, kind, source_id, endpoint_url):
-    """Operator decision: never list this exact upstream endpoint; stop holding it."""
+    """Operator decision: skip this exact upstream endpoint for REVIEW_REJECTED_TTL, then re-review."""
     endpoint = db._exact_endpoint(endpoint_url)
     conn.execute(
         'INSERT INTO wellknown_reviewed_aliases '
@@ -96,15 +98,18 @@ def record_reviewed_rejection(conn, kind, source_id, endpoint_url):
 
 def _reviewed_alias_target(conn, kind, table, ih, eh):
     alias = conn.execute(
-        'SELECT listing_id FROM wellknown_reviewed_aliases '
+        'SELECT listing_id, reviewed_at FROM wellknown_reviewed_aliases '
         'WHERE kind=? AND identity_hash=? AND endpoint_hash=?', (kind, ih, eh),
     ).fetchone()
     if alias is None:
         return None
     if alias['listing_id'] == REVIEW_REJECTED:
+        now = int(time.time())
+        if now - int(alias['reviewed_at']) >= REVIEW_REJECTED_TTL:
+            return None
         conn.execute('UPDATE wellknown_reviewed_aliases SET last_seen=? '
                      'WHERE kind=? AND identity_hash=? AND endpoint_hash=?',
-                     (int(time.time()), kind, ih, eh))
+                     (now, kind, ih, eh))
         raise db.RetiredListingError({'kind': kind, 'slug': None,
                                       'reason': 'wellknown_review_rejected'})
     target = conn.execute(f'SELECT * FROM {table} WHERE id=?', (alias['listing_id'],)).fetchone()

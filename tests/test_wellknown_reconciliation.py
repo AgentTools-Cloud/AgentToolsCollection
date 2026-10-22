@@ -197,6 +197,21 @@ class ReviewedAliasTests(TemporaryDatabaseTestCase):
                 self.assert_result(self.ingest_wellknown(kind, [third]),
                                    errors=["source binding held: wellknown_new_endpoint_requires_review"])
 
+    def test_reviewed_rejection_expires_back_to_review(self):
+        from directory import wellknown_binding
+        first = _row("mcp", "expire-first", source="wellknown", source_id="expire")
+        self.bind("mcp", first)
+        second = dict(first, endpoint_url="https://expire-alt.example/mcp")
+        with db.writer() as conn:
+            wellknown_binding.record_reviewed_rejection(conn, "mcp", second["source_id"], second["endpoint_url"])
+            conn.execute("UPDATE wellknown_reviewed_aliases SET reviewed_at=reviewed_at-?",
+                         (wellknown_binding.REVIEW_REJECTED_TTL,))
+        self.assert_result(self.ingest_wellknown("mcp", [second]),
+                           errors=["source binding held: wellknown_new_endpoint_requires_review"])
+        with db.writer() as conn:
+            wellknown_binding.record_reviewed_rejection(conn, "mcp", second["source_id"], second["endpoint_url"])
+        self.assert_result(self.ingest_wellknown("mcp", [second]), rejected=1)
+
     def test_alias_cannot_target_rejection_sentinel(self):
         from directory import wellknown_binding
         with db.writer() as conn, self.assertRaises(ValueError):
