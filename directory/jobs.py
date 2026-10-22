@@ -29,6 +29,7 @@ from . import agenstry as agenstry_mod
 from . import flows as flows_mod
 from . import paygent as paygent_mod
 from . import zero as zero_mod
+from . import directories as directories_mod
 from . import prowl as prowl_mod
 from . import wellknown as wellknown_mod
 from . import mcp_safety
@@ -45,6 +46,8 @@ crawlers.ALL_CRAWLERS["paygent-discover"] = paygent_mod.fetch_paygent_discover
 crawlers.ALL_CRAWLERS["flows-litprotocol"] = flows_mod.fetch_flows_litprotocol
 crawlers.ALL_CRAWLERS["x402-fuchss"] = crawlers.fetch_x402_fuchss
 crawlers.ALL_CRAWLERS["zero"] = zero_mod.fetch_zero
+for _name, _fn in directories_mod.FETCHERS.items():
+    crawlers.ALL_CRAWLERS[_name] = _fn
 
 log = logging.getLogger("directory.jobs")
 SEED_FILE = Path(__file__).resolve().parent / "seed.json"
@@ -228,13 +231,13 @@ def _run_one(name):
     if name in _RESOURCE_LIST_SOURCES:
         items = _filter_claimed_resource_items(items, name)
 
-    if name == "paygent-discover":
+    if name == "paygent-discover" or name in directories_mod.FETCHERS:
         with db.connect(read_only=True) as c:
             claimed_origins = {
                 db._canonical_origin(row[0])
                 for row in c.execute(
                     "SELECT url FROM services WHERE source != ?",
-                    ("paygent-discover",),
+                    (name,),
                 ).fetchall()
             }
         items = [
