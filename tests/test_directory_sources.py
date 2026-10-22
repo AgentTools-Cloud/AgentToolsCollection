@@ -8,7 +8,13 @@ def page(items_key, items, **top):
     return {items_key: items, **top}
 
 
-class AggregateTests(unittest.TestCase):
+class OfflineCase(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(patch.object(d, "_url_acceptable",
+                                       side_effect=lambda u: not u.startswith("ftp")))
+
+
+class AggregateTests(OfflineCase):
     def test_groups_by_origin_and_drops_tunnels(self):
         rows = d.aggregate("nohumans", [
             {"url": "https://API.example.com/a", "price_usd": 0.01, "chains": ["base"],
@@ -30,7 +36,7 @@ class AggregateTests(unittest.TestCase):
         self.assertEqual(r["name"], "api.example.com")
 
 
-class FetcherTests(unittest.TestCase):
+class FetcherTests(OfflineCase):
     def run_fetch(self, fn, responses):
         calls = iter(responses)
         with patch.object(d, "_get_json", side_effect=lambda *a, **k: next(calls)), \

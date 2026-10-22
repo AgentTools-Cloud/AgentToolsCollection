@@ -455,3 +455,27 @@ FETCHERS = {
     "mppdev": fetch_mppdev,
     "verantis": fetch_verantis,
 }
+
+
+# --- agenstry.com paid_api records (shared full export feed) -------------------
+def fetch_agenstry_paid() -> list:
+    from . import agenstry
+    resources = []
+    for r in agenstry.fetch_feed():
+        if r.get("kind") != "paid_api" or not r.get("payment_protocol"):
+            continue
+        chain = _chain(r.get("payment_network"))
+        resources.append({
+            "url": r.get("documentation_url") or r.get("provider_url") or r.get("url"),
+            "name": r.get("provider") or r.get("name"),
+            "description": r.get("description"), "price_usd": r.get("min_price_usd"),
+            "chains": [chain] if chain else [],
+            "protocol": str(r.get("payment_protocol")).lower(),
+            "quality": _drop_none({"payment_evidence": r.get("payment_evidence"),
+                                   "domain_verified": r.get("domain_verified") or None,
+                                   "first_seen": r.get("first_seen")}),
+        })
+    return _finish("agenstry-paid", resources, None)
+
+
+FETCHERS["agenstry-paid"] = fetch_agenstry_paid

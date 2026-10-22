@@ -1,0 +1,53 @@
+import unittest
+from unittest.mock import patch
+
+from directory import agenstry, crawlers, directories, jobs
+
+
+FEED = [
+    {"kind": "mcp", "id": "x/a", "name": "a", "url": "https://glama.ai/mcp/servers/x/a", "transport": "http"},
+    {"kind": "mcp", "id": "x/b", "name": "b", "url": "https://mcp.b.example/mcp", "transport": "http"},
+    {"kind": "mcp", "id": "x/e", "name": "e", "url": "https://homepage.example/", "transport": "http"},
+    {"kind": "mcp", "id": "x/c", "name": "c", "url": "", "transport": None},
+    {"kind": "mcp", "id": "x/d", "name": "d", "url": "https://mcp.b.example/mcp/", "transport": "sse"},
+    {"kind": "a2a_agent", "id": "ag", "url": "https://agent.example/.well-known/agent-card.json"},
+    {"kind": "a2a_agent", "id": "ag2", "url": "https://agent.example/other"},
+    {"kind": "paid_api", "id": "p", "url": "https://pay.example/.well-known/agent-card.json",
+     "provider_url": "https://pay.example/", "documentation_url": "https://pay.example/api/v1/chat",
+     "payment_protocol": "x402", "payment_network": "solana", "min_price_usd": 0.001},
+    {"kind": "paid_api", "id": "q", "url": "https://nopay.example/", "payment_protocol": None},
+    {"kind": "skill", "id": "s", "url": "https://github.com/x/y/blob/main/SKILL.md"},
+]
+
+
+class AgenstryFeedTests(unittest.TestCase):
+    def test_mcp_rows_skip_catalog_and_empty(self):
+        rows = agenstry.feed_mcp_rows(FEED)
+        self.assertEqual([r["endpoint_url"] for r in rows], ["https://mcp.b.example/mcp"])
+        self.assertEqual(rows[0]["transport"], "streamable-http")
+
+    def test_per_host_cap(self):
+        recs = [{"kind": "mcp", "id": str(i), "url": f"https://spam.example/m{i}", "transport": "http"}
+                for i in range(50)]
+        recs = [dict(r, url=f"https://spam.example/mcp/{r['id']}") for r in recs]
+        self.assertEqual(len(agenstry.feed_mcp_rows(recs)), agenstry._FEED_PER_HOST)
+
+    def test_a2a_domains(self):
+        self.assertEqual(agenstry.feed_a2a_domains(FEED), ["agent.example"])
+
+    def test_paid_api_rows(self):
+        with patch.object(agenstry, "fetch_feed", return_value=FEED), \
+             patch.object(directories, "_url_acceptable", return_value=True):
+            rows = directories.fetch_agenstry_paid()
+        self.assertEqual([r["url"] for r in rows], ["https://pay.example"])
+        self.assertEqual(rows[0]["chains"], ["solana"])
+
+
+class RegistrationTests(unittest.TestCase):
+    def test_registered(self):
+        self.assertIs(crawlers.MCP_CRAWLERS["agenstry-feed"], agenstry.fetch_agenstry_feed_mcp)
+        self.assertIs(crawlers.ALL_CRAWLERS["agenstry-paid"], directories.fetch_agenstry_paid)
+
+
+if __name__ == "__main__":
+    unittest.main()

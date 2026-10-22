@@ -39,6 +39,7 @@ from . import mcp_safety
 crawlers.MCP_CRAWLERS["agenstry"] = agenstry_mod.fetch_agenstry_mcp
 crawlers.MCP_CRAWLERS["prowl"] = prowl_mod.fetch_prowl_mcp
 crawlers.MCP_CRAWLERS["wellknown"] = wellknown_mod.fetch_wellknown_mcp
+crawlers.MCP_CRAWLERS["agenstry-feed"] = agenstry_mod.fetch_agenstry_feed_mcp
 
 # paygent.net reverse-crawl: register its x402 payment index (x402/mpp/l402)
 # as an x402 source; crawl runs via ALL_CRAWLERS -> cmd_crawl -> upsert_service.
@@ -403,7 +404,12 @@ def cmd_crawl_a2a() -> int:
     except Exception as e:
         errors.append(f"directories: {e!r}"); log.warning("a2a dir crawl failed: %r", e)
     try:
-        g = agenstry_mod.crawl_agenstry_a2a()
+        try:
+            feed_domains = agenstry_mod.feed_a2a_domains(agenstry_mod.fetch_feed())
+        except Exception as e:  # noqa: BLE001 -- the sitemap candidates still run
+            feed_domains = []
+            errors.append(f"agenstry feed: {e!r}")
+        g = agenstry_mod.crawl_agenstry_a2a(extra_domains=feed_domains)
         added += g["inserted"]; updated += g["updated"]
         errors.extend('agenstry: ' + error for error in g.get('errors', []))
         log.info("a2a agenstry: candidates=%d resolved=%d inserted=%d updated=%d",
