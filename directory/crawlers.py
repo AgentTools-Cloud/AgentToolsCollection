@@ -117,6 +117,7 @@ _BAZAAR_USDC = {
     "0x0b2c639c533813f4aa9d7837caf62653d097ff85",  # optimism
     "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359",  # polygon
     "0xaf88d065e77c8cc2239327c5edb3a432268e5831",  # arbitrum
+    "0x3600000000000000000000000000000000000000",  # arc mainnet
 }
 
 
@@ -855,6 +856,47 @@ def _decode_payment_required_header(headers: Any) -> dict[str, Any] | None:
     return obj
 
 
+def _documented_post_example(obj: Any, target: str) -> dict | None:
+    """Use only a small public example for the exact declared paid POST route."""
+    if not isinstance(obj, dict) or obj.get("x402Version") != 2:
+        return None
+    paths = obj.get("paths")
+    entry = paths.get(urlparse(target).path) if isinstance(paths, dict) else None
+    if not isinstance(entry, dict):
+        return None
+    methods = entry.get("methods")
+    if not isinstance(methods, list) or "POST" not in methods:
+        return None
+    payment = entry.get("payment")
+    if not isinstance(payment, dict) or payment.get("endpoint") != target:
+        return None
+    if not str(payment.get("paymentProtocol", "")).lower().startswith("x402"):
+        return None
+    example = payment.get("exampleRequest")
+    if not isinstance(example, dict):
+        return None
+    try:
+        if len(json.dumps(example).encode()) > 8192:
+            return None
+    except (TypeError, ValueError):
+        return None
+    return example
+
+
+def _inspect_402(response: Any) -> tuple[bool, dict[str, Any] | None]:
+    """Return whether a 402 has x402 terms and its first parsed offer."""
+    header_obj = _decode_payment_required_header(response.headers)
+    header_ok = header_obj is not None and _looks_like_x402(header_obj)
+    header_payment = _extract_payment(header_obj) if header_ok else None
+    try:
+        obj = json.loads(response.content[:_MAX_BODY])
+    except (ValueError, json.JSONDecodeError):
+        return header_ok, header_payment
+    if _looks_like_x402(obj):
+        return True, header_payment or _extract_payment(obj)
+    return header_ok, header_payment
+
+
 def verify_x402(url: str, well_known: str | None = None) -> dict[str, Any]:
     """Machine-verify whether `url` exposes a real x402 service.
 
@@ -864,6 +906,8 @@ def verify_x402(url: str, well_known: str | None = None) -> dict[str, Any]:
     evidence: list[str] = []
     payment: dict[str, Any] | None = None
     net_error = False
+    post_example: dict | None = None
+    target_challenge = False
 
     url = (url or "").strip()
     parsed = urlparse(url if "//" in url else "https://" + url)
@@ -910,6 +954,10 @@ def verify_x402(url: str, well_known: str | None = None) -> dict[str, Any]:
                 if _looks_like_x402(obj):
                     evidence.append(f"well-known x402 descriptor at {wk} (200, x402 markers)")
                     payment = payment or _extract_payment(obj)
+                    if (urlparse(wk).scheme, urlparse(wk).netloc) == (
+                        parsed.scheme, parsed.netloc
+                    ):
+                        post_example = post_example or _documented_post_example(obj, url)
 
         # --- 2. endpoint 402 challenge ---
         for target in (url, origin):
@@ -921,25 +969,35 @@ def verify_x402(url: str, well_known: str | None = None) -> dict[str, Any]:
                 net_error = True
                 continue
             if r.status_code == 402:
-                body_ok = False
-                header_obj = _decode_payment_required_header(r.headers)
-                if header_obj is not None and _looks_like_x402(header_obj):
-                    body_ok = True
-                    payment = payment or _extract_payment(header_obj)
-                try:
-                    obj = json.loads(r.content[:_MAX_BODY])
-                    parsed_body = _looks_like_x402(obj)
-                    body_ok = body_ok or parsed_body
-                    if parsed_body:
-                        payment = payment or _extract_payment(obj)
-                except (ValueError, json.JSONDecodeError):
-                    obj = None
+                body_ok, found_payment = _inspect_402(r)
+                target_challenge = body_ok and target == url
+                payment = payment or found_payment
                 # A bare 402 is suggestive; 402 + payment body is conclusive.
                 if body_ok:
                     evidence.append(f"endpoint {target} returns HTTP 402 with payment requirements")
                 else:
                     evidence.append(f"endpoint {target} returns HTTP 402 (no parseable accepts body)")
                 break
+
+        # A body-bound POST can reject an empty GET while still exposing a
+        # valid unpaid quote. Never follow redirects or send payment headers.
+        if post_example is not None and not target_challenge:
+            try:
+                r = c.post(url, json=post_example, follow_redirects=False)
+            except Exception:
+                net_error = True
+            else:
+                if r.status_code == 402:
+                    body_ok, found_payment = _inspect_402(r)
+                    payment = found_payment or payment
+                    if body_ok:
+                        evidence.append(
+                            f"documented POST {url} returns HTTP 402 with payment requirements"
+                        )
+                    else:
+                        evidence.append(
+                            f"documented POST {url} returns HTTP 402 (no parseable accepts body)"
+                        )
 
     if evidence:
         # Conclusive only if we saw real x402 markers somewhere.
