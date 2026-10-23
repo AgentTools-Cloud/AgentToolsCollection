@@ -6,7 +6,7 @@ from unittest.mock import patch
 from directory import crawlers
 
 
-TASK_URL = "https://api-staging.aomi.dev/v1/task/build"
+TASK_URL = "https://api.aomi.dev/v1/task/build"
 EXAMPLE = {
     "intent": "Simulate a no-op on Arc Mainnet. Do not sign or broadcast.",
     "chainId": 5042,
