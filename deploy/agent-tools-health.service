@@ -8,4 +8,5 @@ WorkingDirectory=/opt/mcpserver
 EnvironmentFile=/opt/mcpserver/.env
 Environment="PYTHONPATH=/opt/mcpserver"
 ExecStart=/opt/mcpserver/.venv/bin/python -m directory.jobs health
+ExecStartPost=/opt/mcpserver/.venv/bin/python -m directory.jobs retire-stale-tunnels
 User=root

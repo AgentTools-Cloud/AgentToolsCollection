@@ -1277,6 +1277,59 @@ def cmd_retire(kind: str, slug: str, reason: str, actor: str,
     return 0
 
 
+TUNNEL_STALE_DAYS = int(os.environ.get("AGENT_TOOLS_TUNNEL_STALE_DAYS", "7"))
+_TUNNEL_TABLES = (("x402", "services", ("url",)),
+                  ("mcp", "mcp_servers", ("endpoint_url",)),
+                  ("a2a", "a2a_agents", ("endpoint_url", "card_url")))
+
+
+def stale_tunnel_listings(conn, days: int = TUNNEL_STALE_DAYS) -> list[tuple[str, str]]:
+    """Tunnel-hosted listings with no successful health check for `days` days."""
+    cutoff = int(time.time()) - days * 86400
+    out = []
+    for kind, table, cols in _TUNNEL_TABLES:
+        extra = "" if kind == "x402" else ", last_success_at"
+        rows = conn.execute(
+            "SELECT id, slug, health, health_checked, created_at, %s%s FROM %s "
+            "WHERE health IS NOT 'ok' AND created_at <= ? AND health_checked > ?"
+            % (", ".join(cols), extra, table), (cutoff, cutoff)).fetchall()
+        for r in rows:
+            r = dict(r)
+            if not any(crawlers.is_ephemeral_host(r.get(c)) for c in cols):
+                continue
+            if kind == "x402":
+                last_ok = conn.execute(
+                    "SELECT MAX(checked_at) FROM health_history "
+                    "WHERE service_id=? AND status='ok'", (r["id"],)).fetchone()[0]
+            else:
+                last_ok = r.get("last_success_at")
+            if last_ok is None or last_ok <= cutoff:
+                out.append((kind, r["slug"]))
+    return out
+
+
+def cmd_retire_stale_tunnels(days: int = TUNNEL_STALE_DAYS, dry_run: bool = False) -> int:
+    with closing(db.connect(read_only=True)) as conn:
+        targets = stale_tunnel_listings(conn, days)
+    reason = ("Tunnel host unreachable for %d consecutive days; tunnel addresses "
+              "change on restart. Resubmit with the current or a stable URL." % days)
+    retired = {}
+    if not dry_run:
+        for start in range(0, len(targets), 100):
+            def op(batch=targets[start:start + 100]):
+                with db.writer(immediate=True) as conn:
+                    for kind, slug in batch:
+                        db.retire_listing(conn, kind, slug, reason, "auto:stale-tunnel")
+            db.with_retry(op)
+        for kind, _ in targets:
+            retired[kind] = retired.get(kind, 0) + 1
+    log.info("stale tunnels: candidates=%d retired=%s dry_run=%s",
+             len(targets), retired, dry_run)
+    print(json.dumps({"candidates": len(targets), "retired": retired,
+                      "dry_run": dry_run, "sample": targets[:10]}))
+    return 0
+
+
 def cmd_owner_migrations(request_id=None, review_version=None, resolution=None):
     from . import owner_lifecycle
     if request_id is None:
@@ -1696,9 +1749,6 @@ def review_submission(sub_id: int, note_prefix: str = "auto-review", notify_pend
     well_known = p.get("well_known") or p.get("well_known_url")
     if not url:
         verdict = {"status": "rejected", "evidence": ["submission has no url"]}
-    elif any(crawlers.is_ephemeral_host(u) for u in (url, p.get("mcp_url"))):
-        verdict = {"status": "rejected",
-                   "evidence": [crawlers.EPHEMERAL_HOST_MESSAGE]}
     else:
         try:
             verdict = crawlers.verify_x402(url, well_known)
@@ -1899,6 +1949,9 @@ def main(argv=None) -> int:
     p_coll.add_argument("--adjudicate", action="store_true")
     p_shared = sub.add_parser("shared-hosts")
     p_shared.add_argument("--min-paths", type=int, default=db.SHARED_HOST_MIN_PATHS)
+    p_tunnels = sub.add_parser("retire-stale-tunnels")
+    p_tunnels.add_argument("--days", type=int, default=TUNNEL_STALE_DAYS)
+    p_tunnels.add_argument("--dry-run", action="store_true")
     p_onchain = sub.add_parser("onchain")
     p_onchain.add_argument("--limit", type=int, default=None)
     p_onchain.add_argument("--stale-days", type=int, default=3)
@@ -1964,6 +2017,8 @@ def main(argv=None) -> int:
         return cmd_collisions(limit=args.limit, adjudicate=args.adjudicate)
     if args.cmd == "shared-hosts":
         return cmd_shared_hosts(min_paths=args.min_paths)
+    if args.cmd == "retire-stale-tunnels":
+        return cmd_retire_stale_tunnels(days=args.days, dry_run=args.dry_run)
     if args.cmd == "onchain":
         return cmd_onchain(limit=args.limit, stale_days=args.stale_days,
                            refresh_all=args.all, rate=args.rate)
