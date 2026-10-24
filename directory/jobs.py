@@ -1696,6 +1696,9 @@ def review_submission(sub_id: int, note_prefix: str = "auto-review", notify_pend
     well_known = p.get("well_known") or p.get("well_known_url")
     if not url:
         verdict = {"status": "rejected", "evidence": ["submission has no url"]}
+    elif any(crawlers.is_ephemeral_host(u) for u in (url, p.get("mcp_url"))):
+        verdict = {"status": "rejected",
+                   "evidence": [crawlers.EPHEMERAL_HOST_MESSAGE]}
     else:
         try:
             verdict = crawlers.verify_x402(url, well_known)

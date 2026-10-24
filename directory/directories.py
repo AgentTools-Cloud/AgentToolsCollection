@@ -19,14 +19,12 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from .crawlers import UA, TIMEOUT, PartialCrawl, _host_slug, _url_acceptable, network_to_chain
+from .crawlers import (UA, TIMEOUT, EPHEMERAL_SUFFIXES, PartialCrawl, _host_slug,
+                       _url_acceptable, network_to_chain)
 
 log = logging.getLogger("directory.directories")
 
 MAX_SAMPLES = 50
-# Quick tunnels change name on every restart; listing them only adds dead rows.
-EPHEMERAL_SUFFIXES = (".trycloudflare.com", ".ngrok-free.app", ".ngrok.io", ".ngrok.app",
-                      ".loca.lt", ".hostc.app", ".serveo.net", ".localhost.run")
 
 
 def _origin(url: str) -> str | None:

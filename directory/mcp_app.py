@@ -22,6 +22,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from . import ask as directory_ask
 from . import a2a as directory_a2a
 from . import cards
+from . import crawlers as directory_crawlers
 from . import db as directory_db
 from . import jobs as directory_jobs
 from . import limits
@@ -674,6 +675,9 @@ async def register(
         return {"error": "invalid_url", "message": "url must start with http:// or https://"}
     if len(url) > 500:
         return {"error": "invalid_url", "message": "url too long (max 500)"}
+    if any(directory_crawlers.is_ephemeral_host(u) for u in (url, mcp_url)):
+        return {"error": "ephemeral_host",
+                "message": directory_crawlers.EPHEMERAL_HOST_MESSAGE}
     if mcp_url:
         mcp_url = mcp_url.strip()
         if not (mcp_url.startswith("http://") or mcp_url.startswith("https://")):
