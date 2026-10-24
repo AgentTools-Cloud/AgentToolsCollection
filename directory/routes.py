@@ -892,12 +892,6 @@ def _assert_submission_allowed(kind: str, row: dict) -> None:
 
 
 async def _require_public_url(url: str) -> None:
-    if directory_crawlers.is_ephemeral_host(url):
-        raise HTTPException(
-            status_code=422,
-            detail={"error": "ephemeral_host",
-                    "message": directory_crawlers.EPHEMERAL_HOST_MESSAGE},
-        )
     try:
         await run_in_threadpool(directory_public_http.validate_url, url)
     except directory_public_http.UnsafeURL as exc:
