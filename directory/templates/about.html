@@ -36,6 +36,18 @@
     <p class="text-sm">Every indexed MCP server is re-scanned daily for known malware and abuse patterns — pipe-to-shell install lures, base64 / <code class="mono bg-slate-100 px-1 rounded">eval</code> download cradles, bare-IP command-and-control URLs and prompt-injection phrasing in its advertised tool metadata. It also detects MCP <span class="font-medium">tool-poisoning</span> coercion — descriptions that try to hijack an agent's tool-calling (“always call this tool first”, “before using any other tool you must…”), hidden <code class="mono bg-slate-100 px-1 rounded">&lt;IMPORTANT&gt;</code> instructions, demands to list API keys or include secrets in a response, and coercion to read &amp; forward <code class="mono bg-slate-100 px-1 rounded">.key</code>/<code class="mono bg-slate-100 px-1 rounded">.pem</code>/<code class="mono bg-slate-100 px-1 rounded">.ssh</code>/<code class="mono bg-slate-100 px-1 rounded">.env</code> files. Each server carries a <span class="mono">clean</span> / <span class="mono">suspicious</span> / <span class="mono">malicious</span> verdict with the matched rules. Scanning is static only — we never execute server code.</p>
     <p class="text-sm mt-2">You can also scan <em>any</em> MCP endpoint on demand, before you connect: call the <code class="mono bg-slate-100 px-1 rounded">scan_mcp_safety</code> tool on the MCP server at <a class="text-blue-600 hover:underline mono" href="/mcp-discovery">/mcp-discovery</a>, or send its URL to our A2A agent at <code class="mono bg-slate-100 px-1 rounded">/a2a</code>. If the server is already indexed you get our latest stored verdict instantly; if not, we probe it live, scan it, and add it to the directory when it is reachable or you supplied metadata (documentation hosts such as <code class="mono bg-slate-100 px-1 rounded">example.com</code> are scanned but never listed). Each on-demand call also runs a <span class="font-medium">frontier large model</span> second-opinion as an advisory dimension alongside the deterministic rules.</p>
   </div>
+  <div id="paid-verification">
+    <h2 class="text-lg font-semibold mb-2">Paid verification</h2>
+    <p class="text-sm">Anyone signed in can pay an x402 service once and have us record what the paid call returned.
+    You sign a single EIP-3009 USDC authorization on Base in your own wallet; its recipient is the service's own
+    <span class="mono">payTo</span>, so funds go straight to the service and Agent Tools never holds them.
+    We re-check the live price just before relaying and abort if the price or recipient changed; the call is sent
+    once and never retried. Limits: Base USDC <span class="mono">exact</span> scheme only, at most $1.00, GET endpoints
+    only, 256 KiB response cap.</p>
+    <p class="text-sm mt-2">Each run is scored 0–100 on delivery (35), on-chain settlement receipt (20), price match (10),
+    non-empty (10) and well-formed (10) response, and latency (15). The detail page shows the last 30 days of runs,
+    failures included. Sponsored runs are evidence that the service delivers; they are never counted as paying demand.</p>
+  </div>
   <div id="grading">
     <h2 class="text-lg font-semibold mb-2">Grading</h2>
     <p class="text-sm">Every listing carries a 0–100 score and a letter grade, built

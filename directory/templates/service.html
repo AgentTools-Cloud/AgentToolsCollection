@@ -72,6 +72,66 @@
   </div>
 </section>
 
+<section class="svc-card p-6 mb-6" id="paid-verification">
+  <div class="flex items-baseline justify-between mb-1">
+    <h2 class="text-base font-semibold">Paid verification</h2>
+    <a class="text-xs text-blue-600 hover:underline" href="/about#paid-verification">How it works</a>
+  </div>
+  {% if paid_summary %}
+    <p class="text-sm text-slate-700 mb-2">
+      {{ paid_summary.succeeded }} of {{ paid_summary.runs }} sponsored paid call(s) delivered in the last {{ paid_summary.window_days }} days.
+      Latest: <span class="mono">{{ paid_summary.latest.status }}</span>,
+      score {{ paid_summary.latest.score if paid_summary.latest.score is not none else "—" }}/100,
+      HTTP {{ paid_summary.latest.http_status or "—" }}{% if paid_summary.latest.latency_ms %}, {{ paid_summary.latest.latency_ms }} ms{% endif %}
+      {% if paid_summary.latest.tx_hash %}, tx <a class="mono text-blue-600 hover:underline" rel="nofollow noopener" target="_blank" href="https://basescan.org/tx/{{ paid_summary.latest.tx_hash }}">{{ paid_summary.latest.tx_hash[:10] }}…</a>{% endif %}.
+    </p>
+  {% else %}
+    <p class="text-sm text-slate-500 mb-2">No sponsored paid call yet.</p>
+  {% endif %}
+  <p class="text-xs text-slate-500 mb-3">
+    Pay this endpoint once from your own wallet (Base USDC, up to $1.00) and we call it and record what came back.
+    Your wallet pays the listed recipient directly; Agent Tools never holds funds. Sponsored checks prove delivery; they do not count as demand.
+  </p>
+  <button type="button" id="pv-start" data-slug="{{ svc.slug }}"
+          class="rounded bg-slate-900 text-white px-3 py-1.5 text-sm">Verify with my wallet</button>
+  <div id="pv-status" class="text-sm text-slate-700 mt-3 whitespace-pre-line"></div>
+  <script>
+  (function () {
+    var btn = document.getElementById('pv-start');
+    var out = document.getElementById('pv-status');
+    function say(t) { out.textContent = t; }
+    async function call(url, body) {
+      var r = await fetch(url, {method: 'POST', credentials: 'same-origin',
+        headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+      var d = {}; try { d = await r.json(); } catch (e) {}
+      if (r.status === 401) { location.href = '/auth/github/login?next=' + encodeURIComponent(location.pathname + '#paid-verification'); throw new Error('sign in'); }
+      if (!r.ok) throw new Error(d.message || (d.detail && d.detail.message) || d.detail || ('HTTP ' + r.status));
+      return d;
+    }
+    btn.addEventListener('click', async function () {
+      if (!window.ethereum) { say('No browser wallet found. Install a wallet that supports Base to continue.'); return; }
+      btn.disabled = true;
+      try {
+        var accounts = await window.ethereum.request({method: 'eth_requestAccounts'});
+        var payer = accounts[0];
+        say('Fetching the live price…');
+        var q = await call('/api/v1/services/' + encodeURIComponent(btn.dataset.slug) + '/paid-verifications', {payer: payer});
+        if (!confirm('Pay $' + q.amount_usd.toFixed(4) + ' USDC on Base to ' + q.pay_to + ' for one call to this endpoint?')) { say('Cancelled. Nothing was paid.'); return; }
+        say('Waiting for your wallet signature…');
+        var sig = await window.ethereum.request({method: 'eth_signTypedData_v4', params: [payer, JSON.stringify(q.typed_data)]});
+        say('Calling the endpoint once with your payment…');
+        var res = await call('/api/v1/paid-verifications/' + q.id + '/execute', {signature: sig});
+        say('Result: ' + res.status + '\nHTTP ' + (res.http_status || '—') + ', score ' + (res.score == null ? '—' : res.score) + '/100' +
+            (res.tx_hash ? '\nSettlement tx ' + res.tx_hash : '') +
+            (res.status === 'indeterminate' ? '\nThe call may or may not have settled. It was not retried; check your wallet history.' : ''));
+      } catch (e) {
+        if (e.message !== 'sign in') say('Not completed: ' + e.message);
+      } finally { btn.disabled = false; }
+    });
+  })();
+  </script>
+</section>
+
 <section class="svc-card p-6 mb-6">
   <div class="flex items-baseline justify-between mb-1">
     <h2 class="text-base font-semibold">Quality grade</h2>
