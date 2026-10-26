@@ -14,6 +14,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import html
 import json
 import logging
 import os
@@ -24,7 +25,7 @@ import uuid
 
 import httpx
 from fastapi import APIRouter, Form, HTTPException, Request
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from starlette.concurrency import run_in_threadpool
 
 from . import db, limits, owner_declarations, owner_lifecycle, ownership
@@ -44,6 +45,8 @@ STATE_MAX_AGE = 600
 # Separate audience so a hub-readable credential can never act as a main-site session.
 HUB_COOKIE = "atc_hub"
 HUB_AUDIENCE = "hub.agent-tools.cloud"
+ARENA_AUDIENCE = "radeon-arena.com"
+ARENA_PUBLIC_URL = "https://radeon-arena.com"
 
 _TIMEOUT = httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0)
 
@@ -114,6 +117,23 @@ def _clear_hub_cookie(resp) -> None:
         resp.delete_cookie(HUB_COOKIE, path="/", domain=domain)
 
 
+def _arena_secret() -> str:
+    return (os.getenv("RADEON_ARENA_ACCOUNT_SECRET") or "").strip()
+
+
+def _arena_assertion(payload: dict, max_age: int = 120) -> str:
+    secret = _arena_secret()
+    if not secret:
+        raise RuntimeError("RADEON_ARENA_ACCOUNT_SECRET is not set")
+    body = json.dumps({**payload, "aud": ARENA_AUDIENCE,
+                       "exp": int(time.time()) + max_age},
+                      separators=(",", ":")).encode("utf-8")
+    encoded = base64.urlsafe_b64encode(body).decode("ascii").rstrip("=")
+    signature = hmac.new(secret.encode("utf-8"), encoded.encode("ascii"),
+                         hashlib.sha256).hexdigest()
+    return f"{encoded}.{signature}"
+
+
 # ------------------------------------------------------------- helpers
 
 def _safe_next(target: str | None) -> str:
@@ -132,6 +152,13 @@ def _safe_next(target: str | None) -> str:
             or "\\" in target:
         return "/"
     return target
+
+
+def _safe_arena_next(target: str | None) -> str:
+    if not target or not target.startswith("/") or target.startswith("//") \
+            or "\\" in target:
+        return "/me"
+    return target[:500]
 
 
 def _redirect_uri(request: Request) -> str:
@@ -279,6 +306,39 @@ def hub_handoff(request: Request, next: str = ""):
     _set_hub_cookie(resp, int(user["id"]))
     resp.headers["Cache-Control"] = "private, no-store"
     return resp
+
+
+@router.get("/auth/radeon-arena", include_in_schema=False)
+def radeon_arena_handoff(request: Request, next: str = "/me"):
+    """Use the existing GitHub login, then POST a one-use identity assertion."""
+    if not _arena_secret():
+        raise HTTPException(503, "Radeon Arena sign-in is not configured")
+    user = current_user(request) if unsign(
+        request.cookies.get(SESSION_COOKIE)) else None
+    safe_next = _safe_arena_next(next)
+    if user is None:
+        return RedirectResponse(
+            "/auth/github/login?" + urlencode({
+                "next": "/auth/radeon-arena?" + urlencode({"next": safe_next})}),
+            status_code=302)
+    assertion = _arena_assertion({
+        "sub": f"github:{user['provider_uid']}",
+        "login": user["login"],
+        "email": user["email"] if user["email_verified"] else None,
+        "avatar_url": user["avatar_url"],
+        "next": safe_next,
+        "jti": secrets.token_urlsafe(24),
+    })
+    escaped = html.escape(assertion, quote=True)
+    body = ("<!doctype html><meta charset=utf-8><title>Continue to Radeon Arena</title>"
+            "<p>Continuing to Radeon Arena…</p>"
+            f"<form id=f method=post action={ARENA_PUBLIC_URL}/api/auth/sso>"
+            f"<input type=hidden name=assertion value=\"{escaped}\"></form>"
+            "<script>document.getElementById('f').submit()</script>"
+            "<noscript><button form=f>Continue</button></noscript>")
+    return HTMLResponse(body, headers={"Cache-Control": "private, no-store",
+                                       "Content-Security-Policy": "default-src 'none'; script-src 'unsafe-inline'; form-action https://radeon-arena.com; base-uri 'none'",
+                                       "X-Robots-Tag": "noindex, nofollow"})
 
 
 @router.post("/auth/logout", include_in_schema=False)
