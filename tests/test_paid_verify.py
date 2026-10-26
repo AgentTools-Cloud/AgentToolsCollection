@@ -306,6 +306,46 @@ class PaidVerifyRouteTests(TemporaryDatabaseTestCase):
         self.assertIn(429, codes)
 
 
+
+class PaidVerifyDocsTests(TemporaryDatabaseTestCase):
+    def test_public_docs_describe_the_flow(self):
+        import os
+        import importlib.util
+        from pathlib import Path
+        # Load this checkout's server.py; other tests put /opt/mcpserver on sys.path.
+        root = Path(__file__).resolve().parent.parent
+        spec = importlib.util.spec_from_file_location("server_under_test", root / "server.py")
+        server = importlib.util.module_from_spec(spec)
+        with patch.dict(os.environ, {"SESSION_SECRET": "offline-test-session-secret"}):
+            spec.loader.exec_module(server)
+        from fastapi.testclient import TestClient
+        client = TestClient(server.app, base_url="https://agent-tools.cloud")
+        llms = client.get("/llms.txt").text
+        for needle in ("/api/v1/services/{slug}/paid-verifications",
+                       "/api/v1/paid-verifications/{id}/execute", "POST /api/v1/keys"):
+            self.assertIn(needle, llms)
+        manifest = client.get("/.well-known/agent-tools.json").json()
+        self.assertIn("sponsored_paid_verification", manifest["capabilities"])
+        self.assertEqual(manifest["endpoints"]["paid_verification"]["limits"]["network"], pv.BASE_NETWORK)
+        spec = client.get("/openapi.json").json()
+        self.assertIn("/api/v1/services/{slug}/paid-verifications", spec["paths"])
+        self.assertIn("/api/v1/paid-verifications/{vid}/execute", spec["paths"])
+        self.assertIn("paid-verifications", spec["info"]["x-guidance"])
+
+    def test_service_card_carries_public_summary(self):
+        from fastapi.testclient import TestClient
+        from fastapi import FastAPI
+        from directory import routes
+        with db.writer() as conn:
+            sid = conn.execute(
+                "INSERT INTO services(slug,name,url,source,source_id,created_at,updated_at) "
+                "VALUES('card','Card',?,'manual','card',1,1)", (URL,)).lastrowid
+        app = FastAPI(); app.include_router(routes.router)
+        card = TestClient(app).get("/api/v1/services/card").json()
+        self.assertIn("paid_verification", card)
+        self.assertIsNone(card["paid_verification"])
+
+
 if __name__ == "__main__":
     import unittest
     unittest.main()

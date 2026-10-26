@@ -37,7 +37,17 @@ def _error(exc: paid_verify.VerifyError) -> JSONResponse:
 
 @router.post("/api/v1/services/{slug}/paid-verifications")
 async def prepare_verification(slug: str, body: PrepareIn, request: Request):
-    """Quote a one-off paid call; returns EIP-712 typed data for the user's wallet."""
+    """Quote a sponsored paid verification of an x402 service.
+
+    Fetches the service's live 402 quote and accepts only x402 v2, `exact`, Base
+    USDC (`eip155:8453`), at most $1.00. Returns `typed_data`: an EIP-712
+    `TransferWithAuthorization` (EIP-3009) whose `to` is the service's own payTo.
+    Sign it with `payer` and call `/api/v1/paid-verifications/{id}/execute`
+    before `valid_before`. Non-custodial: funds never pass through Agent Tools.
+    Auth: `Authorization: Bearer <api_key>` (mint at `POST /api/v1/keys`, no signup)
+    or a signed-in same-origin browser session. At most 3 open verifications per
+    account; 6/min and 60/day per IP.
+    """
     user = _user(request)
     blocked = limits.check_ip_limits(
         limits.client_ip_from_request(request), "paid_verify_prepare",
@@ -57,7 +67,16 @@ async def prepare_verification(slug: str, body: PrepareIn, request: Request):
 
 @router.post("/api/v1/paid-verifications/{vid}/execute")
 async def execute_verification(vid: str, body: ExecuteIn, request: Request):
-    """Relay the signed authorization once. Never retried by the server."""
+    """Relay the signed authorization to the service exactly once.
+
+    The signature must recover to the quoted `payer`. The live price is
+    re-checked first; if amount or recipient changed nothing is sent and the
+    result is `quote_changed`. Never retried: a timeout is `indeterminate`.
+    `status` is one of `succeeded`, `delivery_failed`, `payment_rejected`,
+    `indeterminate`. `score` (0-100) = delivered 35, settlement receipt 20,
+    price match 10, non-empty 10, well-formed 10, latency 15 (capped at 30
+    when not delivered). Signatures and response bodies are not stored.
+    """
     user = _user(request)
     try:
         out = await run_in_threadpool(paid_verify.execute, vid, int(user["id"]), body.signature)
@@ -68,6 +87,7 @@ async def execute_verification(vid: str, body: ExecuteIn, request: Request):
 
 @router.get("/api/v1/paid-verifications/{vid}")
 def get_verification(vid: str, request: Request):
+    """Read one of your own paid verifications (same fields as execute)."""
     user = current_user(request)
     if user is None:
         raise HTTPException(401, "Sign in required", headers=_NO_STORE)

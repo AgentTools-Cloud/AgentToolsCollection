@@ -201,6 +201,28 @@ _LLMS_TXT = """# agent-tools.cloud
   Tools: search, get, search_mcp_servers, get_mcp_server, search_a2a_agents,
   search_resources, ask_services, list_categories, stats, scan_mcp_safety.
 
+## Sponsored paid verification (x402)
+
+Pay a listed x402 service once from your own wallet and we record what the
+paid call returned. Non-custodial: you sign one EIP-3009 USDC authorization
+whose recipient is the service's own payTo; funds never pass through us.
+Limits: x402 v2, exact scheme, Base USDC, at most $1.00, GET endpoints only.
+
+1. Get an API key (no signup): POST /api/v1/keys -> {"api_key": "atc_live_..."}
+   Send it as Authorization: Bearer <api_key> on the calls below.
+2. Quote: POST /api/v1/services/{slug}/paid-verifications {"payer": "0x..."}
+   -> {id, amount_usd, pay_to, valid_before, typed_data}
+3. Sign typed_data with the payer wallet (EIP-712 / eth_signTypedData_v4).
+4. Run once: POST /api/v1/paid-verifications/{id}/execute {"signature": "0x..."}
+   -> {status, http_status, latency_ms, settled, tx_hash, score, checks}
+5. Re-read later: GET /api/v1/paid-verifications/{id}
+
+The live price is re-checked before paying; if price or recipient changed,
+nothing is paid (quote_changed). The call is never retried; a timeout is
+reported as status=indeterminate. Results (failures included) show on the
+service page for 30 days and as paid_verification in GET /api/v1/services/{slug}.
+Sponsored runs prove delivery; they are never counted as paying demand.
+
 ## Discovery manifests
 
 - /.well-known/mcp.json
@@ -430,7 +452,8 @@ def _build_openapi() -> dict[str, Any]:
         "Agents can search the indexed ecosystem, ask for intent-level recommendations, "
         "retrieve service cards with payment/call/quality metadata, browse categories, "
         "scan any MCP server for malware / prompt-injection before connecting, "
-        "submit services for review, or connect via the ungated MCP discovery server at "
+        "submit services for review, run a sponsored paid verification of an x402 service "
+        "with your own wallet (non-custodial), or connect via the ungated MCP discovery server at "
         "/mcp-discovery. The previously hosted paid Qwen relay and crypto verticals were "
         "retired on 2026-05-25; this host no longer serves paid endpoints."
     )
@@ -449,7 +472,13 @@ def _build_openapi() -> dict[str, Any]:
         "`degraded` = reachable but needs caller auth/credentials or paywalled "
         "(401/402/403); `down` = unreachable/5xx; `unknown` = not yet probed. "
         "Filter any search with health= and read health_status/http_status/latency_ms "
-        "per result; results rank ok > degraded > unknown > down."
+        "per result; results rank ok > degraded > unknown > down. "
+        "Sponsored paid verification: POST /api/v1/services/{slug}/paid-verifications "
+        "with {payer} returns EIP-712 typed data for one EIP-3009 Base-USDC authorization "
+        "paid directly to the service's payTo (<= $1, GET endpoints); sign it with the "
+        "payer wallet and POST /api/v1/paid-verifications/{id}/execute with {signature}. "
+        "We re-check the price before paying, relay once and never retry. Needs "
+        "Authorization: Bearer <api_key> from POST /api/v1/keys (no signup)."
     )
 
     schema = get_openapi(
