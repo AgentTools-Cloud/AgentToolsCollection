@@ -4409,7 +4409,7 @@ _MEASURED_RESET = {
     "x402": ("health", "health_checked", "latency_ms", "http_status", "x402_ok",
          "quality_score", "resource_count", "resource_samples", "payment",
             "call_info", "chains", "price_min", "price_max", "facilitator",
-            "well_known_url",
+                "well_known_url", "descriptor_checked_at",
                  "openapi_url", "quality", "confidence", "currency", "conformance",
          "tx_30d",
              "payto_tx_30d", "payto_payers_30d", "payto_checked", "down_since",

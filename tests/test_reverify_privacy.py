@@ -924,13 +924,18 @@ def test_endpoint_edit_clears_endpoint_derived_payment_state(
             "INSERT INTO service_paytos(service_id,chain,address) "
             "VALUES(?, 'base', '0x123')", (service_id,)
         )
+        conn.execute(
+            "UPDATE services SET descriptor_checked_at=1 WHERE id=?",
+            (service_id,),
+        )
         applied, rejected = db.apply_listing_edits(
             conn, "x402", service_id, user_id, ownership_id,
             {"url": f"https://{host}/new"},
         )
         assert applied == ["url"] and not rejected
         row = conn.execute(
-            "SELECT chains,price_min,price_max,payment,x402_ok,well_known_url "
+            "SELECT chains,price_min,price_max,payment,x402_ok,well_known_url,"
+            "descriptor_checked_at "
             "FROM services WHERE id=?", (service_id,)
         ).fetchone()
         assert all(value is None for value in row)
