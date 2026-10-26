@@ -21,7 +21,7 @@ MAX_HISTORY = 1000
 SEVERITIES = {'info', 'warning', 'error'}
 KINDS = {'x402': 'services', 'mcp': 'mcp_servers', 'a2a': 'a2a_agents'}
 # Removed sources keep their history in crawl_runs but are no longer crawled.
-RETIRED_CRAWL_SOURCES = {'mcp:mcp-catalog', 'mcp:pulsemcp'}
+RETIRED_CRAWL_SOURCES = {'agenstry:crawl', 'mcp:mcp-catalog', 'mcp:pulsemcp'}
 
 
 def safe_text(value, limit=240):
