@@ -527,7 +527,11 @@ def api_service(slug: str):
             raise HTTPException(status_code=410, detail={
                 "status": "retired", "slug": slug, "reason": retired["reason"]})
         raise HTTPException(404, "service not found")
-    return cards.build_service_card(svc)
+    from . import paid_verify
+    card = cards.build_service_card(svc)
+    with _conn() as c:
+        card["paid_verification"] = paid_verify.public_summary(c, int(svc["id"]))
+    return card
 
 
 class AskPayload(BaseModel):
@@ -1690,6 +1694,7 @@ def well_known():
             "search_mcp_servers",
             "unified_resource_search",
             "broker_recommend",
+            "sponsored_paid_verification",
         ],
         "endpoints": {
             "search": {
@@ -1752,13 +1757,33 @@ def well_known():
                 "query": ["q", "max_price_usd", "chain", "require_healthy", "limit"],
                 "returns": "scored payable endpoints with call_hint + pay_hint (no settlement)",
             },
+            "paid_verification": {
+                "docs": "https://agent-tools.cloud/about#paid-verification",
+                "custody": "none: the payer signs an EIP-3009 authorization to the service's own payTo",
+                "limits": {"x402_version": 2, "scheme": "exact", "network": "eip155:8453",
+                           "asset": "USDC", "max_usd": 1.0, "methods": ["GET"]},
+                "auth": "Authorization: Bearer <api_key> (POST /api/v1/keys, no signup)",
+                "prepare": {"method": "POST",
+                            "url_template": "https://agent-tools.cloud/api/v1/services/{slug}/paid-verifications",
+                            "body": {"payer": "0x<wallet>"},
+                            "returns": "id, amount_usd, pay_to, valid_before, typed_data (EIP-712)"},
+                "execute": {"method": "POST",
+                            "url_template": "https://agent-tools.cloud/api/v1/paid-verifications/{id}/execute",
+                            "body": {"signature": "0x<eip712 signature of typed_data>"},
+                            "returns": "status, http_status, latency_ms, settled, tx_hash, score, checks"},
+                "result": "https://agent-tools.cloud/api/v1/paid-verifications/{id}",
+                "notes": "Price re-checked before paying; relayed once, never retried. "
+                         "Sponsored runs are never counted as paying demand.",
+            },
             "x402_manifest": "https://agent-tools.cloud/.well-known/x402",
             "openapi": "https://agent-tools.cloud/openapi.json",
         },
         "agent_hint": (
             "Use POST /api/v1/ask for intent-level recommendations. Use "
             "GET /api/v1/search for faceted retrieval and then GET "
-            "/api/v1/services/{slug} for the service card before paying or calling."
+            "/api/v1/services/{slug} for the service card before paying or calling. "
+            "To prove a paid x402 call delivers, run a sponsored paid verification "
+            "(see endpoints.paid_verification)."
         ),
     }
 

@@ -38,7 +38,7 @@
   </div>
   <div id="paid-verification">
     <h2 class="text-lg font-semibold mb-2">Paid verification</h2>
-    <p class="text-sm">Anyone signed in can pay an x402 service once and have us record what the paid call returned.
+    <p class="text-sm">Anyone with an Agent Tools account or API key can pay an x402 service once and have us record what the paid call returned.
     You sign a single EIP-3009 USDC authorization on Base in your own wallet; its recipient is the service's own
     <span class="mono">payTo</span>, so funds go straight to the service and Agent Tools never holds them.
     We re-check the live price just before relaying and abort if the price or recipient changed; the call is sent
@@ -47,6 +47,23 @@
     <p class="text-sm mt-2">Each run is scored 0–100 on delivery (35), on-chain settlement receipt (20), price match (10),
     non-empty (10) and well-formed (10) response, and latency (15). The detail page shows the last 30 days of runs,
     failures included. Sponsored runs are evidence that the service delivers; they are never counted as paying demand.</p>
+    <h3 class="text-sm font-semibold mt-4 mb-1">For agents and scripts</h3>
+    <p class="text-sm">No browser or GitHub sign-in needed. Mint a key with
+    <code class="mono bg-slate-100 px-1 rounded">POST /api/v1/keys</code> and send it as
+    <code class="mono bg-slate-100 px-1 rounded">Authorization: Bearer &lt;api_key&gt;</code>, then:</p>
+    <ol class="text-sm list-decimal ml-5 mt-1 space-y-1">
+      <li><code class="mono bg-slate-100 px-1 rounded">POST /api/v1/services/{slug}/paid-verifications</code>
+        with <code class="mono bg-slate-100 px-1 rounded">{"payer": "0x…"}</code> returns an
+        <code class="mono">id</code>, the quoted price and EIP-712 <code class="mono">typed_data</code>.</li>
+      <li>Sign <code class="mono">typed_data</code> with the payer wallet (<code class="mono">eth_signTypedData_v4</code>).</li>
+      <li><code class="mono bg-slate-100 px-1 rounded">POST /api/v1/paid-verifications/{id}/execute</code>
+        with <code class="mono bg-slate-100 px-1 rounded">{"signature": "0x…"}</code> before
+        <code class="mono">valid_before</code>; the response has <code class="mono">status</code>,
+        <code class="mono">http_status</code>, <code class="mono">tx_hash</code> and <code class="mono">score</code>.</li>
+    </ol>
+    <p class="text-sm mt-2">Recent results for any service are public in
+    <code class="mono bg-slate-100 px-1 rounded">GET /api/v1/services/{slug}</code> under
+    <code class="mono">paid_verification</code>. Full schema: <a class="text-blue-600 hover:underline" href="/openapi.json">/openapi.json</a>.</p>
   </div>
   <div id="grading">
     <h2 class="text-lg font-semibold mb-2">Grading</h2>
