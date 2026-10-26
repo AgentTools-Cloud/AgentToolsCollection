@@ -362,6 +362,7 @@ CREATE TABLE IF NOT EXISTS mcp_servers (
   source            TEXT NOT NULL,
   source_id         TEXT,
   source_url        TEXT,
+  quality           TEXT,
   health            TEXT DEFAULT 'unknown',
   health_checked    INTEGER,
   latency_ms        INTEGER,
@@ -695,6 +696,7 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
             "ALTER TABLE mcp_servers ADD COLUMN safety_reasons TEXT",
             "ALTER TABLE mcp_servers ADD COLUMN protocol_version TEXT",
             "ALTER TABLE mcp_servers ADD COLUMN kind TEXT",
+            "ALTER TABLE mcp_servers ADD COLUMN quality TEXT",
             "ALTER TABLE a2a_agents ADD COLUMN conformance TEXT",
             "ALTER TABLE services ADD COLUMN down_since INTEGER",
             "ALTER TABLE mcp_servers ADD COLUMN down_since INTEGER",
@@ -793,6 +795,24 @@ def _to_json(value: Any) -> str | None:
     if isinstance(value, str):
         return value
     return json.dumps(value, ensure_ascii=False)
+
+
+def _keep_external_quality(new_value, old_value):
+    """Crawls replace their own quality keys but must not drop side-synced ones."""
+    try:
+        old = json.loads(old_value) if isinstance(old_value, str) else (old_value or {})
+    except (TypeError, json.JSONDecodeError):
+        old = {}
+    if not isinstance(old, dict) or "botsrated" not in old:
+        return new_value
+    try:
+        new = json.loads(new_value) if isinstance(new_value, str) else (new_value or {})
+    except (TypeError, json.JSONDecodeError):
+        new = {}
+    if not isinstance(new, dict):
+        new = {}
+    new.setdefault("botsrated", old["botsrated"])
+    return json.dumps(new, ensure_ascii=False)
 
 
 def _record_source(conn: sqlite3.Connection, kind: str, listing_id,
@@ -1115,6 +1135,7 @@ def upsert_service(conn: sqlite3.Connection, row: dict) -> tuple:
         if _new_rc is not None and _old_rc is not None and _new_rc < _old_rc:
             row["resource_count"] = existing["resource_count"]
             row["resource_samples"] = existing["resource_samples"]
+        row["quality"] = _keep_external_quality(row.get("quality"), existing["quality"])
         _restore_owner_edits(row, existing)
         _keep_owned_slug(cur, "services", row, existing)
         set_clause = ",".join(f"{c}=?" for c in cols if c != "created_at")
@@ -3197,13 +3218,13 @@ _MCP_COLS = [
     "transport", "auth_method", "cost_hint", "source_code_url",
     "package_registry", "package_name", "package_download_count",
     "github_stars", "tags",
-    "x402_supported", "source", "source_id", "source_url", "kind",
+    "x402_supported", "source", "source_id", "source_url", "kind", "quality",
     "health", "health_checked", "latency_ms", "http_status",
     "last_seen", "last_success_at", "confidence",
     "created_at", "updated_at",
 ]
 
-_MCP_JSON_COLS = ("tags",)
+_MCP_JSON_COLS = ("tags", "quality")
 
 
 def mcp_row_to_dict(row) -> dict:
@@ -3373,6 +3394,10 @@ def upsert_mcp_server(conn: sqlite3.Connection, row: dict) -> tuple:
                   "latency_ms", "http_status"):
         if row.get(_keep) is None:
             row[_keep] = existing[_keep]
+    if row.get("quality") is None:
+        row["quality"] = existing["quality"]
+    else:
+        row["quality"] = _keep_external_quality(row.get("quality"), existing["quality"])
     _restore_owner_edits(row, existing)
     row["kind"] = "callable" if (row.get("endpoint_url") or "").strip() else "catalog"
     _keep_owned_slug(cur, "mcp_servers", row, existing)

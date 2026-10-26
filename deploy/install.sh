@@ -26,12 +26,17 @@ if [[ ! -f .env ]]; then
 fi
 
 install -m 644 deploy/mcpserver.service /etc/systemd/system/mcpserver.service
+install -m 644 deploy/agent-tools-botsrated.service \
+    /etc/systemd/system/agent-tools-botsrated.service
+install -m 644 deploy/agent-tools-botsrated.timer \
+    /etc/systemd/system/agent-tools-botsrated.timer
 install -m 644 deploy/nginx/agent-tools-privacy-log.conf \
     /etc/nginx/conf.d/agent-tools-privacy-log.conf
 nginx -t
 systemctl reload nginx
 systemctl daemon-reload
 systemctl enable mcpserver
+systemctl enable --now agent-tools-botsrated.timer
 systemctl restart mcpserver
 sleep 1
 systemctl --no-pager status mcpserver | head -20

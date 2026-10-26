@@ -26,6 +26,8 @@ from . import a2a as a2a_mod
 from . import crawlers, db, mailer
 from . import ownership as ownership_mod
 from . import agenstry as agenstry_mod
+from . import botsrated as botsrated_mod
+from . import capkey as capkey_mod
 from . import flows as flows_mod
 from . import paygent as paygent_mod
 from . import zero as zero_mod
@@ -39,6 +41,7 @@ from . import mcp_safety
 crawlers.MCP_CRAWLERS["agenstry"] = agenstry_mod.fetch_agenstry_mcp
 crawlers.MCP_CRAWLERS["prowl"] = prowl_mod.fetch_prowl_mcp
 crawlers.MCP_CRAWLERS["wellknown"] = wellknown_mod.fetch_wellknown_mcp
+crawlers.MCP_CRAWLERS["capkey"] = capkey_mod.fetch_capkey_mcp
 crawlers.MCP_CRAWLERS["agenstry-feed"] = agenstry_mod.fetch_agenstry_feed_mcp
 
 # paygent.net reverse-crawl: register its x402 payment index (x402/mpp/l402)
@@ -1958,6 +1961,10 @@ def main(argv=None) -> int:
     p_onchain.add_argument("--all", action="store_true")
     p_onchain.add_argument("--rate", type=float, default=1.2,
                            help="seconds to sleep between indexer queries")
+    p_botsrated = sub.add_parser("sync-botsrated")
+    p_botsrated.add_argument("--limit", type=int,
+                             default=botsrated_mod.MAX_HOSTS_PER_RUN)
+    p_botsrated.add_argument("--stale-hours", type=int, default=24)
     args = p.parse_args(argv)
 
     if args.cmd == "init":
@@ -1980,6 +1987,11 @@ def main(argv=None) -> int:
         return cmd_health_mcp()
     if args.cmd == "stats":
         return cmd_stats()
+    if args.cmd == "sync-botsrated":
+        result = botsrated_mod.sync_botsrated_quality(
+            limit=args.limit, stale_hours=args.stale_hours)
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+        return 0 if not result["errors"] else 1
     if args.cmd == "retire":
         return cmd_retire(args.kind, args.slug, args.reason, args.actor,
                           args.requested_by, args.request_email,
