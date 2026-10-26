@@ -1080,10 +1080,58 @@ def test_reverify_discards_results_after_endpoint_changes(
         assert mcp["endpoint_url"] == new_mcp
         assert mcp["x402_supported"] == 0
         service = conn.execute(
-            "SELECT url,x402_ok,payment,resource_count FROM services WHERE id=?",
+            "SELECT url,x402_ok,payment,resource_count,descriptor_checked_at "
+            "FROM services WHERE id=?",
             (service_id,),
         ).fetchone()
         assert service["url"] == new_paid
         assert service["x402_ok"] in (None, 0)
         assert service["payment"] is None
         assert service["resource_count"] is None
+        assert service["descriptor_checked_at"] is None
+
+
+def test_crawl_refresh_does_not_hide_stale_descriptor(tmp_path, monkeypatch):
+    database = tmp_path / "directory.db"
+    monkeypatch.setenv("PRIVACY_SUPPRESSION_KEY", "privacy-test-key")
+    db.init_db(str(database))
+    with db.writer(str(database)) as conn:
+        _, service_id = db.upsert_service(conn, {
+            "slug": "crawled-service", "name": "Crawled",
+            "url": "https://crawled.example.test/api",
+            "source": "x402scan", "source_id": "crawled-service",
+            "health": "ok", "payment": json.dumps({"pay_to": "0xabc"}),
+        })
+        conn.execute("UPDATE services SET x402_ok=1, health='ok' WHERE id=?",
+                     (service_id,))
+    real_connect = db.connect
+    real_writer = db.writer
+    monkeypatch.setattr(
+        reverify_x402.db, "connect",
+        lambda *_args, **kwargs: real_connect(
+            str(database), read_only=kwargs.get("read_only", False)
+        ),
+    )
+    monkeypatch.setattr(
+        reverify_x402.db, "writer",
+        lambda *_args, **kwargs: real_writer(
+            str(database), immediate=kwargs.get("immediate", False)
+        ),
+    )
+
+    real_gather = reverify_x402._gather
+
+    def gathered():
+        with closing(db.connect(str(database), read_only=True)) as conn:
+            return [t["id"] for t in real_gather(
+                conn, ("services",), None, False)]
+
+    # A crawl upsert just bumped updated_at, but the descriptor was never read.
+    assert gathered() == [service_id]
+
+    task = {"table": "services", "id": service_id, "endpoint": "https://crawled.example.test/api",
+            "verdict": {"status": "error", "payment": None}, "resources": {}}
+    monkeypatch.setattr(reverify_x402, "_gather", lambda *a, **k: [task])
+    monkeypatch.setattr(reverify_x402, "_probe", lambda t: t)
+    reverify_x402.reverify(targets=("services",), workers=1)
+    assert gathered() == []
