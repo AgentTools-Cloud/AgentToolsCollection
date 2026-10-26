@@ -138,6 +138,16 @@ def _merge_quality(raw, summary: dict) -> str:
     return json.dumps(quality, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
+def _interleave(queues: dict[str, list[tuple]], limit: int) -> list[tuple]:
+    candidates = []
+    wanted = max(0, int(limit))
+    while len(candidates) < wanted and any(queues.values()):
+        for kind in ("mcp", "x402"):
+            if queues[kind] and len(candidates) < wanted:
+                candidates.append(queues[kind].pop(0))
+    return candidates
+
+
 def sync_botsrated_quality(*, limit: int = MAX_HOSTS_PER_RUN,
                             stale_hours: int = 24) -> dict:
     db.init_db()
@@ -166,12 +176,13 @@ def sync_botsrated_quality(*, limit: int = MAX_HOSTS_PER_RUN,
                     groups.setdefault((kind, host), []).append(
                         (checked if checked is not None else -1,
                          int(row["id"]), row["endpoint"]))
-        candidates = [
-            (min(item[0] for item in rows), kind, host, rows)
-            for (kind, host), rows in groups.items()
-        ]
-        candidates.sort(key=lambda item: (item[0], item[1], item[2]))
-        candidates = candidates[:max(0, int(limit))]
+        queues: dict[str, list[tuple]] = {"mcp": [], "x402": []}
+        for (kind, host), rows in groups.items():
+            queues[kind].append(
+                (min(item[0] for item in rows), kind, host, rows))
+        for queue in queues.values():
+            queue.sort(key=lambda item: (item[0], item[2]))
+        candidates = _interleave(queues, limit)
 
     def fetch(client: httpx.Client, item):
         _, kind, host, rows = item

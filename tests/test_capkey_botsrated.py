@@ -56,6 +56,18 @@ class CapkeyTests(unittest.TestCase):
 
 
 class BotsRatedTests(unittest.TestCase):
+    def test_candidate_groups_are_interleaved(self):
+        queues = {
+            "mcp": [(-1, "mcp", "a.example", []),
+                    (-1, "mcp", "b.example", [])],
+            "x402": [(-1, "x402", "c.example", []),
+                     (-1, "x402", "d.example", [])],
+        }
+        self.assertEqual(
+            [item[1] for item in botsrated._interleave(queues, 4)],
+            ["mcp", "x402", "mcp", "x402"],
+        )
+
     def test_mcp_summary_requires_exact_endpoint(self):
         payload = {
             "found": True,
