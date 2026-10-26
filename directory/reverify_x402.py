@@ -480,6 +480,8 @@ def _gather(conn, targets, limit, only_unverified):
                 "delivery": "a2a", "was": r["x402_supported"] or 0,
             })
     if "services" in targets:
+        # updated_at moves on every crawl upsert, so it cannot tell when the
+        # descriptor was last read; descriptor_checked_at is set only here.
         # Native x402 submissions live directly in `services`; the mcp/a2a
         # mirror never touches them, so verify them in place. Three reasons to
         # probe: never verified, no payTo on file, or the descriptor has not
@@ -492,8 +494,8 @@ def _gather(conn, targets, limit, only_unverified):
             "FROM services "
             "WHERE url IS NOT NULL AND url != '' AND health='ok' "
             "AND (COALESCE(x402_ok,0)=0 OR payment IS NULL OR payment='' "
-            "     OR COALESCE(updated_at,0) < ?) "
-            "ORDER BY COALESCE(updated_at,0) ASC"
+            "     OR COALESCE(descriptor_checked_at,0) < ?) "
+            "ORDER BY COALESCE(descriptor_checked_at,0) ASC"
         )
         rows = conn.execute(sql, (stale_before,)).fetchall()
         for r in rows:
@@ -705,6 +707,18 @@ def reverify(targets=("mcp", "a2a"), workers=24, limit=None,
                         "updated_at=? WHERE id=? AND url=?",
                         (resource_count, samples, updated_at, service_id,
                          probed_endpoint))
+        db.with_retry(op)
+    probed_services = [(int(time.time()), t["id"], t["endpoint"]) for t in tasks
+                       if t["table"] == "services"]
+    for start in range(0, len(probed_services), 500):
+        chunk = probed_services[start:start + 500]
+
+        def op(chunk=chunk):
+            with db.writer() as c:
+                c.executemany(
+                    "UPDATE services SET descriptor_checked_at=? "
+                    "WHERE id=? AND url=?",
+                    chunk)
         db.with_retry(op)
     if service_resources:
         print(f"[reverify] resource counts refreshed: "
