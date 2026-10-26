@@ -21,6 +21,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from directory import db as directory_db
 from directory.routes import router as directory_router
 from directory.auth import router as auth_router
+from directory.paid_verify_routes import router as paid_verify_router
 from directory.mcp_app import discover_mcp, wrap_with_client_capture
 from metrics import PrometheusMiddleware, metrics_endpoint
 
@@ -465,6 +466,7 @@ def _build_openapi() -> dict[str, Any]:
 
 app.include_router(auth_router)
 app.include_router(directory_router)
+app.include_router(paid_verify_router)
 app.add_api_route("/metrics", metrics_endpoint, include_in_schema=False, methods=["GET"])
 
 

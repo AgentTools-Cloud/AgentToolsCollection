@@ -225,8 +225,12 @@ def service_detail(request: Request, slug: str):
         if retired is not None:
             return retired
         raise HTTPException(404, "service not found")
+    from . import paid_verify
+    with _conn() as c:
+        paid_summary = paid_verify.public_summary(c, int(svc["id"]))
     return TEMPLATES.TemplateResponse(request, "service.html", {
         "request": request, "svc": svc, "rating": db.score_breakdown(svc),
+        "paid_summary": paid_summary,
         "call_template": cards.build_call_template(svc),
         "interface_declaration": directory_auth.owner_declarations.public_state(svc)},
         headers=_owned_detail_headers(svc))
