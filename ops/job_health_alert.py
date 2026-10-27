@@ -4,7 +4,7 @@
 The jobs swallow per-stage exceptions into WARNING logs and still return 0, so
 systemd reports success while a whole pass silently did nothing (see doc §4.25:
 the MCP pass aborted on 10 of 64 runs for a week without any visible signal).
-This reads one day of journal in a single pass and distinguishes crawl failures
+This reads the latest health-service invocation and distinguishes stage failures
 and binding holds from isolated data-quality warnings. It stays silent when no
 new problem group is observed.
 """
@@ -29,8 +29,12 @@ from directory import db, mailer  # noqa: E402
 
 STATE = Path("/var/lib/agent-tools-watchdog/state.json")
 BACKUP_SUCCESS = Path("/var/backups/agent-tools/last-success.json")
-WINDOW = "24 hours ago"
 WINDOW_SECONDS = 24 * 3600
+HEALTH_UNIT = "agent-tools-health.service"
+JOURNAL_GREP = (
+    r"directory\.jobs (?:(?:mcp|a2a) health failed:|"
+    r"(?:health|mcp health|a2a health): ok=)"
+)
 # Every table is written by at least one job per 6h; twice that is clearly stuck.
 # health writes each table once a day now, and the a2a stage finishes early
 # in a round that runs over three hours, so a healthy table can legitimately
@@ -57,9 +61,16 @@ PARTIAL_STREAK = 4
 
 
 def journal() -> list[str]:
+    invocation = subprocess.run(
+        ["systemctl", "show", HEALTH_UNIT, "-p", "InvocationID", "--value"],
+        capture_output=True, text=True, timeout=30,
+    ).stdout.strip()
+    if not invocation:
+        return []
     out = subprocess.run(
-        ["journalctl", "-u", "agent-tools-*", "--since", WINDOW, "--no-pager", "-o", "cat"],
-        capture_output=True, text=True, timeout=600,
+        ["journalctl", f"_SYSTEMD_INVOCATION_ID={invocation}",
+         "--no-pager", "-o", "cat", "--grep", JOURNAL_GREP],
+        capture_output=True, text=True, timeout=60,
     )
     return out.stdout.splitlines()
 

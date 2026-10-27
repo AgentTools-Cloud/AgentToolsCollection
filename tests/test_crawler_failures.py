@@ -46,9 +46,54 @@ class _Client:
         return response
 
 
+class _StreamResponse:
+    def __init__(self, chunks, url="https://drip.example.test/data"):
+        self._chunks = chunks
+        self.status_code = 200
+        self.headers = {"content-type": "application/json"}
+        self.request = crawlers.httpx.Request("GET", url)
+        self.extensions = {}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def iter_bytes(self):
+        yield from self._chunks
+
+
+class _StreamingClient:
+    def __init__(self, response):
+        self.response = response
+
+    def stream(self, *_args, **_kwargs):
+        return self.response
+
+
 class CrawlerFailureTests(unittest.TestCase):
     def setUp(self):
         crawlers._WK_CACHE.clear()
+
+    def test_same_origin_request_stops_endless_drip_at_total_deadline(self):
+        client = _StreamingClient(_StreamResponse([b"a", b"b"]))
+        with patch.object(crawlers.time, "monotonic",
+                          side_effect=[0.0, 0.0, 21.0]):
+            with self.assertRaisesRegex(RuntimeError, "total time limit"):
+                crawlers._request_same_origin(
+                    client, "GET", "https://drip.example.test/data",
+                    "https://drip.example.test")
+
+    def test_same_origin_request_stops_oversized_stream(self):
+        client = _StreamingClient(_StreamResponse(
+            [b"x" * (crawlers._MAX_BODY + 1)]))
+        with patch.object(crawlers.time, "monotonic",
+                          side_effect=[0.0, 0.0]):
+            with self.assertRaisesRegex(RuntimeError, "body exceeds limit"):
+                crawlers._request_same_origin(
+                    client, "GET", "https://drip.example.test/data",
+                    "https://drip.example.test")
 
     def test_agenstry_retries_once(self):
         client = _Client([

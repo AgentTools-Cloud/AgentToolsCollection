@@ -712,6 +712,32 @@ def _same_origin(left: str, right: str) -> bool:
         return False
 
 
+def _bounded_stream_request(client, method: str, url: str, json_body=None):
+    """Read one response without letting an endless drip hold a worker."""
+    kwargs = {"json": json_body} if method == "POST" else {}
+    started = time.monotonic()
+    with client.stream(method, url, **kwargs) as source:
+        chunks: list[bytes] = []
+        size = 0
+        for chunk in source.iter_bytes():
+            if time.monotonic() - started > _MAX_RESPONSE_SECONDS:
+                log.warning("response_total_timeout url=%s", str(url)[:200])
+                raise RuntimeError("response exceeded total time limit")
+            size += len(chunk)
+            if size > _MAX_BODY:
+                log.warning("response_too_large bytes>%d url=%s",
+                            _MAX_BODY, str(url)[:200])
+                raise RuntimeError("response body exceeds limit")
+            chunks.append(chunk)
+        return httpx.Response(
+            source.status_code,
+            headers=source.headers,
+            content=b"".join(chunks),
+            request=source.request,
+            extensions=dict(source.extensions),
+        )
+
+
 def _request_same_origin(client, method: str, url: str, origin: str,
                          json_body=None, max_redirects: int = 3):
     """Request an untrusted URL while allowing only same-origin redirects."""
@@ -721,7 +747,10 @@ def _request_same_origin(client, method: str, url: str, origin: str,
     for _ in range(max_redirects + 1):
         if not _same_origin(current, origin):
             raise public_http.UnsafeURL("request URL is not same-origin")
-        if current_method == "POST":
+        if callable(getattr(client, "stream", None)):
+            response = _bounded_stream_request(
+                client, current_method, current, body)
+        elif current_method == "POST":
             response = client.post(current, json=body)
         elif current_method == "HEAD":
             response = client.head(current)
@@ -1407,6 +1436,8 @@ _X402_MARKERS = ("accepts", "paymentrequirements", "x402version", "x402_version"
                  "paymentrequired", "maxamountrequired", "payto")
 _VERIFY_TIMEOUT = httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0)
 _MAX_BODY = 1024 * 1024  # cap response body we parse
+_MAX_RESPONSE_SECONDS = float(
+    os.environ.get("AGENT_TOOLS_MAX_RESPONSE_SECONDS", "20"))
 
 
 def _parse_json_body(content: bytes, url: str = ""):
