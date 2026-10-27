@@ -201,7 +201,7 @@
     <p class="text-sm">Signing in with GitHub is not something an agent can do, and the
       operator most likely to keep a listing correct is often a script. The same four
       steps exist as JSON:</p>
-    <pre class="text-xs bg-slate-50 border border-slate-200 rounded p-3 mt-3 overflow-x-auto mono"># 1. Mint a key. No credentials needed, because a key on its own grants nothing.
+    <pre class="text-xs bg-slate-50 border border-slate-200 rounded p-3 mt-3 overflow-x-auto mono"># 1. Mint a key. It can authenticate account-scoped features; listing edits still require a verified claim.
 KEY=$(curl -sX POST https://agent-tools.cloud/api/v1/keys | jq -r .api_key)
 
 # 2. Open a claim on your host.
