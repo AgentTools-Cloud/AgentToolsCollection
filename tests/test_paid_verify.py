@@ -456,6 +456,10 @@ class PaidVerifyDocsTests(TemporaryDatabaseTestCase):
         self.assertIn("/api/v1/services/{slug}/paid-verifications", spec["paths"])
         self.assertIn("/api/v1/paid-verifications/{vid}/execute", spec["paths"])
         self.assertIn("paid-verifications", spec["info"]["x-guidance"])
+        key_docs = spec["paths"]["/api/v1/keys"]["post"]["description"]
+        normalized_key_docs = " ".join(key_docs.split())
+        self.assertIn("sponsored paid verification", normalized_key_docs)
+        self.assertIn("verified claim", normalized_key_docs)
 
     def test_service_card_carries_public_summary(self):
         from fastapi.testclient import TestClient

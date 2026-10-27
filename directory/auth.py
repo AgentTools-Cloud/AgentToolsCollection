@@ -1,9 +1,9 @@
 """GitHub sign-in. Identity only.
 
-Logging in proves who you are; it grants nothing on its own. Edit rights come
-from `domain_ownership` -- a token published on the host that serves the
-listing. Nothing here should ever be consulted to decide whether an edit is
-allowed.
+Logging in proves who you are and enables account-scoped actions such as paid
+verification; it grants no listing edit rights on its own. Edit rights come from
+`domain_ownership` -- a token published on the host that serves the listing.
+Nothing here should ever be consulted to decide whether an edit is allowed.
 
 Sessions are a signed cookie (stdlib HMAC, no extra dependency). The user row
 is still read on every request so a blocked account loses access immediately

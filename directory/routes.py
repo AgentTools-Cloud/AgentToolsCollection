@@ -1116,8 +1116,9 @@ def _require_api_user(request: Request):
             detail={
                 "error": "no_credentials",
                 "message": ("Present an API key as Authorization: Bearer <key>. "
-                            "A key is free and grants nothing until a domain is "
-                            "verified with it."),
+                            "A key is free and can run account-scoped actions such as "
+                            "sponsored paid verification; listing edits still require "
+                            "a verified domain."),
                 "get_a_key": {"method": "POST", "url": "/api/v1/keys"},
             })
     return user
@@ -1125,11 +1126,11 @@ def _require_api_user(request: Request):
 
 @router.post("/api/v1/keys", tags=["ownership"], status_code=201)
 async def api_mint_key(request: Request, payload: KeyRequest | None = None):
-    """Mint an API key. No credentials needed, because a key alone grants nothing.
+    """Mint an API key. No existing credentials are needed.
 
-    Every edit still goes through a verified claim on the host that serves the
-    listing, so an unclaimed key can do exactly two things: read its own empty
-    account, and open a claim.
+    The key can authenticate account-scoped actions such as sponsored paid
+    verification, read its own account, and open a claim. Every listing edit
+    still requires a verified claim on the host that serves the listing.
     """
     ip = limits.client_ip_from_request(request)
     state = limits.check_ip_limits(
@@ -1146,8 +1147,9 @@ async def api_mint_key(request: Request, payload: KeyRequest | None = None):
     return {
         "api_key": raw,
         "prefix": raw[:15],
-        "message": ("Store this now -- it is not shown again. It grants nothing "
-                    "until a domain is verified with it."),
+        "message": ("Store this now -- it is not shown again. It can authenticate "
+                "account-scoped actions such as sponsored paid verification; "
+                "listing edits require a verified domain."),
         "next": {
             "method": "POST", "url": "/api/v1/claims",
             "auth": "Authorization: Bearer <api_key>",
