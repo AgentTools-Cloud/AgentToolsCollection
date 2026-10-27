@@ -223,6 +223,10 @@ The public request template and live price are re-checked before paying; if the
 method/body, price or recipient changed, nothing is paid. The call is never retried; a timeout is
 reported as status=indeterminate. Results (failures included) show on the
 service page for 30 days and as paid_verification in GET /api/v1/services/{slug}.
+settled=true requires matching Base-USDC AuthorizationUsed and Transfer events.
+Evidence is hidden if the listing URL, request template or payment terms change.
+Pending or transient RPC checks can be refreshed with GET. Matching evidence is
+public for 30 days; underlying records are retained for at most 90 days.
 Sponsored runs prove delivery; they are never counted as paying demand.
 
 ## Discovery manifests
@@ -480,7 +484,9 @@ def _build_openapi() -> dict[str, Any]:
         "paid directly to the service's payTo (<= $1; GET or a declared JSON POST probe); "
         "sign it with the "
         "payer wallet and POST /api/v1/paid-verifications/{id}/execute with {signature}. "
-        "We re-check the request template and price before paying, relay once and never retry. Needs "
+        "We re-check the request template and price before paying, relay once and never retry; "
+        "settled requires matching Base-USDC authorization and transfer events; "
+        "pending RPC checks can be refreshed and records are retained for at most 90 days. Needs "
         "Authorization: Bearer <api_key> from POST /api/v1/keys (no signup)."
     )
 

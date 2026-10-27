@@ -727,6 +727,7 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
         from . import paid_verify
 
         paid_verify.ensure_schema(c)
+        paid_verify.expire_stale(c)
         c.commit()
 
 

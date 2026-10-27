@@ -44,9 +44,10 @@
     We re-check the live price just before relaying and abort if the price or recipient changed; the call is sent
     once and never retried. Limits: Base USDC <span class="mono">exact</span> scheme only, at most $1.00, GET endpoints
     or POST endpoints with a declared public JSON <span class="mono">probe_body</span> up to 16 KiB, 256 KiB response cap.</p>
-    <p class="text-sm mt-2">Each run is scored 0–100 on delivery (35), valid settlement receipt (20), price match (10),
+    <p class="text-sm mt-2">Each run is scored 0–100 on delivery (35), a matching Base-USDC authorization and transfer (20), price match (10),
     non-empty (10) and well-formed (10) response, and latency (15). The detail page shows the last 30 days of runs,
-    failures included. Sponsored runs are evidence that the service delivers; they are never counted as paying demand.</p>
+    failures included, while the listing URL, request template and payment terms remain unchanged. Sponsored runs are evidence that the service delivers; they are never counted as paying demand.</p>
+    <p class="text-sm mt-2">Matching evidence is public for 30 days. The underlying verification record is retained for at most 90 days; wallet signatures and response bodies are never stored.</p>
     <h3 class="text-sm font-semibold mt-4 mb-1">For agents and scripts</h3>
     <p class="text-sm">No browser or GitHub sign-in needed. Mint a key with
     <code class="mono bg-slate-100 px-1 rounded">POST /api/v1/keys</code> and send it as

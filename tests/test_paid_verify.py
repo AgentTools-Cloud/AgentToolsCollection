@@ -76,9 +76,11 @@ class PaidVerifyTests(TemporaryDatabaseTestCase):
                 "INSERT INTO users(provider,provider_uid,login,status,created_at) "
                 "VALUES('github','pv2','pv2','active',1)").lastrowid
             self.sid = conn.execute(
-                "INSERT INTO services(slug,name,url,source,source_id,created_at,updated_at) "
-                "VALUES('vendor','Vendor',?,'manual','vendor',1,1)", (URL,)).lastrowid
-        self.svc = {"id": self.sid, "url": URL}
+                "INSERT INTO services(slug,name,url,payment,source,source_id,created_at,updated_at) "
+                "VALUES('vendor','Vendor',?,?,'manual','vendor',1,1)",
+                (URL, json.dumps({"accepts": challenge()["accepts"]}))).lastrowid
+            self.svc = {"id": self.sid, "url": URL,
+                    "payment": {"accepts": challenge()["accepts"]}}
 
     def set_request(self, method, body=None, primary_url=URL):
         info = {"primary_url": primary_url, "method": method}
@@ -89,8 +91,9 @@ class PaidVerifyTests(TemporaryDatabaseTestCase):
             conn.execute("UPDATE services SET call_info=? WHERE id=?", (encoded, self.sid))
         self.svc["call_info"] = encoded
 
-    def run_flow(self, endpoint, **sign_over):
-        with patch.object(pv, "_fetch", endpoint):
+    def run_flow(self, endpoint, settlement=(True, "verified"), **sign_over):
+        with patch.object(pv, "_fetch", endpoint), patch.object(
+                pv, "verify_onchain_settlement", return_value=settlement):
             quote = pv.prepare(self.uid, self.svc, ACCOUNT.address)
             sig = sign(quote["typed_data"])
             return quote, pv.execute(quote["id"], self.uid, sig)
@@ -127,6 +130,19 @@ class PaidVerifyTests(TemporaryDatabaseTestCase):
         self.assertEqual([r["method"] for r in ep.requests], ["POST", "POST", "POST"])
         self.assertTrue(all(r["body"] == body for r in ep.requests))
         self.assertEqual(sum("PAYMENT-SIGNATURE" in h for _, h in ep.calls), 1)
+
+    def test_owner_style_post_resource_sample_is_supported(self):
+        info = {"primary_url": URL, "method": "POST"}
+        samples = [{"url": URL, "method": "POST", "probe_body": {}}]
+        with db.writer() as conn:
+            conn.execute("UPDATE services SET call_info=?,resource_samples=? WHERE id=?",
+                         (json.dumps(info), json.dumps(samples), self.sid))
+        self.svc.update(call_info=info, resource_samples=samples)
+        ep = FakeEndpoint([challenge()])
+        quote, res = self.run_flow(ep)
+        self.assertEqual(res["status"], "succeeded")
+        self.assertEqual(quote["request_method"], "POST")
+        self.assertEqual([r["body"] for r in ep.requests], [{}, {}, {}])
 
     def test_changed_post_template_aborts_without_paying(self):
         self.set_request("POST", {"messages": [{"role": "user", "content": "one"}]})
@@ -251,6 +267,16 @@ class PaidVerifyTests(TemporaryDatabaseTestCase):
                 self.assertFalse(any("PAYMENT-SIGNATURE" in h for _, h in ep.calls))
                 self.assertEqual(self.row(quote["id"])["status"], "failed_before_dispatch")
 
+    def test_non_ascii_live_amount_aborts_without_paying(self):
+        ep = FakeEndpoint([challenge(), challenge(req={"amount": "²"})])
+        with patch.object(pv, "_fetch", ep):
+            quote = pv.prepare(self.uid, self.svc, ACCOUNT.address)
+            with self.assertRaises(pv.VerifyError) as caught:
+                pv.execute(quote["id"], self.uid, sign(quote["typed_data"]))
+        self.assertEqual(caught.exception.code, "unsupported_payment")
+        self.assertFalse(any("PAYMENT-SIGNATURE" in h for _, h in ep.calls))
+        self.assertEqual(self.row(quote["id"])["status"], "failed_before_dispatch")
+
     def test_transport_failure_is_indeterminate_and_not_retried(self):
         ep = FakeEndpoint([challenge()], error=httpx.ReadTimeout("slow"))
         _, res = self.run_flow(ep)
@@ -262,6 +288,42 @@ class PaidVerifyTests(TemporaryDatabaseTestCase):
         _, res = self.run_flow(ep)
         self.assertEqual(res["status"], "indeterminate")
         self.assertEqual(res["failure_code"], "response_too_large")
+
+    def test_streaming_response_has_total_wall_clock_limit(self):
+        class Response:
+            status_code = 200
+            headers = {}
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def iter_bytes(self):
+                yield b"a"
+
+        class Client:
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def stream(self, *args, **kwargs): return Response()
+
+        with patch.object(public_http, "client", return_value=Client()), \
+                patch.object(pv.time, "monotonic", side_effect=[0.0, pv.MAX_REQUEST_SECONDS + 1]):
+            with self.assertRaises(pv.VerifyError) as caught:
+                pv._fetch(URL)
+        self.assertEqual(caught.exception.code, "response_timeout")
+
+    def test_deep_json_after_dispatch_reaches_terminal_state(self):
+        deep = ("[" * 1100 + "0" + "]" * 1100).encode()
+        ep = FakeEndpoint([challenge()], paid=(200, {"content-type": "application/json"}, deep))
+        _, res = self.run_flow(ep)
+        self.assertEqual(res["status"], "succeeded")
+        self.assertNotEqual(self.row(res["id"])["status"], "dispatching")
+
+    def test_post_dispatch_parser_exception_becomes_indeterminate(self):
+        ep = FakeEndpoint([challenge()])
+        with patch.object(pv, "_fetch", ep), patch.object(
+                pv, "score", side_effect=RecursionError("deep")):
+            quote = pv.prepare(self.uid, self.svc, ACCOUNT.address)
+            res = pv.execute(quote["id"], self.uid, sign(quote["typed_data"]))
+        self.assertEqual(res["status"], "indeterminate")
+        self.assertEqual(res["failure_code"], "invalid_response")
 
     def test_delivery_failure_and_rejection_scores(self):
         _, res = self.run_flow(FakeEndpoint([challenge()], paid=(503, {}, b"down")))
@@ -283,6 +345,66 @@ class PaidVerifyTests(TemporaryDatabaseTestCase):
                 _, res = self.run_flow(ep)
                 self.assertFalse(res["settled"])
                 self.assertFalse(res["checks"]["settled"])
+
+    def test_unverified_onchain_receipt_does_not_score_as_settled(self):
+        receipt = header({"success": True, "transaction": "0x" + "ab" * 32})
+        ep = FakeEndpoint([challenge()], paid=(200, {
+            "content-type": "application/json", "PAYMENT-RESPONSE": receipt}, b'{}'))
+        _, res = self.run_flow(ep, settlement=(False, "transfer_event_mismatch"))
+        self.assertFalse(res["settled"])
+        self.assertFalse(res["checks"]["settled"])
+        self.assertEqual(res["checks"]["settlement_check"], "transfer_event_mismatch")
+
+    def test_onchain_verification_binds_payer_nonce_recipient_and_amount(self):
+        req = challenge()["accepts"][0]
+        payer = ACCOUNT.address.lower()
+        nonce = "0x" + "cd" * 32
+        tx_hash = "0x" + "ab" * 32
+        payer_topic = "0x" + "0" * 24 + payer[2:]
+        pay_to_topic = "0x" + "0" * 24 + PAY_TO[2:].lower()
+        receipt = {
+            "transactionHash": tx_hash,
+            "status": "0x1",
+            "blockNumber": "0x123",
+            "logs": [
+                {"address": pv.BASE_USDC, "topics": [pv.AUTHORIZATION_USED_TOPIC,
+                 payer_topic, nonce], "data": "0x"},
+                {"address": pv.BASE_USDC, "topics": [pv.TRANSFER_TOPIC,
+                 payer_topic, pay_to_topic], "data": hex(10000)},
+            ],
+        }
+        def rpc(method, params):
+            return hex(pv.BASE_CHAIN_ID) if method == "eth_chainId" else receipt
+        with patch.object(pv, "_rpc", side_effect=rpc):
+            self.assertEqual(pv.verify_onchain_settlement(req, payer, nonce, tx_hash),
+                             (True, "verified"))
+            receipt["logs"][1]["data"] = hex(9999)
+            self.assertEqual(pv.verify_onchain_settlement(req, payer, nonce, tx_hash),
+                             (False, "transfer_event_mismatch"))
+
+    def test_onchain_verification_rejects_wrong_chain(self):
+        req = challenge()["accepts"][0]
+        with patch.object(pv, "_rpc", return_value="0x1"):
+            self.assertEqual(pv.verify_onchain_settlement(
+                req, ACCOUNT.address, "0x" + "11" * 32, "0x" + "22" * 32),
+                (False, "wrong_chain"))
+
+    def test_pending_settlement_can_be_refreshed_without_replaying_payment(self):
+        receipt = header({"success": True, "transaction": "0x" + "ab" * 32})
+        ep = FakeEndpoint([challenge()], paid=(200, {
+            "content-type": "application/json", "PAYMENT-RESPONSE": receipt}, b'{}'))
+        with patch.object(pv, "_fetch", ep), patch.object(
+                pv, "verify_onchain_settlement", return_value=(False, "receipt_pending")):
+            quote = pv.prepare(self.uid, self.svc, ACCOUNT.address)
+            res = pv.execute(quote["id"], self.uid, sign(quote["typed_data"]))
+        self.assertFalse(res["settled"])
+        checked_at = res["checks"]["settlement_checked_at"]
+        with patch.object(pv, "verify_onchain_settlement", return_value=(True, "verified")), \
+                patch.object(pv.time, "time", return_value=checked_at + pv.SETTLEMENT_RETRY_SECONDS + 1):
+            refreshed = pv.result(quote["id"], self.uid)
+        self.assertTrue(refreshed["settled"])
+        self.assertEqual(refreshed["checks"]["settlement_check"], "verified")
+        self.assertEqual(sum("PAYMENT-SIGNATURE" in h for _, h in ep.calls), 1)
 
     def test_expired_authorization_is_not_dispatched(self):
         ep = FakeEndpoint([challenge()])
@@ -335,6 +457,15 @@ class PaidVerifyTests(TemporaryDatabaseTestCase):
             pv.expire_stale(conn)
         self.assertEqual(self.row(quote["id"])["status"], "indeterminate")
 
+    def test_terminal_records_are_pruned_after_retention_window(self):
+        self.run_flow(FakeEndpoint([challenge()]))
+        cutoff = int(time.time()) + (pv.RETENTION_DAYS + 1) * 86400
+        with db.writer() as conn:
+            pv.expire_stale(conn, cutoff)
+        with closing(db.connect(read_only=True)) as conn:
+            count = conn.execute("SELECT COUNT(*) FROM paid_verifications").fetchone()[0]
+        self.assertEqual(count, 0)
+
     def test_late_finish_cannot_overwrite_indeterminate(self):
         with patch.object(pv, "_fetch", FakeEndpoint([challenge()])):
             quote = pv.prepare(self.uid, self.svc, ACCOUNT.address)
@@ -353,6 +484,37 @@ class PaidVerifyTests(TemporaryDatabaseTestCase):
         with closing(db.connect(read_only=True)) as conn:
             summary = pv.public_summary(conn, self.sid)
         self.assertEqual((summary["runs"], summary["succeeded"]), (2, 1))
+
+    def test_public_summary_is_bound_to_current_listing_version(self):
+        self.run_flow(FakeEndpoint([challenge()]))
+        with closing(db.connect(read_only=True)) as conn:
+            self.assertIsNotNone(pv.public_summary(conn, self.sid))
+        with db.writer() as conn:
+            conn.execute("UPDATE services SET url=? WHERE id=?",
+                         ("https://new.vendor.example/data", self.sid))
+        with closing(db.connect(read_only=True)) as conn:
+            self.assertIsNone(pv.public_summary(conn, self.sid))
+
+    def test_public_summary_is_bound_to_complete_payment_terms(self):
+        self.run_flow(FakeEndpoint([challenge()]))
+        changed = challenge()["accepts"][0]
+        changed["scheme"] = "upto"
+        with db.writer() as conn:
+            conn.execute("UPDATE services SET payment=? WHERE id=?",
+                         (json.dumps({"accepts": [changed]}), self.sid))
+        with closing(db.connect(read_only=True)) as conn:
+            self.assertIsNone(pv.public_summary(conn, self.sid))
+
+    def test_legacy_self_reported_settlement_is_not_public(self):
+        quote, _ = self.run_flow(FakeEndpoint([challenge()]))
+        row = self.row(quote["id"])
+        checks = json.loads(row["checks"])
+        checks.pop("settlement_check", None)
+        with db.writer() as conn:
+            conn.execute("UPDATE paid_verifications SET settled=1,checks=? WHERE id=?",
+                         (json.dumps(checks), quote["id"]))
+        with closing(db.connect(read_only=True)) as conn:
+            self.assertIsNone(pv.public_summary(conn, self.sid))
 
     def test_real_fetch_refuses_private_targets(self):
         with self.assertRaises(public_http.UnsafeURL):
@@ -445,13 +607,15 @@ class PaidVerifyDocsTests(TemporaryDatabaseTestCase):
         llms = client.get("/llms.txt").text
         for needle in ("/api/v1/services/{slug}/paid-verifications",
                        "/api/v1/paid-verifications/{id}/execute", "POST /api/v1/keys",
-                       "public JSON probe_body"):
+                       "public JSON probe_body", "AuthorizationUsed", "Evidence is hidden"):
             self.assertIn(needle, llms)
         manifest = client.get("/.well-known/agent-tools.json").json()
         self.assertIn("sponsored_paid_verification", manifest["capabilities"])
         self.assertEqual(manifest["endpoints"]["paid_verification"]["limits"]["network"], pv.BASE_NETWORK)
         self.assertEqual(manifest["endpoints"]["paid_verification"]["limits"]["methods"],
                          ["GET", "POST"])
+        self.assertIn("AuthorizationUsed",
+                  manifest["endpoints"]["paid_verification"]["notes"])
         spec = client.get("/openapi.json").json()
         self.assertIn("/api/v1/services/{slug}/paid-verifications", spec["paths"])
         self.assertIn("/api/v1/paid-verifications/{vid}/execute", spec["paths"])
@@ -460,6 +624,11 @@ class PaidVerifyDocsTests(TemporaryDatabaseTestCase):
         normalized_key_docs = " ".join(key_docs.split())
         self.assertIn("sponsored paid verification", normalized_key_docs)
         self.assertIn("verified claim", normalized_key_docs)
+        self.assertIn("account-scoped actions", client.get("/privacy").text)
+        self.assertIn("no listing edit rights", client.get("/docs/claim").text)
+        self.assertIn("retained for at most 90 days", client.get("/privacy").text)
+        self.assertIn("not independently verified",
+                  (root / "directory/templates/service.html").read_text())
 
     def test_service_card_carries_public_summary(self):
         from fastapi.testclient import TestClient

@@ -191,8 +191,8 @@
     <h2 class="text-lg font-semibold text-slate-900 mb-2">Privacy</h2>
     <p class="text-sm">We store your GitHub account id, login name, avatar URL and
       verified email address. The email is used to contact you about your claims — for
-      instance if one is transferred away — and for nothing else. Signing in grants no
-      permissions on its own; every edit right comes from a verified host. See
+      instance if one is transferred away — and for nothing else. Signing in enables
+      account-scoped features but grants no listing edit rights; every edit right comes from a verified host. See
       <a class="text-blue-600 hover:underline" href="/privacy">/privacy</a>.</p>
   </div>
 
@@ -219,11 +219,11 @@ curl -sX POST https://agent-tools.cloud/api/v1/claims/42/verify \
 curl -sX PATCH https://agent-tools.cloud/api/v1/listings/x402/your-slug \
   -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
   -d '{"description":"What it actually does."}'</pre>
-    <p class="text-sm mt-3">The key is only an identity. Every write still goes through
-      the verified claim above, which is why we hand keys out to anyone who asks: a key
-      with no claim behind it can read its own empty account and nothing else. What an
-      attacker would still need is the one thing we cannot give them — the ability to
-      publish a file on your domain.</p>
+    <p class="text-sm mt-3">The key is an account identity. It can use account-scoped
+      features such as sponsored paid verification with its own wallet, but every listing
+      edit still goes through the verified claim above. What an attacker would still need
+      to edit your listing is the one thing we cannot give them — the ability to publish a
+      file on your domain.</p>
     <p class="text-sm mt-2">Edits made this way are recorded in the same public history
       as edits made in the browser, marked as coming through the API.</p>
     <p class="text-xs text-slate-500 mt-2">Full schemas:
