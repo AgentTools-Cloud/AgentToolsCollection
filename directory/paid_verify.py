@@ -26,6 +26,7 @@ USDC_DOMAIN = {"name": "USD Coin", "version": "2"}
 MAX_AMOUNT_ATOMIC = 1_000_000  # $1.00 in 6-decimal USDC
 VALID_SECONDS = 300
 MAX_RESPONSE_BYTES = 256 * 1024
+MAX_REQUEST_BODY_BYTES = 16 * 1024
 MAX_HEADER_BYTES = 16 * 1024
 TIMEOUT = httpx.Timeout(connect=8.0, read=30.0, write=10.0, pool=5.0)
 UA = "agent-tools.cloud paid-verification/1 (+https://agent-tools.cloud/about#paid-verification)"
@@ -106,6 +107,71 @@ def _sha(data: bytes | str) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _canonical_body(body: Any) -> bytes:
+    if not isinstance(body, dict):
+        raise VerifyError("missing_probe_body", "POST verification requires a public JSON probe_body")
+    try:
+        encoded = json.dumps(body, ensure_ascii=False, allow_nan=False,
+                             sort_keys=True, separators=(",", ":")).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise VerifyError("invalid_probe_body", "The public probe_body is not valid JSON") from exc
+    if len(encoded) > MAX_REQUEST_BODY_BYTES:
+        raise VerifyError("request_too_large", "The public probe_body exceeds the size limit")
+    return encoded
+
+
+def _request(method: Any, body: Any = None) -> dict:
+    normalized = str(method or "GET").strip().upper()
+    if normalized == "GET":
+        if body is not None:
+            raise VerifyError("invalid_request_template", "GET verification cannot include a request body")
+        return {"method": "GET", "body": None, "body_sha256": None}
+    if normalized != "POST":
+        raise VerifyError("unsupported_method", "Only GET and declared POST endpoints can be verified")
+    encoded = _canonical_body(body)
+    return {"method": "POST", "body": body, "body_sha256": _sha(encoded)}
+
+
+def request_template(service: dict) -> dict:
+    raw = service.get("call_info")
+    if raw in (None, ""):
+        info = {}
+    elif isinstance(raw, dict):
+        info = raw
+    elif isinstance(raw, str):
+        try:
+            info = json.loads(raw)
+        except ValueError as exc:
+            raise VerifyError("invalid_request_template", "The listing call_info is not valid JSON") from exc
+    else:
+        raise VerifyError("invalid_request_template", "The listing call_info is invalid")
+    if not isinstance(info, dict):
+        raise VerifyError("invalid_request_template", "The listing call_info must be an object")
+    endpoint = str(service.get("url") or "").rstrip("/")
+    advertised = str(info.get("primary_url") or endpoint).rstrip("/")
+    if advertised != endpoint:
+        raise VerifyError("request_mismatch", "The listing call_info names a different endpoint")
+    method = str(info.get("method") or "GET").upper()
+    return _request(method, info.get("probe_body") if method == "POST" else None)
+
+
+def _stored_requirements(value: str) -> tuple[dict, dict]:
+    try:
+        stored = json.loads(value)
+    except (TypeError, ValueError) as exc:
+        raise VerifyError("invalid_verification", "Stored verification data is invalid", 409) from exc
+    if not isinstance(stored, dict):
+        raise VerifyError("invalid_verification", "Stored verification data is invalid", 409)
+    if isinstance(stored.get("payment"), dict) and isinstance(stored.get("request"), dict):
+        req = stored["payment"]
+        raw_request = stored["request"]
+        request = _request(raw_request.get("method"), raw_request.get("body"))
+        if raw_request.get("body_sha256") != request["body_sha256"]:
+            raise VerifyError("invalid_verification", "Stored request template hash is invalid", 409)
+        return req, request
+    return stored, _request("GET")
+
+
 def _addr(value: Any) -> str | None:
     text = str(value or "").strip().lower()
     if len(text) == 42 and text.startswith("0x"):
@@ -115,6 +181,17 @@ def _addr(value: Any) -> str | None:
         except ValueError:
             return None
     return None
+
+
+def _tx_hash(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if len(text) != 66 or not text.startswith("0x"):
+        return None
+    try:
+        int(text[2:], 16)
+    except ValueError:
+        return None
+    return text
 
 
 def _b64json(value: str | None) -> dict | None:
@@ -173,12 +250,18 @@ def select_requirement(challenge: dict, endpoint_url: str) -> dict:
     raise VerifyError("unsupported_payment", "No Base USDC exact payment option is offered")
 
 
-def _fetch(url: str, headers: dict | None = None) -> tuple[httpx.Response, bytes, int]:
+def _fetch(url: str, headers: dict | None = None,
+           request: dict | None = None) -> tuple[httpx.Response, bytes, int]:
+    request = _request((request or {}).get("method"), (request or {}).get("body"))
+    request_headers = {"User-Agent": UA, "Accept": "application/json, */*", **(headers or {})}
+    content = None
+    if request["method"] == "POST":
+        request_headers["Content-Type"] = "application/json"
+        content = _canonical_body(request["body"])
     started = time.monotonic()
     with public_http.client(timeout=TIMEOUT, follow_redirects=False,
-                            headers={"User-Agent": UA, "Accept": "application/json, */*",
-                                     **(headers or {})}) as client:
-        with client.stream("GET", url) as response:
+                            headers=request_headers) as client:
+        with client.stream(request["method"], url, content=content) as response:
             body = bytearray()
             for chunk in response.iter_bytes():
                 body.extend(chunk)
@@ -188,10 +271,10 @@ def _fetch(url: str, headers: dict | None = None) -> tuple[httpx.Response, bytes
             return response, bytes(body), elapsed
 
 
-def fetch_challenge(url: str) -> tuple[dict, str]:
+def fetch_challenge(url: str, request: dict | None = None) -> tuple[dict, str]:
     try:
         public_http.validate_url(url)
-        response, _, _ = _fetch(url)
+        response, _, _ = _fetch(url, request=request)
     except public_http.UnsafeURL as exc:
         raise VerifyError("unsafe_url", str(exc)) from exc
     except httpx.HTTPError as exc:
@@ -236,7 +319,8 @@ def prepare(user_id: int, service: dict, payer: str) -> dict:
     url = str(service.get("url") or "")
     if not url.startswith("https://"):
         raise VerifyError("unsafe_url", "Only https endpoints can be verified")
-    challenge, challenge_hash = fetch_challenge(url)
+    request = request_template(service)
+    challenge, challenge_hash = fetch_challenge(url, request)
     req = select_requirement(challenge, url)
     now = int(time.time())
     valid_after = now - 60
@@ -244,6 +328,7 @@ def prepare(user_id: int, service: dict, payer: str) -> dict:
     nonce = "0x" + secrets.token_hex(32)
     vid = uuid.uuid4().hex
     with db.writer(immediate=True) as conn:
+        expire_stale(conn, now)
         open_count = conn.execute(
             "SELECT COUNT(*) FROM paid_verifications WHERE user_id=? AND status IN ('prepared','dispatching')",
             (user_id,)).fetchone()[0]
@@ -254,10 +339,13 @@ def prepare(user_id: int, service: dict, payer: str) -> dict:
             "challenge_hash,requirements,payer,pay_to,amount_atomic,nonce,valid_after,valid_before,created_at)"
             " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (vid, int(service["id"]), int(user_id), "prepared", url, _sha(url), challenge_hash,
-             json.dumps(req, separators=(",", ":")), payer_addr, _addr(req["payTo"]),
+             json.dumps({"version": 1, "payment": req, "request": request},
+                        separators=(",", ":")), payer_addr, _addr(req["payTo"]),
              req["amount"], nonce, valid_after, valid_before, now))
     return {"id": vid, "amount_atomic": req["amount"], "amount_usd": int(req["amount"]) / 1e6,
             "pay_to": req["payTo"], "network": BASE_NETWORK, "valid_before": valid_before,
+            "request_method": request["method"],
+            "request_body_sha256": request["body_sha256"],
             "typed_data": typed_data(req, payer_addr, nonce, valid_after, valid_before)}
 
 
@@ -273,7 +361,8 @@ def _finish(vid: str, **fields) -> None:
     fields["completed_at"] = int(time.time())
     cols = ",".join(f"{k}=?" for k in fields)
     with db.writer(immediate=True) as conn:
-        conn.execute(f"UPDATE paid_verifications SET {cols} WHERE id=?", (*fields.values(), vid))
+        conn.execute(f"UPDATE paid_verifications SET {cols} WHERE id=? AND status='dispatching'",
+                     (*fields.values(), vid))
 
 
 def score(http_status: int, settled: bool, tx_hash: str | None, content_type: str,
@@ -317,7 +406,7 @@ def execute(vid: str, user_id: int, signature: str) -> dict:
         if row["valid_before"] - 15 < now:
             conn.execute("UPDATE paid_verifications SET status='expired', completed_at=? WHERE id=?", (now, vid))
             raise VerifyError("expired", "Authorization window expired; start again", 409)
-        req = json.loads(row["requirements"])
+        req, request = _stored_requirements(row["requirements"])
         data = typed_data(req, row["payer"], row["nonce"], row["valid_after"], row["valid_before"])
         if recover_signer(data, signature) != row["payer"]:
             raise VerifyError("bad_signature", "Signature does not match the payer wallet")
@@ -327,9 +416,21 @@ def execute(vid: str, user_id: int, signature: str) -> dict:
         if claimed != 1:
             raise VerifyError("not_prepared", "This verification was already used", 409)
 
-    # Re-check the live price right before paying; a changed quote is never signed for.
+    # Re-check both the public request template and live price before paying.
     try:
-        challenge, challenge_hash = fetch_challenge(row["endpoint_url"])
+        with db.connect(read_only=True) as conn:
+            service = conn.execute("SELECT * FROM services WHERE id=?", (row["service_id"],)).fetchone()
+        live_service = dict(service) if service is not None else None
+        live_request = request_template(live_service) if live_service is not None else None
+    except VerifyError as exc:
+        _finish(vid, status="failed_before_dispatch", failure_code=exc.code)
+        raise
+    live_url = str((live_service or {}).get("url") or "").rstrip("/")
+    if live_url != row["endpoint_url"].rstrip("/") or live_request != request:
+        _finish(vid, status="failed_before_dispatch", failure_code="request_changed")
+        raise VerifyError("request_changed", "The listing changed its request template; nothing was paid", 409)
+    try:
+        challenge, challenge_hash = fetch_challenge(row["endpoint_url"], request)
         live = select_requirement(challenge, row["endpoint_url"])
     except VerifyError as exc:
         _finish(vid, status="failed_before_dispatch", failure_code=exc.code)
@@ -349,7 +450,7 @@ def execute(vid: str, user_id: int, signature: str) -> dict:
     }
     header = base64.b64encode(json.dumps(payload, separators=(",", ":")).encode()).decode()
     try:
-        response, body, latency = _fetch(row["endpoint_url"], {"PAYMENT-SIGNATURE": header})
+        response, body, latency = _fetch(row["endpoint_url"], {"PAYMENT-SIGNATURE": header}, request)
     except VerifyError as exc:
         _finish(vid, status="indeterminate", failure_code=exc.code)
         return result(vid, user_id)
@@ -360,9 +461,8 @@ def execute(vid: str, user_id: int, signature: str) -> dict:
 
     receipt = _b64json(response.headers.get("PAYMENT-RESPONSE")
                        or response.headers.get("X-PAYMENT-RESPONSE")) or {}
-    tx_hash = receipt.get("transaction") or receipt.get("txHash")
-    tx_hash = tx_hash if isinstance(tx_hash, str) and tx_hash.startswith("0x") and len(tx_hash) <= 80 else None
-    settled = bool(receipt.get("success")) and tx_hash is not None
+    tx_hash = _tx_hash(receipt.get("transaction") or receipt.get("txHash"))
+    settled = receipt.get("success") is True and tx_hash is not None
     ctype = (response.headers.get("content-type") or "")[:100]
     points, checks = score(response.status_code, settled, tx_hash, ctype, body, latency, True)
     if response.status_code == 402:

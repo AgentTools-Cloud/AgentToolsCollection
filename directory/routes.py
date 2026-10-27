@@ -1761,18 +1761,20 @@ def well_known():
                 "docs": "https://agent-tools.cloud/about#paid-verification",
                 "custody": "none: the payer signs an EIP-3009 authorization to the service's own payTo",
                 "limits": {"x402_version": 2, "scheme": "exact", "network": "eip155:8453",
-                           "asset": "USDC", "max_usd": 1.0, "methods": ["GET"]},
+                           "asset": "USDC", "max_usd": 1.0, "methods": ["GET", "POST"],
+                           "post_body": "declared public JSON probe_body, max 16 KiB"},
                 "auth": "Authorization: Bearer <api_key> (POST /api/v1/keys, no signup)",
                 "prepare": {"method": "POST",
                             "url_template": "https://agent-tools.cloud/api/v1/services/{slug}/paid-verifications",
                             "body": {"payer": "0x<wallet>"},
-                            "returns": "id, amount_usd, pay_to, valid_before, typed_data (EIP-712)"},
+                            "returns": "id, amount_usd, pay_to, valid_before, request_method, "
+                                       "request_body_sha256, typed_data (EIP-712)"},
                 "execute": {"method": "POST",
                             "url_template": "https://agent-tools.cloud/api/v1/paid-verifications/{id}/execute",
                             "body": {"signature": "0x<eip712 signature of typed_data>"},
                             "returns": "status, http_status, latency_ms, settled, tx_hash, score, checks"},
                 "result": "https://agent-tools.cloud/api/v1/paid-verifications/{id}",
-                "notes": "Price re-checked before paying; relayed once, never retried. "
+                "notes": "Request template and price re-checked before paying; relayed once, never retried. "
                          "Sponsored runs are never counted as paying demand.",
             },
             "x402_manifest": "https://agent-tools.cloud/.well-known/x402",

@@ -39,8 +39,9 @@ def _error(exc: paid_verify.VerifyError) -> JSONResponse:
 async def prepare_verification(slug: str, body: PrepareIn, request: Request):
     """Quote a sponsored paid verification of an x402 service.
 
-    Fetches the service's live 402 quote and accepts only x402 v2, `exact`, Base
-    USDC (`eip155:8453`), at most $1.00. Returns `typed_data`: an EIP-712
+    Fetches the service's live 402 quote using GET or its declared JSON POST
+    `probe_body`, and accepts only x402 v2, `exact`, Base USDC (`eip155:8453`),
+    at most $1.00. Returns the request method/body hash and `typed_data`: an EIP-712
     `TransferWithAuthorization` (EIP-3009) whose `to` is the service's own payTo.
     Sign it with `payer` and call `/api/v1/paid-verifications/{id}/execute`
     before `valid_before`. Non-custodial: funds never pass through Agent Tools.
@@ -69,9 +70,9 @@ async def prepare_verification(slug: str, body: PrepareIn, request: Request):
 async def execute_verification(vid: str, body: ExecuteIn, request: Request):
     """Relay the signed authorization to the service exactly once.
 
-    The signature must recover to the quoted `payer`. The live price is
-    re-checked first; if amount or recipient changed nothing is sent and the
-    result is `quote_changed`. Never retried: a timeout is `indeterminate`.
+    The signature must recover to the quoted `payer`. The public request template
+    and live price are re-checked first; if method/body, amount or recipient changed,
+    nothing is sent. Never retried: a timeout is `indeterminate`.
     `status` is one of `succeeded`, `delivery_failed`, `payment_rejected`,
     `indeterminate`. `score` (0-100) = delivered 35, settlement receipt 20,
     price match 10, non-empty 10, well-formed 10, latency 15 (capped at 30

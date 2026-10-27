@@ -50,9 +50,11 @@ class FakeEndpoint:
         self.paid = paid or (200, {"content-type": "application/json"}, b'{"ok":true}')
         self.error = error
         self.calls = []
+        self.requests = []
 
-    def __call__(self, url, headers=None):
+    def __call__(self, url, headers=None, request=None):
         self.calls.append((url, dict(headers or {})))
+        self.requests.append(json.loads(json.dumps(request or {})))
         if headers and "PAYMENT-SIGNATURE" in headers:
             if self.error:
                 raise self.error
@@ -77,6 +79,15 @@ class PaidVerifyTests(TemporaryDatabaseTestCase):
                 "INSERT INTO services(slug,name,url,source,source_id,created_at,updated_at) "
                 "VALUES('vendor','Vendor',?,'manual','vendor',1,1)", (URL,)).lastrowid
         self.svc = {"id": self.sid, "url": URL}
+
+    def set_request(self, method, body=None, primary_url=URL):
+        info = {"primary_url": primary_url, "method": method}
+        if body is not None:
+            info["probe_body"] = body
+        encoded = json.dumps(info)
+        with db.writer() as conn:
+            conn.execute("UPDATE services SET call_info=? WHERE id=?", (encoded, self.sid))
+        self.svc["call_info"] = encoded
 
     def run_flow(self, endpoint, **sign_over):
         with patch.object(pv, "_fetch", endpoint):
@@ -103,6 +114,77 @@ class PaidVerifyTests(TemporaryDatabaseTestCase):
         payload = json.loads(base64.b64decode(paid[0]["PAYMENT-SIGNATURE"]))
         self.assertEqual(payload["payload"]["authorization"]["to"], PAY_TO)
         self.assertEqual(payload["accepted"]["amount"], "10000")
+
+    def test_declared_post_template_is_used_for_quote_recheck_and_paid_call(self):
+        body = {"model": "Public-Model", "messages": [{"role": "user", "content": "probe"}],
+                "max_tokens": 1, "stream": False}
+        self.set_request("POST", body)
+        ep = FakeEndpoint([challenge()])
+        quote, res = self.run_flow(ep)
+        self.assertEqual(res["status"], "succeeded")
+        self.assertEqual(quote["request_method"], "POST")
+        self.assertEqual(len(quote["request_body_sha256"]), 64)
+        self.assertEqual([r["method"] for r in ep.requests], ["POST", "POST", "POST"])
+        self.assertTrue(all(r["body"] == body for r in ep.requests))
+        self.assertEqual(sum("PAYMENT-SIGNATURE" in h for _, h in ep.calls), 1)
+
+    def test_changed_post_template_aborts_without_paying(self):
+        self.set_request("POST", {"messages": [{"role": "user", "content": "one"}]})
+        ep = FakeEndpoint([challenge()])
+        with patch.object(pv, "_fetch", ep):
+            quote = pv.prepare(self.uid, self.svc, ACCOUNT.address)
+            self.set_request("POST", {"messages": [{"role": "user", "content": "two"}]})
+            with self.assertRaises(pv.VerifyError) as caught:
+                pv.execute(quote["id"], self.uid, sign(quote["typed_data"]))
+        self.assertEqual(caught.exception.code, "request_changed")
+        self.assertFalse(any("PAYMENT-SIGNATURE" in h for _, h in ep.calls))
+        self.assertEqual(self.row(quote["id"])["status"], "failed_before_dispatch")
+
+    def test_changed_endpoint_aborts_without_paying(self):
+        ep = FakeEndpoint([challenge()])
+        with patch.object(pv, "_fetch", ep):
+            quote = pv.prepare(self.uid, self.svc, ACCOUNT.address)
+            with db.writer() as conn:
+                conn.execute("UPDATE services SET url=? WHERE id=?",
+                             ("https://new.vendor.example/data", self.sid))
+            with self.assertRaises(pv.VerifyError) as caught:
+                pv.execute(quote["id"], self.uid, sign(quote["typed_data"]))
+        self.assertEqual(caught.exception.code, "request_changed")
+        self.assertFalse(any("PAYMENT-SIGNATURE" in h for _, h in ep.calls))
+        self.assertEqual(self.row(quote["id"])["status"], "failed_before_dispatch")
+
+    def test_unsafe_request_templates_are_rejected_before_network(self):
+        cases = [
+            ({"method": "POST"}, "missing_probe_body"),
+            ({"method": "POST", "probe_body": []}, "missing_probe_body"),
+            ({"method": "DELETE"}, "unsupported_method"),
+            ({"method": "GET", "primary_url": "https://other.example/x"}, "request_mismatch"),
+            ({"method": "POST", "probe_body": {"text": "x" * pv.MAX_REQUEST_BODY_BYTES}},
+             "request_too_large"),
+        ]
+        for info, code in cases:
+            with self.subTest(code=code):
+                svc = {**self.svc, "call_info": json.dumps(info)}
+                ep = FakeEndpoint([challenge()])
+                with patch.object(pv, "_fetch", ep):
+                    with self.assertRaises(pv.VerifyError) as caught:
+                        pv.prepare(self.uid, svc, ACCOUNT.address)
+                self.assertEqual(caught.exception.code, code)
+                self.assertEqual(ep.calls, [])
+
+    def test_legacy_get_record_remains_executable(self):
+        ep = FakeEndpoint([challenge()])
+        with patch.object(pv, "_fetch", ep):
+            quote = pv.prepare(self.uid, self.svc, ACCOUNT.address)
+            with db.writer() as conn:
+                row = conn.execute("SELECT requirements FROM paid_verifications WHERE id=?",
+                                   (quote["id"],)).fetchone()
+                payment = json.loads(row["requirements"])["payment"]
+                conn.execute("UPDATE paid_verifications SET requirements=? WHERE id=?",
+                             (json.dumps(payment), quote["id"]))
+            res = pv.execute(quote["id"], self.uid, sign(quote["typed_data"]))
+        self.assertEqual(res["status"], "succeeded")
+        self.assertEqual([r["method"] for r in ep.requests], ["GET", "GET", "GET"])
 
     def test_signature_and_body_are_not_stored(self):
         quote, _ = self.run_flow(FakeEndpoint([challenge()]))
@@ -188,6 +270,20 @@ class PaidVerifyTests(TemporaryDatabaseTestCase):
         _, res = self.run_flow(FakeEndpoint([challenge()], paid=(402, {}, b"")))
         self.assertEqual(res["status"], "payment_rejected")
 
+    def test_malformed_settlement_receipt_does_not_score_as_settled(self):
+        receipts = [
+            {"success": "false", "transaction": "0x" + "ab" * 32},
+            {"success": True, "transaction": "0x1"},
+            {"success": True, "transaction": "0x" + "zz" * 32},
+        ]
+        for receipt in receipts:
+            with self.subTest(receipt=receipt):
+                ep = FakeEndpoint([challenge()], paid=(200, {
+                    "content-type": "application/json", "PAYMENT-RESPONSE": header(receipt)}, b'{}'))
+                _, res = self.run_flow(ep)
+                self.assertFalse(res["settled"])
+                self.assertFalse(res["checks"]["settled"])
+
     def test_expired_authorization_is_not_dispatched(self):
         ep = FakeEndpoint([challenge()])
         with patch.object(pv, "_fetch", ep):
@@ -216,6 +312,20 @@ class PaidVerifyTests(TemporaryDatabaseTestCase):
                 pv.prepare(self.uid, self.svc, ACCOUNT.address)
         self.assertEqual(caught.exception.code, "too_many_open")
 
+    def test_prepare_expires_stale_open_records(self):
+        with patch.object(pv, "_fetch", FakeEndpoint([challenge()])):
+            quotes = [pv.prepare(self.uid, self.svc, ACCOUNT.address) for _ in range(3)]
+            with db.writer() as conn:
+                conn.execute("UPDATE paid_verifications SET valid_before=1 WHERE user_id=?",
+                             (self.uid,))
+            fresh = pv.prepare(self.uid, self.svc, ACCOUNT.address)
+        self.assertNotIn(fresh["id"], {q["id"] for q in quotes})
+        with closing(db.connect(read_only=True)) as conn:
+            expired = conn.execute(
+                "SELECT COUNT(*) FROM paid_verifications WHERE user_id=? AND status='expired'",
+                (self.uid,)).fetchone()[0]
+        self.assertEqual(expired, 3)
+
     def test_stuck_dispatch_becomes_indeterminate(self):
         with patch.object(pv, "_fetch", FakeEndpoint([challenge()])):
             quote = pv.prepare(self.uid, self.svc, ACCOUNT.address)
@@ -224,6 +334,18 @@ class PaidVerifyTests(TemporaryDatabaseTestCase):
                          (quote["id"],))
             pv.expire_stale(conn)
         self.assertEqual(self.row(quote["id"])["status"], "indeterminate")
+
+    def test_late_finish_cannot_overwrite_indeterminate(self):
+        with patch.object(pv, "_fetch", FakeEndpoint([challenge()])):
+            quote = pv.prepare(self.uid, self.svc, ACCOUNT.address)
+        with db.writer() as conn:
+            conn.execute("UPDATE paid_verifications SET status='dispatching', dispatched_at=1 WHERE id=?",
+                         (quote["id"],))
+            pv.expire_stale(conn)
+        pv._finish(quote["id"], status="succeeded", http_status=200)
+        row = self.row(quote["id"])
+        self.assertEqual(row["status"], "indeterminate")
+        self.assertIsNone(row["http_status"])
 
     def test_public_summary_counts_failures(self):
         self.run_flow(FakeEndpoint([challenge()]))
@@ -322,11 +444,14 @@ class PaidVerifyDocsTests(TemporaryDatabaseTestCase):
         client = TestClient(server.app, base_url="https://agent-tools.cloud")
         llms = client.get("/llms.txt").text
         for needle in ("/api/v1/services/{slug}/paid-verifications",
-                       "/api/v1/paid-verifications/{id}/execute", "POST /api/v1/keys"):
+                       "/api/v1/paid-verifications/{id}/execute", "POST /api/v1/keys",
+                       "public JSON probe_body"):
             self.assertIn(needle, llms)
         manifest = client.get("/.well-known/agent-tools.json").json()
         self.assertIn("sponsored_paid_verification", manifest["capabilities"])
         self.assertEqual(manifest["endpoints"]["paid_verification"]["limits"]["network"], pv.BASE_NETWORK)
+        self.assertEqual(manifest["endpoints"]["paid_verification"]["limits"]["methods"],
+                         ["GET", "POST"])
         spec = client.get("/openapi.json").json()
         self.assertIn("/api/v1/services/{slug}/paid-verifications", spec["paths"])
         self.assertIn("/api/v1/paid-verifications/{vid}/execute", spec["paths"])
