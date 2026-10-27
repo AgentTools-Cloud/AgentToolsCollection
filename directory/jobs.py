@@ -1966,6 +1966,7 @@ def main(argv=None) -> int:
                              default=botsrated_mod.MAX_HOSTS_PER_RUN)
     p_botsrated.add_argument("--stale-hours", type=int, default=24)
     args = p.parse_args(argv)
+    db.init_db()
 
     if args.cmd == "init":
         return cmd_init()

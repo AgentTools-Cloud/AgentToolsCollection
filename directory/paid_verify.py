@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import secrets
 import sqlite3
 import time
@@ -17,7 +18,7 @@ from typing import Any
 
 import httpx
 
-from . import db, public_http
+from . import cards, db, public_http
 
 BASE_NETWORK = "eip155:8453"
 BASE_CHAIN_ID = 8453
@@ -28,9 +29,15 @@ VALID_SECONDS = 300
 MAX_RESPONSE_BYTES = 256 * 1024
 MAX_REQUEST_BODY_BYTES = 16 * 1024
 MAX_HEADER_BYTES = 16 * 1024
+MAX_REQUEST_SECONDS = 45.0
+SETTLEMENT_RETRY_SECONDS = 15
+RETENTION_DAYS = 90
 TIMEOUT = httpx.Timeout(connect=8.0, read=30.0, write=10.0, pool=5.0)
 UA = "agent-tools.cloud paid-verification/1 (+https://agent-tools.cloud/about#paid-verification)"
 EVIDENCE_DAYS = 30
+BASE_RPC_URL = os.getenv("PAID_VERIFY_BASE_RPC_URL", "https://base.gateway.tenderly.co")
+TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+AUTHORIZATION_USED_TOPIC = "0x98de503528ee59b575ef0c0a2576a82497bfc029a5685b209e9ec333479b10a5"
 
 TERMINAL = {"succeeded", "delivery_failed", "payment_rejected",
             "failed_before_dispatch", "indeterminate", "expired"}
@@ -113,7 +120,7 @@ def _canonical_body(body: Any) -> bytes:
     try:
         encoded = json.dumps(body, ensure_ascii=False, allow_nan=False,
                              sort_keys=True, separators=(",", ":")).encode("utf-8")
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, RecursionError) as exc:
         raise VerifyError("invalid_probe_body", "The public probe_body is not valid JSON") from exc
     if len(encoded) > MAX_REQUEST_BODY_BYTES:
         raise VerifyError("request_too_large", "The public probe_body exceeds the size limit")
@@ -133,26 +140,29 @@ def _request(method: Any, body: Any = None) -> dict:
 
 
 def request_template(service: dict) -> dict:
-    raw = service.get("call_info")
-    if raw in (None, ""):
-        info = {}
-    elif isinstance(raw, dict):
-        info = raw
-    elif isinstance(raw, str):
+    service = db.row_to_dict(service)
+    endpoint = str(service.get("url") or "")
+    info = service.get("call_info") if isinstance(service.get("call_info"), dict) else {}
+    advertised = str(info.get("primary_url") or endpoint)
+    if advertised.rstrip("/") != endpoint.rstrip("/"):
+        raise VerifyError("request_mismatch", "The listing request template names a different endpoint")
+    if info and not info.get("primary_url"):
+        service = {**service, "call_info": {**info, "primary_url": endpoint}}
+    explicit_method = str(info.get("method") or "").strip().upper()
+    if explicit_method and explicit_method not in {"GET", "POST"}:
+        raise VerifyError("unsupported_method", "Only GET and declared POST endpoints can be verified")
+    request = cards.primary_http_request(service)
+    method = explicit_method or str(request.get("method") or "GET").upper()
+    body = None
+    if method == "POST":
+        encoded = cards.primary_json_body(service, endpoint)
+        if encoded is None:
+            raise VerifyError("missing_probe_body", "POST verification requires one unambiguous public JSON probe_body")
         try:
-            info = json.loads(raw)
-        except ValueError as exc:
-            raise VerifyError("invalid_request_template", "The listing call_info is not valid JSON") from exc
-    else:
-        raise VerifyError("invalid_request_template", "The listing call_info is invalid")
-    if not isinstance(info, dict):
-        raise VerifyError("invalid_request_template", "The listing call_info must be an object")
-    endpoint = str(service.get("url") or "").rstrip("/")
-    advertised = str(info.get("primary_url") or endpoint).rstrip("/")
-    if advertised != endpoint:
-        raise VerifyError("request_mismatch", "The listing call_info names a different endpoint")
-    method = str(info.get("method") or "GET").upper()
-    return _request(method, info.get("probe_body") if method == "POST" else None)
+            body = json.loads(encoded)
+        except (TypeError, ValueError, RecursionError) as exc:
+            raise VerifyError("invalid_probe_body", "The public probe_body is not valid JSON") from exc
+    return _request(method, body)
 
 
 def _stored_requirements(value: str) -> tuple[dict, dict]:
@@ -170,6 +180,48 @@ def _stored_requirements(value: str) -> tuple[dict, dict]:
             raise VerifyError("invalid_verification", "Stored request template hash is invalid", 409)
         return req, request
     return stored, _request("GET")
+
+
+def _payment_fingerprint(value: dict) -> dict | None:
+    if not isinstance(value, dict):
+        return None
+    extra = value.get("extra") if isinstance(value.get("extra"), dict) else {}
+    amount = value.get("amount") if value.get("amount") is not None else value.get("amount_raw")
+    pay_to = value.get("payTo") if value.get("payTo") is not None else value.get("pay_to")
+    timeout = value.get("maxTimeoutSeconds")
+    try:
+        timeout = int(timeout)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    asset = _addr(value.get("asset"))
+    pay_to = _addr(pay_to)
+    if not asset or not pay_to or not str(amount or "").isascii() or not str(amount or "").isdecimal():
+        return None
+    return {
+        "scheme": str(value.get("scheme") or "").lower(),
+        "network": str(value.get("network") or ""),
+        "asset": asset,
+        "amount": str(amount),
+        "payTo": pay_to,
+        "maxTimeoutSeconds": timeout,
+        "extra": {
+            "name": extra.get("name"),
+            "version": extra.get("version"),
+            "assetTransferMethod": extra.get("assetTransferMethod"),
+        },
+    }
+
+
+def _payment_matches(service: dict, req: dict) -> bool:
+    service = db.row_to_dict(service)
+    payment = service.get("payment")
+    if not isinstance(payment, dict):
+        return False
+    accepts = payment.get("accepts")
+    candidates = ([item for item in accepts if isinstance(item, dict)]
+                  if isinstance(accepts, list) else [payment])
+    expected = _payment_fingerprint(req)
+    return expected is not None and any(_payment_fingerprint(item) == expected for item in candidates)
 
 
 def _addr(value: Any) -> str | None:
@@ -194,6 +246,71 @@ def _tx_hash(value: Any) -> str | None:
     return text
 
 
+def _topic_address(value: str) -> str:
+    return "0x" + "0" * 24 + value[2:].lower()
+
+
+def _rpc(method: str, params: list) -> Any:
+    if not BASE_RPC_URL.startswith("https://"):
+        raise ValueError("Base RPC must use https")
+    with public_http.client(
+            timeout=httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0),
+            follow_redirects=False,
+            headers={"User-Agent": UA, "Content-Type": "application/json"}) as client:
+        response = client.post(BASE_RPC_URL, json={
+            "jsonrpc": "2.0", "id": 1, "method": method, "params": params})
+        response.raise_for_status()
+        payload = response.json()
+    if not isinstance(payload, dict) or payload.get("error") or "result" not in payload:
+        raise ValueError("Base RPC returned an invalid response")
+    return payload["result"]
+
+
+def verify_onchain_settlement(req: dict, payer: str, nonce: str,
+                              tx_hash: str) -> tuple[bool, str]:
+    try:
+        chain_id = _rpc("eth_chainId", [])
+        if int(str(chain_id or "0"), 16) != BASE_CHAIN_ID:
+            return False, "wrong_chain"
+        receipt = _rpc("eth_getTransactionReceipt", [tx_hash])
+        if not isinstance(receipt, dict):
+            return False, "receipt_pending"
+        if (_tx_hash(receipt.get("transactionHash")) or "").lower() != tx_hash.lower():
+            return False, "transaction_mismatch"
+        if int(str(receipt.get("status") or "0"), 16) != 1 or not receipt.get("blockNumber"):
+            return False, "transaction_failed"
+        payer_topic = _topic_address(payer)
+        pay_to_topic = _topic_address(_addr(req.get("payTo")) or "0x" + "0" * 40)
+        nonce_topic = str(nonce or "").lower()
+        amount = int(str(req.get("amount") or ""))
+        authorization_used = False
+        transferred = False
+        for log in receipt.get("logs") or []:
+            if not isinstance(log, dict) or _addr(log.get("address")) != _addr(req.get("asset")):
+                continue
+            topics = log.get("topics")
+            if not isinstance(topics, list) or not topics:
+                continue
+            normalized = [str(topic).lower() for topic in topics]
+            if (len(normalized) >= 3 and normalized[0] == AUTHORIZATION_USED_TOPIC
+                    and normalized[1] == payer_topic and normalized[2] == nonce_topic):
+                authorization_used = True
+            if (len(normalized) >= 3 and normalized[0] == TRANSFER_TOPIC
+                    and normalized[1] == payer_topic and normalized[2] == pay_to_topic):
+                try:
+                    transferred = int(str(log.get("data") or "0x0"), 16) == amount
+                except ValueError:
+                    transferred = False
+        if not authorization_used:
+            return False, "authorization_event_missing"
+        if not transferred:
+            return False, "transfer_event_mismatch"
+        return True, "verified"
+    except (httpx.HTTPError, public_http.UnsafeURL, ValueError, TypeError, KeyError,
+            OverflowError, RecursionError):
+        return False, "rpc_error"
+
+
 def _b64json(value: str | None) -> dict | None:
     if not value or len(value) > MAX_HEADER_BYTES:
         return None
@@ -201,7 +318,7 @@ def _b64json(value: str | None) -> dict | None:
         text = value.strip()
         text += "=" * (-len(text) % 4)
         obj = json.loads(base64.b64decode(text, altchars=b"-_", validate=True))
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, RecursionError):
         return None
     return obj if isinstance(obj, dict) else None
 
@@ -237,7 +354,7 @@ def select_requirement(challenge: dict, endpoint_url: str) -> dict:
             continue
         pay_to = _addr(req.get("payTo"))
         amount = str(req.get("amount") or "")
-        if not pay_to or not amount.isdigit():
+        if not pay_to or not amount.isascii() or not amount.isdecimal():
             continue
         if not 0 < int(amount) <= MAX_AMOUNT_ATOMIC:
             raise VerifyError("amount_too_high", "Price exceeds the $1.00 verification limit")
@@ -264,6 +381,8 @@ def _fetch(url: str, headers: dict | None = None,
         with client.stream(request["method"], url, content=content) as response:
             body = bytearray()
             for chunk in response.iter_bytes():
+                if time.monotonic() - started > MAX_REQUEST_SECONDS:
+                    raise VerifyError("response_timeout", "Response exceeded the total time limit", 502)
                 body.extend(chunk)
                 if len(body) > MAX_RESPONSE_BYTES:
                     raise VerifyError("response_too_large", "Response exceeds the size limit", 502)
@@ -374,7 +493,7 @@ def score(http_status: int, settled: bool, tx_hash: str | None, content_type: st
         try:
             json.loads(body or b"null")
             json_ok = True
-        except ValueError:
+        except (ValueError, RecursionError):
             json_ok = False
     checks = {
         "delivered": delivered,
@@ -435,6 +554,9 @@ def execute(vid: str, user_id: int, signature: str) -> dict:
     except VerifyError as exc:
         _finish(vid, status="failed_before_dispatch", failure_code=exc.code)
         raise
+    except (ValueError, TypeError, KeyError, OverflowError, RecursionError) as exc:
+        _finish(vid, status="failed_before_dispatch", failure_code="invalid_challenge")
+        raise VerifyError("invalid_challenge", "The live payment challenge is invalid", 409) from exc
     if (live["amount"] != req["amount"] or _addr(live["payTo"]) != _addr(req["payTo"])):
         _finish(vid, status="failed_before_dispatch", failure_code="quote_changed")
         raise VerifyError("quote_changed", "The endpoint changed its price or recipient; nothing was paid", 409)
@@ -459,22 +581,31 @@ def execute(vid: str, user_id: int, signature: str) -> dict:
         _finish(vid, status="indeterminate", failure_code="transport_error")
         return result(vid, user_id)
 
-    receipt = _b64json(response.headers.get("PAYMENT-RESPONSE")
-                       or response.headers.get("X-PAYMENT-RESPONSE")) or {}
-    tx_hash = _tx_hash(receipt.get("transaction") or receipt.get("txHash"))
-    settled = receipt.get("success") is True and tx_hash is not None
-    ctype = (response.headers.get("content-type") or "")[:100]
-    points, checks = score(response.status_code, settled, tx_hash, ctype, body, latency, True)
-    if response.status_code == 402:
-        status = "payment_rejected"
-    elif 200 <= response.status_code < 300:
-        status = "succeeded"
-    else:
-        status = "delivery_failed"
-    _finish(vid, status=status, http_status=response.status_code, latency_ms=latency,
-            response_type=ctype, response_bytes=len(body), response_sha256=_sha(body),
-            settled=int(settled), tx_hash=tx_hash, score=points,
-            checks=json.dumps(checks, separators=(",", ":")))
+    try:
+        receipt = _b64json(response.headers.get("PAYMENT-RESPONSE")
+                           or response.headers.get("X-PAYMENT-RESPONSE")) or {}
+        tx_hash = _tx_hash(receipt.get("transaction") or receipt.get("txHash"))
+        settled = False
+        settlement_check = "invalid_receipt"
+        if receipt.get("success") is True and tx_hash is not None:
+            settled, settlement_check = verify_onchain_settlement(
+                req, row["payer"], row["nonce"], tx_hash)
+        ctype = (response.headers.get("content-type") or "")[:100]
+        points, checks = score(response.status_code, settled, tx_hash, ctype, body, latency, True)
+        checks["settlement_check"] = settlement_check
+        checks["settlement_checked_at"] = int(time.time())
+        if response.status_code == 402:
+            status = "payment_rejected"
+        elif 200 <= response.status_code < 300:
+            status = "succeeded"
+        else:
+            status = "delivery_failed"
+        _finish(vid, status=status, http_status=response.status_code, latency_ms=latency,
+                response_type=ctype, response_bytes=len(body), response_sha256=_sha(body),
+                settled=int(settled), tx_hash=tx_hash, score=points,
+                checks=json.dumps(checks, separators=(",", ":")))
+    except (ValueError, TypeError, KeyError, OverflowError, RecursionError):
+        _finish(vid, status="indeterminate", failure_code="invalid_response")
     return result(vid, user_id)
 
 
@@ -485,7 +616,12 @@ def expire_stale(conn, now: int | None = None) -> int:
     stuck = conn.execute("UPDATE paid_verifications SET status='indeterminate', "
                          "failure_code='interrupted', completed_at=? "
                          "WHERE status='dispatching' AND dispatched_at<?", (now, now - 300))
-    return cur.rowcount + stuck.rowcount
+    deleted = conn.execute(
+        "DELETE FROM paid_verifications WHERE status IN "
+        "('succeeded','delivery_failed','payment_rejected','failed_before_dispatch',"
+        "'indeterminate','expired') AND completed_at<?",
+        (now - RETENTION_DAYS * 86400,))
+    return cur.rowcount + stuck.rowcount + deleted.rowcount
 
 
 _PUBLIC = ("id", "status", "http_status", "latency_ms", "response_type", "response_bytes",
@@ -495,26 +631,90 @@ _PUBLIC = ("id", "status", "http_status", "latency_ms", "response_type", "respon
 
 def _public(row: dict) -> dict:
     out = {k: row.get(k) for k in _PUBLIC}
-    out["checks"] = json.loads(row["checks"]) if row.get("checks") else None
+    try:
+        out["checks"] = json.loads(row["checks"]) if row.get("checks") else None
+    except (TypeError, ValueError, RecursionError):
+        out["checks"] = None
     out["amount_usd"] = int(row["amount_atomic"]) / 1e6
     out["settled"] = bool(row.get("settled"))
     return out
 
 
+def _refresh_settlement(vid: str, user_id: int) -> None:
+    with db.connect(read_only=True) as conn:
+        row = _load(conn, vid, user_id)
+    if row.get("settled") or not _tx_hash(row.get("tx_hash")):
+        return
+    try:
+        checks = json.loads(row.get("checks") or "{}")
+    except (TypeError, ValueError, RecursionError):
+        return
+    if checks.get("settlement_check") not in {"receipt_pending", "rpc_error"}:
+        return
+    now = int(time.time())
+    if now - int(checks.get("settlement_checked_at") or 0) < SETTLEMENT_RETRY_SECONDS:
+        return
+    try:
+        req, _ = _stored_requirements(row["requirements"])
+        verified, reason = verify_onchain_settlement(
+            req, row["payer"], row["nonce"], row["tx_hash"])
+    except VerifyError:
+        return
+    checks["settlement_check"] = reason
+    checks["settlement_checked_at"] = now
+    score_value = int(row.get("score") or 0)
+    if verified:
+        checks["settled"] = True
+        score_value = min(100, score_value + 20)
+    with db.writer(immediate=True) as conn:
+        conn.execute(
+            "UPDATE paid_verifications SET settled=?,score=?,checks=? "
+            "WHERE id=? AND user_id=? AND settled=0",
+            (int(verified), score_value, json.dumps(checks, separators=(",", ":")),
+             vid, user_id))
+
+
 def result(vid: str, user_id: int) -> dict:
+    _refresh_settlement(vid, user_id)
     with db.connect(read_only=True) as conn:
         return _public(_load(conn, vid, user_id))
 
 
 def public_summary(conn, service_id: int) -> dict | None:
     since = int(time.time()) - EVIDENCE_DAYS * 86400
+    service_row = conn.execute("SELECT * FROM services WHERE id=?", (service_id,)).fetchone()
+    if service_row is None:
+        return None
+    service = db.row_to_dict(service_row)
+    try:
+        current_request = request_template(service)
+    except VerifyError:
+        return None
     rows = conn.execute(
-        "SELECT * FROM paid_verifications WHERE service_id=? AND completed_at>=? "
+        "SELECT * FROM paid_verifications WHERE service_id=? AND endpoint_hash=? "
+        "AND completed_at>=? "
         "AND status IN ('succeeded','delivery_failed','payment_rejected','indeterminate') "
-        "ORDER BY completed_at DESC LIMIT 20", (service_id, since)).fetchall()
+        "ORDER BY completed_at DESC", (service_id, _sha(str(service.get("url") or "")), since))
+    matching = []
+    for raw in rows:
+        row = dict(raw)
+        try:
+            req, request = _stored_requirements(row["requirements"])
+        except VerifyError:
+            continue
+        try:
+            checks = json.loads(row.get("checks") or "{}")
+        except (TypeError, ValueError, RecursionError):
+            continue
+        if (request != current_request or not _payment_matches(service, req)
+                or (row.get("settled") and checks.get("settlement_check") != "verified")):
+            continue
+        matching.append(row)
+        if len(matching) >= 20:
+            break
+    rows = matching
     if not rows:
         return None
-    rows = [dict(r) for r in rows]
     ok = sum(r["status"] == "succeeded" for r in rows)
     return {"runs": len(rows), "succeeded": ok,
             "latest": _public(rows[0]),

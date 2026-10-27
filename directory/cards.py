@@ -40,7 +40,7 @@ def primary_http_request(row: dict[str, Any]) -> dict[str, Any]:
     return {'url': url, 'method': method, 'method_known': known, 'empty_post_probe': empty_probe}
 
 
-def _primary_json_body(row: dict[str, Any], url: str) -> str | None:
+def primary_json_body(row: dict[str, Any], url: str) -> str | None:
     info = row.get('call_info') if isinstance(row.get('call_info'), dict) else {}
     samples = row.get('resource_samples') or info.get('resource_samples') or []
     sources = [sample for sample in samples if isinstance(sample, dict)
@@ -103,7 +103,7 @@ def build_call_template(row: dict[str, Any]) -> dict[str, Any]:
     url, primary_method = request['url'], request['method']
     method_known, empty_probe = request['method_known'], request['empty_post_probe']
     if url:
-        json_body = ('{}' if empty_probe else _primary_json_body(row, url)) if primary_method == 'POST' else None
+        json_body = ('{}' if empty_probe else primary_json_body(row, url)) if primary_method == 'POST' else None
         price_min = row.get("price_min")
         payment = row.get("payment") if isinstance(row.get("payment"), dict) else {}
         currency = row.get("currency") or payment.get("currency")

@@ -73,10 +73,16 @@ async def execute_verification(vid: str, body: ExecuteIn, request: Request):
     The signature must recover to the quoted `payer`. The public request template
     and live price are re-checked first; if method/body, amount or recipient changed,
     nothing is sent. Never retried: a timeout is `indeterminate`.
+    `settled=true` additionally requires a successful Base receipt containing
+    matching USDC `AuthorizationUsed(payer, nonce)` and `Transfer(payer, payTo,
+    amount)` events. Pending or transient RPC checks may be refreshed with GET.
+    Public evidence is shown only while the listing URL,
+    request template and payment terms still match the verified version.
     `status` is one of `succeeded`, `delivery_failed`, `payment_rejected`,
-    `indeterminate`. `score` (0-100) = delivered 35, settlement receipt 20,
+    `indeterminate`. `score` (0-100) = delivered 35, verified Base transfer 20,
     price match 10, non-empty 10, well-formed 10, latency 15 (capped at 30
-    when not delivered). Signatures and response bodies are not stored.
+    when not delivered). Signatures and response bodies are not stored; records
+    are retained for at most 90 days.
     """
     user = _user(request)
     try:

@@ -83,7 +83,7 @@
       Latest: <span class="mono">{{ paid_summary.latest.status }}</span>,
       score {{ paid_summary.latest.score if paid_summary.latest.score is not none else "—" }}/100,
       HTTP {{ paid_summary.latest.http_status or "—" }}{% if paid_summary.latest.latency_ms %}, {{ paid_summary.latest.latency_ms }} ms{% endif %}
-      {% if paid_summary.latest.tx_hash %}, tx <a class="mono text-blue-600 hover:underline" rel="nofollow noopener" target="_blank" href="https://basescan.org/tx/{{ paid_summary.latest.tx_hash }}">{{ paid_summary.latest.tx_hash[:10] }}…</a>{% endif %}.
+      {% if paid_summary.latest.tx_hash %}, {{ "verified settlement tx" if paid_summary.latest.settled else "reported tx (not independently verified)" }} <a class="mono text-blue-600 hover:underline" rel="nofollow noopener" target="_blank" href="https://basescan.org/tx/{{ paid_summary.latest.tx_hash }}">{{ paid_summary.latest.tx_hash[:10] }}…</a>{% endif %}.
     </p>
   {% else %}
     <p class="text-sm text-slate-500 mb-2">No sponsored paid call yet.</p>
@@ -122,7 +122,7 @@
         say('Calling the endpoint once with your payment…');
         var res = await call('/api/v1/paid-verifications/' + q.id + '/execute', {signature: sig});
         say('Result: ' + res.status + '\nHTTP ' + (res.http_status || '—') + ', score ' + (res.score == null ? '—' : res.score) + '/100' +
-            (res.tx_hash ? '\nSettlement tx ' + res.tx_hash : '') +
+            (res.tx_hash ? '\n' + (res.settled ? 'Verified settlement tx ' : 'Reported tx (not independently verified) ') + res.tx_hash : '') +
             (res.status === 'indeterminate' ? '\nThe call may or may not have settled. It was not retried; check your wallet history.' : ''));
       } catch (e) {
         if (e.message !== 'sign in') say('Not completed: ' + e.message);
