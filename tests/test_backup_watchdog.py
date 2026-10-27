@@ -126,7 +126,7 @@ class BackupWatchdogTests(unittest.TestCase):
 
     def test_journal_filters_at_source_before_reading_output(self):
         tree = ast.parse(SOURCE.read_text())
-        names = {"HEALTH_UNIT", "JOURNAL_GREP"}
+        names = {"HEALTH_UNIT", "JOURNAL_GREP", "WINDOW"}
         selected = []
         for node in tree.body:
             if isinstance(node, ast.FunctionDef) and node.name == "journal":
@@ -153,7 +153,7 @@ class BackupWatchdogTests(unittest.TestCase):
         self.assertEqual(show_call.kwargs["timeout"], 30)
         command = journal_call.args[0]
         self.assertEqual(command[1], f"_SYSTEMD_INVOCATION_ID={invocation}")
-        self.assertNotIn("--since", command)
+        self.assertEqual(command[2:4], ["--since", namespace["WINDOW"]])
         self.assertEqual(command[-2:], ["--grep", namespace["JOURNAL_GREP"]])
         self.assertEqual(journal_call.kwargs["timeout"], 60)
 

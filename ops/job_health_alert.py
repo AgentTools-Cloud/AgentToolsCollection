@@ -29,6 +29,7 @@ from directory import db, mailer  # noqa: E402
 
 STATE = Path("/var/lib/agent-tools-watchdog/state.json")
 BACKUP_SUCCESS = Path("/var/backups/agent-tools/last-success.json")
+WINDOW = "24 hours ago"
 WINDOW_SECONDS = 24 * 3600
 HEALTH_UNIT = "agent-tools-health.service"
 JOURNAL_GREP = (
@@ -69,7 +70,8 @@ def journal() -> list[str]:
         return []
     out = subprocess.run(
         ["journalctl", f"_SYSTEMD_INVOCATION_ID={invocation}",
-         "--no-pager", "-o", "cat", "--grep", JOURNAL_GREP],
+         "--since", WINDOW, "--no-pager", "-o", "cat",
+         "--grep", JOURNAL_GREP],
         capture_output=True, text=True, timeout=60,
     )
     return out.stdout.splitlines()
