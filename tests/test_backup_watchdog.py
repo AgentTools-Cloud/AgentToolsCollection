@@ -124,6 +124,39 @@ class BackupWatchdogTests(unittest.TestCase):
         self.assertTrue(self.fresh())
         self.assertEqual(self.ns["unit_results"](), [("backup", "exit-code")])
 
+    def test_journal_filters_at_source_before_reading_output(self):
+        tree = ast.parse(SOURCE.read_text())
+        names = {"HEALTH_UNIT", "JOURNAL_GREP"}
+        selected = []
+        for node in tree.body:
+            if isinstance(node, ast.FunctionDef) and node.name == "journal":
+                selected.append(node)
+            elif isinstance(node, ast.Assign) and any(
+                    isinstance(target, ast.Name) and target.id in names
+                    for target in node.targets):
+                selected.append(node)
+        invocation = "a" * 32
+        run = Mock(side_effect=[
+            subprocess.CompletedProcess([], 0, stdout=invocation + "\n"),
+            subprocess.CompletedProcess([], 0, stdout="first\nsecond\n"),
+        ])
+        namespace = {"subprocess": types.SimpleNamespace(run=run)}
+        exec(compile(ast.Module(body=selected, type_ignores=[]),
+                     str(SOURCE), "exec"), namespace)
+
+        self.assertEqual(namespace["journal"](), ["first", "second"])
+        show_call, journal_call = run.call_args_list
+        self.assertEqual(show_call.args[0], [
+            "systemctl", "show", namespace["HEALTH_UNIT"],
+            "-p", "InvocationID", "--value",
+        ])
+        self.assertEqual(show_call.kwargs["timeout"], 30)
+        command = journal_call.args[0]
+        self.assertEqual(command[1], f"_SYSTEMD_INVOCATION_ID={invocation}")
+        self.assertNotIn("--since", command)
+        self.assertEqual(command[-2:], ["--grep", namespace["JOURNAL_GREP"]])
+        self.assertEqual(journal_call.kwargs["timeout"], 60)
+
     def test_main_calls_both_unit_result_and_receipt_checks(self):
         main = next(node for node in ast.parse(SOURCE.read_text()).body if isinstance(node, ast.FunctionDef) and node.name == "main")
         calls = {node.func.id for node in ast.walk(main) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)}
