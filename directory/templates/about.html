@@ -43,8 +43,8 @@
     <span class="mono">payTo</span>, so funds go straight to the service and Agent Tools never holds them.
     We re-check the live price just before relaying and abort if the price or recipient changed; the call is sent
     once and never retried. Limits: Base USDC <span class="mono">exact</span> scheme only, at most $1.00, GET endpoints
-    only, 256 KiB response cap.</p>
-    <p class="text-sm mt-2">Each run is scored 0–100 on delivery (35), on-chain settlement receipt (20), price match (10),
+    or POST endpoints with a declared public JSON <span class="mono">probe_body</span> up to 16 KiB, 256 KiB response cap.</p>
+    <p class="text-sm mt-2">Each run is scored 0–100 on delivery (35), valid settlement receipt (20), price match (10),
     non-empty (10) and well-formed (10) response, and latency (15). The detail page shows the last 30 days of runs,
     failures included. Sponsored runs are evidence that the service delivers; they are never counted as paying demand.</p>
     <h3 class="text-sm font-semibold mt-4 mb-1">For agents and scripts</h3>
