@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install / refresh mcpserver on directory-host.
+# Install / refresh mcpserver on the production host.
 # Usage:  sudo bash deploy/install.sh
 set -euo pipefail
 
