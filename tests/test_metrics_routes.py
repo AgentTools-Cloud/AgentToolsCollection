@@ -1,3 +1,7 @@
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from directory.routes import router
 from metrics import normalize_route
 
 
@@ -27,3 +31,19 @@ def test_unknown_http_methods_are_bucketed():
     methods = {value if value in _HTTP_METHODS else "_other"
                for value in ("GET", *("METHOD%d" % i for i in range(1000)))}
     assert methods == {"GET", "_other"}
+
+
+def test_lordevo_legacy_mcp_slug_redirects_directly_to_current_listing():
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app)
+
+    response = client.get(
+        "/mcp/servers/lordevo-agent-shop",
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 301
+    assert response.headers["location"] == (
+        "/mcp/servers/lordevo-shop-x402-website-checks-shop-lordevo-com"
+    )
