@@ -44,6 +44,10 @@ TEMPLATES.env.globals["url_host"] = lambda u: db._host_and_path(u or "")[0]
 
 router = APIRouter()
 
+LEGACY_MCP_SLUG_REDIRECTS = {
+    "lordevo-agent-shop": "lordevo-shop-x402-website-checks-shop-lordevo-com",
+}
+
 # Single source of truth for the liveness vocabulary, surfaced on every
 # `health` filter (services / a2a / mcp) and echoed by the `health_status`
 # field on each result.
@@ -358,6 +362,11 @@ def mcp_page(
 
 @router.get("/mcp/servers/{slug}", response_class=HTMLResponse, include_in_schema=False)
 def mcp_detail(request: Request, slug: str):
+    if replacement_slug := LEGACY_MCP_SLUG_REDIRECTS.get(slug):
+        return Response(
+            status_code=301,
+            headers={"Location": f"/mcp/servers/{replacement_slug}"},
+        )
     with _conn() as c:
         m = db.get_mcp_by_slug(c, slug)
     if not m:
