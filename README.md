@@ -73,10 +73,10 @@ search tools only.
 
 ## Deploy
 
-Currently deployed on `latex-tools` behind nginx (vhost: `agent-tools.cloud`).
+Runs behind nginx as a systemd service (see `deploy/`).
 
 ```bash
-cd /opt/mcpserver
+cd <install-dir>
 sudo git pull
 sudo systemctl restart mcpserver
 ```

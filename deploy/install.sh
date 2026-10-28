@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install / refresh mcpserver on latex-tools.
+# Install / refresh mcpserver on the target host.
 # Usage:  sudo bash deploy/install.sh
 set -euo pipefail
 

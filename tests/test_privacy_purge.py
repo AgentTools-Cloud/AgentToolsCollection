@@ -855,7 +855,7 @@ def test_pending_claim_cannot_verify_after_host_becomes_shared(
 
 
 def test_finalize_marker_blocks_startup_gate_and_backup(tmp_path):
-    from ops import backup_agent_tools as backup
+    backup = pytest.importorskip("ops.backup_agent_tools")  # operator-only, not in the public repo
 
     database = tmp_path / "directory.db"
     target = tmp_path / "snapshot.db"

@@ -19,3 +19,6 @@ data/
 
 # patch workflow also emits .bak2/.bak3 style names
 *.bak[0-9]*
+
+# Operator-only scripts and runbooks live in a private repository.
+/ops/

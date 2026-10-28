@@ -87,7 +87,7 @@ def find_occupant(conn: sqlite3.Connection, listing_id: int,
 
 
 # --------------------------------------------------------------------------
-# survivor choice -- same order as ops/merge_x402_duplicates.py
+# survivor choice -- same order as the operator dedup script
 
 
 def _rank(r: sqlite3.Row, ignore_field: Optional[str] = None):
@@ -177,7 +177,7 @@ def classify(conn: sqlite3.Connection, host: str, user_id,
 
 
 # --------------------------------------------------------------------------
-# merge -- same absorb rules as ops/merge_x402_duplicates.py
+# merge -- same absorb rules as the operator dedup script
 
 
 _MAXABLE = ("x402_ok", "resource_count", "tx_30d", "payto_tx_30d",
