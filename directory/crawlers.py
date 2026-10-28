@@ -1675,7 +1675,9 @@ def _mcp_parse_response(r):
 
 
 # Per-server caps so a padded multi-tool server can't bloat our row/index.
-_MAX_TOOLS = 60
+# One hundred still bounds each row while avoiding silent capability loss for
+# legitimate MCP servers whose tool inventories have grown beyond sixty.
+_MAX_TOOLS = 100
 _MAX_TOOL_DESC = 160
 
 
@@ -1687,7 +1689,9 @@ def _summarize_tools(tools: list) -> list:
     that exposes 24 tools is 24 discoverable capabilities, not one.
     """
     out = []
-    for t in tools[:_MAX_TOOLS]:
+    for t in tools:
+        if len(out) >= _MAX_TOOLS:
+            break
         if not isinstance(t, dict):
             continue
         name = str(t.get("name") or "").strip()
