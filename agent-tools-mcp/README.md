@@ -34,56 +34,31 @@ Also listed on [Smithery](https://smithery.ai/servers/kangletian/agent-tools-mcp
 | `get_agent(slug)` | Full A2A agent card (endpoint, skills, auth, x402 info) |
 | `search_all(intent, protocol, top_k)` | **Unified** search across all three; each result tagged with `protocol` |
 | `stats()` | Directory size & health across x402 / MCP / A2A |
+| `ask(question, top_k, max_price_usd, chain, category)` | Plain-language **recommendation**: a written answer plus the ranked x402/MCP services behind it |
+| `recommend(intent, top_k, max_price_usd, chain)` | **Scored x402 shortlist** with `price_hint` / `pay_hint` (discovery only, never pays) |
 
-Typical flow: start with `search_all` if you don't know which resource type fits, or
+Typical flow: ask `ask` for a recommendation, start with `search_all` if you don't know which resource type fits, or
 go straight to the protocol-specific search (`search` / `search_mcp_servers` /
 `search_agents`), then call the matching `get*` tool for the full call template.
 
-## What agents get back (x402 example)
+## What agents get back
 
-`search()` and `get()` return a normalised service record. For services hosted
-directly on **agent-tools.cloud**, every paid endpoint advertises the full x402 v2
-`extensions.bazaar` block in its 402 challenge — including JSON Schema and a worked
-request body example — so the agent can call without trial-and-error:
+`search()` / `get()` return a normalised service record: endpoint URL, method, price range,
+settlement network/asset, `payTo`, health and quality signals, plus whatever call metadata
+the provider publishes (x402 v2 `extensions.bazaar` input/output schema, OpenAPI, or an
+MCP `tools/list`). Entries come from the provider's own `/.well-known/x402`, x402scan,
+x402.org, the MCP Registry, PulseMCP and public A2A agent-cards; agent-tools.cloud
+re-probes them and adds health, latency and on-chain activity, but does not proxy or
+host the paid endpoints.
 
-```jsonc
-// shape of get("agent-tools-cloud-signal-token")
-{
-  "slug": "agent-tools-cloud-signal-token",
-  "endpoint": "https://agent-tools.cloud/v1/signal/token",
-  "method": "POST",
-  "price_usd": 0.01,
-  "network": "base-mainnet",
-  "asset": "USDC",
-  "bazaar": {
-    "info": {
-      "input":  { "type": "http", "method": "POST", "bodyType": "json",
-                  "body":   { "chain": "base", "token": "0x4200...0006" } },
-      "output": { "type": "json",
-                  "example": { "signal": "buy", "score": 0.78, "confidence": 0.62 } }
-    },
-    "schema": { "type": "object", "properties": { "body": { "properties":
-                  { "chain": {"type":"string","enum":["base","ethereum","solana"]},
-                    "token": {"type":"string"} },
-                  "required": ["chain", "token"] } } }
-  }
-}
-```
-
-The response also passes through `payment-required` (challenge) and `payment-response`
-headers, both exposed via `Access-Control-Expose-Headers` so a browser-side
-`fetch()` (e.g. `x402-fetch`) can read them.
-
-Third-party entries scraped from `awesome-x402` / `x402scan` / `x402.org`, the
-MCP registry / PulseMCP, and public A2A agent-cards are passed through as-is and
-may or may not include full call metadata.
+Retired listings return `{"error": "retired", "status": 410}` instead of raising.
 
 ## Quick Start
 
 ### Claude Code CLI
 
 ```bash
-claude mcp add agent-tools -- uvx agent-tools-mcp
+claude mcp add agent-tools -- uvx agent-tools-mcp@latest
 ```
 
 ### Claude Desktop / Cursor / Cline

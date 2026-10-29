@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-tools-mcp"
-version = "0.2.0"
+version = "0.3.0"
 description = "Discover x402 paid services, MCP servers and A2A agents from any MCP-compatible agent (Claude, Cursor, Cline)."
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -19,10 +19,11 @@ classifiers = [
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Topic :: Software Development :: Libraries",
 ]
 dependencies = [
-  "mcp>=1.2.0",
+  "mcp>=1.2.0,<3",
   "httpx>=0.27",
 ]
 
