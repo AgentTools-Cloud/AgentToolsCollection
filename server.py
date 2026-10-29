@@ -205,37 +205,26 @@ _LLMS_TXT = """# agent-tools.cloud
 
 ## Sponsored paid verification (x402)
 
-Pay a listed x402 service once from your own wallet and we record what the
-paid call returned. Non-custodial: you sign one EIP-3009 USDC authorization
-whose recipient is the service's own payTo; funds never pass through us.
-Limits: x402 v2, exact scheme, Base USDC, at most $1.00. Supports GET, or POST
-when the listing declares a public JSON probe_body of at most 16 KiB.
+Pay a listed x402 service once from your own wallet; we call it once and
+publish the result. Funds go straight to the service's payTo (EIP-3009,
+Base USDC, <= $1). We never hold funds or sign for you. GET, or POST with the
+listing's public JSON probe_body (<= 16 KiB).
 
-1. Get an API key (no signup): POST /api/v1/keys -> {"api_key": "atc_live_..."}
-   Send it as Authorization: Bearer <api_key> on the calls below.
-2. Quote: POST /api/v1/services/{slug}/paid-verifications {"payer": "0x..."}
-    -> {id, amount_usd, pay_to, valid_before, request_method,
-         request_body_sha256, typed_data}
-3. Sign typed_data with the payer wallet (EIP-712 / eth_signTypedData_v4).
-4. Run once: POST /api/v1/paid-verifications/{id}/execute {"signature": "0x..."}
-   -> {status, http_status, latency_ms, settled, tx_hash, score, checks}
-5. Re-read later: GET /api/v1/paid-verifications/{id}
+HTTP:
+1. POST /api/v1/keys -> api_key (no signup). Send Authorization: Bearer <api_key>.
+2. POST /api/v1/services/{slug}/paid-verifications {"payer": "0x..."} -> id, typed_data
+3. Sign typed_data with the payer wallet (eth_signTypedData_v4).
+4. POST /api/v1/paid-verifications/{id}/execute {"signature": "0x..."} -> status, score, tx_hash
+5. GET /api/v1/paid-verifications/{id}
 
-Over MCP (https://agent-tools.cloud/mcp-discovery/) the same flow is the tools
-prepare_paid_verification(slug, payer), execute_paid_verification(id, signature)
-and get_paid_verification(id). Authenticate with the HTTP header
-Authorization: Bearer <api_key> or the api_key tool argument. The MCP server
-never signs: sign typed_data with your own wallet.
+MCP (same flow; API key as header or api_key argument):
+prepare_paid_verification(slug, payer) -> execute_paid_verification(id, signature)
+-> get_paid_verification(id)
 
-The public request template and live price are re-checked before paying; if the
-method/body, price or recipient changed, nothing is paid. The call is never retried; a timeout is
-reported as status=indeterminate. Results (failures included) show on the
-service page for 30 days and as paid_verification in GET /api/v1/services/{slug}.
-settled=true requires matching Base-USDC AuthorizationUsed and Transfer events.
-Evidence is hidden if the listing URL, request template or payment terms change.
-Pending or transient RPC checks can be refreshed with GET. Matching evidence is
-public for 30 days; underlying records are retained for at most 90 days.
-Sponsored runs prove delivery; they are never counted as paying demand.
+Price and recipient are re-checked before paying; the call is never retried.
+settled requires matching Base-USDC AuthorizationUsed and Transfer events.
+Results (failures included) are public for 30 days in GET /api/v1/services/{slug}.
+Evidence is hidden if the listing changes.
 
 ## Discovery manifests
 
