@@ -25,6 +25,7 @@ from . import cards
 from . import db as directory_db
 from . import jobs as directory_jobs
 from . import limits
+from . import paid_verify
 from . import ownership as directory_ownership
 from . import resources as directory_resources
 from . import safety_service
@@ -52,7 +53,15 @@ _INSTRUCTIONS = (
     "  5. `scan_mcp_safety(endpoint_url)` screens an MCP server for malware /\n"
     "     prompt-injection lures: returns our latest stored verdict if it is\n"
     "     already indexed, otherwise probes + scans it live and adds it to the\n"
-    "     directory."
+    "     directory.\n"
+    "  6. Sponsored paid verification of an x402 service (you pay it once from\n"
+    "     YOUR wallet, we call it once and record the evidence):\n"
+    "     `prepare_paid_verification(slug, payer)` -> sign `typed_data` with the\n"
+    "     payer wallet (EIP-712) -> `execute_paid_verification(id, signature)`\n"
+    "     -> `get_paid_verification(id)`. Needs an API key from\n"
+    "     POST https://agent-tools.cloud/api/v1/keys (no signup), sent as the\n"
+    "     HTTP header `Authorization: Bearer <key>` or the `api_key` argument.\n"
+    "     We never hold funds or keys and never sign for you."
 )
 
 _TS = TransportSecuritySettings(enable_dns_rebinding_protection=False)
@@ -76,6 +85,18 @@ discover_mcp = FastMCP(
 _current_client_ip: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "agent_tools_client_ip", default=None,
 )
+# Raw `Authorization` header of the current MCP HTTP request. Only read by the
+# paid-verification tools; never logged.
+_current_authorization: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "agent_tools_authorization", default=None,
+)
+
+
+def _extract_authorization(scope: dict) -> str | None:
+    for k, v in scope.get("headers") or []:
+        if k == b"authorization":
+            return v.decode("latin-1", "replace")
+    return None
 
 
 def _extract_peer_ip(scope: dict) -> str | None:
@@ -223,12 +244,14 @@ def wrap_with_client_capture(app):
         if scope.get("type") in ("http", "websocket"):
             ip = _extract_peer_ip(scope)
             token = _current_client_ip.set(ip)
+            auth_token = _current_authorization.set(_extract_authorization(scope))
             try:
                 if scope.get("type") == "http" and scope.get("method") == "POST":
                     receive = await _peek_and_replay(receive)
                 await app(scope, receive, send)
             finally:
                 _current_client_ip.reset(token)
+                _current_authorization.reset(auth_token)
         else:  # lifespan etc.
             await app(scope, receive, send)
     return wrapped
@@ -872,4 +895,171 @@ async def scan_mcp_safety(
     return out
 
 
-log.info("directory MCP app built (db=%s, tools=11)", DB_PATH)
+# ---- Sponsored paid verification ----------------------------------------------
+
+_PV_PREPARE_LIMITS = (("minute", 6, 60), ("day", 60, 86400))
+_PV_AUTH_ERROR = {
+    "error": "unauthorized",
+    "message": (
+        "An API key is required. Mint one (no signup) with "
+        "POST https://agent-tools.cloud/api/v1/keys, then send it as the HTTP "
+        "header `Authorization: Bearer <key>` or pass it as `api_key`."),
+}
+
+
+def _pv_user_id(api_key: str | None) -> int | None:
+    """Account id for the presented API key (argument first, then header)."""
+    raw = (api_key or "").strip()
+    if not raw:
+        scheme, _, tok = (_current_authorization.get() or "").partition(" ")
+        if scheme.lower() == "bearer":
+            raw = tok.strip()
+    if not raw:
+        return None
+    try:
+        with _open() as conn:
+            key = directory_db.api_key_row(conn, raw)
+            if key is None:
+                return None
+            user = conn.execute("SELECT id, status FROM users WHERE id=?",
+                                (key["user_id"],)).fetchone()
+    except Exception:
+        return None
+    if user is None or user["status"] != "active":
+        return None
+    directory_db.touch_api_key(key["id"], key["last_used_at"])
+    return int(user["id"])
+
+
+def _pv_error(exc: "paid_verify.VerifyError") -> dict[str, Any]:
+    return {"error": exc.code, "message": str(exc)}
+
+
+@discover_mcp.tool()
+async def prepare_paid_verification(
+    slug: str,
+    payer: str,
+    api_key: str | None = None,
+    ctx: Context | None = None,
+) -> dict[str, Any]:
+    """Quote a sponsored paid verification of a listed x402 service.
+
+    You pay the service once from YOUR OWN wallet; we relay that one call and
+    publish the evidence (HTTP status, latency, settlement tx, 0-100 score,
+    failures included). Non-custodial: the authorization's recipient is the
+    service's own payTo; funds never pass through agent-tools and we never
+    sign for you. Sponsored runs are never counted as paying demand.
+
+    We fetch the live 402 quote (GET, or the listing's declared JSON POST
+    probe_body) and accept only x402 v2, `exact`, Base USDC (eip155:8453),
+    at most $1.00.
+
+    Next step: sign the returned `typed_data` (EIP-712 / eth_signTypedData_v4,
+    an EIP-3009 TransferWithAuthorization) with the `payer` wallet and call
+    `execute_paid_verification(id, signature)` before `valid_before`.
+
+    Auth: API key from POST https://agent-tools.cloud/api/v1/keys (no signup),
+    sent as HTTP header `Authorization: Bearer <key>` or as `api_key`.
+    Limits: 3 open verifications per account; 6/min and 60/day per IP.
+
+    Args:
+        slug: Service slug from `search` / `get`.
+        payer: 0x address of the wallet that will sign and pay.
+        api_key: Optional if the Authorization header is sent.
+
+    Returns:
+        { id, amount_atomic, amount_usd, pay_to, network, valid_before,
+          request_method, request_body_sha256, typed_data } or { error, message }.
+    """
+    uid = _pv_user_id(api_key)
+    if uid is None:
+        return dict(_PV_AUTH_ERROR)
+    blocked = limits.check_ip_limits(
+        _current_client_ip.get(), "paid_verify_prepare", _PV_PREPARE_LIMITS,
+        db_path=directory_db.DEFAULT_DB_PATH)
+    if blocked:
+        return {"error": "rate_limited",
+                "message": "too many paid verification requests",
+                "retry_after_seconds": int(blocked.get("retry_after") or 1)}
+    with _open() as conn:
+        svc = directory_db.get_by_slug(conn, slug)
+    if not svc:
+        return {"error": "not_found", "message": "service not found"}
+    try:
+        out = await asyncio.to_thread(paid_verify.prepare, uid, svc, payer)
+    except paid_verify.VerifyError as exc:
+        out = _pv_error(exc)
+    _log_call("prepare_paid_verification", ctx=ctx,
+              args={"slug": slug, "outcome": out.get("error") or "prepared"},
+              result_n=0 if out.get("error") else 1, result_slug=slug)
+    return out
+
+
+@discover_mcp.tool()
+async def execute_paid_verification(
+    id: str,
+    signature: str,
+    api_key: str | None = None,
+    ctx: Context | None = None,
+) -> dict[str, Any]:
+    """Relay your signed authorization to the service exactly once.
+
+    The signature must recover to the quoted `payer`. The request template and
+    live price are re-checked first; if method/body, amount or recipient
+    changed, nothing is sent. Never retried: a timeout is `indeterminate`.
+
+    `status` is one of succeeded, delivery_failed, payment_rejected,
+    indeterminate. `settled=true` requires a successful Base receipt with
+    matching USDC AuthorizationUsed(payer, nonce) and Transfer(payer, payTo,
+    amount) events. Signatures and response bodies are not stored.
+
+    Args:
+        id: `id` returned by `prepare_paid_verification`.
+        signature: 0x EIP-712 signature of its `typed_data` by the payer.
+        api_key: Optional if the Authorization header is sent (same account
+            that prepared the verification).
+    """
+    uid = _pv_user_id(api_key)
+    if uid is None:
+        return dict(_PV_AUTH_ERROR)
+    sig = (signature or "").strip()
+    if not 132 <= len(sig) <= 134:
+        return {"error": "bad_signature", "message": "signature must be a 65-byte 0x hex string"}
+    try:
+        out = await asyncio.to_thread(paid_verify.execute, id, uid, sig)
+    except paid_verify.VerifyError as exc:
+        out = _pv_error(exc)
+    _log_call("execute_paid_verification", ctx=ctx,
+              args={"outcome": out.get("error") or out.get("status")},
+              result_n=0 if out.get("error") else 1)
+    return out
+
+
+@discover_mcp.tool()
+async def get_paid_verification(
+    id: str,
+    api_key: str | None = None,
+    ctx: Context | None = None,
+) -> dict[str, Any]:
+    """Read one of your own paid verifications (same fields as execute).
+
+    Pending or transient on-chain settlement checks are refreshed on read.
+
+    Args:
+        id: Verification id.
+        api_key: Optional if the Authorization header is sent.
+    """
+    uid = _pv_user_id(api_key)
+    if uid is None:
+        return dict(_PV_AUTH_ERROR)
+    try:
+        out = await asyncio.to_thread(paid_verify.result, id, uid)
+    except paid_verify.VerifyError as exc:
+        out = _pv_error(exc)
+    _log_call("get_paid_verification", ctx=ctx,
+              args={"outcome": out.get("error") or out.get("status")},
+              result_n=0 if out.get("error") else 1)
+    return out
+
+
+log.info("directory MCP app built (db=%s, tools=14)", DB_PATH)
