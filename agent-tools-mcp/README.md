@@ -17,7 +17,7 @@ Backed by [agent-tools.cloud](https://agent-tools.cloud), an open directory that
 
 > A2A tells agents *who* can do the job. x402 lets them *pay* for it. MCP gives them the *tools* to do it.
 
-This is a **discovery layer, not a facilitator** — your agent keeps full custody of payment. The tools never auto-pay; they only find resources and return call templates. Call the `stats` tool for live counts across all three protocols.
+Tools never pay or sign on your behalf. Call `stats` for live counts.
 
 Also listed on [Smithery](https://smithery.ai/servers/kangletian/agent-tools-mcp) for one-click hosted install.
 
@@ -36,6 +36,11 @@ Also listed on [Smithery](https://smithery.ai/servers/kangletian/agent-tools-mcp
 | `stats()` | Directory size & health across x402 / MCP / A2A |
 | `ask(question, top_k, max_price_usd, chain, category)` | Plain-language **recommendation**: a written answer plus the ranked x402/MCP services behind it |
 | `recommend(intent, top_k, max_price_usd, chain)` | **Scored x402 shortlist** with `price_hint` / `pay_hint` (discovery only, never pays) |
+| `prepare_paid_verification(slug, payer)` | Quote a one-off paid test of an x402 service; returns EIP-712 `typed_data` to sign in your wallet |
+| `execute_paid_verification(id, signature)` | Pay the service once (Base USDC, <= $1, straight to its payTo) and score the result |
+| `get_paid_verification(id)` | Read your result |
+
+Paid-verification tools need a free API key: `POST https://agent-tools.cloud/api/v1/keys`, then set `AGENT_TOOLS_API_KEY`.
 
 Typical flow: ask `ask` for a recommendation, start with `search_all` if you don't know which resource type fits, or
 go straight to the protocol-specific search (`search` / `search_mcp_servers` /
@@ -102,6 +107,7 @@ agent-tools-mcp                    # stdio server, ready for an MCP client
 | `AGENT_TOOLS_API_BASE` | `https://agent-tools.cloud` | Point at a different deployment (e.g. self-hosted) |
 | `AGENT_TOOLS_LOG_LEVEL` | `INFO` | Server log level (stderr only) |
 | `AGENT_TOOLS_HTTP_LOG_LEVEL` | `WARNING` | httpx/httpcore log level |
+| `AGENT_TOOLS_API_KEY` | — | API key for the paid-verification tools |
 
 ## Debugging
 
