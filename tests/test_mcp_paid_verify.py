@@ -116,3 +116,21 @@ class McpPaidVerifyTests(TemporaryDatabaseTestCase):
         self.assertIn("execute_paid_verification", names)
         self.assertIn("get_paid_verification",
                       client.get("/openapi.json").json()["info"]["x-guidance"])
+
+    def test_human_and_manifest_docs_mention_mcp_tools(self):
+        import os
+        import importlib.util
+        from pathlib import Path
+        root = Path(__file__).resolve().parent.parent
+        spec = importlib.util.spec_from_file_location("server_under_test_mcp2", root / "server.py")
+        server = importlib.util.module_from_spec(spec)
+        with patch.dict(os.environ, {"SESSION_SECRET": "offline-test-session-secret"}):
+            spec.loader.exec_module(server)
+        from fastapi.testclient import TestClient
+        client = TestClient(server.app, base_url="https://agent-tools.cloud")
+        manifest = client.get("/.well-known/agent-tools.json").json()
+        self.assertIn("prepare_paid_verification",
+                      manifest["endpoints"]["paid_verification"]["mcp"]["tools"])
+        self.assertIn("execute_paid_verification(id, signature)",
+                      (root / "directory/templates/about.html").read_text())
+        self.assertIn("get_paid_verification(id, api_key=None)", (root / "README.md").read_text())

@@ -21,6 +21,8 @@ Also listed on [Smithery](https://smithery.ai/servers/kangletian/agent-tools-x40
 | `GET /api/v1/services/{slug}` | free | Service card with payment, call and quality metadata |
 | `GET /api/v1/categories`, `/api/v1/stats` | free | Directory facets and aggregate stats |
 | `POST /api/v1/submit` | free, rate-limited | Pending service submission with dedupe |
+| `POST /api/v1/keys` | free | Mint an API key (no signup) for account-scoped actions |
+| `POST /api/v1/services/{slug}/paid-verifications` | API key | Sponsored paid verification: quote, then `/api/v1/paid-verifications/{id}/execute` |
 | `POST /mcp-discovery/` | free | **MCP streamable-http** discovery server |
 | `POST /a2a` | free | **A2A JSON-RPC** agent (`message/send`): directory search + MCP safety scan |
 | `GET /healthz` | free | Liveness |
@@ -47,7 +49,21 @@ search_a2a_agents(intent, top_k=5, x402_only=False)
 search_resources(intent, protocol=None, top_k=10)
 scan_mcp_safety(endpoint_url, name="", description="", tools_text="")
 register(url, name=None, description=None, mcp_url=None, category=None)
+prepare_paid_verification(slug, payer, api_key=None)
+execute_paid_verification(id, signature, api_key=None)
+get_paid_verification(id, api_key=None)
 ```
+
+The three `*_paid_verification` tools are a sponsored paid verification of a
+listed x402 service and exist only on the remote server
+(`https://agent-tools.cloud/mcp-discovery/`), not in the `agent-tools-mcp`
+stdio package. You pay the service once from your own wallet (Base USDC,
+at most $1, EIP-3009 authorization whose recipient is the service's own
+`payTo`); we relay that call once and record the evidence. The server never
+signs: sign the returned `typed_data` yourself. Authenticate with an API key
+from `POST /api/v1/keys` (no signup), sent as `Authorization: Bearer <key>`
+or the `api_key` argument. The same flow is available over HTTP, see
+[`/about#paid-verification`](https://agent-tools.cloud/about#paid-verification).
 
 `search` accepts natural-language intent and ranks by FTS5 + popularity +
 health. Each result carries a `match_reason` and a `confidence` score.

@@ -1770,6 +1770,11 @@ def well_known():
             },
             "paid_verification": {
                 "docs": "https://agent-tools.cloud/about#paid-verification",
+                "mcp": {"url": "https://agent-tools.cloud/mcp-discovery/",
+                        "tools": ["prepare_paid_verification", "execute_paid_verification",
+                                  "get_paid_verification"],
+                        "auth": "Authorization: Bearer <api_key> header or api_key argument",
+                        "signing": "the MCP server never signs; sign typed_data with your own wallet"},
                 "custody": "none: the payer signs an EIP-3009 authorization to the service's own payTo",
                 "limits": {"x402_version": 2, "scheme": "exact", "network": "eip155:8453",
                            "asset": "USDC", "max_usd": 1.0, "methods": ["GET", "POST"],
