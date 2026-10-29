@@ -1792,8 +1792,7 @@ def well_known():
                 "result": "https://agent-tools.cloud/api/v1/paid-verifications/{id}",
                 "notes": "Request template and price re-checked before paying; relayed once, never retried. "
                          "Settled requires matching Base-USDC AuthorizationUsed and Transfer events; "
-                         "pending RPC checks can be refreshed; evidence is version-bound, public for 30 days, "
-                         "and retained for at most 90 days. Sponsored runs are never counted as paying demand.",
+                         "evidence is public for 30 days. We do not store prompts or generated content.",
             },
             "x402_manifest": "https://agent-tools.cloud/.well-known/x402",
             "openapi": "https://agent-tools.cloud/openapi.json",

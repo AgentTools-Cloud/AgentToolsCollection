@@ -81,8 +81,7 @@ async def execute_verification(vid: str, body: ExecuteIn, request: Request):
     `status` is one of `succeeded`, `delivery_failed`, `payment_rejected`,
     `indeterminate`. `score` (0-100) = delivered 35, verified Base transfer 20,
     price match 10, non-empty 10, well-formed 10, latency 15 (capped at 30
-    when not delivered). Signatures and response bodies are not stored; records
-    are retained for at most 90 days.
+    when not delivered). Wallet signatures, prompts and generated content are not stored.
     """
     user = _user(request)
     try:

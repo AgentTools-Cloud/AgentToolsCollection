@@ -224,7 +224,7 @@ prepare_paid_verification(slug, payer) -> execute_paid_verification(id, signatur
 Price and recipient are re-checked before paying; the call is never retried.
 settled requires matching Base-USDC AuthorizationUsed and Transfer events.
 Results (failures included) are public for 30 days in GET /api/v1/services/{slug}.
-Evidence is hidden if the listing changes.
+Evidence is hidden if the listing changes. We do not store prompts or generated content.
 
 ## Discovery manifests
 
@@ -488,7 +488,7 @@ def _build_openapi() -> dict[str, Any]:
         "payer wallet and POST /api/v1/paid-verifications/{id}/execute with {signature}. "
         "We re-check the request template and price before paying, relay once and never retry; "
         "settled requires matching Base-USDC authorization and transfer events; "
-        "pending RPC checks can be refreshed and records are retained for at most 90 days. Needs "
+        "pending RPC checks can be refreshed. We do not store prompts or generated content. Needs "
         "Authorization: Bearer <api_key> from POST /api/v1/keys (no signup)."
     )
 
