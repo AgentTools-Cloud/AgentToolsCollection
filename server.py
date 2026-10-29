@@ -199,7 +199,9 @@ _LLMS_TXT = """# agent-tools.cloud
 
 - Streamable-HTTP MCP server: https://agent-tools.cloud/mcp-discovery/
   Tools: search, get, search_mcp_servers, get_mcp_server, search_a2a_agents,
-  search_resources, ask_services, list_categories, stats, scan_mcp_safety.
+  search_resources, ask_services, list_categories, stats, scan_mcp_safety,
+  register, prepare_paid_verification, execute_paid_verification,
+  get_paid_verification.
 
 ## Sponsored paid verification (x402)
 
@@ -218,6 +220,12 @@ when the listing declares a public JSON probe_body of at most 16 KiB.
 4. Run once: POST /api/v1/paid-verifications/{id}/execute {"signature": "0x..."}
    -> {status, http_status, latency_ms, settled, tx_hash, score, checks}
 5. Re-read later: GET /api/v1/paid-verifications/{id}
+
+Over MCP (https://agent-tools.cloud/mcp-discovery/) the same flow is the tools
+prepare_paid_verification(slug, payer), execute_paid_verification(id, signature)
+and get_paid_verification(id). Authenticate with the HTTP header
+Authorization: Bearer <api_key> or the api_key tool argument. The MCP server
+never signs: sign typed_data with your own wallet.
 
 The public request template and live price are re-checked before paying; if the
 method/body, price or recipient changed, nothing is paid. The call is never retried; a timeout is
@@ -392,6 +400,9 @@ def well_known_mcp(request: Request) -> dict[str, Any]:
             {"name": "search_resources", "description": "Unified search across x402 services, MCP servers and A2A agents."},
             {"name": "scan_mcp_safety", "description": "Check an MCP server (by endpoint URL) for malware / prompt-injection / tool-poisoning: returns our stored verdict if indexed, else probes + scans + indexes it."},
             {"name": "register", "description": "Self-register an x402 / MCP service for human review."},
+            {"name": "prepare_paid_verification", "description": "Quote a sponsored paid verification of an x402 service: returns EIP-712 typed data for your own wallet to sign (non-custodial, Base USDC, <= $1)."},
+            {"name": "execute_paid_verification", "description": "Relay your signed authorization to the service exactly once and score the paid call."},
+            {"name": "get_paid_verification", "description": "Read one of your own paid verifications."},
         ],
     }
 
@@ -471,7 +482,9 @@ def _build_openapi() -> dict[str, Any]:
         "service. GET /api/v1/categories and /api/v1/stats expose facets and "
         "health. POST /mcp-discovery/ is an ungated MCP streamable-http server "
         "with search, ask_services, get, list_categories, stats, scan_mcp_safety "
-        "(malware / prompt-injection check for any MCP endpoint) and register. "
+        "(malware / prompt-injection check for any MCP endpoint), register, and "
+        "prepare_paid_verification / execute_paid_verification / "
+        "get_paid_verification (sponsored paid verification over MCP). "
         "agent-tools.cloud itself is discovery-only; paid relay routes were retired. "
         "Every indexed resource (x402 service, MCP server, A2A agent) carries a "
         "liveness `health_status`: `ok` = answered a live probe and is callable; "
