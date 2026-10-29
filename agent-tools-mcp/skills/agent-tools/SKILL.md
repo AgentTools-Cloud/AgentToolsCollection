@@ -1,6 +1,6 @@
 ---
 name: agent-tools
-description: Discover agent-callable resources via the agent-tools.cloud directory — x402 paid services (pay-per-call USDC on Base), MCP servers (tools/context), and A2A agents (task delegation). Use when the user wants to find an on-demand paid API, an MCP tool server, or a peer agent to hand a task to. Tools - `search(intent)` finds x402 paid services, `search_mcp_servers(intent)` finds MCP servers, `search_agents(intent)` finds A2A agents, `search_all(intent)` searches all three at once, and the matching `get*(slug)` returns the full call template.
+description: Discover agent-callable resources via the agent-tools.cloud directory — x402 paid services (pay-per-call USDC on Base), MCP servers (tools/context), and A2A agents (task delegation). Use when the user wants to find an on-demand paid API, an MCP tool server, or a peer agent to hand a task to. Tools - `search(intent)` finds x402 paid services, `search_mcp_servers(intent)` finds MCP servers, `search_agents(intent)` finds A2A agents, `search_all(intent)` searches all three at once, `ask(question)` gives a written recommendation, `recommend(intent)` a scored x402 shortlist, and the matching `get*(slug)` returns the full call template.
 metadata: {"openclaw": {"emoji": "🛒", "homepage": "https://agent-tools.cloud", "requires": {"bins": ["uvx"]}, "install": [{"id": "uv", "kind": "uv", "package": "agent-tools-mcp", "bins": ["agent-tools-mcp"], "label": "Install via uv (recommended)"}, {"id": "pip", "kind": "pip", "package": "agent-tools-mcp", "bins": ["agent-tools-mcp"], "label": "Install via pip"}]}}
 ---
 
@@ -57,6 +57,8 @@ The MCP server (installed via the installer specs above) exposes these tools:
 | `get_agent(slug)` | Full A2A agent card (endpoint, skills, auth, x402 info) |
 | `search_all(intent, protocol?, top_k?)` | **Unified** search across all three; each result tagged with `protocol` |
 | `stats()` | Live directory size + health across x402 / MCP / A2A |
+| `ask(question, top_k?, max_price_usd?, chain?, category?)` | Plain-language recommendation + ranked x402/MCP services |
+| `recommend(intent, top_k?, max_price_usd?, chain?)` | Scored x402 shortlist with price/pay hints (never pays) |
 
 If you don't know which resource type fits, start with `search_all`. Otherwise
 use the protocol-specific search, pick the highest-ranked result that fits the

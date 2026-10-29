@@ -16,6 +16,8 @@ Tools:
 - get_agent(slug)                                  - full A2A agent card
 - search_all(intent, protocol, top_k)              - unified search across all three
 - stats()                                          - directory-wide stats (all protocols)
+- ask(question, ...)                               - natural-language answer + ranked x402/MCP picks
+- recommend(intent, max_price_usd, chain, ...)     - scored x402 shortlist with price/pay hints
 
 This is a discovery layer, not a facilitator: the agent keeps full custody of
 payment. Tools never auto-pay; they only find resources and return call templates.
@@ -29,12 +31,17 @@ import os
 from typing import Any
 
 import httpx
-from mcp.server.fastmcp import FastMCP
+
+# mcp>=2 renamed FastMCP to MCPServer; keep both majors working.
+try:  # pragma: no cover - exercised by whichever major is installed
+    from mcp.server.mcpserver import MCPServer as _Server
+except ImportError:  # mcp 1.x
+    from mcp.server.fastmcp import FastMCP as _Server
 
 log = logging.getLogger("agent_tools_mcp")
 
 DEFAULT_API_BASE = "https://agent-tools.cloud"
-DEFAULT_TIMEOUT = 15.0
+DEFAULT_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 
 
 def _api_base() -> str:
@@ -52,25 +59,58 @@ def _client() -> httpx.AsyncClient:
     )
 
 
+def _clean(params: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in params.items() if v is not None}
+
+
 async def _get(path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
     async with _client() as cx:
-        r = await cx.get(f"{_api_base()}{path}", params=params)
+        r = await cx.get(f"{_api_base()}{path}", params=_clean(params or {}))
+        if r.status_code == 410:
+            return {"error": "retired", "detail": "This listing has been retired from the directory.",
+                    "status": 410}
         r.raise_for_status()
         return r.json()
 
 
-def build_server() -> FastMCP:
-    mcp = FastMCP(
+async def _post(path: str, body: dict[str, Any], timeout: float = 60.0) -> dict[str, Any]:
+    async with _client() as cx:
+        r = await cx.post(f"{_api_base()}{path}", json=_clean(body), timeout=timeout)
+        r.raise_for_status()
+        return r.json()
+
+
+def _version_kwargs(version: str) -> dict[str, Any]:
+    """mcp>=2 accepts `version` directly; mcp 1.x FastMCP does not."""
+    import inspect
+    return {"version": version} if "version" in inspect.signature(_Server.__init__).parameters else {}
+
+
+def _set_version(server: Any, version: str) -> None:
+    """mcp 1.x reports the SDK version as serverInfo.version unless the low-level server has one."""
+    low = getattr(server, "_mcp_server", None)
+    if low is not None and getattr(low, "version", None) in (None, ""):
+        low.version = version
+
+
+def build_server() -> Any:
+    from . import __version__
+    mcp = _Server(
         name="agent-tools",
         instructions=(
             "Discover agent-callable resources from the agent-tools.cloud directory: "
             "x402 paid services, MCP servers and A2A agents. "
             "Use `search` for x402 paid APIs, `search_mcp_servers` for MCP tool servers, "
             "`search_agents` for A2A peer agents, or `search_all` to look across all three. "
+            "Use `ask` for a plain-language recommendation, or `recommend` for a scored "
+            "x402 shortlist under a price cap. "
             "Then call the matching `get*` tool for the full call template. "
             "This is a discovery layer only — it never pays on your behalf."
         ),
+        website_url="https://agent-tools.cloud",
+        **_version_kwargs(__version__),
     )
+    _set_version(mcp, __version__)
 
     # ------------------------------------------------------------------ x402
     @mcp.tool()
@@ -236,5 +276,62 @@ def build_server() -> FastMCP:
             out["a2a"] = {"error": str(e)}
         return out
 
-    log.info("agent-tools-mcp server built (api_base=%s)", _api_base())
+    # ------------------------------------------------------------- guidance
+    @mcp.tool()
+    async def ask(
+        question: str,
+        top_k: int = 5,
+        max_price_usd: float | None = None,
+        chain: str | None = None,
+        category: str | None = None,
+        require_healthy: bool = True,
+        use_llm: bool = True,
+    ) -> dict[str, Any]:
+        """Ask in plain language which **x402 / MCP services** best fit a task.
+
+        Returns a short written `answer` plus the ranked services it is based on.
+        Use this when you want a recommendation, not just a raw search list.
+
+        Args:
+            question: The task, e.g. "translate a document to Japanese under $0.05".
+            top_k: Max number of recommended services (default 5, max 10).
+            max_price_usd: Optional upper bound on per-call price in USD.
+            chain: Optional settlement chain filter (e.g. "base", "solana").
+            category: Optional category filter (see `list_categories`).
+            require_healthy: Only consider services whose latest probe was healthy.
+            use_llm: Set false for a faster deterministic ranking without the written answer.
+        """
+        return await _post("/api/v1/ask", {
+            "query": question, "limit": max(1, min(int(top_k), 10)),
+            "max_price_usd": max_price_usd, "chain": chain, "category": category,
+            "require_healthy": require_healthy, "use_llm": use_llm,
+        })
+
+    @mcp.tool()
+    async def recommend(
+        intent: str,
+        top_k: int = 5,
+        max_price_usd: float | None = None,
+        chain: str | None = None,
+        require_healthy: bool = True,
+    ) -> dict[str, Any]:
+        """Get a **scored shortlist of x402 services** with price and payment hints.
+
+        Each recommendation carries a `score`, `price_hint` and `pay_hint`. This is
+        discovery only: nothing is paid; settle with your own x402 client.
+
+        Args:
+            intent: What the agent wants to do, plain language.
+            top_k: Max number of recommendations (default 5, max 20).
+            max_price_usd: Optional upper bound on per-call price in USD.
+            chain: Optional settlement chain filter (e.g. "base").
+            require_healthy: Only include services whose latest probe was healthy.
+        """
+        return await _get("/api/v1/broker/recommend", {
+            "q": intent, "limit": max(1, min(int(top_k), 20)),
+            "max_price_usd": max_price_usd, "chain": chain,
+            "require_healthy": "true" if require_healthy else "false",
+        })
+
+    log.info("agent-tools-mcp %s server built (api_base=%s)", __version__, _api_base())
     return mcp
