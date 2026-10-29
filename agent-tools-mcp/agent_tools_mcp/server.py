@@ -18,11 +18,14 @@ Tools:
 - stats()                                          - directory-wide stats (all protocols)
 - ask(question, ...)                               - natural-language answer + ranked x402/MCP picks
 - recommend(intent, max_price_usd, chain, ...)     - scored x402 shortlist with price/pay hints
+- prepare_paid_verification(slug, payer)           - quote a paid test of an x402 service
+- execute_paid_verification(id, signature)         - run it once with your wallet signature
+- get_paid_verification(id)                        - read the result
 
-This is a discovery layer, not a facilitator: the agent keeps full custody of
-payment. Tools never auto-pay; they only find resources and return call templates.
+Tools never pay or sign on your behalf.
 
-Reads `AGENT_TOOLS_API_BASE` env var (default https://agent-tools.cloud).
+Reads `AGENT_TOOLS_API_BASE` (default https://agent-tools.cloud) and, for the
+paid-verification tools, `AGENT_TOOLS_API_KEY`.
 """
 from __future__ import annotations
 
@@ -80,6 +83,35 @@ async def _post(path: str, body: dict[str, Any], timeout: float = 60.0) -> dict[
         return r.json()
 
 
+_NEED_KEY = {
+    "error": "unauthorized",
+    "message": "API key required: POST https://agent-tools.cloud/api/v1/keys, "
+               "then set AGENT_TOOLS_API_KEY or pass api_key.",
+}
+
+
+def _api_key(api_key: str | None) -> str | None:
+    key = (api_key or os.environ.get("AGENT_TOOLS_API_KEY") or "").strip()
+    return key or None
+
+
+async def _authed(method: str, path: str, key: str, body: dict[str, Any] | None = None,
+                  timeout: float = 90.0) -> dict[str, Any]:
+    """Call an account-scoped endpoint; return API errors as data, not exceptions."""
+    async with _client() as cx:
+        r = await cx.request(method, f"{_api_base()}{path}", json=body,
+                             headers={"Authorization": f"Bearer {key}"}, timeout=timeout)
+    try:
+        data = r.json()
+    except ValueError:
+        data = {"error": "http_error", "message": r.text[:300]}
+    if r.status_code >= 400 and isinstance(data, dict) and "error" not in data:
+        detail = data.get("detail")
+        data = {"error": "http_error", "status": r.status_code,
+                "message": detail if isinstance(detail, str) else str(detail or data)[:300]}
+    return data
+
+
 def _version_kwargs(version: str) -> dict[str, Any]:
     """mcp>=2 accepts `version` directly; mcp 1.x FastMCP does not."""
     import inspect
@@ -105,7 +137,9 @@ def build_server() -> Any:
             "Use `ask` for a plain-language recommendation, or `recommend` for a scored "
             "x402 shortlist under a price cap. "
             "Then call the matching `get*` tool for the full call template. "
-            "This is a discovery layer only — it never pays on your behalf."
+            "To test a paid x402 service once from your own wallet: "
+            "`prepare_paid_verification` -> sign `typed_data` -> `execute_paid_verification`. "
+            "Tools never pay or sign on your behalf."
         ),
         website_url="https://agent-tools.cloud",
         **_version_kwargs(__version__),
@@ -332,6 +366,60 @@ def build_server() -> Any:
             "max_price_usd": max_price_usd, "chain": chain,
             "require_healthy": "true" if require_healthy else "false",
         })
+
+    # ------------------------------------------------- paid verification
+
+    @mcp.tool()
+    async def prepare_paid_verification(slug: str, payer: str,
+                                        api_key: str | None = None) -> dict[str, Any]:
+        """Quote a sponsored paid verification of an x402 service.
+
+        You pay the service once from your own wallet (Base USDC, <= $1; funds go
+        to its payTo). Sign the returned `typed_data` (EIP-712), then call
+        `execute_paid_verification` before `valid_before`. Never signs or pays for you.
+
+        Args:
+            slug: Service slug from `search` / `get`.
+            payer: 0x address of the paying wallet.
+            api_key: Optional; defaults to AGENT_TOOLS_API_KEY.
+        """
+        key = _api_key(api_key)
+        if not key:
+            return dict(_NEED_KEY)
+        return await _authed("POST", f"/api/v1/services/{slug}/paid-verifications",
+                             key, {"payer": payer})
+
+    @mcp.tool()
+    async def execute_paid_verification(id: str, signature: str,
+                                        api_key: str | None = None) -> dict[str, Any]:
+        """Send the signed payment to the service once and score the result.
+
+        Aborts without paying if price or recipient changed. Never retried; a
+        timeout returns `indeterminate`.
+
+        Args:
+            id: `id` from `prepare_paid_verification`.
+            signature: 0x EIP-712 signature of its `typed_data` by the payer.
+            api_key: Optional; defaults to AGENT_TOOLS_API_KEY.
+        """
+        key = _api_key(api_key)
+        if not key:
+            return dict(_NEED_KEY)
+        return await _authed("POST", f"/api/v1/paid-verifications/{id}/execute",
+                             key, {"signature": signature})
+
+    @mcp.tool()
+    async def get_paid_verification(id: str, api_key: str | None = None) -> dict[str, Any]:
+        """Read one of your own paid verifications.
+
+        Args:
+            id: Verification id.
+            api_key: Optional; defaults to AGENT_TOOLS_API_KEY.
+        """
+        key = _api_key(api_key)
+        if not key:
+            return dict(_NEED_KEY)
+        return await _authed("GET", f"/api/v1/paid-verifications/{id}", key)
 
     log.info("agent-tools-mcp %s server built (api_base=%s)", __version__, _api_base())
     return mcp
