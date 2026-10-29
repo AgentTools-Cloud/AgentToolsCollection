@@ -62,13 +62,10 @@
         <code class="mono">valid_before</code>; the response has <code class="mono">status</code>,
         <code class="mono">http_status</code>, <code class="mono">tx_hash</code> and <code class="mono">score</code>.</li>
     </ol>
-    <p class="text-sm mt-2">Over MCP, the same flow is available on
-    <code class="mono bg-slate-100 px-1 rounded">https://agent-tools.cloud/mcp-discovery/</code> as the tools
-    <code class="mono">prepare_paid_verification(slug, payer)</code>,
-    <code class="mono">execute_paid_verification(id, signature)</code> and
-    <code class="mono">get_paid_verification(id)</code>. Send the same API key as the
-    <code class="mono">Authorization</code> header or pass it as <code class="mono">api_key</code>.
-    The server never signs for you: sign <code class="mono">typed_data</code> in your own wallet.</p>
+    <p class="text-sm mt-2">Over MCP (<code class="mono">/mcp-discovery/</code>):
+    <code class="mono">prepare_paid_verification(slug, payer)</code> → sign <code class="mono">typed_data</code> →
+    <code class="mono">execute_paid_verification(id, signature)</code> → <code class="mono">get_paid_verification(id)</code>.
+    Same API key, as header or <code class="mono">api_key</code>.</p>
     <p class="text-sm mt-2">Recent results for any service are public in
     <code class="mono bg-slate-100 px-1 rounded">GET /api/v1/services/{slug}</code> under
     <code class="mono">paid_verification</code>. Full schema: <a class="text-blue-600 hover:underline" href="/openapi.json">/openapi.json</a>.</p>

@@ -54,14 +54,9 @@ _INSTRUCTIONS = (
     "     prompt-injection lures: returns our latest stored verdict if it is\n"
     "     already indexed, otherwise probes + scans it live and adds it to the\n"
     "     directory.\n"
-    "  6. Sponsored paid verification of an x402 service (you pay it once from\n"
-    "     YOUR wallet, we call it once and record the evidence):\n"
-    "     `prepare_paid_verification(slug, payer)` -> sign `typed_data` with the\n"
-    "     payer wallet (EIP-712) -> `execute_paid_verification(id, signature)`\n"
-    "     -> `get_paid_verification(id)`. Needs an API key from\n"
-    "     POST https://agent-tools.cloud/api/v1/keys (no signup), sent as the\n"
-    "     HTTP header `Authorization: Bearer <key>` or the `api_key` argument.\n"
-    "     We never hold funds or keys and never sign for you."
+    "  6. `prepare_paid_verification` -> sign `typed_data` in your wallet ->\n"
+    "     `execute_paid_verification`: pay a service once and record the\n"
+    "     result. Needs an API key (POST /api/v1/keys)."
 )
 
 _TS = TransportSecuritySettings(enable_dns_rebinding_protection=False)
@@ -900,10 +895,8 @@ async def scan_mcp_safety(
 _PV_PREPARE_LIMITS = (("minute", 6, 60), ("day", 60, 86400))
 _PV_AUTH_ERROR = {
     "error": "unauthorized",
-    "message": (
-        "An API key is required. Mint one (no signup) with "
-        "POST https://agent-tools.cloud/api/v1/keys, then send it as the HTTP "
-        "header `Authorization: Bearer <key>` or pass it as `api_key`."),
+    "message": "API key required: POST https://agent-tools.cloud/api/v1/keys, "
+               "then send Authorization: Bearer <key> or api_key.",
 }
 
 
@@ -942,25 +935,14 @@ async def prepare_paid_verification(
     api_key: str | None = None,
     ctx: Context | None = None,
 ) -> dict[str, Any]:
-    """Quote a sponsored paid verification of a listed x402 service.
+    """Quote a sponsored paid verification of an x402 service.
 
-    You pay the service once from YOUR OWN wallet; we relay that one call and
-    publish the evidence (HTTP status, latency, settlement tx, 0-100 score,
-    failures included). Non-custodial: the authorization's recipient is the
-    service's own payTo; funds never pass through agent-tools and we never
-    sign for you. Sponsored runs are never counted as paying demand.
+    You pay the service once from your own wallet (Base USDC, <= $1; funds go
+    to its payTo). Sign the returned `typed_data` (EIP-712), then call
+    `execute_paid_verification` before `valid_before`. We never sign or hold funds.
 
-    We fetch the live 402 quote (GET, or the listing's declared JSON POST
-    probe_body) and accept only x402 v2, `exact`, Base USDC (eip155:8453),
-    at most $1.00.
-
-    Next step: sign the returned `typed_data` (EIP-712 / eth_signTypedData_v4,
-    an EIP-3009 TransferWithAuthorization) with the `payer` wallet and call
-    `execute_paid_verification(id, signature)` before `valid_before`.
-
-    Auth: API key from POST https://agent-tools.cloud/api/v1/keys (no signup),
-    sent as HTTP header `Authorization: Bearer <key>` or as `api_key`.
-    Limits: 3 open verifications per account; 6/min and 60/day per IP.
+    Auth: API key from POST https://agent-tools.cloud/api/v1/keys, as the
+    `Authorization: Bearer` header or `api_key`.
 
     Args:
         slug: Service slug from `search` / `get`.
@@ -968,8 +950,7 @@ async def prepare_paid_verification(
         api_key: Optional if the Authorization header is sent.
 
     Returns:
-        { id, amount_atomic, amount_usd, pay_to, network, valid_before,
-          request_method, request_body_sha256, typed_data } or { error, message }.
+        { id, amount_usd, pay_to, valid_before, typed_data, ... } or { error, message }.
     """
     uid = _pv_user_id(api_key)
     if uid is None:
@@ -1002,22 +983,16 @@ async def execute_paid_verification(
     api_key: str | None = None,
     ctx: Context | None = None,
 ) -> dict[str, Any]:
-    """Relay your signed authorization to the service exactly once.
+    """Send the signed payment to the service once and score the result.
 
-    The signature must recover to the quoted `payer`. The request template and
-    live price are re-checked first; if method/body, amount or recipient
-    changed, nothing is sent. Never retried: a timeout is `indeterminate`.
-
-    `status` is one of succeeded, delivery_failed, payment_rejected,
-    indeterminate. `settled=true` requires a successful Base receipt with
-    matching USDC AuthorizationUsed(payer, nonce) and Transfer(payer, payTo,
-    amount) events. Signatures and response bodies are not stored.
+    Aborts without paying if price or recipient changed. Never retried; a
+    timeout returns `indeterminate`. status: succeeded | delivery_failed |
+    payment_rejected | indeterminate.
 
     Args:
         id: `id` returned by `prepare_paid_verification`.
         signature: 0x EIP-712 signature of its `typed_data` by the payer.
-        api_key: Optional if the Authorization header is sent (same account
-            that prepared the verification).
+        api_key: Optional if the Authorization header is sent.
     """
     uid = _pv_user_id(api_key)
     if uid is None:
@@ -1041,9 +1016,7 @@ async def get_paid_verification(
     api_key: str | None = None,
     ctx: Context | None = None,
 ) -> dict[str, Any]:
-    """Read one of your own paid verifications (same fields as execute).
-
-    Pending or transient on-chain settlement checks are refreshed on read.
+    """Read one of your own paid verifications.
 
     Args:
         id: Verification id.
