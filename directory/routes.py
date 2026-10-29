@@ -1792,7 +1792,7 @@ def well_known():
                 "result": "https://agent-tools.cloud/api/v1/paid-verifications/{id}",
                 "notes": "Request template and price re-checked before paying; relayed once, never retried. "
                          "Settled requires matching Base-USDC AuthorizationUsed and Transfer events; "
-                         "evidence is public for 30 days. We do not store prompts or generated content.",
+                         "evidence is public for 30 days. Signatures and response bodies are not stored.",
             },
             "x402_manifest": "https://agent-tools.cloud/.well-known/x402",
             "openapi": "https://agent-tools.cloud/openapi.json",
