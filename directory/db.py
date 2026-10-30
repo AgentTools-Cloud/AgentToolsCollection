@@ -1155,7 +1155,52 @@ def row_to_dict(row) -> dict:
                 d[k] = json.loads(d[k])
             except (TypeError, json.JSONDecodeError):
                 pass
+    _apply_resource_prices(d)
     return d
+
+
+def _apply_resource_prices(d: dict) -> None:
+    """Expose each advertised resource's own price and keep the headline span
+    covering all of them.
+
+    An origin often sells several endpoints at different prices. Some crawls
+    only priced the first one, so the listing showed e.g. "$1 / call" for an
+    origin selling $1/$2/$3/$5 resources, and importers applied that one price
+    to every child resource. Each sample now carries ``price_usd`` read from its
+    own accepts[], and price_min/price_max are widened (never narrowed: the
+    sample list is capped and can miss the dearest tier) to include them.
+    Owner-verified listings keep the price their owner declared.
+    """
+    samples = d.get("resource_samples")
+    if not isinstance(samples, list):
+        return
+    from .crawlers import _bazaar_price_usd
+    prices: list[float] = []
+    for sample in samples:
+        if not isinstance(sample, dict):
+            continue
+        own = []
+        for acc in sample.get("accepts") or []:
+            if isinstance(acc, dict):
+                usd = _bazaar_price_usd(acc)
+                if usd is None and acc.get("estimated_usd") is not None:
+                    try:
+                        usd = float(acc["estimated_usd"]) or None
+                    except (TypeError, ValueError):
+                        usd = None
+                if usd is not None:
+                    own.append(usd)
+        if own:
+            sample["price_usd"] = min(own)
+            if max(own) != min(own):
+                sample["price_max_usd"] = max(own)
+            prices.extend(own)
+    if not prices or int(d.get("owner_verified") or 0):
+        return
+    lo, hi = min(prices), max(prices)
+    cur_lo, cur_hi = d.get("price_min"), d.get("price_max")
+    d["price_min"] = lo if cur_lo is None else min(float(cur_lo), lo)
+    d["price_max"] = hi if cur_hi is None else max(float(cur_hi), hi)
 
 
 # ---------------------------------------------------------------------------

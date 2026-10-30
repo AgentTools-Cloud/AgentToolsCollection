@@ -180,6 +180,7 @@
   <h2 class="text-base font-semibold mb-1">Paid endpoints</h2>
   <p class="text-xs text-slate-500 mb-4">
     {{ svc.resource_count or svc.resource_samples|length }} resource(s) advertised by this origin.
+    Each price below is that resource's own x402 price; the headline price is the range across them.
   </p>
   <div class="space-y-3">
     {% for r in svc.resource_samples %}
@@ -189,6 +190,11 @@
         <span class="shrink-0 px-2 py-0.5 rounded bg-slate-900 text-white text-xs mono">{{ r.method }}</span>
         {% endif %}
         <code class="text-sm mono break-all text-slate-800">{{ r.url }}</code>
+        {% if r.price_usd is defined and r.price_usd is not none %}
+        <span class="ml-auto shrink-0 mono text-xs text-slate-700 bg-slate-50 ring-1 ring-slate-200 rounded-md px-2 py-0.5">
+          {% if r.price_max_usd is defined and r.price_max_usd %}${{ "%.4f"|format(r.price_usd) }}–${{ "%.4f"|format(r.price_max_usd) }}{% else %}${{ "%.4f"|format(r.price_usd) }}{% endif %} / call
+        </span>
+        {% endif %}
       </div>
       {% if r.description %}
       <p class="text-xs text-slate-500 mt-1.5">{{ r.description }}</p>
