@@ -448,6 +448,8 @@ def _resource_accepts(res: dict[str, Any]) -> list[dict[str, Any]]:
 def _accept_summary(accept: dict[str, Any], resource_url: str | None = None) -> dict[str, Any]:
     extra = accept.get("extra") if isinstance(accept.get("extra"), dict) else {}
     price_usd = _max_amount_to_usd(accept.get("maxAmountRequired"))
+    if price_usd is None:
+        price_usd = _bazaar_price_usd(accept)
     return {
         "scheme": accept.get("scheme"),
         "network": str(accept.get("network")).lower() if accept.get("network") else None,
@@ -580,6 +582,11 @@ def fetch_x402scan() -> list:
                 if accept.get("network"):
                     chains.add(str(accept["network"]).lower())
                 price = _max_amount_to_usd(accept.get("maxAmountRequired"))
+                if price is None:
+                    # x402 v2 accepts carry `amount`, not maxAmountRequired;
+                    # skipping them priced a multi-tier origin by its first
+                    # (v1) resource only.
+                    price = _bazaar_price_usd(accept)
                 if price is not None and price > 0:
                     prices.append(price)
                 if accept.get("description"):

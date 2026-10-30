@@ -18,7 +18,7 @@
         <td class="px-2 py-2.5">{{ grade_badge(svc.grade) }}</td>
         <td class="px-2 py-2.5">{{ score_pill(svc.score) }}</td>
         <td class="px-2 py-2.5 hidden md:table-cell text-xs text-slate-500">{{ svc.category or '—' }}</td>
-        <td class="px-4 py-2.5 hidden sm:table-cell mono text-xs text-slate-600">{% if svc.price_min is not none %}${{ "%.4f"|format(svc.price_min) }}{% else %}—{% endif %}</td>
+        <td class="px-4 py-2.5 hidden sm:table-cell mono text-xs text-slate-600">{% if svc.price_min is not none %}${{ "%.4f"|format(svc.price_min) }}{% if svc.price_max and svc.price_max != svc.price_min %}–${{ "%.4f"|format(svc.price_max) }}{% endif %}{% else %}—{% endif %}</td>
       </tr>
       {% endfor %}
     </tbody>

@@ -191,6 +191,9 @@ _LLMS_TXT = """# agent-tools.cloud
 - MCP servers: GET /api/v1/mcp/search?q=...  | details: /api/v1/mcp/servers/{slug}
 - A2A agents:  GET /api/v1/a2a/search?q=...  | details: /api/v1/a2a/agents/{slug}
 - x402 services: GET /api/v1/services/{slug}
+  (price_min/price_max span every resource the origin advertises; each
+  call.resource_samples[] entry has its own price_usd and accepts[] -- use
+  those, not the headline range, to price a specific endpoint)
 - LLM-ranked recommendation: GET /api/v1/ask?q=...
 - Directory stats: GET /api/v1/stats
 - OpenAPI: /openapi.json
