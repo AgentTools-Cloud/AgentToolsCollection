@@ -64,6 +64,32 @@ class ResourcePriceTests(unittest.TestCase):
         self.assertNotIn("price_usd", row["resource_samples"][0])
         self.assertEqual(row["price_max"], 1.0)
 
+    def test_estimated_usd_of_non_stablecoin_is_ignored(self):
+        # Older crawls divided any token by 10**6; SOL must not become "USD".
+        acc = {"network": "solana", "asset": "So11111111111111111111111111111111111111112",
+               "max_amount_required": "50000000", "estimated_usd": 50.0}
+        row = _row(resource_samples=[{"url": "https://example.test/a", "accepts": [acc]}])
+        db._apply_resource_prices(row)
+        self.assertNotIn("price_usd", row["resource_samples"][0])
+        self.assertEqual(row["price_max"], 1.0)
+
+    def test_lookalike_usdc_contract_is_ignored(self):
+        acc = _accept(9_000_000)
+        acc["asset"] = "0x833589fCD6eDb6E08f4c7C32D4f71b54bB3dDd6d"
+        row = _row(resource_samples=[{"url": "https://example.test/a", "accepts": [acc]}])
+        db._apply_resource_prices(row)
+        self.assertEqual(row["price_max"], 1.0)
+
+    def test_crawler_summary_shape_and_solana_usdc_are_priced(self):
+        summary = {"network": "base", "asset": USDC_BASE, "max_amount_required": "2500000"}
+        sol = {"network": "solana", "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+               "max_amount_required": "4000000"}
+        row = _row(resource_samples=[{"url": "https://example.test/a", "accepts": [summary]},
+                                     {"url": "https://example.test/b", "accepts": [sol]}])
+        db._apply_resource_prices(row)
+        self.assertEqual([s["price_usd"] for s in row["resource_samples"]], [2.5, 4.0])
+        self.assertEqual((row["price_min"], row["price_max"]), (1.0, 4.0))
+
     def test_service_card_exposes_span_and_per_resource_price(self):
         row = _row()
         db._apply_resource_prices(row)

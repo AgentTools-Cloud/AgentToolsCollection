@@ -1159,6 +1159,40 @@ def row_to_dict(row) -> dict:
     return d
 
 
+# Solana USDC mint; the shared stablecoin registry is EVM-only.
+_SOLANA_USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+
+
+def _resource_accept_usd(acc: dict) -> float | None:
+    """USD price of one stored accept, only when its asset is a known
+    stablecoin contract. Stored accepts come in three shapes (raw v2
+    ``amount``, raw v1 ``maxAmountRequired``, crawler summary
+    ``max_amount_required``); an ``estimated_usd`` written by an older crawl is
+    ignored because it divided any token, SOL included, by 10**6.
+    """
+    from .crawlers import _stablecoin_metadata
+    raw = acc.get("amount")
+    for key in ("maxAmountRequired", "max_amount_required"):
+        if raw in (None, ""):
+            raw = acc.get(key)
+    if raw in (None, ""):
+        return None
+    try:
+        amount = float(str(raw))
+    except (TypeError, ValueError):
+        return None
+    if amount <= 0:
+        return None
+    meta = _stablecoin_metadata(acc)
+    if meta is not None:
+        return amount / (10 ** meta[1])
+    network = str(acc.get("network") or "").lower()
+    if (str(acc.get("asset") or "") == _SOLANA_USDC_MINT
+            and (network == "solana" or network.startswith("solana:5eykt4"))):
+        return amount / 1e6
+    return None
+
+
 def _apply_resource_prices(d: dict) -> None:
     """Expose each advertised resource's own price and keep the headline span
     covering all of them.
@@ -1174,7 +1208,6 @@ def _apply_resource_prices(d: dict) -> None:
     samples = d.get("resource_samples")
     if not isinstance(samples, list):
         return
-    from .crawlers import _bazaar_price_usd
     prices: list[float] = []
     for sample in samples:
         if not isinstance(sample, dict):
@@ -1182,12 +1215,7 @@ def _apply_resource_prices(d: dict) -> None:
         own = []
         for acc in sample.get("accepts") or []:
             if isinstance(acc, dict):
-                usd = _bazaar_price_usd(acc)
-                if usd is None and acc.get("estimated_usd") is not None:
-                    try:
-                        usd = float(acc["estimated_usd"]) or None
-                    except (TypeError, ValueError):
-                        usd = None
+                usd = _resource_accept_usd(acc)
                 if usd is not None:
                     own.append(usd)
         if own:
