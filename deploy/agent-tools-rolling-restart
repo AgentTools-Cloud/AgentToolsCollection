@@ -1,0 +1,16 @@
+#!/bin/bash
+# Restart mcpserver and mcpserver-b one at a time; nginx keeps serving from the other.
+set -euo pipefail
+wait_healthy() {
+    for _ in $(seq 1 120); do
+        [ "$(curl -s -o /dev/null -m 3 -w '%{http_code}' "http://127.0.0.1:$1/healthz")" = 200 ] && return 0
+        sleep 0.5
+    done
+    echo "port $1 not healthy after 60s" >&2; return 1
+}
+for pair in "mcpserver-b 9101" "mcpserver 9100"; do
+    set -- $pair
+    systemctl restart "$1"
+    wait_healthy "$2"
+    echo "$1 healthy on :$2"
+done

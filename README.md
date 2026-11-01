@@ -94,6 +94,7 @@ sudo systemctl restart mcpserver
 systemd units live in [`deploy/`](deploy/):
 
 - `mcpserver.service` — the ASGI app (uvicorn, 127.0.0.1:9100)
+- `mcpserver-b.service` — second instance on 127.0.0.1:9101; nginx upstream `agent_tools_app` uses both, so deploy with `agent-tools-rolling-restart` instead of `systemctl restart mcpserver`
 - `agent-tools-crawl.{service,timer}` — daily directory crawler at 00:30
 - `agent-tools-health.{service,timer}` — daily endpoint health checks at 05:30
 
