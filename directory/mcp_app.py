@@ -14,9 +14,11 @@ import contextvars
 import json
 import logging
 import os
+import re
 from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
+from mcp.types import ToolAnnotations
 from mcp.server.transport_security import TransportSecuritySettings
 
 from . import ask as directory_ask
@@ -58,6 +60,18 @@ _INSTRUCTIONS = (
     "     `execute_paid_verification`: pay a service once and record the\n"
     "     result. Needs an API key (POST /api/v1/keys)."
 )
+
+_READ_ONLY = ToolAnnotations(readOnlyHint=True, openWorldHint=False)
+# Adds or rescans a directory listing; repeating it does not create duplicates.
+_SCAN = ToolAnnotations(readOnlyHint=False, destructiveHint=False,
+                        idempotentHint=True, openWorldHint=True)
+_SUBMIT = ToolAnnotations(readOnlyHint=False, destructiveHint=False,
+                          idempotentHint=False, openWorldHint=True)
+_QUOTE = ToolAnnotations(readOnlyHint=False, destructiveHint=False,
+                         idempotentHint=False, openWorldHint=False)
+# Spends the caller's funds irreversibly, so clients should confirm first.
+_PAYMENT = ToolAnnotations(readOnlyHint=False, destructiveHint=True,
+                           idempotentHint=False, openWorldHint=True)
 
 _TS = TransportSecuritySettings(enable_dns_rebinding_protection=False)
 discover_mcp = FastMCP(
@@ -305,7 +319,7 @@ def _log_call(tool, ctx: Context | None = None, args=None,
 # ---- Tools --------------------------------------------------------------------
 
 
-@discover_mcp.tool()
+@discover_mcp.tool(annotations=_READ_ONLY)
 async def search(
     intent: str | None = None,
     top_k: int = 5,
@@ -397,7 +411,7 @@ async def search(
     return out
 
 
-@discover_mcp.tool()
+@discover_mcp.tool(annotations=_READ_ONLY)
 async def ask_services(
     intent: str,
     top_k: int = 5,
@@ -470,7 +484,7 @@ async def ask_services(
     )
     return out
 
-@discover_mcp.tool()
+@discover_mcp.tool(annotations=_READ_ONLY)
 async def get(slug: str, ctx: Context | None = None) -> dict[str, Any]:
     """Get full details + ready-to-paste call template for a service.
 
@@ -496,7 +510,7 @@ async def get(slug: str, ctx: Context | None = None) -> dict[str, Any]:
     return row
 
 
-@discover_mcp.tool()
+@discover_mcp.tool(annotations=_READ_ONLY)
 async def list_categories(ctx: Context | None = None) -> dict[str, Any]:
     """List all available service categories in the directory."""
     with _open() as conn:
@@ -506,7 +520,7 @@ async def list_categories(ctx: Context | None = None) -> dict[str, Any]:
     return out
 
 
-@discover_mcp.tool()
+@discover_mcp.tool(annotations=_READ_ONLY)
 async def stats(ctx: Context | None = None) -> dict[str, Any]:
     """High-level stats about the directory: total services, healthy count, sources."""
     with _open() as conn:
@@ -515,7 +529,7 @@ async def stats(ctx: Context | None = None) -> dict[str, Any]:
     return out
 
 
-@discover_mcp.tool()
+@discover_mcp.tool(annotations=_READ_ONLY)
 async def search_mcp_servers(
     intent: str | None = None,
     top_k: int = 5,
@@ -563,9 +577,13 @@ async def search_mcp_servers(
     return {"intent": intent, "count": len(servers), "servers": servers}
 
 
-@discover_mcp.tool()
+@discover_mcp.tool(annotations=_READ_ONLY)
 async def get_mcp_server(slug: str, ctx: Context | None = None) -> dict[str, Any]:
-    """Get the full card for one MCP server by slug."""
+    """Get the full card for one MCP server by slug.
+
+    Args:
+        slug: MCP server slug as returned by `search_mcp_servers` items.
+    """
     with _open() as conn:
         suppressed = directory_db.find_privacy_suppression_any(
             conn, "mcp", {"slug": slug})
@@ -586,7 +604,7 @@ async def get_mcp_server(slug: str, ctx: Context | None = None) -> dict[str, Any
     return card
 
 
-@discover_mcp.tool()
+@discover_mcp.tool(annotations=_READ_ONLY)
 async def search_a2a_agents(
     intent: str | None = None,
     top_k: int = 5,
@@ -611,7 +629,7 @@ async def search_a2a_agents(
     return {"intent": intent, "count": len(agents), "agents": agents}
 
 
-@discover_mcp.tool()
+@discover_mcp.tool(annotations=_READ_ONLY)
 async def search_resources(
     intent: str | None = None,
     protocol: str | None = None,
@@ -639,7 +657,7 @@ async def search_resources(
 _REGISTER_RATE_LIMIT_PER_IP_PER_DAY = 5
 
 
-@discover_mcp.tool()
+@discover_mcp.tool(annotations=_SUBMIT)
 async def register(
     url: str,
     name: str | None = None,
@@ -817,7 +835,7 @@ async def register(
 # ---- Safety scanning ----------------------------------------------------------
 
 
-@discover_mcp.tool()
+@discover_mcp.tool(annotations=_SCAN)
 async def scan_mcp_safety(
     endpoint_url: str,
     name: str = "",
@@ -928,7 +946,7 @@ def _pv_error(exc: "paid_verify.VerifyError") -> dict[str, Any]:
     return {"error": exc.code, "message": str(exc)}
 
 
-@discover_mcp.tool()
+@discover_mcp.tool(annotations=_QUOTE)
 async def prepare_paid_verification(
     slug: str,
     payer: str,
@@ -976,7 +994,7 @@ async def prepare_paid_verification(
     return out
 
 
-@discover_mcp.tool()
+@discover_mcp.tool(annotations=_PAYMENT)
 async def execute_paid_verification(
     id: str,
     signature: str,
@@ -1010,7 +1028,7 @@ async def execute_paid_verification(
     return out
 
 
-@discover_mcp.tool()
+@discover_mcp.tool(annotations=_READ_ONLY)
 async def get_paid_verification(
     id: str,
     api_key: str | None = None,
@@ -1033,6 +1051,40 @@ async def get_paid_verification(
               args={"outcome": out.get("error") or out.get("status")},
               result_n=0 if out.get("error") else 1)
     return out
+
+
+_ARG_LINE = re.compile(r"^ {8}(\w+): (.*)$")
+
+
+def _docstring_args(doc: str) -> dict[str, str]:
+    """Parse the Google-style `Args:` block into {param: one-line description}."""
+    out: dict[str, str] = {}
+    current = None
+    in_args = False
+    for line in (doc or "").splitlines():
+        if line.strip() == "Args:":
+            in_args = True
+            continue
+        if not in_args:
+            continue
+        m = _ARG_LINE.match(line)
+        if m:
+            current = m.group(1)
+            out[current] = m.group(2).strip()
+        elif current and line.startswith(" " * 12) and line.strip():
+            out[current] += " " + line.strip()
+        elif line.strip() and not line.startswith(" " * 8):
+            break
+    return out
+
+
+# FastMCP leaves inputSchema properties without descriptions; agents read them
+# there, not in the tool docstring.
+for _tool in discover_mcp._tool_manager.list_tools():
+    _descs = _docstring_args(_tool.fn.__doc__ or "")
+    for _name, _schema in (_tool.parameters.get("properties") or {}).items():
+        if _name in _descs and not _schema.get("description"):
+            _schema["description"] = _descs[_name]
 
 
 log.info("directory MCP app built (db=%s, tools=14)", DB_PATH)
