@@ -73,7 +73,9 @@ def store(category, severity, title, summary, *, event_key=None, listing_kind=No
                 'INSERT INTO internal_notices '
                 '(event_key,category,severity,title,summary,listing_kind,listing_id,submission_id,'
                 'verdict,data_json,first_seen,last_seen) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) '
-                'ON CONFLICT(event_key) DO UPDATE SET last_seen=excluded.last_seen,occurrences=occurrences+1',
+                # Concurrent writers can commit out of order; never move last_seen backwards.
+                'ON CONFLICT(event_key) DO UPDATE SET last_seen=MAX(last_seen,excluded.last_seen),'
+                'occurrences=occurrences+1',
                 (key, category, severity, title, summary, listing_kind, listing_id, submission_id,
                  verdict, payload, now, now))
             conn.execute('DELETE FROM internal_notices WHERE last_seen<?',
