@@ -736,9 +736,17 @@ def _bounded_stream_request(client, method: str, url: str, json_body=None):
                             _MAX_BODY, str(url)[:200])
                 raise RuntimeError("response body exceeds limit")
             chunks.append(chunk)
+        # iter_bytes() has already undone Content-Encoding, and the cap above
+        # is on the decoded size. Carrying the original gzip/br header into the
+        # rebuilt Response made httpx decode the plain bytes a second time, so
+        # every compressed descriptor failed with DecodingError and was read as
+        # "no descriptor" (resource counts froze from 2026-10-27).
+        headers = httpx.Headers(source.headers)
+        for name in ("content-encoding", "content-length", "transfer-encoding"):
+            headers.pop(name, None)
         return httpx.Response(
             source.status_code,
-            headers=source.headers,
+            headers=headers,
             content=b"".join(chunks),
             request=source.request,
             extensions=dict(source.extensions),

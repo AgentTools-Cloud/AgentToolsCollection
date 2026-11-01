@@ -95,6 +95,44 @@ class CrawlerFailureTests(unittest.TestCase):
                     client, "GET", "https://drip.example.test/data",
                     "https://drip.example.test")
 
+    def test_same_origin_request_reads_gzip_descriptor(self):
+        import gzip
+        import httpx
+        body = json.dumps({"x402Version": 2, "resources": [
+            "https://gz.example.test/api/a", "https://gz.example.test/api/b"]}).encode()
+
+        def handler(request):
+            return httpx.Response(200, content=gzip.compress(body), headers={
+                "content-type": "application/json",
+                "content-encoding": "gzip"})
+
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+            r = crawlers._request_same_origin(
+                client, "GET", "https://gz.example.test/.well-known/x402",
+                "https://gz.example.test")
+            self.assertEqual(r.content, body)
+            self.assertNotIn("content-encoding", r.headers)
+            status, obj = crawlers.fetch_well_known(
+                client, "https://gz.example.test/.well-known/x402",
+                expected_origin="https://gz.example.test")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(obj["resources"]), 2)
+
+    def test_gzip_size_cap_applies_to_decoded_body(self):
+        import gzip
+        import httpx
+        bomb = gzip.compress(b"0" * (crawlers._MAX_BODY + 1))
+
+        def handler(request):
+            return httpx.Response(200, content=bomb,
+                                  headers={"content-encoding": "gzip"})
+
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+            with self.assertRaisesRegex(RuntimeError, "body exceeds limit"):
+                crawlers._request_same_origin(
+                    client, "GET", "https://gz.example.test/x",
+                    "https://gz.example.test")
+
     def test_agenstry_retries_once(self):
         client = _Client([
             _Response(429),
