@@ -37,6 +37,15 @@ class InternalNoticeTests(TemporaryDatabaseTestCase):
         self.assertNotIn(f'#{submission}', json.dumps(event, ensure_ascii=False))
         self.smtp.assert_not_called()
 
+    def test_out_of_order_repeat_never_moves_last_seen_backwards(self):
+        with patch.object(notices.time, 'time', return_value=2_000_000_100):
+            self.assertTrue(notices.store('submission', 'info', 'repeat', 'same', event_key='k'))
+        with patch.object(notices.time, 'time', return_value=2_000_000_050):
+            self.assertTrue(notices.store('submission', 'info', 'repeat', 'same', event_key='k'))
+        with closing(db.connect(read_only=True)) as conn:
+            row = conn.execute('SELECT first_seen,last_seen,occurrences FROM internal_notices').fetchone()
+        self.assertEqual(tuple(row), (2_000_000_100, 2_000_000_100, 2))
+
     def test_watchdog_alert_is_stored_without_raw_errors_or_smtp(self):
         text = 'agent-tools 后台任务异常\n\n- database failed https://secret.example/?token=abcdef\n- 来源端点失配警告: a2a\n'
         self.assertTrue(mailer.send_internal_notice('[agent-tools] 后台任务异常: database failed', text, '<script>private</script>'))
