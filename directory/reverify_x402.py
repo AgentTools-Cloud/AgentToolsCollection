@@ -621,6 +621,7 @@ def reverify(targets=("mcp", "a2a"), workers=24, limit=None,
                         _res.get("resource_count"),
                         json.dumps(_res.get("resource_samples"), ensure_ascii=False)
                         if _res.get("resource_samples") else None,
+                        _res.get("resources_text"),
                         int(time.time()), t["id"], t["endpoint"]))
                 pay = (t["verdict"].get("payment") or None) if same_endpoint else None
                 if pay and pay.get("pay_to"):
@@ -694,7 +695,7 @@ def reverify(targets=("mcp", "a2a"), workers=24, limit=None,
 
         def op(chunk=chunk):
             with db.writer() as c:
-                 for (resource_count, samples, updated_at, service_id,
+                 for (resource_count, samples, rtext, updated_at, service_id,
                      probed_endpoint) in chunk:
                     if _owner_interface_current(c, service_id, probed_endpoint):
                         continue
@@ -704,8 +705,9 @@ def reverify(targets=("mcp", "a2a"), workers=24, limit=None,
                     c.execute(
                         "UPDATE services SET resource_count=?, "
                         "resource_samples=COALESCE(?, resource_samples), "
+                        "resources_text=COALESCE(?, resources_text), "
                         "updated_at=? WHERE id=? AND url=?",
-                        (resource_count, samples, updated_at, service_id,
+                        (resource_count, samples, rtext, updated_at, service_id,
                          probed_endpoint))
         db.with_retry(op)
     probed_services = [(int(time.time()), t["id"], t["endpoint"]) for t in tasks

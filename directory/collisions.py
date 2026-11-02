@@ -18,6 +18,8 @@ from typing import Optional
 
 import httpx
 
+from . import db
+
 log = logging.getLogger(__name__)
 
 PENDING = "pending"
@@ -229,6 +231,15 @@ def merge_pair(conn: sqlite3.Connection, survivor_id: int,
             if r["payment"]:
                 upd["payment"] = r["payment"]
                 break
+    # The absorbed row's endpoint and its own wording stay searchable on the
+    # survivor (an origin is one listing; its paths must still be findable).
+    if "resources_text" in keep.keys():
+        texts = [ln for r in rows for ln in (r["resources_text"] or "").splitlines()]
+        texts.append({"url": drop["url"] or "",
+                      "description": " ".join(x for x in (drop["name"], drop["description"]) if x)})
+        merged_text = db.resources_text(texts)
+        if merged_text:
+            upd["resources_text"] = merged_text
     born = [int(r["created_at"]) for r in rows if r["created_at"]]
     if born:
         upd["created_at"] = min(born)

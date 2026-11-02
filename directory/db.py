@@ -161,6 +161,7 @@ CREATE TABLE IF NOT EXISTS services (
   tx_30d          INTEGER,
     resource_count  INTEGER,
     resource_samples TEXT,
+    resources_text  TEXT,
     payment         TEXT,
     call_info       TEXT,
     quality         TEXT,
@@ -175,23 +176,23 @@ CREATE INDEX IF NOT EXISTS idx_services_url      ON services(url);
 CREATE INDEX IF NOT EXISTS idx_services_mcp_url  ON services(mcp_url);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS services_fts USING fts5(
-  name, name_zh, description, description_zh, tags, category,
+  name, name_zh, description, description_zh, tags, category, resources_text,
   content='services', content_rowid='id', tokenize='porter unicode61'
 );
 
 CREATE TRIGGER IF NOT EXISTS services_ai AFTER INSERT ON services BEGIN
-  INSERT INTO services_fts(rowid, name, name_zh, description, description_zh, tags, category)
-    VALUES (new.id, new.name, new.name_zh, new.description, new.description_zh, new.tags, new.category);
+  INSERT INTO services_fts(rowid, name, name_zh, description, description_zh, tags, category, resources_text)
+    VALUES (new.id, new.name, new.name_zh, new.description, new.description_zh, new.tags, new.category, new.resources_text);
 END;
 CREATE TRIGGER IF NOT EXISTS services_ad AFTER DELETE ON services BEGIN
-  INSERT INTO services_fts(services_fts, rowid, name, name_zh, description, description_zh, tags, category)
-    VALUES('delete', old.id, old.name, old.name_zh, old.description, old.description_zh, old.tags, old.category);
+  INSERT INTO services_fts(services_fts, rowid, name, name_zh, description, description_zh, tags, category, resources_text)
+    VALUES('delete', old.id, old.name, old.name_zh, old.description, old.description_zh, old.tags, old.category, old.resources_text);
 END;
 CREATE TRIGGER IF NOT EXISTS services_au AFTER UPDATE ON services BEGIN
-  INSERT INTO services_fts(services_fts, rowid, name, name_zh, description, description_zh, tags, category)
-    VALUES('delete', old.id, old.name, old.name_zh, old.description, old.description_zh, old.tags, old.category);
-  INSERT INTO services_fts(rowid, name, name_zh, description, description_zh, tags, category)
-    VALUES (new.id, new.name, new.name_zh, new.description, new.description_zh, new.tags, new.category);
+  INSERT INTO services_fts(services_fts, rowid, name, name_zh, description, description_zh, tags, category, resources_text)
+    VALUES('delete', old.id, old.name, old.name_zh, old.description, old.description_zh, old.tags, old.category, old.resources_text);
+  INSERT INTO services_fts(rowid, name, name_zh, description, description_zh, tags, category, resources_text)
+    VALUES (new.id, new.name, new.name_zh, new.description, new.description_zh, new.tags, new.category, new.resources_text);
 END;
 
 CREATE TABLE IF NOT EXISTS submissions (
@@ -670,6 +671,7 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
             "ALTER TABLE services ADD COLUMN tx_30d INTEGER",
             "ALTER TABLE services ADD COLUMN resource_count INTEGER",
             "ALTER TABLE services ADD COLUMN resource_samples TEXT",
+            "ALTER TABLE services ADD COLUMN resources_text TEXT",
             "ALTER TABLE services ADD COLUMN payment TEXT",
             "ALTER TABLE services ADD COLUMN call_info TEXT",
             "ALTER TABLE services ADD COLUMN quality TEXT",
@@ -718,6 +720,7 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
                     raise
         backfill_key_user_logins(c)
         _migrate_mcp_fts_tools(c)
+        _migrate_services_fts_resources(c)
         from . import collisions
 
         collisions.ensure_schema(c)
@@ -782,6 +785,80 @@ def _migrate_mcp_fts_tools(c: sqlite3.Connection) -> None:
         INSERT INTO mcp_fts(mcp_fts) VALUES('rebuild');
         """
     )
+
+
+def _migrate_services_fts_resources(c: sqlite3.Connection) -> None:
+    """Idempotently add per-endpoint text to the x402 FTS index.
+
+    An origin is one listing however many paid paths it sells, so the path
+    names and descriptions of its endpoints have to be searchable on that
+    listing; otherwise folding an origin hides what it can do. Rebuilds the
+    external-content index with a `resources_text` column, then repopulates.
+    No-op once migrated.
+    """
+    row = c.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='services_fts'"
+    ).fetchone()
+    if row and "resources_text" in (row[0] or ""):
+        return
+    c.executescript(
+        """
+        DROP TRIGGER IF EXISTS services_ai;
+        DROP TRIGGER IF EXISTS services_ad;
+        DROP TRIGGER IF EXISTS services_au;
+        DROP TABLE IF EXISTS services_fts;
+        CREATE VIRTUAL TABLE services_fts USING fts5(
+          name, name_zh, description, description_zh, tags, category, resources_text,
+          content='services', content_rowid='id', tokenize='porter unicode61'
+        );
+        CREATE TRIGGER services_ai AFTER INSERT ON services BEGIN
+  INSERT INTO services_fts(rowid, name, name_zh, description, description_zh, tags, category, resources_text)
+    VALUES (new.id, new.name, new.name_zh, new.description, new.description_zh, new.tags, new.category, new.resources_text);
+END;
+CREATE TRIGGER services_ad AFTER DELETE ON services BEGIN
+  INSERT INTO services_fts(services_fts, rowid, name, name_zh, description, description_zh, tags, category, resources_text)
+    VALUES('delete', old.id, old.name, old.name_zh, old.description, old.description_zh, old.tags, old.category, old.resources_text);
+END;
+CREATE TRIGGER services_au AFTER UPDATE ON services BEGIN
+  INSERT INTO services_fts(services_fts, rowid, name, name_zh, description, description_zh, tags, category, resources_text)
+    VALUES('delete', old.id, old.name, old.name_zh, old.description, old.description_zh, old.tags, old.category, old.resources_text);
+  INSERT INTO services_fts(rowid, name, name_zh, description, description_zh, tags, category, resources_text)
+    VALUES (new.id, new.name, new.name_zh, new.description, new.description_zh, new.tags, new.category, new.resources_text);
+END;
+        INSERT INTO services_fts(services_fts) VALUES('rebuild');
+        """
+    )
+
+
+def resources_text(entries, limit: int = 20000) -> str | None:
+    """Searchable text for an origin's paid endpoints: path + description.
+
+    `entries` are resource dicts ({"url", "description", ...}) or URL strings.
+    Paths are split into words so "/v1/btcfeecalc" and "/v1/fee-history"
+    both contribute tokens. Capped so one huge manifest cannot bloat the row.
+    """
+    seen, parts, size = set(), [], 0
+    for e in entries or []:
+        if isinstance(e, str):
+            u, d = e, ""
+        elif isinstance(e, dict):
+            u = str(e.get("url") or e.get("resource") or e.get("path") or "")
+            d = str(e.get("description") or e.get("name") or "")
+        else:
+            continue
+        path = re.sub(r"^[a-z]+://[^/]+", "", u.strip(), flags=re.I)
+        path = path.split("?", 1)[0]
+        key = (path, d)
+        if not (path or d) or key in seen:
+            continue
+        seen.add(key)
+        words = " ".join(w for w in re.split(r"[^A-Za-z0-9]+", path) if w)
+        line = (words + " " + d).strip()[:400]
+        if size + len(line) + 1 > limit:
+            break
+        parts.append(line)
+        size += len(line) + 1
+    return "\n".join(parts) if parts else None
 
 
 @contextmanager
@@ -1098,7 +1175,7 @@ def upsert_service(conn: sqlite3.Connection, row: dict) -> tuple:
         "facilitator", "mcp_url", "openapi_url", "well_known_url",
         "source", "source_id", "tags", "region",
         "health", "health_checked", "last_seen",
-        "confidence", "tx_30d", "resource_count", "resource_samples",
+        "confidence", "tx_30d", "resource_count", "resource_samples", "resources_text",
         "payment", "call_info", "quality",
         "created_at", "updated_at",
     ]
@@ -1131,7 +1208,8 @@ def upsert_service(conn: sqlite3.Connection, row: dict) -> tuple:
         # worse, freshly backfilled payTo addresses were being wiped every
         # six hours.
         for field in ("health", "health_checked", "tx_30d", "payment",
-                      "resource_count", "resource_samples", "well_known_url",
+                      "resource_count", "resource_samples", "resources_text",
+                      "well_known_url",
                       "confidence"):
             if row.get(field) is None:
                 row[field] = existing[field]
