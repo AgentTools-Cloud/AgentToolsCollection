@@ -1721,6 +1721,26 @@ def _approve(sub_id: int, note: str | None = None,
                     wc, sub_id, "owner_locked",
                     note="Verified owner controls this endpoint")
                 return {"owner_locked": True}
+            # Another paid path of an origin already listed with the same
+            # payTo joins that listing instead of minting a row per path.
+            if not db.find_service_by_url(wc, url):
+                same = db.find_same_origin_service(
+                    wc, url, (payment or {}).get("pay_to"))
+                if same is not None:
+                    db._record_source(wc, "x402", int(same["id"]),
+                                      ("submission", f"sub:{sub_id}", url))
+                    rc = res_info.get("resource_count")
+                    if rc and int(rc) > int(same.get("resource_count") or 0):
+                        wc.execute(
+                            "UPDATE services SET resource_count=?, "
+                            "resource_samples=?, updated_at=? WHERE id=?",
+                            (int(rc), json.dumps(res_info.get("resource_samples")),
+                             int(time.time()), int(same["id"])))
+                    db.mark_submission(
+                        wc, sub_id, "approved",
+                        note=((note + "; ") if note else "")
+                        + "folded into %s (same origin and payTo)" % same["slug"])
+                    return {"created": False, "slug": same["slug"]}
             created, _sid = db.upsert_service(wc, service)
             db.mark_submission(wc, sub_id, "approved", note=note)
             # upsert_service folds a submission into the row already holding
