@@ -98,15 +98,23 @@ class ResourcesTextSearch(_TempDB):
         lines = t.splitlines()
         self.assertEqual(len(lines), 2)
         self.assertLessEqual(len(t), 1000)
-        self.assertEqual(lines[0], "v1 a " + "x" * 200)
+        self.assertEqual(lines[0], "v1 a | " + "x" * 200)
         self.assertEqual(lines[1], "v1 b")
 
     def test_bare_path_is_filled_by_later_description(self):
         t = db.resources_text([ORIGIN + "/v1/btcfeecalc",
                                {"url": ORIGIN + "/v1/btcfeecalc", "description": "Bitcoin fee calculator"}])
-        self.assertEqual(t, "v1 btcfeecalc Bitcoin fee calculator")
+        self.assertEqual(t, "v1 btcfeecalc | Bitcoin fee calculator")
         # feeding its own output back changes nothing
         self.assertEqual(db.resources_text(t.splitlines()), t)
+
+    def test_feeding_output_back_with_new_entries_does_not_duplicate(self):
+        ents = [{"url": ORIGIN + "/v1/p%d" % i, "description": "thing %d" % i} for i in range(50)]
+        t1 = db.resources_text(ents)
+        t2 = db.resources_text(t1.splitlines() + ents + [ORIGIN + "/v1/p3"])
+        self.assertEqual(t1, t2)
+        t3 = db.resources_text(t1.splitlines() + [{"url": ORIGIN + "/v1/new", "description": "fresh"}])
+        self.assertEqual(len(t3.splitlines()), 51)
 
     def test_many_endpoints_keep_their_descriptions(self):
         ents = [{"url": ORIGIN + "/v1/p%03d" % i, "description": "endpoint number %d " % i + "y" * 150}
