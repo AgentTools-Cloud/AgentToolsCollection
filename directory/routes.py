@@ -225,9 +225,16 @@ def service_detail(request: Request, slug: str):
     with _conn() as c:
         svc = db.get_by_slug(c, slug)
     if not svc:
+        # Retired or privacy-suppressed slugs keep their 410/404 page; only a
+        # slug that simply moved to another row is redirected.
         retired = _retired_response(request, "x402", slug)
         if retired is not None:
             return retired
+        with _conn() as c:
+            moved = db.resolve_moved_service_slug(c, slug)
+        if moved:
+            return Response(status_code=301,
+                            headers={"Location": f"/services/{moved}"})
         raise HTTPException(404, "service not found")
     from . import paid_verify
     with _conn() as c:
