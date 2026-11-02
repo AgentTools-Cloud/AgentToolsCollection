@@ -727,8 +727,18 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
         from . import paid_verify
 
         paid_verify.ensure_schema(c)
-        paid_verify.expire_stale(c)
         c.commit()
+        # Housekeeping, not schema: every job calls init_db at start, and the
+        # 00:30 crawl holds the write lock for hours, so quarantine (01:15) and
+        # botsrated died here with "database is locked". Skip on contention;
+        # the next caller (web workers, review every 30 min) expires them.
+        try:
+            paid_verify.expire_stale(c)
+            c.commit()
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc) and "busy" not in str(exc):
+                raise
+            c.rollback()
 
 
 def _migrate_mcp_fts_tools(c: sqlite3.Connection) -> None:
