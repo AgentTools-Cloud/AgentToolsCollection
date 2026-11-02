@@ -1523,6 +1523,29 @@ def get_by_slug(conn, slug):
     return out
 
 
+def resolve_moved_service_slug(conn, slug: str) -> str | None:
+    """Current slug for an x402 slug that no longer has its own row.
+
+    Two ways a public link outlives its row: an approval email built the
+    "<host>-sub<id>" slug before upsert folded the submission into an existing
+    endpoint row, and a merge absorbed a duplicate (its slug is kept as an
+    'x402' source on the survivor). Both leave a listing_sources pointer.
+    """
+    m = re.fullmatch(r".+-sub(\d+)", slug or "")
+    probes = [("x402", slug)]
+    if m:
+        probes.insert(0, ("submission", "sub:" + m.group(1)))
+    for source, source_id in probes:
+        row = conn.execute(
+            "SELECT s.slug FROM listing_sources ls JOIN services s "
+            "ON s.id=ls.listing_id WHERE ls.kind='x402' AND ls.source=? "
+            "AND ls.source_id=? ORDER BY ls.first_seen LIMIT 1",
+            (source, source_id)).fetchone()
+        if row and row[0] != slug:
+            return row[0]
+    return None
+
+
 def list_categories(conn):
     rows = conn.execute(
         """SELECT category, COUNT(*) AS n

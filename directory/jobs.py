@@ -1674,12 +1674,20 @@ def _approve(sub_id: int, note: str | None = None,
                 return {"owner_locked": True}
             created, _sid = db.upsert_service(wc, service)
             db.mark_submission(wc, sub_id, "approved", note=note)
-            return {"created": bool(created)}
+            # upsert_service folds a submission into the row already holding
+            # this endpoint without renaming it, so the "-subNNN" slug built
+            # above may not exist. Link and probe the row that actually holds
+            # the listing; the confirmation email used to 404 here.
+            landed = wc.execute("SELECT slug FROM services WHERE id=?",
+                                (int(_sid),)).fetchone() if _sid else None
+            return {"created": bool(created),
+                    "slug": landed[0] if landed else service["slug"]}
     outcome = db.with_retry(op)
     if outcome.get("owner_locked"):
         log.warning("approve #%d refused: verified owner controls endpoint", sub_id)
         return {"owner_locked": True, "name": name, "url": url}
     created = outcome["created"]
+    service["slug"] = outcome.get("slug") or service["slug"]
     log.info("approved submission #%d -> service slug=%s (%s)",
              sub_id, service["slug"], "new" if created else "updated")
     # Probe once now so the new service is not stuck at health=unknown
