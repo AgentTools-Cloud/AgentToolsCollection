@@ -352,8 +352,10 @@ def fetch_cdp_bazaar() -> list:
         descriptions: list = []
         payto = None
         mcp_url = None
+        text_entries = []
         for it in resources:
             res = it.get("resource") or ""
+            text_entries.append({"url": res, "description": it.get("description")})
             if it.get("description"):
                 descriptions.append(it["description"])
             for a in (it.get("accepts") or []):
@@ -385,6 +387,7 @@ def fetch_cdp_bazaar() -> list:
             "well_known_url": origin + "/.well-known/x402",
             "resource_count": len(resources),
             "resource_samples": samples,
+            "resources_text": _db_resources_text(text_entries),
             "payment": {
                 "price_min_usd": min(prices) if prices else None,
                 "price_max_usd": max(prices) if prices else None,
@@ -2065,6 +2068,7 @@ def fetch_wellknown_resources(url: str, well_known: str | None = None) -> dict[s
         doc = None
 
     samples: list[dict[str, Any]] = []
+    text_entries: list[dict[str, Any]] = []
     prices: list[float] = []
     seen_urls: dict = {}
     # Some manifests list paid endpoints under `endpoints` with a
@@ -2114,6 +2118,7 @@ def fetch_wellknown_resources(url: str, well_known: str | None = None) -> dict[s
             continue
         seen_urls[res_url] = len(samples) if len(samples) < 50 else None
         advertised_total += 1
+        text_entries.append({"url": res_url, "description": desc})
         # Cap what we store, not what we count.
         if len(samples) >= 50:
             continue
@@ -2136,6 +2141,7 @@ def fetch_wellknown_resources(url: str, well_known: str | None = None) -> dict[s
         "descriptor_observed": doc is not None,
         "resource_count": advertised_total,
         "resource_samples": samples,
+        "resources_text": _db_resources_text(text_entries),
         "price_min": min(prices) if prices else None,
         "price_max": max(prices) if prices else None,
     }
@@ -3607,3 +3613,8 @@ def fetch_apify_mcp(max_pages: int = 40, per_page: int = 100,
 
 
 MCP_CRAWLERS["apify"] = fetch_apify_mcp
+
+
+def _db_resources_text(entries):
+    from .db import resources_text
+    return resources_text(entries)

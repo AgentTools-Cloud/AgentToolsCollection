@@ -20,7 +20,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from .crawlers import (UA, TIMEOUT, EPHEMERAL_SUFFIXES, PartialCrawl, _host_slug,
-                       _url_acceptable, network_to_chain)
+                       _url_acceptable, network_to_chain, _db_resources_text)
 
 log = logging.getLogger("directory.directories")
 
@@ -56,11 +56,14 @@ def aggregate(source: str, resources: list[dict]) -> list[dict]:
             continue
         g = grouped.setdefault(origin, {"samples": [], "keys": set(), "prices": [],
                                         "chains": set(), "protocols": set(),
-                                        "names": [], "descs": [], "quality": None})
+                                        "names": [], "descs": [], "quality": None,
+                                        "text": []})
         p = urlsplit(res["url"].strip())
         key = p._replace(netloc=p.netloc.lower(), fragment="").geturl()
         if key not in g["keys"]:
             g["keys"].add(key)
+            g["text"].append({"url": key, "description": " ".join(
+                x for x in (res.get("name"), res.get("description")) if x)})
             if len(g["samples"]) < MAX_SAMPLES:
                 proto = (res.get("protocol") or "x402").lower()
                 g["samples"].append({"url": key, "kind": f"{proto}-resource"})
@@ -94,6 +97,7 @@ def aggregate(source: str, resources: list[dict]) -> list[dict]:
             "well_known_url": origin + "/.well-known/x402",
             "resource_count": len(g["keys"]),
             "resource_samples": g["samples"],
+            "resources_text": _db_resources_text(g["text"]),
             "quality": {source: g["quality"]} if g["quality"] else None,
             "source": source,
             "source_id": f"origin:{origin}",

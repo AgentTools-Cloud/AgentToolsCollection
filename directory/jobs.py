@@ -1624,6 +1624,41 @@ def _claim_approval_email(contact: str, url: str, now: int | None = None) -> boo
         return True
 
 
+# Per-payTo submission limit. The per-IP limit is easy to sidestep from a
+# shared egress (one operator rotated 300+ Cloudflare IPv6 addresses on
+# 2026-11-02); the payTo address in the verified 402 is what identifies the
+# seller. Counted only for submissions that verify, i.e. would be listed.
+SUBMIT_PAYTO_LIMIT_PER_DAY = int(os.environ.get(
+    "AGENT_TOOLS_SUBMIT_PAYTO_LIMIT_PER_DAY", "5"))
+SUBMIT_PAYTO_WINDOW = 86400
+
+
+def _payto_submission_limited(sub_id: int, verdict: dict) -> str | None:
+    """Count this verified submission against its payTo; a note if over limit."""
+    if SUBMIT_PAYTO_LIMIT_PER_DAY <= 0:
+        return None
+    pay = (verdict or {}).get("payment") or {}
+    pay_to = str(pay.get("pay_to") or "").strip().lower()
+    if not pay_to:
+        return None
+
+    def op():
+        with db.writer(immediate=True) as wc:
+            return db.hit_rate_limit(wc, "submit:payto:" + pay_to,
+                                     SUBMIT_PAYTO_LIMIT_PER_DAY,
+                                     SUBMIT_PAYTO_WINDOW)
+    try:
+        state = db.with_retry(op)
+    except Exception as e:  # noqa: BLE001 - a limiter outage must not block listing
+        log.warning("payTo submission limit unavailable: %r", e)
+        return None
+    if state.get("allowed", True):
+        return None
+    return ("rate limited: more than %d listed submissions for payTo %s in 24h; "
+            "submit each service once (https://agent-tools.cloud/terms, section 5)"
+            % (SUBMIT_PAYTO_LIMIT_PER_DAY, pay_to))
+
+
 def _approve(sub_id: int, note: str | None = None,
              verdict: dict | None = None) -> dict | None:
     """Core approve logic: copy a pending submission into services + mark it
@@ -1703,6 +1738,10 @@ def _approve(sub_id: int, note: str | None = None,
         "well_known_url": res_info.get("well_known_url"),
         "resource_count": res_info.get("resource_count"),
         "resource_samples": res_info.get("resource_samples"),
+        # Descriptor text, plus the submitter's own description of this path.
+        "resources_text": db.resources_text(
+            [{"url": url, "description": p.get("description") or name}])
+            if not res_info.get("resources_text") else res_info["resources_text"],
         "call_info": {
             "resource_count": res_info.get("resource_count"),
             "resource_samples": res_info.get("resource_samples"),
@@ -1736,6 +1775,12 @@ def _approve(sub_id: int, note: str | None = None,
                             "resource_samples=?, updated_at=? WHERE id=?",
                             (int(rc), json.dumps(res_info.get("resource_samples")),
                              int(time.time()), int(same["id"])))
+                    # Keep this path's own wording searchable on the listing.
+                    merged = db.resources_text(
+                        [ln for ln in (same.get("resources_text") or "").splitlines()]
+                        + [{"url": url, "description": p.get("description") or name}])
+                    wc.execute("UPDATE services SET resources_text=? WHERE id=?",
+                               (merged, int(same["id"])))
                     db.mark_submission(
                         wc, sub_id, "approved",
                         note=((note + "; ") if note else "")
@@ -1863,6 +1908,16 @@ def review_submission(sub_id: int, note_prefix: str = "auto-review", notify_pend
              ("Submission", f"#{sub_id}")])
 
     if vstatus == "verified":
+        limited = _payto_submission_limited(sub_id, verdict)
+        if limited:
+            def _mark():
+                with db.writer() as wc:
+                    db.mark_submission(wc, sub_id, "rate_limited", note=limited)
+            db.with_retry(_mark)
+            log.info("submission #%d: %s", sub_id, limited)
+            return {"status": "rate_limited", "submission_id": sub_id,
+                    "evidence": [limited],
+                    "retry_after_seconds": SUBMIT_PAYTO_WINDOW}
         res = _approve(sub_id, note=note, verdict=verdict)
         if res and res.get("owner_locked"):
             return {"status": "owner_locked", "submission_id": sub_id,

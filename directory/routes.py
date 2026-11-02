@@ -1032,6 +1032,21 @@ async def api_submit(request: Request, payload: SubmissionPayload):
             "message": "A verified owner controls this endpoint.",
             "submission_id": sub_id,
         })
+    if rstatus == "rate_limited":
+        retry = int(review.get("retry_after_seconds") or 86400)
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "rate_limited",
+                "message": ("Too many submissions for this payTo address in "
+                            "the last 24h. Submit each service once; its other "
+                            "paid endpoints are read from /.well-known/x402."),
+                "window": "day",
+                "submission_id": sub_id,
+                "retry_after_seconds": retry,
+            },
+            headers={"Retry-After": str(retry)},
+        )
     return {
         "status": "pending",
         "submission_id": sub_id,
