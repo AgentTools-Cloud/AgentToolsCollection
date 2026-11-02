@@ -56,11 +56,21 @@ class FoldExistingRows(_TempDB):
         self.assertEqual(out["absorbed"], 2)
         rows = self.q("SELECT slug, url, resource_count FROM services ORDER BY id")
         self.assertEqual([r["slug"] for r in rows], ["seller-sub1", "seller-sub9"])
-        self.assertEqual(rows[0]["url"], ORIGIN)
+        self.assertEqual(rows[0]["url"], ORIGIN + "/v1/a")
         self.assertEqual(rows[0]["resource_count"], 3)
         with closing(db.connect(read_only=True)) as c:
             self.assertEqual(db.resolve_moved_service_slug(c, "seller-sub2"), "seller-sub1")
             self.assertEqual(db.resolve_moved_service_slug(c, "seller-sub3"), "seller-sub1")
+
+    def test_unreadable_descriptor_counts_folded_paths(self):
+        for i, path in enumerate(("/v1/a", "/v1/b", "/v1/c", "/v1/d"), start=1):
+            self.add(path, i)
+        with db.writer() as c:
+            fold_origin.fold(c, ORIGIN, PAY, {})
+        row = self.q("SELECT url, resource_count, resource_samples FROM services")[0]
+        self.assertEqual(row["url"], ORIGIN + "/v1/a")
+        self.assertEqual(row["resource_count"], 4)
+        self.assertEqual(len(json.loads(row["resource_samples"])), 4)
 
     def test_dry_run_changes_nothing(self):
         self.add("/v1/a", 1)

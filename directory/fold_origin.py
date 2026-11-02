@@ -68,15 +68,21 @@ def fold(conn, origin: str, pay_to: str | None, resources: dict | None) -> dict:
             (sid, "x402-fold:" + res["absorbed_slug"], "x402:" + res["absorbed_slug"],
              r.get("url"), int(time.time()), int(time.time())))
         absorbed.append(res["absorbed_slug"])
-    upd = {"url": origin, "updated_at": int(time.time())}
-    if resources and resources.get("resource_count"):
+    # The survivor keeps its own paid endpoint as url: the bare origin often
+    # answers 200, and re-verification would then read it as not x402.
+    upd = {"updated_at": int(time.time())}
+    if not (resources and resources.get("resource_count")):
+        # Descriptor unreadable (e.g. over the size cap): the folded rows'
+        # own verified paths are the resource list.
+        paths = sorted({r["url"] for r in rows if r.get("url")})
+        resources = {"resource_count": len(paths),
+                     "resource_samples": [{"url": u, "kind": "x402-resource"}
+                                          for u in paths[:50]]}
+    if int(resources["resource_count"]) > int(keep.get("resource_count") or 0):
         upd["resource_count"] = int(resources["resource_count"])
         upd["resource_samples"] = json.dumps(resources.get("resource_samples"))
         if resources.get("well_known_url"):
             upd["well_known_url"] = resources["well_known_url"]
-    if db._find_exact_endpoint_row(conn, "services", ("url",), origin,
-                                   exclude_id=sid) is not None:
-        upd.pop("url")
     conn.execute("UPDATE services SET %s WHERE id=?"
                  % ", ".join("%s=?" % k for k in upd), [*upd.values(), sid])
     return {"rows": len(rows), "survivor_id": sid, "survivor_slug": keep["slug"],
