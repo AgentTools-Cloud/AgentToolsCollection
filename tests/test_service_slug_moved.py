@@ -20,7 +20,7 @@ def _setup(tmp_path, monkeypatch):
               "'https://host.example/v1/a','x402scan','abc','ok',?,?)",
               (now, now))
     sid = c.execute("SELECT id FROM services WHERE slug='host-scan'").fetchone()[0]
-    for source, source_id in (("submission", "sub:77"), ("x402", "host-bazaar")):
+    for source, source_id in (("submission", "sub:77"), ("x402", "x402:host-bazaar")):
         c.execute("INSERT INTO listing_sources(kind,listing_id,source,source_id,"
                   "first_seen,last_seen) VALUES('x402',?,?,?,?,?)",
                   (sid, source, source_id, now, now))
