@@ -118,6 +118,45 @@ class CrawlerFailureTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(len(obj["resources"]), 2)
 
+    def test_descriptor_has_larger_cap_than_other_bodies(self):
+        import httpx
+        entries = [{"url": "https://big.example.test/v1/p%d" % i,
+                    "description": "x" * 400} for i in range(4000)]
+        body = json.dumps({"x402Version": 2, "resources": entries}).encode()
+        self.assertGreater(len(body), crawlers._MAX_BODY)
+        self.assertLess(len(body), crawlers._MAX_DESCRIPTOR_BODY)
+
+        def handler(request):
+            return httpx.Response(200, content=body,
+                                  headers={"content-type": "application/json"})
+
+        crawlers._WK_CACHE.clear()
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+            status, obj = crawlers.fetch_well_known(
+                client, "https://big.example.test/.well-known/x402",
+                expected_origin="https://big.example.test")
+            self.assertEqual(status, 200)
+            self.assertEqual(len(obj["resources"]), 4000)
+            # an ordinary response of the same size is still refused
+            with self.assertRaisesRegex(RuntimeError, "body exceeds limit"):
+                crawlers._request_same_origin(
+                    client, "GET", "https://big.example.test/v1/p1",
+                    "https://big.example.test")
+
+    def test_descriptor_cap_still_bounds_descriptors(self):
+        import httpx
+        body = b"[" + b"0," * (crawlers._MAX_DESCRIPTOR_BODY // 2 + 1) + b"0]"
+
+        def handler(request):
+            return httpx.Response(200, content=body)
+
+        crawlers._WK_CACHE.clear()
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+            status, obj = crawlers.fetch_well_known(
+                client, "https://huge.example.test/.well-known/x402",
+                expected_origin="https://huge.example.test")
+        self.assertIsNone(obj)
+
     def test_gzip_size_cap_applies_to_decoded_body(self):
         import gzip
         import httpx
