@@ -1532,7 +1532,8 @@ def resolve_moved_service_slug(conn, slug: str) -> str | None:
     'x402' source on the survivor). Both leave a listing_sources pointer.
     """
     m = re.fullmatch(r".+-sub(\d+)", slug or "")
-    probes = [("x402", slug)]
+    # merges record the absorbed slug as source 'x402', id 'x402:<slug>'
+    probes = [("x402", "x402:" + (slug or "")), ("x402", slug)]
     if m:
         probes.insert(0, ("submission", "sub:" + m.group(1)))
     for source, source_id in probes:
