@@ -221,5 +221,60 @@ class IncrementalWriteTests(TemporaryDatabaseTestCase):
         self.assertEqual(self.checked("on-base")[1], 3)
 
 
+
+class ArcBulkConfigTests(unittest.TestCase):
+    def test_arc_uses_official_node_with_wide_windows_and_pacing(self):
+        url, contract, _secs, window, _batch = crawlers.BULK_LOG_CHAINS["arc"]
+        self.assertEqual(url, "https://rpc.mainnet.arc.io")
+        self.assertEqual(contract, "0x3600000000000000000000000000000000000000")
+        self.assertGreaterEqual(window, 10000)
+        self.assertGreaterEqual(crawlers.BULK_LOG_MIN_INTERVAL["arc"], 2.0)
+
+    def test_pacing_applies_between_log_calls(self):
+        def handler(request):
+            body = request.read().decode()
+            if "eth_blockNumber" in body:
+                return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": hex(25000)})
+            if "eth_getBlockByNumber" in body:
+                return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {"timestamp": hex(0)}})
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": []})
+
+        cfg = {"arc": ("https://rpc.invalid", "0x3600000000000000000000000000000000000000",
+                       0.5, 10000, 400)}
+        with patch.object(crawlers, "BULK_LOG_CHAINS", cfg), \
+                patch.object(crawlers.time, "sleep") as slept, \
+                patch.object(crawlers.httpx, "Client", side_effect=_client_with(handler)):
+            results, ok = crawlers.fetch_chain_activity_bulk([PAYTO], chain="arc", days=0.1)
+        self.assertTrue(ok)
+        self.assertEqual(results[PAYTO.lower()]["tx"], 0)
+        self.assertTrue(slept.call_args_list)
+        self.assertTrue(all(c.args[0] >= 2.0 for c in slept.call_args_list))
+
+    def test_jsonrpc_result_cap_splits_without_backoff(self):
+        state = {"calls": 0}
+
+        def handler(request):
+            body = request.read().decode()
+            if "eth_blockNumber" in body:
+                return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": hex(9999)})
+            if "eth_getBlockByNumber" in body:
+                return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {"timestamp": hex(0)}})
+            state["calls"] += 1
+            if state["calls"] == 1:
+                return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "error": {
+                    "code": -32602, "message": "query exceeds max results 20000"}})
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": []})
+
+        cfg = {"base": ("https://rpc.invalid", "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                        2.0, 10000, 400)}
+        with patch.object(crawlers, "BULK_LOG_CHAINS", cfg), \
+                patch.object(crawlers.time, "sleep"), \
+                patch.object(crawlers.httpx, "Client", side_effect=_client_with(handler)):
+            _results, ok = crawlers.fetch_chain_activity_bulk([PAYTO], chain="base", days=0.1)
+        self.assertTrue(ok)
+        # one refused call, then the two halves -- no six-attempt retry first
+        self.assertEqual(state["calls"], 3)
+
+
 if __name__ == "__main__":
     unittest.main()

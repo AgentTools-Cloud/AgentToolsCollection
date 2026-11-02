@@ -1296,9 +1296,16 @@ BULK_LOG_CHAINS = {
                "0xddafbb505ad214d7b80b1f830fccc89b60fb7a83", 5.0, 10000, 400),
     "celo": ("https://forno.celo.org",
              "0xceba9300f2b948710d2653dd7b07f33a8b32118c", 1.0, 1000, 400),
-    "arc": ("https://5042.rpc.thirdweb.com",
-            "0x3600000000000000000000000000000000000000", 1.0, 1000, 400),
+    # Arc mainnet: thirdweb's 5042 gateway answered ~all eth_getLogs with 429
+    # even at one call per 2 s and refused 10k-block windows; the 2026-11-02
+    # sweep crawled 700/5113 windows in 14 h. The official node (and QuickNode's
+    # public one) serve 30-day-old 10k-block windows reliably when paced at
+    # 2 s; Blockdaemon has no rate limit but keeps only ~3.6 days of logs.
+    "arc": ("https://rpc.mainnet.arc.io",
+            "0x3600000000000000000000000000000000000000", 0.5, 10000, 400),
 }
+# Minimum seconds between eth_getLogs calls for nodes that throttle bursts.
+BULK_LOG_MIN_INTERVAL = {"arc": 2.0}
 _TRANSFER_TOPIC = (
     "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef")
 
@@ -1314,7 +1321,16 @@ def _oversized_range(exc):
     again, so backing off before splitting only burns wall clock.
     """
     resp = getattr(exc, "response", None)
-    return resp is not None and resp.status_code in (413, 500)
+    if resp is not None and resp.status_code in (413, 500):
+        return True
+    # JSON-RPC level refusals are just as deterministic; split instead of
+    # sleeping through six back-offs first.
+    # ("too many" is deliberately absent: it matches HTTP 429's reason phrase.)
+    if resp is not None and resp.status_code == 429:
+        return False
+    msg = str(exc).lower()
+    return any(k in msg for k in ("max results", "response size",
+                                  "range too large", "block range"))
 
 
 def _rpc(client, url, method, params):
@@ -1340,6 +1356,7 @@ def fetch_chain_activity_bulk(paytos, chain="base", days=30, rate=0.15):
     if cfg is None or not paytos:
         return {}, False
     rpc_url, contract, block_secs, block_window, addr_batch = cfg
+    rate = max(rate, BULK_LOG_MIN_INTERVAL.get(chain, 0.0))
 
     wanted = sorted({a.lower() for a in paytos if a})
     counts = {a: {"tx": 0, "payers": set()} for a in wanted}
