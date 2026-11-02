@@ -133,6 +133,15 @@ class CrawlerFailureTests(unittest.TestCase):
                     client, "GET", "https://gz.example.test/x",
                     "https://gz.example.test")
 
+    def test_arc_mainnet_payment_is_valid(self):
+        # Arc mainnet (eip155:5042) is already mapped for payTo/on-chain; the
+        # verifier whitelist omitted it, leaving aomi.dev pending (2026-11-02).
+        base = {"scheme": "exact", "amount_raw": "10000",
+                "asset": "0x3600000000000000000000000000000000000000",
+                "pay_to": "0xB5a3830c44b37f5E878788D56A32f4185B931212"}
+        self.assertTrue(crawlers._valid_payment({**base, "network": "eip155:5042"}))
+        self.assertFalse(crawlers._valid_payment({**base, "network": "eip155:5042002"}))
+
     def test_agenstry_retries_once(self):
         client = _Client([
             _Response(429),
