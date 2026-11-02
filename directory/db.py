@@ -1533,6 +1533,40 @@ def get_by_slug(conn, slug):
     return out
 
 
+def find_same_origin_service(conn, url: str, pay_to: str | None,
+                              exclude_id: int | None = None) -> dict | None:
+    """Oldest x402 row on the same origin that advertises the same payTo.
+
+    One origin selling many paid paths is one service: crawlers already list
+    it once with its advertised resources. A submission for another path of
+    that origin, paid to the same address, belongs to that row rather than a
+    new one. Without a payTo match the origin may be a shared host, so no row
+    is returned.
+    """
+    pay_to = str(pay_to or "").strip().lower()
+    origin = _endpoint_authority(url or "")
+    if not pay_to or not origin:
+        return None
+    for row in conn.execute(
+            "SELECT * FROM services WHERE (url = ? COLLATE NOCASE OR url LIKE ? "
+            "COLLATE NOCASE) ORDER BY id", (origin, origin + "/%")):
+        if exclude_id is not None and int(row["id"]) == int(exclude_id):
+            continue
+        if _endpoint_authority(row["url"] or "") != origin:
+            continue
+        try:
+            pay = json.loads(row["payment"] or "null") or {}
+        except (TypeError, ValueError):
+            continue
+        seen = {str(pay.get("pay_to") or "").strip().lower()} if isinstance(pay, dict) else set()
+        for acc in (pay.get("accepts") or []) if isinstance(pay, dict) else []:
+            if isinstance(acc, dict):
+                seen.add(str(acc.get("payTo") or acc.get("pay_to") or "").strip().lower())
+        if pay_to in seen:
+            return row_to_dict(row)
+    return None
+
+
 def resolve_moved_service_slug(conn, slug: str) -> str | None:
     """Current slug for an x402 slug that no longer has its own row.
 
@@ -1543,7 +1577,10 @@ def resolve_moved_service_slug(conn, slug: str) -> str | None:
     """
     m = re.fullmatch(r".+-sub(\d+)", slug or "")
     # merges record the absorbed slug as source 'x402', id 'x402:<slug>'
-    probes = [("x402", "x402:" + (slug or "")), ("x402", slug)]
+    # bulk origin folds (fold_origin) record one source per absorbed slug,
+    # since listing_sources allows a single 'x402' source per listing
+    probes = [("x402", "x402:" + (slug or "")), ("x402", slug),
+              ("x402-fold:" + (slug or ""), "x402:" + (slug or ""))]
     if m:
         probes.insert(0, ("submission", "sub:" + m.group(1)))
     for source, source_id in probes:
@@ -1554,6 +1591,24 @@ def resolve_moved_service_slug(conn, slug: str) -> str | None:
             (source, source_id)).fetchone()
         if row and row[0] != slug:
             return row[0]
+    # A submission row folded into the origin's single listing by a merge:
+    # its pointer collapsed into the survivor's one 'submission' source, so
+    # fall back to the submission's own URL and the only row on that origin.
+    if m:
+        sub = conn.execute("SELECT payload FROM submissions WHERE id=?",
+                           (int(m.group(1)),)).fetchone()
+        try:
+            sub_url = (json.loads(sub[0]) or {}).get("url") if sub else None
+        except (TypeError, ValueError):
+            sub_url = None
+        origin = _endpoint_authority(sub_url or "")
+        if origin:
+            rows = [r for r in conn.execute(
+                "SELECT slug, url FROM services WHERE url = ? COLLATE NOCASE "
+                "OR url LIKE ? COLLATE NOCASE", (origin, origin + "/%"))
+                if _endpoint_authority(r[1] or "") == origin]
+            if len(rows) == 1 and rows[0][0] != slug:
+                return rows[0][0]
     return None
 
 
