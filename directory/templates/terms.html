@@ -4,7 +4,7 @@
 {% block content %}
 <section class="max-w-3xl mb-8">
   <h1 class="text-3xl md:text-4xl font-extrabold tracking-tight">Terms of Service</h1>
-  <p class="text-slate-500 mt-2 text-sm">Last updated: 14 September 2026</p>
+  <p class="text-slate-500 mt-2 text-sm">Last updated: 2 November 2026</p>
 </section>
 
 <div class="max-w-3xl space-y-6 text-sm text-slate-600 leading-relaxed">
@@ -31,6 +31,7 @@
   <div>
     <h2 class="text-lg font-semibold text-slate-800 mb-2">5. Listings &amp; removal</h2>
     <p>Entries are sourced from public registries, public crawls, and submissions. If you operate a listed service you can correct it yourself by proving you control the domain that serves it — in a browser or over the API, see <a class="text-blue-600 hover:underline" href="/docs/claim">/docs/claim</a>. Measured values such as availability and grade are not editable by anyone, including us through that path. You can also contact us and we will action reasonable requests, including removal.</p>
+    <p class="mt-3">Submit each service once, by its main endpoint. We read the other paid endpoints it advertises (for example in <span class="mono">/.well-known/x402</span>) and list them under that one entry, so there is no need to submit them separately. Submissions are limited per client, and that limit is part of the service: do not rotate IP addresses, accounts, keys or contact addresses to get past it, and do not split one origin into many separate submissions. We may merge such entries into one, reject further submissions for that origin or contact, and stop sending confirmation emails for them.</p>
   </div>
 
   <div>
