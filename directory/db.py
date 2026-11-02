@@ -848,22 +848,28 @@ def resources_text(entries, limit: int = 120000) -> str | None:
             if "://" in raw or raw.startswith("/"):
                 u, d = raw, ""
             else:
-                # a line from a previous call: "<path words> <description>"
-                u, d = "", raw
+                # a line from a previous call: "<path words> | <description>"
+                key, _, d = raw.partition(" | ")
+                key, d = key.strip(), " ".join(d.split())[:200]
+                if not key:
+                    continue
+                if key not in desc:
+                    order.append(key)
+                    desc[key] = d
+                elif d and len(d) > len(desc[key]):
+                    desc[key] = d
+                continue
         elif isinstance(e, dict):
             u = str(e.get("url") or e.get("resource") or e.get("path") or "")
             d = str(e.get("description") or e.get("name") or "")
         else:
             continue
-        if u:
-            path = re.sub(r"^[a-z]+://[^/]+", "", u.strip(), flags=re.I)
-            words = " ".join(w for w in re.split(r"[^A-Za-z0-9]+", path.split("?", 1)[0]) if w)
-            d = " ".join(d.split())[:200]
-        else:
-            words, d = d[:400], ""
-        if not words and not d:
+        path = re.sub(r"^[a-z]+://[^/]+", "", u.strip(), flags=re.I)
+        words = " ".join(w for w in re.split(r"[^A-Za-z0-9]+", path.split("?", 1)[0]) if w)
+        d = " ".join(d.split())[:200]
+        if not words:
             continue
-        key = words or d
+        key = words
         if key not in desc:
             order.append(key)
             desc[key] = d
@@ -872,7 +878,7 @@ def resources_text(entries, limit: int = 120000) -> str | None:
     parts, size = [], 0
     for key in order:
         d = desc[key]
-        line = (key + " " + d).strip() if d and not key.endswith(d) else key
+        line = key + " | " + d if d else key
         if size + len(line) + 1 > limit:
             break
         parts.append(line)
