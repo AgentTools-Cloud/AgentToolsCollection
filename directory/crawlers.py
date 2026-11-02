@@ -722,8 +722,10 @@ def _same_origin(left: str, right: str) -> bool:
         return False
 
 
-def _bounded_stream_request(client, method: str, url: str, json_body=None):
+def _bounded_stream_request(client, method: str, url: str, json_body=None,
+                            max_body: int | None = None):
     """Read one response without letting an endless drip hold a worker."""
+    max_body = int(max_body or _MAX_BODY)
     kwargs = {"json": json_body} if method == "POST" else {}
     started = time.monotonic()
     with client.stream(method, url, **kwargs) as source:
@@ -734,9 +736,9 @@ def _bounded_stream_request(client, method: str, url: str, json_body=None):
                 log.warning("response_total_timeout url=%s", str(url)[:200])
                 raise RuntimeError("response exceeded total time limit")
             size += len(chunk)
-            if size > _MAX_BODY:
+            if size > max_body:
                 log.warning("response_too_large bytes>%d url=%s",
-                            _MAX_BODY, str(url)[:200])
+                            max_body, str(url)[:200])
                 raise RuntimeError("response body exceeds limit")
             chunks.append(chunk)
         # iter_bytes() has already undone Content-Encoding, and the cap above
@@ -757,7 +759,8 @@ def _bounded_stream_request(client, method: str, url: str, json_body=None):
 
 
 def _request_same_origin(client, method: str, url: str, origin: str,
-                         json_body=None, max_redirects: int = 3):
+                         json_body=None, max_redirects: int = 3,
+                         max_body: int | None = None):
     """Request an untrusted URL while allowing only same-origin redirects."""
     current = str(url)
     current_method = method.upper()
@@ -767,7 +770,7 @@ def _request_same_origin(client, method: str, url: str, origin: str,
             raise public_http.UnsafeURL("request URL is not same-origin")
         if callable(getattr(client, "stream", None)):
             response = _bounded_stream_request(
-                client, current_method, current, body)
+                client, current_method, current, body, max_body=max_body)
         elif current_method == "POST":
             response = client.post(current, json=body)
         elif current_method == "HEAD":
@@ -1471,17 +1474,22 @@ _X402_MARKERS = ("accepts", "paymentrequirements", "x402version", "x402_version"
                  "paymentrequired", "maxamountrequired", "payto")
 _VERIFY_TIMEOUT = httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0)
 _MAX_BODY = 1024 * 1024  # cap response body we parse
+# A .well-known descriptor lists every paid endpoint with its payment terms
+# and schemas; a 600-endpoint origin publishes ~2 MB. Descriptors alone get
+# a larger (still bounded, still time-limited) cap; every other body keeps 1 MB.
+_MAX_DESCRIPTOR_BODY = int(os.environ.get(
+    "AGENT_TOOLS_MAX_DESCRIPTOR_BYTES", str(8 * 1024 * 1024)))
 _MAX_RESPONSE_SECONDS = float(
     os.environ.get("AGENT_TOOLS_MAX_RESPONSE_SECONDS", "20"))
 
 
-def _parse_json_body(content: bytes, url: str = ""):
+def _parse_json_body(content: bytes, url: str = "", max_body: int | None = None):
     """Parse a response body, refusing an oversized one outright.
 
     Slicing to _MAX_BODY and parsing the fragment can only ever raise, so an
     oversized descriptor used to be indistinguishable from malformed JSON.
     """
-    if len(content) > _MAX_BODY:
+    if len(content) > int(max_body or _MAX_BODY):
         log.warning("descriptor_too_large bytes=%d url=%s",
                     len(content), str(url)[:200])
         return None
@@ -1597,14 +1605,15 @@ def fetch_well_known(client, url: str, expected_origin: str | None = None):
 
     try:
         origin = expected_origin or url
-        r = _request_same_origin(client, "GET", url, origin)
+        r = _request_same_origin(client, "GET", url, origin,
+                                 max_body=_MAX_DESCRIPTOR_BODY)
         status = r.status_code
         final_url = str(getattr(r, "url", None) or url)
         if expected_origin and not _same_origin(final_url, expected_origin):
             raise public_http.UnsafeURL("descriptor redirect is not same-origin")
         obj = None
         if status == 200:
-            obj = _parse_json_body(r.content, url)
+            obj = _parse_json_body(r.content, url, max_body=_MAX_DESCRIPTOR_BODY)
     except public_http.UnsafeURL:
         raise
     except Exception:
