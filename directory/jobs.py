@@ -1575,6 +1575,55 @@ def cmd_submissions(status: str = "pending", limit: int = 50) -> int:
     return 0
 
 
+# One "you're listed" email per contact and per site per rolling window.
+# 2026-11-02: one operator submitted 450+ paths of a single origin in an
+# evening (auto-approved on submit) and received an email for each one.
+APPROVAL_EMAIL_WINDOW = int(os.environ.get("AGENT_TOOLS_APPROVAL_EMAIL_WINDOW",
+                                           "86400"))
+
+
+def _claim_approval_email(contact: str, url: str, now: int | None = None) -> bool:
+    """Reserve the approval email for this contact and site, or report a recent one.
+
+    Returns True when neither the address nor the host was emailed in the last
+    APPROVAL_EMAIL_WINDOW seconds, and records both. The window rolls from the
+    last send, so a steady trickle of submissions cannot reopen it at a
+    fixed-window boundary. Storage errors fail open: approval mail is a
+    courtesy, and a DB hiccup must not silently drop the first one.
+    """
+    if APPROVAL_EMAIL_WINDOW <= 0:
+        return True
+    now = int(time.time() if now is None else now)
+    keys = []
+    addr = (contact or "").strip().lower()
+    if addr:
+        keys.append("approval-mail:to:" + addr)
+    host = (urlsplit(url or "").hostname or "").lower()
+    if host:
+        keys.append("approval-mail:host:" + host)
+    if not keys:
+        return True
+
+    def op():
+        with db.writer(immediate=True) as wc:
+            marks = ",".join("?" for _ in keys)
+            recent = wc.execute(
+                "SELECT 1 FROM rate_limits WHERE key IN (%s) AND updated_at > ? "
+                "LIMIT 1" % marks, (*keys, now - APPROVAL_EMAIL_WINDOW)).fetchone()
+            if recent:
+                return False
+            for key in keys:
+                wc.execute("DELETE FROM rate_limits WHERE key=?", (key,))
+                wc.execute("INSERT INTO rate_limits (key, window_start, count, "
+                           "updated_at) VALUES (?, ?, 1, ?)", (key, now, now))
+            return True
+    try:
+        return bool(db.with_retry(op))
+    except Exception as e:  # noqa: BLE001 - see docstring
+        log.warning("approval email throttle unavailable: %r", e)
+        return True
+
+
 def _approve(sub_id: int, note: str | None = None,
              verdict: dict | None = None) -> dict | None:
     """Core approve logic: copy a pending submission into services + mark it
@@ -1720,7 +1769,12 @@ def _approve(sub_id: int, note: str | None = None,
         elif pmin is not None:
             bits.append(f"${pmin}")
         verified_line = "  \u00b7  ".join(bits)
-        mailer.send_approval_email(contact, name, service["slug"], verified_line)
+        if _claim_approval_email(contact, url):
+            mailer.send_approval_email(contact, name, service["slug"], verified_line)
+        else:
+            log.info("approve #%d: listing email suppressed (already sent to "
+                     "this contact or site within %ds)", sub_id,
+                     APPROVAL_EMAIL_WINDOW)
     except Exception as e:
         log.warning("approve notification email failed: %r", e)
     return {"slug": service["slug"], "created": bool(created),
