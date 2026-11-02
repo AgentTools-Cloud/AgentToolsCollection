@@ -1620,7 +1620,7 @@ def _payment_incomplete(payment) -> bool:
 
 _LIVE_EVM_IDS = frozenset({
     1, 10, 56, 100, 130, 137, 143, 146, 196, 480, 999, 1329,
-    2741, 3338, 8453, 42161, 42220, 42793, 43114,
+    2741, 3338, 5042, 8453, 42161, 42220, 42793, 43114,
 })
 _LEGACY_EVM_IDS = {
     "base": 8453, "ethereum": 1, "eth": 1, "optimism": 10,
