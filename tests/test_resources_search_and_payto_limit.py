@@ -98,7 +98,22 @@ class ResourcesTextSearch(_TempDB):
         lines = t.splitlines()
         self.assertEqual(len(lines), 2)
         self.assertLessEqual(len(t), 1000)
+        self.assertEqual(lines[0], "v1 a " + "x" * 200)
         self.assertEqual(lines[1], "v1 b")
+
+    def test_bare_path_is_filled_by_later_description(self):
+        t = db.resources_text([ORIGIN + "/v1/btcfeecalc",
+                               {"url": ORIGIN + "/v1/btcfeecalc", "description": "Bitcoin fee calculator"}])
+        self.assertEqual(t, "v1 btcfeecalc Bitcoin fee calculator")
+        # feeding its own output back changes nothing
+        self.assertEqual(db.resources_text(t.splitlines()), t)
+
+    def test_many_endpoints_keep_their_descriptions(self):
+        ents = [{"url": ORIGIN + "/v1/p%03d" % i, "description": "endpoint number %d " % i + "y" * 150}
+                for i in range(600)]
+        t = db.resources_text(ents)
+        self.assertEqual(len(t.splitlines()), 600)
+        self.assertIn("endpoint number 599", t)
 
 
 class FoldKeepsText(_TempDB):

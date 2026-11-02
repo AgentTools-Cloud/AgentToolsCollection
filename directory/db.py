@@ -830,30 +830,49 @@ END;
     )
 
 
-def resources_text(entries, limit: int = 20000) -> str | None:
-    """Searchable text for an origin's paid endpoints: path + description.
+def resources_text(entries, limit: int = 120000) -> str | None:
+    """Searchable text for an origin's paid endpoints: path words + description.
 
-    `entries` are resource dicts ({"url", "description", ...}) or URL strings.
-    Paths are split into words so "/v1/btcfeecalc" and "/v1/fee-history"
-    both contribute tokens. Capped so one huge manifest cannot bloat the row.
+    `entries` are resource dicts ({"url", "description", ...}), URL strings, or
+    lines previously produced by this function. One line per path: a later
+    entry that carries a description fills in a bare earlier one, so the cap is
+    spent on wording rather than on repeats. Descriptions are trimmed to 200
+    characters and the whole text to `limit`, so one huge manifest cannot bloat
+    the row.
     """
-    seen, parts, size = set(), [], 0
+    order: list[str] = []
+    desc: dict[str, str] = {}
     for e in entries or []:
         if isinstance(e, str):
-            u, d = e, ""
+            raw = e.strip()
+            if "://" in raw or raw.startswith("/"):
+                u, d = raw, ""
+            else:
+                # a line from a previous call: "<path words> <description>"
+                u, d = "", raw
         elif isinstance(e, dict):
             u = str(e.get("url") or e.get("resource") or e.get("path") or "")
             d = str(e.get("description") or e.get("name") or "")
         else:
             continue
-        path = re.sub(r"^[a-z]+://[^/]+", "", u.strip(), flags=re.I)
-        path = path.split("?", 1)[0]
-        key = (path, d)
-        if not (path or d) or key in seen:
+        if u:
+            path = re.sub(r"^[a-z]+://[^/]+", "", u.strip(), flags=re.I)
+            words = " ".join(w for w in re.split(r"[^A-Za-z0-9]+", path.split("?", 1)[0]) if w)
+            d = " ".join(d.split())[:200]
+        else:
+            words, d = d[:400], ""
+        if not words and not d:
             continue
-        seen.add(key)
-        words = " ".join(w for w in re.split(r"[^A-Za-z0-9]+", path) if w)
-        line = (words + " " + d).strip()[:400]
+        key = words or d
+        if key not in desc:
+            order.append(key)
+            desc[key] = d
+        elif d and len(d) > len(desc[key]):
+            desc[key] = d
+    parts, size = [], 0
+    for key in order:
+        d = desc[key]
+        line = (key + " " + d).strip() if d and not key.endswith(d) else key
         if size + len(line) + 1 > limit:
             break
         parts.append(line)
