@@ -338,6 +338,19 @@ def _mirror_service_in_tx(conn, service: dict, protect_owner=None,
         return {"identity_conflict": True, "created": False}
     by_source = source_rows[0] if source_rows else None
     existing = db.find_service_by_primary_url(conn, service.get("url"))
+    if (existing is not None
+            and db._exact_endpoint(existing.get("url") or "")
+            != db._exact_endpoint(service.get("url") or "")):
+        # This paid path was folded into its seller's single listing: attach
+        # the mirror's provenance there instead of re-minting the path.
+        db._record_source(conn, "x402", int(existing["id"]), (
+            service.get("source"), service.get("source_id"),
+            service.get("source_url"),
+        ))
+        conn.execute("UPDATE services SET x402_ok=1 WHERE id=?",
+                     (int(existing["id"]),))
+        return {"duplicate": True, "created": False,
+                "listing_id": int(existing["id"]), "slug": existing["slug"]}
     if (by_source is not None and existing is not None
             and int(by_source["id"]) != int(existing["id"])):
         return {"identity_conflict": True, "created": False}
