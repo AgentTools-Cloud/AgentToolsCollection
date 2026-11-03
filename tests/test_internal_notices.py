@@ -4,7 +4,7 @@ from contextlib import closing
 import json
 from unittest.mock import Mock, patch
 
-from directory import db, mailer, notices
+from directory import db, ingestion, mailer, notices
 from test_ingestion_pipeline import TemporaryDatabaseTestCase, _row
 
 
@@ -157,6 +157,45 @@ class InternalNoticeTests(TemporaryDatabaseTestCase):
                          "VALUES('mcp','wellknown','a','b','hold','fixture',1,2)")
         feed = self.feed()
         self.assertTrue(any(row['category'] == 'ingestion' and row['status'] == 'active' for row in feed['notices']))
+
+    def ingestion_feed(self, now):
+        with closing(db.connect(read_only=True)) as conn:
+            conn.execute('PRAGMA query_only=ON')
+            feed = notices.export_feed(conn, now=now)
+        return {row['summary'].split('；')[0]: row for row in feed['notices'] if row['category'] == 'ingestion'}
+
+    def test_unobserved_rejections_stop_being_active_but_holds_never_expire(self):
+        now, day = 2_000_000_000, 86400
+        with db.writer() as conn:
+            # Deleted upstream 22 days ago; a superseded content version; a live
+            # rejection seen by yesterday's crawl; a month-old hold.
+            for identity, content, disposition, reason, age in (
+                    ('gone', 'v1', 'rejected', 'missing_endpoint', 22),
+                    ('tpl', 'v1', 'rejected', 'needs_configuration:url_template', 10),
+                    ('tpl', 'v2', 'rejected', 'needs_configuration:url_template', 1),
+                    ('held', 'v1', 'hold', 'new_endpoint_requires_review', 30)):
+                conn.execute('INSERT INTO ingestion_issues '
+                             '(kind,source,identity_hash,content_hash,disposition,reason,first_seen,last_seen) '
+                             'VALUES(?,?,?,?,?,?,?,?)',
+                             ('mcp', 'fixture', identity, content, disposition, reason,
+                              now - (age + 1) * day, now - age * day))
+        before = self.query('SELECT * FROM ingestion_issues ORDER BY identity_hash,content_hash')
+        active = self.ingestion_feed(now)
+        self.assertEqual(set(active), {'needs_configuration:url_template', 'new_endpoint_requires_review'})
+        self.assertIn('近 3 天观测到来源身份 1，内容版本 1', active['needs_configuration:url_template']['summary'])
+        self.assertEqual(active['new_endpoint_requires_review']['severity'], 'error')
+        self.assertIn('来源身份 1，内容版本 1', active['new_endpoint_requires_review']['summary'])
+        self.assertEqual(self.query('SELECT * FROM ingestion_issues ORDER BY identity_hash,content_hash'), before)
+
+    def test_reobserved_rejection_is_active_again(self):
+        row = {'slug': 'fixture-template', 'endpoint_url': 'https://fixture.example/{id}'}
+        old, now = 2_000_000_000, 2_000_000_000 + 22 * 86400
+        for seen in (old, now):
+            with patch.object(ingestion.time, 'time', return_value=seen), db.writer() as conn:
+                ingestion.record_issue(conn, 'mcp', 'fixture', row, 'rejected', 'needs_configuration:url_template')
+            if seen == old:
+                self.assertEqual(self.ingestion_feed(now), {})
+        self.assertEqual(self.ingestion_feed(now)['needs_configuration:url_template']['occurrences'], 2)
 
     def _submission(self, name):
         with db.writer() as conn:

@@ -22,6 +22,12 @@ SEVERITIES = {'info', 'warning', 'error'}
 KINDS = {'x402': 'services', 'mcp': 'mcp_servers', 'a2a': 'a2a_agents'}
 # Removed sources keep their history in crawl_runs but are no longer crawled.
 RETIRED_CRAWL_SOURCES = {'agenstry:crawl', 'mcp:mcp-catalog', 'mcp:pulsemcp', 'a2a:wellknown'}
+# A rejection is only cleared when the same identity later ingests cleanly, so
+# rows the upstream deleted, and every superseded content version, would stay
+# "unresolved" for good. Rejections need no action: count them as active only
+# while crawls keep re-observing them (daily crawls; one missed run tolerated).
+# Holds await review and never expire. Audit rows are left untouched.
+REJECTED_ACTIVE_DAYS = 3
 # Routine successes keep one row per Beijing day (occurrences = count), so a bulk
 # submitter cannot push every other event out of the MAX_HISTORY window.
 ROUTINE_DAILY = {
@@ -265,18 +271,20 @@ def _history(conn, now):
     return result
 
 
-def _active_rows(conn):
+def _active_rows(conn, now):
     result = []
     for row in conn.execute(
             'SELECT kind,source,disposition,reason,COUNT(*) versions,COUNT(DISTINCT identity_hash) identities,'
             'MIN(first_seen) first_seen,MAX(last_seen) last_seen,SUM(occurrences) occurrences '
-            'FROM ingestion_issues WHERE resolved_at IS NULL GROUP BY kind,source,disposition,reason'):
+            "FROM ingestion_issues WHERE resolved_at IS NULL AND (disposition='hold' OR last_seen>=?) "
+            'GROUP BY kind,source,disposition,reason', (now - REJECTED_ACTIVE_DAYS * 86400,)):
         held = row['disposition'] == 'hold'
         key = json.dumps(['ingestion', row['kind'], row['source'], row['disposition'], row['reason']])
         result.append({'id': hashlib.sha256(key.encode()).hexdigest(), 'category': 'ingestion',
                        'severity': 'error' if held else 'warning', 'status': 'active',
                        'title': f'{row["kind"]}:{safe_text(row["source"], 50)} · ' + ('摄入待审' if held else '数据质量拒绝'),
-                       'summary': safe_text(row['reason'], 100) + f'；来源身份 {row["identities"]}，内容版本 {row["versions"]}。',
+                       'summary': safe_text(row['reason'], 100) + ('；' if held else f'；近 {REJECTED_ACTIVE_DAYS} 天观测到')
+                                  + f'来源身份 {row["identities"]}，内容版本 {row["versions"]}。',
                        'first_seen': row['first_seen'], 'last_seen': row['last_seen'], 'occurrences': row['occurrences'],
                        'data': {'source_identities': row['identities'], 'content_versions': row['versions']}})
     if conn.execute("SELECT 1 FROM sqlite_master WHERE name='source_endpoint_warnings'").fetchone():
@@ -327,7 +335,7 @@ def _active_rows(conn):
 
 def export_feed(conn, now=None):
     now = int(time.time()) if now is None else int(now)
-    active = _active_rows(conn)
+    active = _active_rows(conn, now)
     history = _history(conn, now)
     active.sort(key=lambda item: (item['last_seen'], item['id']), reverse=True)
     # Current failures must not disappear behind a busy submission history.

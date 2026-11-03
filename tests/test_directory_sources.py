@@ -65,6 +65,36 @@ class FetcherTests(OfflineCase):
         self.assertEqual(rows[0]["price_min"], 0.02)
         self.assertEqual(rows[0]["quality"]["agentgates"]["calls_30d"], 9)
 
+    def agentgates_board(self, total):
+        # The server ignores larger limits and any source filter; PayAI rows sit
+        # behind the CDP mirror, here on the last page only.
+        calls = []
+
+        def get_json(client, url, params, gap):
+            calls.append(params["offset"])
+            last = params["offset"] + params["limit"] >= total
+            item = ({"resource": "https://payai.example/x", "source": "payai"} if last
+                    else {"resource": f"https://cdp{params['offset']}.example/x", "source": "cdp"})
+            return page("items", [item], pagination={"total": total})
+
+        with patch.object(d, "_get_json", side_effect=get_json), patch.object(d.time, "sleep"):
+            try:
+                return d.fetch_agentgates(), calls
+            except crawlers.PartialCrawl as e:
+                return e, calls
+
+    def test_agentgates_walks_past_100k_rows_to_the_payai_tail(self):
+        rows, calls = self.agentgates_board(128_751)  # live board on 2026-11-03
+        self.assertIsInstance(rows, list)
+        self.assertEqual(len(calls), 1288)
+        self.assertEqual([r["url"] for r in rows], ["https://payai.example"])
+
+    def test_agentgates_runaway_board_is_still_partial(self):
+        error, calls = self.agentgates_board(10_000_000)
+        self.assertIsInstance(error, crawlers.PartialCrawl)
+        self.assertIn(f"max_pages={d.AGENTGATES_MAX_PAGES} exhausted", error.reason)
+        self.assertEqual(len(calls), d.AGENTGATES_MAX_PAGES)
+
     def test_the402_keeps_payable_submissions_only(self):
         rows = self.run_fetch(d.fetch_the402, [page("items", [
             {"resource": "https://bz.example/x", "source": "bazaar", "verdict": "payable"},
