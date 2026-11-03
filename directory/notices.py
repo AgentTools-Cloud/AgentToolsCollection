@@ -21,7 +21,19 @@ MAX_HISTORY = 1000
 SEVERITIES = {'info', 'warning', 'error'}
 KINDS = {'x402': 'services', 'mcp': 'mcp_servers', 'a2a': 'a2a_agents'}
 # Removed sources keep their history in crawl_runs but are no longer crawled.
-RETIRED_CRAWL_SOURCES = {'agenstry:crawl', 'mcp:mcp-catalog', 'mcp:pulsemcp'}
+RETIRED_CRAWL_SOURCES = {'agenstry:crawl', 'mcp:mcp-catalog', 'mcp:pulsemcp', 'a2a:wellknown'}
+# Routine successes keep one row per Beijing day (occurrences = count), so a bulk
+# submitter cannot push every other event out of the MAX_HISTORY window.
+ROUTINE_DAILY = {
+    'x402_verified': '事件结果：verified；按北京日汇总，观察次数即当日验证通过的提交数。',
+    'mail_accepted': 'SMTP 已接收；对方邮箱是否送达尚未验证。按北京日汇总，观察次数即当日已接收封数。',
+}
+MAIL_PRIVACY_NOTE = ' 不抄送/密送自己，内部只记录发送结果；不复制收件地址或邮件正文。'
+
+
+def routine_day_key(name, now=None):
+    day = time.strftime('%Y-%m-%d', time.gmtime(int(time.time() if now is None else now) + 8 * 3600))
+    return f'daily:{name}:{day}'
 
 
 def safe_text(value, limit=240):
@@ -104,6 +116,9 @@ def publish_admin(kind, title, verdict, fields):
     state = 'verified' if kind == 'x402 submission' and verdict == 'listed' else verdict
     if state not in ('verified', 'listed', 'updated', 'pending', 'uncertain', 'rejected', 'error'):
         state = 'recorded'
+    if listing_kind == 'x402' and state == 'verified':
+        return store('submission', 'info', label, ROUTINE_DAILY['x402_verified'],
+                     event_key=routine_day_key('x402_verified'), listing_kind='x402', verdict=state)
     values = dict(fields)
     submission_id = None
     match = re.fullmatch(r'#?(\d{1,12})', str(values.get('Submission') or '').strip())
@@ -181,9 +196,11 @@ def publish_mail_result(purpose, state, event_id):
     if purpose not in labels or state not in states:
         raise ValueError('Invalid external mail result')
     severity, summary = states[state]
-    return store('outbound_mail', severity, labels[purpose],
-                 summary + ' 不抄送/密送自己，内部只记录发送结果；不复制收件地址或邮件正文。',
-                 event_key='mail-result:' + event_id,
+    event_key = 'mail-result:' + event_id
+    if state == 'accepted' and purpose != 'external':
+        summary, event_key = ROUTINE_DAILY['mail_accepted'], routine_day_key('mail_accepted_' + purpose)
+    return store('outbound_mail', severity, labels[purpose], summary + MAIL_PRIVACY_NOTE,
+                 event_key=event_key,
                  data={'smtp_accepted': state == 'accepted', 'not_sent': state == 'skipped'})
 
 
