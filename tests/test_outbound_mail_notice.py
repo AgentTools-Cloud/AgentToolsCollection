@@ -86,7 +86,13 @@ class OutboundMailNoticeTests(unittest.TestCase):
         self.assertFalse(self.send())
         self.assertFalse(self.store.call_args.kwargs['data']['smtp_accepted'])
 
-    def test_each_actual_attempt_has_distinct_anonymous_event(self):
+    def test_routine_success_shares_daily_event_but_failures_stay_distinct(self):
+        self.send(); self.send()
+        keys = [call.kwargs['event_key'] for call in self.store.call_args_list]
+        self.assertEqual(len(set(keys)), 1)
+        self.assertTrue(keys[0].startswith('daily:mail_accepted_approval:'))
+        self.store.reset_mock()
+        self.smtp.sendmail.side_effect = smtplib.SMTPDataError(550, b'private server response')
         self.send(); self.send()
         keys = [call.kwargs['event_key'] for call in self.store.call_args_list]
         self.assertEqual(len(set(keys)), 2)

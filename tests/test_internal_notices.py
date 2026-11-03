@@ -25,14 +25,14 @@ class InternalNoticeTests(TemporaryDatabaseTestCase):
         with db.writer() as conn:
             submission = db.create_submission(conn, payload)
         self.assertTrue(mailer.send_admin_notification(
-            'x402 submission', 'https://SECRET.example/?token=private-token', 'listed',
+            'x402 submission', 'https://SECRET.example/?token=private-token', 'rejected',
             [('URL', payload['url']), ('Contact', payload['contact']),
              ('Evidence', 'Authorization: private-cookie'), ('Submission', f'#{submission}')]))
         raw = json.dumps(self.query('SELECT * FROM internal_notices'))
         for secret in ('SECRET', 'private-token', 'private@example.com', '10.20.30.40', 'private-cookie'):
             self.assertNotIn(secret, raw)
         event = self.feed()['notices'][0]
-        self.assertIn('verified', event['summary'])
+        self.assertIn('rejected', event['summary'])
         self.assertIn('pending', event['summary'])
         self.assertNotIn(f'#{submission}', json.dumps(event, ensure_ascii=False))
         self.smtp.assert_not_called()
@@ -140,13 +140,13 @@ class InternalNoticeTests(TemporaryDatabaseTestCase):
         with db.writer() as conn:
             for source, status in (('agenstry:crawl', 'partial'),
                                    ('mcp:mcp-catalog', 'error'), ('mcp:pulsemcp', 'partial'),
-                                   ('mcp:smithery', 'error')):
+                                   ('a2a:wellknown', 'partial'), ('mcp:smithery', 'error')):
                 run = db.record_crawl_start(conn, source)
                 db.record_crawl_finish(conn, run, 0, 0, ['gone'], status)
         before = self.query('SELECT * FROM crawl_runs')
         titles = [row['title'] for row in self.feed()['notices'] if row['category'] == 'crawl']
         self.assertFalse(any(name in title for title in titles
-                             for name in ('agenstry:crawl', 'mcp-catalog', 'pulsemcp')))
+                             for name in ('agenstry:crawl', 'mcp-catalog', 'pulsemcp', 'a2a:wellknown')))
         self.assertTrue(any('mcp:smithery' in title for title in titles))
         self.assertEqual(self.query('SELECT * FROM crawl_runs'), before)
 
@@ -157,6 +157,51 @@ class InternalNoticeTests(TemporaryDatabaseTestCase):
                          "VALUES('mcp','wellknown','a','b','hold','fixture',1,2)")
         feed = self.feed()
         self.assertTrue(any(row['category'] == 'ingestion' and row['status'] == 'active' for row in feed['notices']))
+
+    def _submission(self, name):
+        with db.writer() as conn:
+            return db.create_submission(conn, {'name': name, 'url': f'https://{name}.example/api'})
+
+    def test_routine_successes_collapse_to_one_row_per_beijing_day(self):
+        # 2_000_044_799 / 2_000_044_800 are 15:59:59 / 16:00:00 UTC: one second either side of Beijing midnight.
+        for index, now in enumerate((2_000_044_799, 2_000_044_800, 2_000_044_900)):
+            with patch.object(notices.time, 'time', return_value=now):
+                sid = self._submission(f'bulk{index}')
+                self.assertTrue(mailer.send_admin_notification(
+                    'x402 submission', 'Bulk', 'listed', [('Submission', f'#{sid}')]))
+                self.assertTrue(notices.publish_mail_result('approval', 'accepted', f'mail-{index}'))
+        rows = self.query('SELECT category,submission_id,listing_id,occurrences FROM internal_notices '
+                          'ORDER BY category,first_seen')
+        self.assertEqual([(r['category'], r['occurrences']) for r in rows],
+                         [('outbound_mail', 1), ('outbound_mail', 2), ('submission', 1), ('submission', 2)])
+        self.assertTrue(all(r['submission_id'] is None and r['listing_id'] is None for r in rows))
+        titles = {row['title'] for row in self.feed()['notices']}
+        self.assertEqual(titles, {'x402 提交验证', '上架确认邮件'})
+        self.smtp.assert_not_called()
+
+    def test_failures_and_non_routine_events_stay_individual(self):
+        for index in range(2):
+            sid = self._submission(f'rejected{index}')
+            self.assertTrue(mailer.send_admin_notification(
+                'x402 submission', 'R', 'rejected', [('Submission', f'#{sid}')]))
+        for purpose, state, event in (('approval', 'failed_or_unknown', 'f1'), ('approval', 'failed_or_unknown', 'f2'),
+                                      ('external', 'accepted', 'e1'), ('external', 'accepted', 'e2')):
+            self.assertTrue(notices.publish_mail_result(purpose, state, event))
+        rows = self.query('SELECT submission_id,occurrences FROM internal_notices')
+        self.assertEqual(len(rows), 6)
+        self.assertTrue(all(r['occurrences'] == 1 for r in rows))
+        self.assertEqual(sum(r['submission_id'] is not None for r in rows), 2)
+
+    def test_bulk_routine_events_do_not_evict_other_history(self):
+        with patch.object(notices, 'MAX_HISTORY', 5), patch.object(notices.time, 'time', return_value=2_000_000_000):
+            self.assertTrue(notices.store('system', 'warning', 'Older warning', 'kept', event_key='older'))
+            for index in range(20):
+                sid = self._submission(f'flood{index}')
+                mailer.send_admin_notification('x402 submission', 'Flood', 'listed', [('Submission', f'#{sid}')])
+                notices.publish_mail_result('approval', 'accepted', f'flood-{index}')
+        titles = [row['title'] for row in self.query('SELECT title FROM internal_notices')]
+        self.assertIn('Older warning', titles)
+        self.assertEqual(len(titles), 3)
 
     def test_source_export_aggregates_without_listing_ids_or_endpoint_hashes(self):
         warnings = [{'kind': 'mcp', 'listing_id': 987654321, 'change_type': 'authority',
