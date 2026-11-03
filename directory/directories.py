@@ -326,7 +326,14 @@ def fetch_aegis(page_size: int = 50, gap: float = 1.0) -> list:
 
 # --- agentgates.ai -------------------------------------------------------------
 # Mirrors CDP Bazaar (skipped, we crawl it) and the PayAI facilitator list.
+# The server caps `limit` at 100 and has no source filter, and the two
+# upstreams are interleaved, so the whole board has to be walked. It passed
+# 100k rows on 2026-10-29 (128,751 on 11-03, CDP 102k): the old 1000-page cap
+# turned every run partial. done() stops at pagination.total; 2000 pages
+# (~48 min) still ends before the 04:00 backup. Hitting it again means the
+# mirror outgrew this approach, not that the cap needs another bump.
 AGENTGATES_API = "https://agentgates.ai/api/directory/resources"
+AGENTGATES_MAX_PAGES = 2000
 
 
 def fetch_agentgates(page_size: int = 100, gap: float = 0.7) -> list:
@@ -335,7 +342,7 @@ def fetch_agentgates(page_size: int = 100, gap: float = 0.7) -> list:
         rows = _paginate("agentgates", AGENTGATES_API, lambda d: d.get("items"),
                          lambda p: {"limit": page_size, "offset": p * page_size},
                          lambda d, p, n: (p + 1) * page_size >= ((d.get("pagination") or {}).get("total") or 0),
-                         gap, max_pages=1000)
+                         gap, max_pages=AGENTGATES_MAX_PAGES)
     except PartialCrawl as e:
         rows, partial = e.items, e.reason
     resources = []
