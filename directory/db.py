@@ -400,6 +400,18 @@ END;
 -- Every directory that vouched for a listing. The row's own `source` column is
 -- only the first/owning one; a server indexed by several upstreams keeps one
 -- row per upstream here so the public card can list them all.
+-- x402 rows folded into one listing per seller (same origin + payTo).
+-- Not provenance: keeps an absorbed slug resolvable (301) and an absorbed
+-- endpoint attached to its survivor when a mirror or crawler sees it again.
+CREATE TABLE IF NOT EXISTS service_folds (
+  absorbed_slug  TEXT PRIMARY KEY,
+  absorbed_url   TEXT,
+  survivor_id    INTEGER NOT NULL,
+  folded_at      INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_service_folds_url ON service_folds(absorbed_url);
+CREATE INDEX IF NOT EXISTS idx_service_folds_survivor ON service_folds(survivor_id);
+
 CREATE TABLE IF NOT EXISTS listing_sources (
   kind        TEXT NOT NULL,          -- 'x402' | 'mcp' | 'a2a'
   listing_id  INTEGER NOT NULL,
@@ -721,6 +733,7 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
         backfill_key_user_logins(c)
         _migrate_mcp_fts_tools(c)
         _migrate_services_fts_resources(c)
+        _migrate_fold_sources(c)
         from . import collisions
 
         collisions.ensure_schema(c)
@@ -828,6 +841,22 @@ END;
         INSERT INTO services_fts(services_fts) VALUES('rebuild');
         """
     )
+
+
+def _migrate_fold_sources(c: sqlite3.Connection) -> None:
+    """Move 2026-11-03 fold pointers out of public provenance (idempotent)."""
+    rows = c.execute(
+        "SELECT listing_id, source, source_url, first_seen FROM listing_sources "
+        "WHERE kind='x402' AND source LIKE 'x402-fold:%'").fetchall()
+    for r in rows:
+        c.execute("INSERT OR IGNORE INTO service_folds (absorbed_slug, "
+                  "absorbed_url, survivor_id, folded_at) VALUES (?,?,?,?)",
+                  (r[1][len("x402-fold:"):], _exact_endpoint(r[2] or "") or r[2],
+                   int(r[0]), int(r[3] or 0)))
+    if rows:
+        c.execute("DELETE FROM listing_sources WHERE kind='x402' "
+                  "AND source LIKE 'x402-fold:%'")
+        c.commit()
 
 
 def resources_text(entries, limit: int = 120000) -> str | None:
@@ -1179,6 +1208,14 @@ def upsert_service(conn: sqlite3.Connection, row: dict) -> tuple:
     endpoint_existing = _find_exact_endpoint_row(
         conn, "services", ("url",), row.get("url") or ""
     )
+    if endpoint_existing is None and row.get("url"):
+        # An endpoint folded into its seller's listing stays there: record
+        # who vouched for it, but never re-mint it or rewrite the survivor
+        # with this path's metadata.
+        survivor = folded_survivor(conn, row["url"])
+        if survivor is not None:
+            _record_source(conn, "x402", int(survivor["id"]), _src)
+            return False, int(survivor["id"])
     if (source_existing is not None and endpoint_existing is not None
             and source_existing["id"] != endpoint_existing["id"]):
         return False, int(source_existing["id"])
@@ -1636,6 +1673,49 @@ def get_by_slug(conn, slug):
     return out
 
 
+GATEWAY_MIN_LISTINGS = 3
+
+
+def is_gateway_origin(conn, origin: str) -> bool:
+    """An origin fronting many independent services, not one seller's API.
+
+    Reviewed shared hosts (github.com, npm) and origins that the MCP or A2A
+    directory already lists as several separate servers/agents (pipeworx,
+    m2mcent, tooloracle ...) keep one x402 row per service: those rows mirror
+    distinct listings, and folding them would bury each tool.
+    """
+    origin = _endpoint_authority(origin or "")
+    if not origin:
+        return False
+    host = origin.split("://", 1)[1].split(":", 1)[0].lower()
+    row = conn.execute("SELECT verdict FROM shared_hosts WHERE host=?",
+                       (host,)).fetchone()
+    if row and row["verdict"] == "shared":
+        return True
+    like = origin + "/%"
+    for sql in ("SELECT endpoint_url FROM mcp_servers WHERE endpoint_url = ? "
+                "COLLATE NOCASE OR endpoint_url LIKE ? COLLATE NOCASE",
+                "SELECT COALESCE(endpoint_url, card_url) FROM a2a_agents "
+                "WHERE COALESCE(endpoint_url, card_url) = ? COLLATE NOCASE "
+                "OR COALESCE(endpoint_url, card_url) LIKE ? COLLATE NOCASE"):
+        n = sum(1 for (u,) in conn.execute(sql, (origin, like))
+                if _endpoint_authority(u or "") == origin)
+        if n >= GATEWAY_MIN_LISTINGS:
+            return True
+    return False
+
+
+def folded_survivor(conn, url: str) -> dict | None:
+    """The listing an x402 endpoint was folded into, if it was."""
+    key = _exact_endpoint(url or "")
+    if not key:
+        return None
+    row = conn.execute(
+        "SELECT s.* FROM service_folds f JOIN services s ON s.id=f.survivor_id "
+        "WHERE f.absorbed_url=? ORDER BY f.folded_at DESC LIMIT 1", (key,)).fetchone()
+    return row_to_dict(row) if row else None
+
+
 def find_same_origin_service(conn, url: str, pay_to: str | None,
                               exclude_id: int | None = None) -> dict | None:
     """Oldest x402 row on the same origin that advertises the same payTo.
@@ -1648,7 +1728,7 @@ def find_same_origin_service(conn, url: str, pay_to: str | None,
     """
     pay_to = str(pay_to or "").strip().lower()
     origin = _endpoint_authority(url or "")
-    if not pay_to or not origin:
+    if not pay_to or not origin or is_gateway_origin(conn, origin):
         return None
     for row in conn.execute(
             "SELECT * FROM services WHERE (url = ? COLLATE NOCASE OR url LIKE ? "
@@ -1680,10 +1760,12 @@ def resolve_moved_service_slug(conn, slug: str) -> str | None:
     """
     m = re.fullmatch(r".+-sub(\d+)", slug or "")
     # merges record the absorbed slug as source 'x402', id 'x402:<slug>'
-    # bulk origin folds (fold_origin) record one source per absorbed slug,
-    # since listing_sources allows a single 'x402' source per listing
-    probes = [("x402", "x402:" + (slug or "")), ("x402", slug),
-              ("x402-fold:" + (slug or ""), "x402:" + (slug or ""))]
+    folded = conn.execute(
+        "SELECT s.slug FROM service_folds f JOIN services s ON s.id=f.survivor_id "
+        "WHERE f.absorbed_slug=?", (slug or "",)).fetchone()
+    if folded and folded[0] != slug:
+        return folded[0]
+    probes = [("x402", "x402:" + (slug or "")), ("x402", slug)]
     if m:
         probes.insert(0, ("submission", "sub:" + m.group(1)))
     for source, source_id in probes:
@@ -2941,17 +3023,19 @@ def list_retirements(conn, status: str | None = "active") -> list[dict]:
 
 
 def find_service_by_url(conn, url: str) -> dict | None:
-    """Best-effort lookup: a services row registering this exact endpoint."""
+    """Best-effort lookup: a services row registering this exact endpoint,
+    or the listing it was folded into."""
     row = _find_exact_endpoint_row(
         conn, "services", ("url", "mcp_url"), url
     )
-    return row_to_dict(row) if row else None
+    return row_to_dict(row) if row else folded_survivor(conn, url)
 
 
 def find_service_by_primary_url(conn, url: str) -> dict | None:
-    """Find only a paid service URL; protocol aliases are not paid identity."""
+    """Find only a paid service URL (or the listing it was folded into);
+    protocol aliases are not paid identity."""
     row = _find_exact_endpoint_row(conn, "services", ("url",), url)
-    return row_to_dict(row) if row else None
+    return row_to_dict(row) if row else folded_survivor(conn, url)
 
 
 def find_owner_locked_listing(conn, kind: str, url: str | None = None,

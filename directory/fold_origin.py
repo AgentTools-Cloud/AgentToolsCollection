@@ -21,7 +21,7 @@ import time
 from . import collisions, crawlers, db
 
 
-def _rows(conn, origin: str, pay_to: str | None):
+def _rows(conn, origin: str, pay_to: str | None, include_unpaid: bool = False):
     out = []
     for row in conn.execute(
             "SELECT * FROM services WHERE url = ? COLLATE NOCASE "
@@ -29,25 +29,33 @@ def _rows(conn, origin: str, pay_to: str | None):
         if db._endpoint_authority(row["url"] or "") != origin:
             continue
         if pay_to:
-            try:
-                pay = json.loads(row["payment"] or "null") or {}
-            except (TypeError, ValueError):
-                pay = {}
-            seen = {str(pay.get("pay_to") or "").lower()}
-            seen |= {str(a.get("payTo") or a.get("pay_to") or "").lower()
-                     for a in pay.get("accepts") or [] if isinstance(a, dict)}
-            if pay_to.lower() not in seen:
+            from .fold_review import _paytos
+            seen = {a.lower() for a in _paytos(row["payment"])}
+            # A row paying the seller's address on another chain family
+            # (EVM + Solana) belongs to the same seller; the caller has
+            # checked there is only one address per family on this origin.
+            if (pay_to.lower() not in seen and seen and not include_unpaid):
+                continue
+            if not seen and not include_unpaid:
                 continue
         out.append(dict(row))
     return out
 
 
-def fold(conn, origin: str, pay_to: str | None, resources: dict | None) -> dict:
-    rows = _rows(conn, origin, pay_to)
+def fold(conn, origin: str, pay_to: str | None, resources: dict | None,
+         include_unpaid: bool = False, allow_gateway: bool = False) -> dict:
+    if not allow_gateway and db.is_gateway_origin(conn, origin):
+        return {"rows": 0, "absorbed": 0, "skipped": "gateway"}
+    rows = _rows(conn, origin, pay_to, include_unpaid)
     if len(rows) < 2:
         return {"rows": len(rows), "absorbed": 0}
     verified = [r for r in rows if int(r.get("owner_verified") or 0)]
-    keep = (verified or rows)[0]
+    # Survivor: an owner-verified row, else one that is a working paid
+    # endpoint (a bare root often answers 200 and reads as not-x402), else
+    # the oldest.
+    working = [r for r in rows if int(r.get("x402_ok") or 0)
+               and (r.get("health") or "") == "ok"]
+    keep = (verified or working or rows)[0]
     sid = int(keep["id"])
     absorbed = []
     for r in rows:
@@ -60,13 +68,14 @@ def fold(conn, origin: str, pay_to: str | None, resources: dict | None) -> dict:
         conn.execute("UPDATE OR IGNORE wellknown_reviewed_aliases SET listing_id=? "
                      "WHERE kind='x402' AND listing_id=?", (sid, rid))
         res = collisions.merge_pair(conn, sid, rid)
-        # Keep the absorbed slug resolvable (301) from the survivor.
+        # Keep the absorbed slug resolvable (301) and its endpoint attached.
         conn.execute(
-            "INSERT OR IGNORE INTO listing_sources (kind, listing_id, source, "
-            "source_id, source_url, first_seen, last_seen) "
-            "VALUES ('x402', ?, ?, ?, ?, ?, ?)",
-            (sid, "x402-fold:" + res["absorbed_slug"], "x402:" + res["absorbed_slug"],
-             r.get("url"), int(time.time()), int(time.time())))
+            "INSERT OR REPLACE INTO service_folds (absorbed_slug, absorbed_url, "
+            "survivor_id, folded_at) VALUES (?, ?, ?, ?)",
+            (res["absorbed_slug"], db._exact_endpoint(r.get("url") or ""), sid,
+             int(time.time())))
+        conn.execute("UPDATE service_folds SET survivor_id=? WHERE survivor_id=?",
+                     (sid, rid))
         absorbed.append(res["absorbed_slug"])
     # The survivor keeps its own paid endpoint as url: the bare origin often
     # answers 200, and re-verification would then read it as not x402.
