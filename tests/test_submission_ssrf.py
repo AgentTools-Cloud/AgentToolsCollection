@@ -14,6 +14,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # time, so the copy has to happen before the first `from directory import ...`.
 source_db = os.environ.get("AGENT_TOOLS_SOURCE_DB",
                            "/opt/mcpserver/data/agent-tools.db")
+if not os.path.exists(source_db):
+    print("SKIP: no database at %s" % source_db)
+    raise SystemExit(0)
 copy_db = "/tmp/test-submission-ssrf-%d.db" % os.getpid()
 sqlite3.connect(source_db).backup(sqlite3.connect(copy_db))
 os.environ["AGENT_TOOLS_DB_PATH"] = copy_db

@@ -10,6 +10,9 @@ import tempfile
 import uuid
 
 SOURCE=os.environ.get("AGENT_TOOLS_SOURCE_DB","/opt/mcpserver/data/agent-tools.db")
+if not os.path.exists(SOURCE):
+    print("SKIP: no database at %s" % SOURCE)
+    raise SystemExit(0)
 PREVIOUS_DB_ENV=os.environ.get("AGENT_TOOLS_DB_PATH")
 tmp=tempfile.mkdtemp(prefix="retirement-lifecycle-")
 path=os.path.join(tmp,"test.db")
