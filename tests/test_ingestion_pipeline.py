@@ -191,11 +191,12 @@ class TemporaryDatabaseTestCase(OfflineTestCase):
                 raise AssertionError("non-temporary database access forbidden")
             return self.path
 
-        def connect(db_path=None, read_only=False, set_wal=True):
-            return real_connect(checked_path(db_path), read_only=read_only, set_wal=set_wal)
+        def connect(db_path=None, read_only=False, set_wal=True, *, timeout=30.0):
+            return real_connect(checked_path(db_path), read_only=read_only,
+                                set_wal=set_wal, timeout=timeout)
 
-        def writer(db_path=None, immediate=False):
-            return real_writer(checked_path(db_path), immediate=immediate)
+        def writer(db_path=None, immediate=False, *, timeout=None):
+            return real_writer(checked_path(db_path), immediate=immediate, timeout=timeout)
 
         self.enterContext(patch.object(db, "connect", side_effect=connect))
         self.writer = self.enterContext(patch.object(db, "writer", side_effect=writer))
@@ -553,7 +554,7 @@ class IngestionJobTests(TemporaryDatabaseTestCase):
         self.assertEqual(calls, [r["slug"] for r in rows[:4]])
         self.assertEqual([r["slug"] for r in self.listings("mcp")], [r["slug"] for r in rows[:2]])
         self.assertEqual(self.issues(), [])
-        self.sleep.assert_not_called()
+        self.sleep.assert_called_once_with(0.05)
         for row in rows[2:]:
             self.assert_no_listing_artifacts("mcp", row)
 
