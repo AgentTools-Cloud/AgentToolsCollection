@@ -112,5 +112,43 @@ class ProwlCrawlerTests(unittest.TestCase):
         self.assertEqual(rows[0]["confidence"], 0.82)
 
 
+class FuchssCrawlerTests(unittest.TestCase):
+    def test_host_leaderboard_does_not_invent_resource_paths(self):
+        payload = {"schemaVersion": "2.0.0", "top": [
+            {"host": "api.vendor.example", "score": 88.6, "grade": "A", "endpoints": 8},
+            {"host": "api.vendor.example", "score": 86, "grade": "A", "endpoints": 8},
+        ]}
+        with patch.object(crawlers.httpx, "Client", return_value=_Client([_Response(payload)])):
+            rows = crawlers.fetch_x402_fuchss()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["url"], "https://api.vendor.example")
+        self.assertEqual(rows[0]["source_id"], "api.vendor.example")
+        self.assertEqual(rows[0]["resource_samples"], [])
+        self.assertIsNone(rows[0]["confidence"])
+
+    def test_legacy_resource_leaderboard_remains_supported(self):
+        payload = {"top": [{"resource": "https://api.vendor.example/v1/check",
+                            "score": 87, "grade": "A", "confidence": 0.9}]}
+        with patch.object(crawlers.httpx, "Client", return_value=_Client([_Response(payload)])):
+            rows = crawlers.fetch_x402_fuchss()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["url"], "https://api.vendor.example")
+        self.assertEqual(rows[0]["resource_samples"][0]["url"], "https://api.vendor.example/v1/check")
+        self.assertEqual(rows[0]["confidence"], 0.9)
+
+    def test_invalid_host_records_are_not_promoted(self):
+        payload = {"top": [None, "api.vendor.example", {"host": 123},
+                            {"host": "https://api.vendor.example"},
+                            {"host": "api.vendor.example/path"},
+                            {"host": "user:password@api.vendor.example"},
+                            {"host": "api.vendor.example?token=secret"},
+                            {"host": "api.vendor.example#fragment"},
+                            {"host": "bad host.example"}, {"host": "127.0.0.1"},
+                            {"resource": {}}, {"host": "api.vendor.example"}]}
+        with patch.object(crawlers.httpx, "Client", return_value=_Client([_Response(payload)])):
+            rows = crawlers.fetch_x402_fuchss()
+        self.assertEqual([row["url"] for row in rows], ["https://api.vendor.example"])
+
+
 if __name__ == "__main__":
     unittest.main()

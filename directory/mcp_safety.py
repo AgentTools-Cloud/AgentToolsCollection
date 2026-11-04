@@ -34,6 +34,11 @@ _PIPE_TO_SHELL = re.compile(
     r"(?:curl|wget|fetch)\b[^\n|]{0,200}\|\s*(?:sudo\s+)?(?:bash|sh|zsh|python3?|node|ruby|perl)\b",
     re.I,
 )
+_ABSTRACT_PIPE_TO_SHELL = re.compile(
+    r"(?:curl|wget|fetch)\s*(?:\\)?\|\s*(?:sudo\s+)?(?:bash|sh|zsh|python3?|node|ruby|perl)\b",
+    re.I,
+)
+_PIPE_AUDIT_CONTEXT = re.compile(r"\blint(?:s|ing|er)?\b", re.I)
 # decode something and run it:  base64 -d | bash   /   | base64 --decode | sh
 _DECODE_TO_SHELL = re.compile(
     r"base64\s+(?:-d|--decode|-D)\b[^\n]{0,80}\|\s*(?:bash|sh|zsh|python3?|node)\b"
@@ -79,6 +84,14 @@ _DEFENSE_CONTEXT = re.compile(
     r"security|audit|red[\s-]?team|circuit\s+breaker|safeguard|monitor)\b",
     re.I,
 )
+_DEFENSE_REVIEW_CONTEXT = re.compile(
+    r"\b(?:check(?:s|ing)?|flags?|inspect(?:s|ing)?|detect(?:s|ion|ing)?)\b",
+    re.I,
+)
+_QUOTED_ATTACK_CONTEXT = re.compile(
+    r"\b(?:hidden\s+instructions|instruction[-\s]like\s+phrases|prompt[-\s]injection)\b",
+    re.I,
+)
 # long base64 blob (>= 40 chars) that decodes to something shell-looking
 _B64_BLOB = re.compile(r"[A-Za-z0-9+/]{40,}={0,2}")
 # A decoded blob is only "shell payload" if it looks like an actual command:
@@ -113,7 +126,10 @@ _CHEAP_TLD = re.compile(r"https?://[^\s/]+\.(?:click|top|xyz|gq|cf|tk|ml|work|re
 _TOOL_POISON_COERCION = re.compile(
     r"\balways\s+(?:consult|use|run|execute|invoke|call|trigger)\s+this\s+(?:tool|function|command)\s+(?:immediately|first|before|prior)\b"
     r"|\bbefore\s+(?:executing|invoking|running|using|calling)\s+any\s+other\s+(?:tool|function|command|action)\b"
-    r"|\b(?:you|user)\s+(?:must|need to|have to|are required to)\s+(?:use|execute|run|invoke|call)\s+this\s+(?:tool|function|command)\b"
+    r"|\b(?:you|user)\s+(?:must|need to|have to|are required to)\s+(?:use|execute|run|invoke|call)\s+this\s+(?:tool|function|command)"
+    r"\s+(?:(?:as\s+)?(?:the\s+)?(?:very\s+)?first\b"
+    r"|before\s+(?:(?:executing|invoking|running|using|calling)\s+)?(?:any\s+)?other\s+(?:tools?|functions?|commands?|actions?)\b"
+    r"|before\s+(?:doing\s+)?anything\s+else\b)"
     r"|\b(?:required|mandatory|essential)\s+to\s+(?:execute|use|run|invoke|call)\s+(?:this|the current)\s+(?:tool|function|command)\s+(?:first|before|initially|prior)\b"
     r"|\bthis\s+tool\s+will\s+not\s+work\s+unless\b"
     r"|\bsidenote\W+(?:required|otherwise)\b[^\n]{0,60}\btool\b",
@@ -132,7 +148,7 @@ _HIDDEN_INSTRUCTION = re.compile(
 # secrets/credentials/system prompt in your response", "base64 encode the
 # credentials", "send the conversation history".
 _DATA_EXFIL_COERCION = re.compile(
-    r"\blist\s+all\s+(?:api\s+)?keys?\b"
+    r"\blist\s+all\s+(?:api|secret|private)\s+keys?\b"
     r"|\bshow\s+(?:me\s+)?(?:all\s+)?passwords?\b"
     r"|\binclude\s+[^\n]{0,40}\b(?:secrets?|passwords?|credentials?|tokens?|system\s+prompt|conversation\s+history)\b[^\n]{0,20}\bin\s+(?:your\s+)?response\b"
     r"|\bbase64\s+encode\s+[^\n]{0,30}\bcredentials?\b"
@@ -215,8 +231,19 @@ def scan_text(text: str, defensive: bool = False) -> list[Finding]:
         ("data_exfil_coercion", 60, _DATA_EXFIL_COERCION),
         ("sensitive_file_coercion", 65, _SENSITIVE_FILE_COERCION),
     ):
-        m = pat.search(text)
-        if m:
+        for m in pat.finditer(text):
+            if rule == "pipe_to_shell" and _ABSTRACT_PIPE_TO_SHELL.fullmatch(m.group()):
+                context = text[max(0, m.start() - 160):m.end() + 160]
+                if (defensive or _DEFENSE_CONTEXT.search(context)
+                        or _PIPE_AUDIT_CONTEXT.search(context)):
+                    continue
+            if (rule == "prompt_injection"
+                    and text[m.start() - 1:m.start()] in ('"', "'", "`", "\u201c", "\u2018")
+                    and text[m.end():m.end() + 1] in ('"', "'", "`", "\u201d", "\u2019")):
+                context = text[max(0, m.start() - 180):m.start()]
+                if (_DEFENSE_REVIEW_CONTEXT.search(context)
+                        and _QUOTED_ATTACK_CONTEXT.search(context)):
+                    continue
             # A defensive/security product legitimately *names* the attacks it
             # detects — suppress the description-level injection/coercion rules
             # when defense framing is near (RCE rules below stay strict).
@@ -226,6 +253,7 @@ def scan_text(text: str, defensive: bool = False) -> list[Finding]:
                     defensive or _DEFENSE_CONTEXT.search(text)):
                 continue
             out.append(Finding(rule, weight, _snippet(text, m)))
+            break
 
     # install-lure only counts as risk if it co-occurs with a command-ish token
     m = _INSTALL_LURE.search(text)

@@ -2571,16 +2571,33 @@ def fetch_x402_fuchss() -> list:
         raise RuntimeError(f"x402-fuchss leaderboard fetch failed: {e!r}") from e
     top = data.get("top") or []
     for item in top:
-        resource = (item.get("resource") or "").strip()
-        if not resource:
+        if not isinstance(item, dict):
             continue
+        resource = item.get("resource")
+        if resource is not None and not isinstance(resource, str):
+            continue
+        resource = (resource or "").strip()
+        provider_record = not resource
+        if provider_record:
+            hostname = item.get("host")
+            if not isinstance(hostname, str) or not hostname.strip():
+                continue
+            hostname = hostname.strip()
+            if any(character.isspace() for character in hostname):
+                continue
+            resource = f"https://{hostname}"
         try:
             p = urlparse(resource)
         except Exception:
             continue
         if p.scheme not in ("http", "https") or not p.hostname:
             continue
+        if provider_record and (p.path or p.params or p.query or p.fragment
+                                or p.username is not None or p.password is not None):
+            continue
         origin = f"{p.scheme}://{p.netloc}"
+        if provider_record and not _url_acceptable(origin):
+            continue
         host = p.hostname
         if host in seen:
             continue
@@ -2593,14 +2610,14 @@ def fetch_x402_fuchss() -> list:
             "name": host,
             "url": origin,
             "description": (
-                f"x402 endpoint - trust grade {grade} ({score}/100) "
+                f"x402 {'provider' if provider_record else 'endpoint'} - trust grade {grade} ({score}/100) "
                 f"per x402-trust.com leaderboard"
             ),
             "category": "general",
             "chains": [],
             "well_known_url": origin + "/.well-known/x402",
             "confidence": conf if isinstance(conf, (int, float)) else None,
-            "resource_samples": [{"url": resource, "kind": "x402-resource"}],
+            "resource_samples": [] if provider_record else [{"url": resource, "kind": "x402-resource"}],
             "source": "x402-fuchss",
             "source_id": host,
             "tags": ["trust-leaderboard"],
