@@ -1,7 +1,9 @@
+import random
 import unittest
 from unittest.mock import patch
 
 from directory import crawlers, directories as d, jobs
+from test_ingestion_pipeline import TemporaryDatabaseTestCase, _row
 
 
 def page(items_key, items, **top):
@@ -54,46 +56,88 @@ class FetcherTests(OfflineCase):
         self.assertEqual([r["url"] for r in rows], ["https://a.example"])
         self.assertTrue(rows[0]["quality"]["nohumans"]["paid_verified"])
 
-    def test_agentgates_skips_cdp_and_reads_atomic_price(self):
-        rows = self.run_fetch(d.fetch_agentgates, [page("items", [
-            {"resource": "https://cdp.example/x", "source": "cdp"},
-            {"resource": "https://payai.example/x", "source": "payai",
-             "legs": [{"chain": "base", "amountAtomic": "20000", "decimals": 6}],
-             "traffic": {"calls30d": 9}},
-        ], pagination={"total": 2})])
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["price_min"], 0.02)
-        self.assertEqual(rows[0]["quality"]["agentgates"]["calls_30d"], 9)
-
-    def agentgates_board(self, total):
-        # The server ignores larger limits and any source filter; PayAI rows sit
-        # behind the CDP mirror, here on the last page only.
+    def agentgates(self, providers, rows_by_host, claimed=(), paging="stable", providers_total=None):
+        # Fake upstream: /providers pages are stable; /resources?q=<host> pages
+        # are "shuffled" (fresh random sample per request, as live) or "stuck"
+        # (offset ignored, always the first page).
+        rng = random.Random(7)
         calls = []
 
         def get_json(client, url, params, gap):
-            calls.append(params["offset"])
-            last = params["offset"] + params["limit"] >= total
-            item = ({"resource": "https://payai.example/x", "source": "payai"} if last
-                    else {"resource": f"https://cdp{params['offset']}.example/x", "source": "cdp"})
-            return page("items", [item], pagination={"total": total})
+            calls.append((url.rsplit("/", 1)[1], params.get("q"), params["offset"]))
+            if url.endswith("/providers"):
+                hosts = providers[params["offset"]:params["offset"] + params["limit"]]
+                return page("items", [{"host": h} for h in hosts],
+                            pagination={"total": providers_total or len(providers)})
+            rows = rows_by_host.get(params["q"], [])
+            if paging == "shuffled":
+                batch = rng.sample(rows, min(len(rows), params["limit"]))
+            elif paging == "stuck":
+                batch = rows[:params["limit"]]
+            else:
+                batch = rows[params["offset"]:params["offset"] + params["limit"]]
+            return page("items", batch, pagination={"total": len(rows)})
 
         with patch.object(d, "_get_json", side_effect=get_json), patch.object(d.time, "sleep"):
             try:
-                return d.fetch_agentgates(), calls
+                return d.fetch_agentgates(claimed=set(claimed)), calls
             except crawlers.PartialCrawl as e:
                 return e, calls
 
-    def test_agentgates_walks_past_100k_rows_to_the_payai_tail(self):
-        rows, calls = self.agentgates_board(128_751)  # live board on 2026-11-03
-        self.assertIsInstance(rows, list)
-        self.assertEqual(len(calls), 1288)
-        self.assertEqual([r["url"] for r in rows], ["https://payai.example"])
+    def test_agentgates_skips_cdp_delisted_and_other_hosts(self):
+        rows, _ = self.agentgates(["pay.example"], {"pay.example": [
+            {"id": 1, "resource": "https://pay.example/x", "host": "pay.example", "source": "payai",
+             "legs": [{"chain": "base", "amountAtomic": "20000", "decimals": 6}],
+             "traffic": {"calls30d": 9}},
+            {"id": 2, "resource": "https://pay.example/cdp", "host": "pay.example", "source": "cdp"},
+            {"id": 3, "resource": "https://pay.example/old", "host": "pay.example", "source": "payai",
+             "delisted": True},
+            {"id": 4, "resource": "https://mirror.example/pay.example", "host": "mirror.example",
+             "source": "payai"},
+        ]})
+        self.assertEqual([r["url"] for r in rows], ["https://pay.example"])
+        self.assertEqual(rows[0]["resource_count"], 1)
+        self.assertEqual(rows[0]["price_min"], 0.02)
+        self.assertEqual(rows[0]["quality"]["agentgates"]["calls_30d"], 9)
 
-    def test_agentgates_runaway_board_is_still_partial(self):
-        error, calls = self.agentgates_board(10_000_000)
+    def test_agentgates_never_queries_hosts_another_source_lists(self):
+        rows_by_host = {h: [{"id": h, "resource": f"https://{h}/x", "host": h, "source": "payai"}]
+                        for h in ("ours.example", "theirs.example")}
+        rows, calls = self.agentgates(sorted(rows_by_host), rows_by_host, claimed={"https://theirs.example"})
+        self.assertEqual([r["url"] for r in rows], ["https://ours.example"])
+        self.assertNotIn("theirs.example", {q for _, q, _ in calls})
+
+    def big_host(self, n):
+        return {"big.example": [{"id": i, "resource": f"https://big.example/r{i}", "host": "big.example",
+                                 "source": "payai"} for i in range(n)]}
+
+    def test_agentgates_repeats_unstable_host_pages_until_every_row_is_seen(self):
+        rows, calls = self.agentgates(["big.example"], self.big_host(250), paging="shuffled")
+        self.assertIsInstance(rows, list)
+        self.assertEqual(rows[0]["resource_count"], 250)
+        self.assertLessEqual(sum(1 for path, _, _ in calls if path == "resources"),
+                             3 * d.AGENTGATES_PASSES)
+
+    def test_agentgates_host_that_never_completes_is_partial_and_keeps_rows(self):
+        error, _ = self.agentgates(["big.example"], self.big_host(250), paging="stuck")
         self.assertIsInstance(error, crawlers.PartialCrawl)
-        self.assertIn(f"max_pages={d.AGENTGATES_MAX_PAGES} exhausted", error.reason)
-        self.assertEqual(len(calls), d.AGENTGATES_MAX_PAGES)
+        self.assertIn("1 of 1 hosts incomplete", error.reason)
+        self.assertEqual(error.items[0]["resource_count"], 100)
+
+    def test_agentgates_runaway_host_query_is_partial_without_walking(self):
+        error, calls = self.agentgates(["big.example"], self.big_host(d.AGENTGATES_MAX_HOST_ROWS + 1))
+        self.assertIsInstance(error, crawlers.PartialCrawl)
+        self.assertEqual(sum(1 for path, _, _ in calls if path == "resources"), 1)
+
+    def test_agentgates_repeated_provider_rows_are_not_a_gap(self):
+        rows, calls = self.agentgates(["a.example", "a.example"], {})
+        self.assertEqual(rows, [])
+        self.assertEqual(sum(1 for path, _, _ in calls if path == "resources"), 1)
+
+    def test_agentgates_short_providers_listing_is_partial(self):
+        error, _ = self.agentgates(["a.example"], {}, providers_total=2)
+        self.assertIsInstance(error, crawlers.PartialCrawl)
+        self.assertIn("providers: 1/2 rows", error.reason)
 
     def test_the402_keeps_payable_submissions_only(self):
         rows = self.run_fetch(d.fetch_the402, [page("items", [
@@ -140,6 +184,13 @@ class RegistrationTests(unittest.TestCase):
     def test_all_sources_registered(self):
         for name in d.FETCHERS:
             self.assertIs(crawlers.ALL_CRAWLERS[name], d.FETCHERS[name])
+
+
+class AgentgatesClaimedTests(TemporaryDatabaseTestCase):
+    def test_claimed_origins_are_other_sources_only(self):
+        self.seed("x402", _row("x402", "theirs", "http://theirs.example:8443/api", source="cdp-bazaar"))
+        self.seed("x402", _row("x402", "ours", source="agentgates"))
+        self.assertEqual(d._agentgates_claimed(), {"http://theirs.example:8443"})
 
 
 if __name__ == "__main__":

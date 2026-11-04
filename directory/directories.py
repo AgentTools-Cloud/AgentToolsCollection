@@ -325,46 +325,109 @@ def fetch_aegis(page_size: int = 50, gap: float = 1.0) -> list:
 
 
 # --- agentgates.ai -------------------------------------------------------------
-# Mirrors CDP Bazaar (skipped, we crawl it) and the PayAI facilitator list.
-# The server caps `limit` at 100 and has no source filter, and the two
-# upstreams are interleaved, so the whole board has to be walked. It passed
-# 100k rows on 2026-10-29 (128,751 on 11-03, CDP 102k): the old 1000-page cap
-# turned every run partial. done() stops at pagination.total; 2000 pages
-# (~48 min) still ends before the 04:00 backup. Hitting it again means the
-# mirror outgrew this approach, not that the cap needs another bump.
-AGENTGATES_API = "https://agentgates.ai/api/directory/resources"
-AGENTGATES_MAX_PAGES = 2000
+# Mirrors CDP Bazaar (skipped, we crawl it) plus PayAI and paid self-listings.
+# Offset paging over /resources is not deterministic (the same request returns
+# different rows), so walking the 129k-row board only samples it. /providers
+# pages are stable: list every host, skip hosts whose origin another source
+# already lists, and re-query the rest by host until the unique rows reach the
+# query's own total (providers.endpoints also counts delisted rows).
+AGENTGATES_API = "https://agentgates.ai/api/directory"
+AGENTGATES_PASSES = 8          # 5 passes completed a 318-row host on 2026-11-04
+AGENTGATES_MAX_HOST_ROWS = 2000  # a host query matching more is free text gone wide
 
 
-def fetch_agentgates(page_size: int = 100, gap: float = 0.7) -> list:
-    partial = None
-    try:
-        rows = _paginate("agentgates", AGENTGATES_API, lambda d: d.get("items"),
-                         lambda p: {"limit": page_size, "offset": p * page_size},
-                         lambda d, p, n: (p + 1) * page_size >= ((d.get("pagination") or {}).get("total") or 0),
-                         gap, max_pages=AGENTGATES_MAX_PAGES)
-    except PartialCrawl as e:
-        rows, partial = e.items, e.reason
-    resources = []
-    for s in rows:
-        if not isinstance(s, dict) or s.get("delisted") or s.get("source") == "cdp":
-            continue
-        legs = s.get("legs") or []
-        prices = [p for p in (_price_atomic(l.get("amountAtomic"), l.get("decimals")) for l in legs) if p is not None]
-        traffic = s.get("traffic") or {}
-        resources.append({
-            "url": s.get("resource"), "name": s.get("displayName") or s.get("name"),
-            "description": s.get("description"),
-            "price_usd": min(prices) if prices else None,
-            "chains": [c for c in (_chain(l.get("chain") or l.get("network")) for l in legs) if c],
-            "protocol": "x402",
-            "quality": _drop_none({"upstream": s.get("source"),
-                                   "calls_30d": traffic.get("calls30d"),
-                                   "payers_30d": traffic.get("payers30d"),
-                                   "last_called": traffic.get("lastCalledAt"),
-                                   "last_seen": s.get("lastSeenAt")}),
-        })
-    return _finish("agentgates", resources, partial)
+def _agentgates_host(row: dict) -> str:
+    return (row.get("host") or urlsplit(row.get("resource") or "").hostname or "").lower()
+
+
+def _agentgates_claimed() -> set:
+    from . import db
+    with db.connect(read_only=True) as conn:
+        return {db._canonical_origin(url) for (url,) in conn.execute(
+            "SELECT url FROM services WHERE source<>'agentgates' AND url IS NOT NULL AND url<>''")}
+
+
+def _agentgates_host_rows(client: httpx.Client, host: str, page_size: int,
+                          gap: float) -> tuple[list, str | None]:
+    seen: dict = {}
+    total = 0
+    for _ in range(AGENTGATES_PASSES):
+        offset = 0
+        while True:
+            data = _get_json(client, f"{AGENTGATES_API}/resources",
+                             {"q": host, "limit": page_size, "offset": offset}, gap)
+            total = (data.get("pagination") or {}).get("total") or 0
+            if total > AGENTGATES_MAX_HOST_ROWS:
+                return [], f"query matched {total} rows"
+            items = [x for x in data.get("items") or [] if isinstance(x, dict)]
+            seen.update(((x.get("id") or x.get("resource")), x) for x in items)
+            offset += page_size
+            if not items or offset >= total:
+                break
+        if len(seen) >= total:
+            return [x for x in seen.values() if _agentgates_host(x) == host], None
+    return ([x for x in seen.values() if _agentgates_host(x) == host],
+            f"{len(seen)}/{total} rows after {AGENTGATES_PASSES} passes")
+
+
+def _agentgates_resource(s: dict) -> dict:
+    legs = s.get("legs") or []
+    prices = [p for p in (_price_atomic(l.get("amountAtomic"), l.get("decimals")) for l in legs) if p is not None]
+    traffic = s.get("traffic") or {}
+    return {
+        "url": s.get("resource"), "name": s.get("displayName") or s.get("name"),
+        "description": s.get("description"),
+        "price_usd": min(prices) if prices else None,
+        "chains": [c for c in (_chain(l.get("chain") or l.get("network")) for l in legs) if c],
+        "protocol": "x402",
+        "quality": _drop_none({"upstream": s.get("source"),
+                               "calls_30d": traffic.get("calls30d"),
+                               "payers_30d": traffic.get("payers30d"),
+                               "last_called": traffic.get("lastCalledAt"),
+                               "last_seen": s.get("lastSeenAt")}),
+    }
+
+
+def fetch_agentgates(page_size: int = 100, gap: float = 0.7, claimed: set | None = None) -> list:
+    problems, hosts, resources, incomplete = [], set(), [], 0
+    with httpx.Client(timeout=TIMEOUT, follow_redirects=True,
+                      headers={"User-Agent": UA, "Accept": "application/json"}) as client:
+        total = offset = listed = 0
+        try:
+            while offset < 200 * page_size:
+                data = _get_json(client, f"{AGENTGATES_API}/providers",
+                                 {"sort": "name", "limit": page_size, "offset": offset}, gap)
+                items = [p for p in data.get("items") or [] if isinstance(p, dict)]
+                total = (data.get("pagination") or {}).get("total") or 0
+                listed += len(items)
+                hosts.update((p.get("host") or "").lower() for p in items)
+                offset += page_size
+                if not items or offset >= total:
+                    break
+        except Exception as e:  # noqa: BLE001
+            problems.append(f"providers page {offset // page_size} failed: {e!r}")
+        hosts.discard("")
+        # Counted in rows: the live listing repeats a couple of hosts.
+        if listed < total:
+            problems.append(f"providers: {listed}/{total} rows")
+        if claimed is None:
+            claimed = _agentgates_claimed()
+        # aggregate() files http rows under https://host, so this matches jobs._run_one.
+        todo = sorted(h for h in hosts if f"https://{h}" not in claimed)
+        for host in todo:
+            try:
+                rows, problem = _agentgates_host_rows(client, host, page_size, gap)
+            except Exception as e:  # noqa: BLE001
+                rows, problem = [], f"request failed: {e!r}"
+            if problem:
+                incomplete += 1
+                log.warning("agentgates: %s incomplete (%s)", host, problem)
+            resources += [_agentgates_resource(s) for s in rows
+                          if not s.get("delisted") and s.get("source") != "cdp"]
+    log.info("agentgates: %d providers, %d unclaimed, %d incomplete", len(hosts), len(todo), incomplete)
+    if incomplete:
+        problems.append(f"{incomplete} of {len(todo)} hosts incomplete")
+    return _finish("agentgates", resources, "; ".join(problems) or None)
 
 
 # --- the402.dev ----------------------------------------------------------------
