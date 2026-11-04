@@ -208,6 +208,8 @@ def _ingest_rows(kind, source, items, upsert, batch_size=100):
             log.warning('source endpoint mismatch: kind=%s source=%s new_pairs=%d; current primary retained',
                         kind, source, result['warnings'])
         total['errors'].extend(result['errors'])
+        if start + len(batch) < len(items):
+            time.sleep(0.05)
     log.info('ingestion %s: added=%d updated=%d rejected=%d errors=%d', source,
              total['added'], total['updated'], total['rejected'], len(total['errors']))
     return total

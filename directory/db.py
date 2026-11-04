@@ -582,7 +582,7 @@ def _ensure_dir(path: str) -> None:
 
 
 def connect(db_path: str = DEFAULT_DB_PATH, read_only: bool = False,
-            set_wal: bool = True) -> sqlite3.Connection:
+            set_wal: bool = True, *, timeout: float = 30.0) -> sqlite3.Connection:
     _ensure_dir(db_path)
     # sqlite timeout handles ordinary writer contention; busy_timeout is kept for
     # older sqlite builds and PRAGMA visibility. 30s is intentionally longer
@@ -592,14 +592,14 @@ def connect(db_path: str = DEFAULT_DB_PATH, read_only: bool = False,
         uri,
         uri=read_only,
         check_same_thread=False,
-        timeout=30.0,
+        timeout=timeout,
         isolation_level=None if read_only else "DEFERRED",
     )
     conn.row_factory = sqlite3.Row
     if not read_only and set_wal:
         conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute("PRAGMA busy_timeout=30000")
+    conn.execute(f"PRAGMA busy_timeout={max(0, int(timeout * 1000))}")
     return conn
 
 
@@ -917,8 +917,8 @@ def resources_text(entries, limit: int = 120000) -> str | None:
 
 @contextmanager
 def writer(db_path: str = DEFAULT_DB_PATH,
-           immediate: bool = False) -> Iterator[sqlite3.Connection]:
-    conn = connect(db_path)
+        immediate: bool = False, *, timeout: float | None = None) -> Iterator[sqlite3.Connection]:
+    conn = connect(db_path) if timeout is None else connect(db_path, timeout=timeout)
     try:
         if immediate:
             conn.execute("BEGIN IMMEDIATE")

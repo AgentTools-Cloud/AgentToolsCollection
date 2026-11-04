@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import secrets
 import json
+import sqlite3
 import threading
 import time
 from contextlib import closing
@@ -915,6 +916,29 @@ def _assert_submission_allowed(kind: str, row: dict) -> None:
         raise _retired_submission_error() from exc
 
 
+def _existing_submission_response(existing, pending):
+    if existing:
+        return {
+            "status": "already_listed",
+            "message": (
+                "A service with this URL is already in the directory. Submitting "
+                "it again will not change it: verify domain ownership to edit."),
+            "claim_url": "https://agent-tools.cloud/account",
+            "claim_docs": "https://agent-tools.cloud/docs/claim",
+            "api": directory_ownership.API_FLOW,
+            "slug": existing.get("slug"),
+            "url": existing.get("url"),
+        }
+    if pending:
+        return {
+            "status": "already_pending",
+            "message": (
+                "A submission for this URL is already submitted and auto-verifying."),
+            "submission_id": pending.get("id"),
+        }
+    return None
+
+
 async def _require_public_url(url: str) -> None:
     try:
         await run_in_threadpool(directory_public_http.validate_url, url)
@@ -960,25 +984,9 @@ async def api_submit(request: Request, payload: SubmissionPayload):
         existing = db.find_service_by_url(c, url)
         pending = db.find_pending_submission(c, url)
         recent = db.count_recent_submissions(c, client_ip)
-    if existing:
-        return {
-            "status": "already_listed",
-            "message": (
-                "A service with this URL is already in the directory. Submitting "
-                "it again will not change it: verify domain ownership to edit."),
-            "claim_url": "https://agent-tools.cloud/account",
-            "claim_docs": "https://agent-tools.cloud/docs/claim",
-            "api": directory_ownership.API_FLOW,
-            "slug": existing.get("slug"),
-            "url": existing.get("url"),
-        }
-    if pending:
-        return {
-            "status": "already_pending",
-            "message": (
-                "A submission for this URL is already submitted and auto-verifying."),
-            "submission_id": pending.get("id"),
-        }
+    duplicate = _existing_submission_response(existing, pending)
+    if duplicate:
+        return duplicate
     if recent >= SUBMIT_RATE_LIMIT_PER_DAY:
         raise HTTPException(
             status_code=429,
@@ -988,7 +996,8 @@ async def api_submit(request: Request, payload: SubmissionPayload):
                 "limit": SUBMIT_RATE_LIMIT_PER_DAY,
             },
         )
-    state = limits.check_ip_limits(
+    state = await run_in_threadpool(
+        limits.check_ip_limits,
         client_ip,
         "submit",
         (("day", SUBMIT_RATE_LIMIT_PER_DAY, 86400),),
@@ -996,13 +1005,30 @@ async def api_submit(request: Request, payload: SubmissionPayload):
     if state:
         limits.raise_rate_limited(state, "Too many service submissions from this IP.")
     submission["_client_ip"] = client_ip
+
+    def persist(conn):
+        db.assert_listing_not_retired(conn, "x402", submission)
+        duplicate = _existing_submission_response(
+            db.find_service_by_url(conn, url), db.find_pending_submission(conn, url))
+        if duplicate:
+            return duplicate
+        if db.count_recent_submissions(conn, client_ip) >= SUBMIT_RATE_LIMIT_PER_DAY:
+            raise HTTPException(status_code=429, detail={
+                "error": "rate_limited",
+                "message": "Too many pending submissions from this IP in the last 24h.",
+                "limit": SUBMIT_RATE_LIMIT_PER_DAY,
+            })
+        return db.create_submission(conn, submission)
+
     try:
-        with db.writer() as c:
-            sub_id = db.create_submission(c, submission)
+        stored = await run_in_threadpool(_submission_write, persist)
     except db.PrivacySuppressedListingError as exc:
         raise _privacy_submission_error("x402") from exc
     except db.RetiredListingError as exc:
         raise _retired_submission_error() from exc
+    if isinstance(stored, dict):
+        return stored
+    sub_id = stored
     # Auto-review immediately — there is no human gate. x402 verification
     # decides: verified -> listed now, rejected -> dropped, uncertain ->
     # stays pending and is retried automatically by the crawl timer.
@@ -1078,6 +1104,26 @@ def _enforce_submit_limit(request: Request, scope: str) -> str:
     if state:
         limits.raise_rate_limited(state, "Too many submissions from this IP today.")
     return client_ip
+
+
+def _submission_write(operation):
+    deadline = time.monotonic() + 2.5
+    last_error = None
+    while time.monotonic() < deadline:
+        timeout = min(0.25, max(0.0, deadline - time.monotonic()) / 3)
+        try:
+            with db.writer(immediate=True, timeout=timeout) as conn:
+                return operation(conn)
+        except sqlite3.OperationalError as exc:
+            if not db.is_locked_error(exc):
+                raise
+            last_error = exc
+            time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+    raise HTTPException(
+        status_code=503,
+        detail={"error": "submission_busy", "message": "Please retry shortly."},
+        headers={"Retry-After": "2", "Cache-Control": "private, no-store"},
+    ) from last_error
 
 
 def _owner_locked(kind: str, row: dict) -> HTTPException:
@@ -1469,7 +1515,7 @@ async def api_submit_mcp(request: Request, payload: McpSubmissionPayload):
             status_code=410,
             detail="This endpoint was retired by its operator.",
         )
-    _enforce_submit_limit(request, "submit-mcp")
+    await run_in_threadpool(_enforce_submit_limit, request, "submit-mcp")
     with db.connect(read_only=True) as _c:
         _owned = db.find_mcp_by_endpoint(_c, endpoint)
     if _owned and _owned.get("owner_verified"):
@@ -1498,44 +1544,47 @@ async def api_submit_mcp(request: Request, payload: McpSubmissionPayload):
         "last_success_at": int(time.time()) if probe.get("status") == "ok" else None,
         "confidence": 0.5,
     }
-    try:
-        with db.writer(immediate=True) as c:
-            db.assert_listing_not_retired(c, "mcp", row)
-            locked = db.find_owner_locked_listing(c, "mcp", endpoint, slug)
+    def persist(conn):
+        db.assert_listing_not_retired(conn, "mcp", row)
+        locked = db.find_owner_locked_listing(conn, "mcp", endpoint, slug)
+        if locked:
+            raise _owner_locked("mcp", locked)
+        created, server_id = db.upsert_mcp_server(conn, row)
+        stored = conn.execute(
+            "SELECT endpoint_url FROM mcp_servers WHERE id=?", (server_id,)
+        ).fetchone()
+        if (stored is None or db._exact_endpoint(stored["endpoint_url"] or "")
+                != db._exact_endpoint(endpoint)):
+            raise HTTPException(status_code=409, detail={
+                "error": "identity_conflict",
+                "message": "This submission identity belongs to another endpoint.",
+            })
+        x402 = directory_reverify.verify_and_mirror(
+            endpoint, slug=slug, name=name,
+            description=(payload.description or "").strip() or None,
+            homepage=endpoint, delivery="mcp", source="submission",
+            source_id=endpoint, verdict=verdict, conn=conn,
+            protect_owner_kind="mcp", protect_owner_slug=slug,
+            protect_owner_url=endpoint,
+        )
+        if x402.get("owner_locked"):
+            locked = x402.get("locked_listing")
             if locked:
-                raise _owner_locked("mcp", locked)
-            created, server_id = db.upsert_mcp_server(c, row)
-            stored = c.execute(
-                "SELECT endpoint_url FROM mcp_servers WHERE id=?", (server_id,)
-            ).fetchone()
-            if (stored is None or db._exact_endpoint(stored["endpoint_url"] or "")
-                    != db._exact_endpoint(endpoint)):
-                raise HTTPException(status_code=409, detail={
-                    "error": "identity_conflict",
-                    "message": "This submission identity belongs to another endpoint.",
-                })
-            x402 = directory_reverify.verify_and_mirror(
-                endpoint, slug=slug, name=name,
-                description=(payload.description or "").strip() or None,
-                homepage=endpoint, delivery="mcp", source="submission",
-                source_id=endpoint, verdict=verdict, conn=c,
-                protect_owner_kind="mcp", protect_owner_slug=slug,
-                protect_owner_url=endpoint,
-            )
-            if x402.get("owner_locked"):
-                locked = x402.get("locked_listing")
-                if locked:
-                    raise _owner_locked(x402.get("locked_kind") or "x402", locked)
-                raise HTTPException(status_code=409, detail={"error": "owner_verified"})
-            if x402.get("identity_conflict"):
-                raise HTTPException(status_code=409, detail={
-                    "error": "identity_conflict",
-                    "message": "The verified paid resource conflicts with an existing identity.",
-                })
-            c.execute(
-                "UPDATE mcp_servers SET x402_supported=? WHERE id=?",
-                (1 if x402.get("x402") else 0, server_id),
-            )
+                raise _owner_locked(x402.get("locked_kind") or "x402", locked)
+            raise HTTPException(status_code=409, detail={"error": "owner_verified"})
+        if x402.get("identity_conflict"):
+            raise HTTPException(status_code=409, detail={
+                "error": "identity_conflict",
+                "message": "The verified paid resource conflicts with an existing identity.",
+            })
+        conn.execute(
+            "UPDATE mcp_servers SET x402_supported=? WHERE id=?",
+            (1 if x402.get("x402") else 0, server_id),
+        )
+        return created, x402
+
+    try:
+        created, x402 = await run_in_threadpool(_submission_write, persist)
     except db.PrivacySuppressedListingError as exc:
         raise _privacy_submission_error("mcp") from exc
     except db.RetiredListingError as exc:
@@ -1586,7 +1635,7 @@ async def api_submit_a2a(request: Request, payload: A2ASubmissionPayload):
             status_code=410,
             detail="This endpoint was retired by its operator.",
         )
-    _enforce_submit_limit(request, "submit-a2a")
+    await run_in_threadpool(_enforce_submit_limit, request, "submit-a2a")
     try:
         card, card_url = await run_in_threadpool(
             directory_a2a.fetch_agent_card, url, None, True)
@@ -1613,51 +1662,54 @@ async def api_submit_a2a(request: Request, payload: A2ASubmissionPayload):
     verdict = await run_in_threadpool(
         directory_crawlers.verify_x402, verify_target
     )
-    try:
-        with db.writer(immediate=True) as c:
-            db.assert_listing_not_retired(c, "a2a", row)
-            locked = db.find_owner_locked_listing(
-                c, "a2a", card_url, row["slug"], row.get("endpoint_url"))
+    def persist(conn):
+        db.assert_listing_not_retired(conn, "a2a", row)
+        locked = db.find_owner_locked_listing(
+            conn, "a2a", card_url, row["slug"], row.get("endpoint_url"))
+        if locked:
+            raise _owner_locked("a2a", locked)
+        created, agent_id = db.upsert_a2a_agent(conn, row)
+        stored = conn.execute(
+            "SELECT endpoint_url,card_url FROM a2a_agents WHERE id=?",
+            (agent_id,),
+        ).fetchone()
+        if (stored is None
+                or db._exact_endpoint(stored["endpoint_url"] or "")
+                != db._exact_endpoint(row.get("endpoint_url") or "")
+                or db._exact_endpoint(stored["card_url"] or "")
+                != db._exact_endpoint(card_url)):
+            raise HTTPException(status_code=409, detail={
+                "error": "identity_conflict",
+                "message": "This Agent Card identity belongs to another endpoint.",
+            })
+        x402 = directory_reverify.verify_and_mirror(
+            verify_target, slug=row["slug"], name=row.get("name"),
+            description=row.get("description"),
+            homepage=row.get("homepage_url"), delivery="a2a",
+            source="submission", source_id=row.get("source_id"),
+            verdict=verdict, conn=conn,
+            protect_owner_kind="a2a", protect_owner_slug=row["slug"],
+            protect_owner_url=card_url,
+            protect_owner_alternate_url=row.get("endpoint_url"),
+        )
+        if x402.get("owner_locked"):
+            locked = x402.get("locked_listing")
             if locked:
-                raise _owner_locked("a2a", locked)
-            created, agent_id = db.upsert_a2a_agent(c, row)
-            stored = c.execute(
-                "SELECT endpoint_url,card_url FROM a2a_agents WHERE id=?",
-                (agent_id,),
-            ).fetchone()
-            if (stored is None
-                    or db._exact_endpoint(stored["endpoint_url"] or "")
-                    != db._exact_endpoint(row.get("endpoint_url") or "")
-                    or db._exact_endpoint(stored["card_url"] or "")
-                    != db._exact_endpoint(card_url)):
-                raise HTTPException(status_code=409, detail={
-                    "error": "identity_conflict",
-                    "message": "This Agent Card identity belongs to another endpoint.",
-                })
-            x402 = directory_reverify.verify_and_mirror(
-                verify_target, slug=row["slug"], name=row.get("name"),
-                description=row.get("description"),
-                homepage=row.get("homepage_url"), delivery="a2a",
-                source="submission", source_id=row.get("source_id"),
-                verdict=verdict, conn=c,
-                protect_owner_kind="a2a", protect_owner_slug=row["slug"],
-                protect_owner_url=card_url,
-                protect_owner_alternate_url=row.get("endpoint_url"),
-            )
-            if x402.get("owner_locked"):
-                locked = x402.get("locked_listing")
-                if locked:
-                    raise _owner_locked(x402.get("locked_kind") or "x402", locked)
-                raise HTTPException(status_code=409, detail={"error": "owner_verified"})
-            if x402.get("identity_conflict"):
-                raise HTTPException(status_code=409, detail={
-                    "error": "identity_conflict",
-                    "message": "The verified paid resource conflicts with an existing identity.",
-                })
-            c.execute(
-                "UPDATE a2a_agents SET x402_supported=? WHERE id=?",
-                (1 if x402.get("x402") else 0, agent_id),
-            )
+                raise _owner_locked(x402.get("locked_kind") or "x402", locked)
+            raise HTTPException(status_code=409, detail={"error": "owner_verified"})
+        if x402.get("identity_conflict"):
+            raise HTTPException(status_code=409, detail={
+                "error": "identity_conflict",
+                "message": "The verified paid resource conflicts with an existing identity.",
+            })
+        conn.execute(
+            "UPDATE a2a_agents SET x402_supported=? WHERE id=?",
+            (1 if x402.get("x402") else 0, agent_id),
+        )
+        return created, x402
+
+    try:
+        created, x402 = await run_in_threadpool(_submission_write, persist)
     except db.PrivacySuppressedListingError as exc:
         raise _privacy_submission_error("a2a") from exc
     except db.RetiredListingError as exc:
