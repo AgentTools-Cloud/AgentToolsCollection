@@ -222,6 +222,111 @@ class IncrementalWriteTests(TemporaryDatabaseTestCase):
 
 
 
+    def test_failed_hyperevm_rpc_preserves_previous_statistics_without_etherscan(self):
+        import json
+        now = int(crawlers.time.time())
+        service_id = self.ids["on-base"]
+        with db.writer() as conn:
+            conn.execute("UPDATE services SET payto_checked=? WHERE id=?",
+                         (now, self.ids["on-polygon"]))
+            conn.execute(
+                "UPDATE services SET payment=?,payto_checked=1,"
+                "payto_tx_30d=17,payto_payers_30d=3,tx_30d=17 WHERE id=?",
+                (json.dumps({"accepts": [{"network": "eip155:999",
+                                         "pay_to": "0x" + "2" * 40}]}), service_id))
+        def statistics():
+            with closing(db.connect(read_only=True)) as conn:
+                return tuple(conn.execute(
+                    "SELECT payto_checked,payto_tx_30d,payto_payers_30d,tx_30d "
+                    "FROM services WHERE id=?", (service_id,)).fetchone())
+        before = statistics()
+        with patch.dict(os.environ, {"ETHERSCAN_API_KEY": "test-key"}), \
+                patch.object(crawlers, "fetch_chain_activity_bulk", return_value=({}, False)), \
+                patch.object(crawlers, "_etherscan_payto_activity") as etherscan, \
+                patch.object(jobs.time, "sleep"), patch.object(jobs, "cmd_rescore"):
+            jobs.cmd_onchain()
+        etherscan.assert_not_called()
+        self.assertEqual(statistics(), before)
+
+
+class HyperEvmBulkTests(unittest.TestCase):
+    def test_response_too_big_splits_without_retry_backoff(self):
+        import json
+        queries = []
+
+        def handler(request):
+            body = json.loads(request.content)
+            if body["method"] == "eth_blockNumber":
+                return httpx.Response(200, json={"result": hex(999)})
+            if body["method"] == "eth_getBlockByNumber":
+                return httpx.Response(200, json={"result": {"timestamp": "0x0"}})
+            query = body["params"][0]
+            queries.append(query)
+            lower = int(query["fromBlock"], 16)
+            upper = int(query["toBlock"], 16)
+            if upper - lower + 1 == 1000:
+                return httpx.Response(200, json={
+                    "error": {"code": -32008, "message": "Response is too big"}})
+            return httpx.Response(200, json={"result": [
+                {"topics": [crawlers._TRANSFER_TOPIC, crawlers._topic_addr(PAYER),
+                            crawlers._topic_addr(PAYTO)]}
+            ] if lower == 500 else []})
+
+        with patch.object(crawlers.httpx, "Client", side_effect=_client_with(handler)), \
+                patch.object(crawlers.time, "sleep") as sleeper:
+            results, ok = crawlers.fetch_chain_activity_bulk(
+                [PAYTO], chain="hyperevm", days=1000 / 86400)
+        self.assertTrue(ok)
+        self.assertEqual(results[PAYTO.lower()]["tx"], 1)
+        self.assertEqual(len(queries), 3)
+        self.assertEqual([call.args[0] for call in sleeper.call_args_list], [1.0, 1.0])
+
+    def test_hyperevm_uses_keyless_rpc_and_never_falls_back_to_etherscan(self):
+        self.assertNotIn("hyperevm", crawlers.ETHERSCAN_FREE_CHAINS)
+        url, contract, _seconds, window, _batch = crawlers.BULK_LOG_CHAINS["hyperevm"]
+        self.assertEqual(url, "https://rpc.hypurrscan.io")
+        self.assertEqual(contract, "0xb88339cb7199b77e23db6e890353e22632ba630f")
+        self.assertEqual(window, 1000)
+        self.assertGreaterEqual(crawlers.BULK_LOG_MIN_INTERVAL["hyperevm"], 1.0)
+        with patch.dict(os.environ, {"ETHERSCAN_API_KEY": "test-key"}), \
+                patch.object(crawlers, "_etherscan_payto_activity") as etherscan:
+            self.assertFalse(crawlers.fetch_payto_activity(PAYTO, chain="hyperevm")["ok"])
+        etherscan.assert_not_called()
+
+    def test_bulk_queries_only_usdc_transfers_to_requested_addresses(self):
+        import json
+        seen = []
+
+        def handler(request):
+            body = json.loads(request.content)
+            self.assertEqual(request.url.host, "rpc.hypurrscan.io")
+            self.assertNotIn("apikey", request.url.params)
+            if body["method"] == "eth_blockNumber":
+                return httpx.Response(200, json={"result": hex(9999)})
+            if body["method"] == "eth_getBlockByNumber":
+                return httpx.Response(200, json={"result": {"timestamp": "0x0"}})
+            self.assertEqual(body["method"], "eth_getLogs")
+            seen.append(body["params"][0])
+            return httpx.Response(200, json={"result": [
+                {"topics": [crawlers._TRANSFER_TOPIC, crawlers._topic_addr(PAYER),
+                            crawlers._topic_addr(PAYTO)]},
+                {"topics": [crawlers._TRANSFER_TOPIC, crawlers._topic_addr(PAYTO),
+                            crawlers._topic_addr(PAYER)]},
+            ] if len(seen) == 1 else []})
+
+        with patch.object(crawlers.httpx, "Client", side_effect=_client_with(handler)), \
+                patch.object(crawlers.time, "sleep"):
+            results, ok = crawlers.fetch_chain_activity_bulk([PAYTO], chain="hyperevm", days=0.1)
+        self.assertTrue(ok)
+        self.assertEqual((results[PAYTO.lower()]["tx"], results[PAYTO.lower()]["payers"]), (1, 1))
+        self.assertEqual(len(seen), 9)
+        for query in seen:
+            self.assertLessEqual(int(query["toBlock"], 16) - int(query["fromBlock"], 16) + 1, 1000)
+            self.assertEqual(query["address"], crawlers.EVM_USDC_INDEXERS["hyperevm"][1].lower())
+            self.assertEqual(query["topics"], [crawlers._TRANSFER_TOPIC, None,
+                                             [crawlers._topic_addr(PAYTO)]])
+
+
 class ArcBulkConfigTests(unittest.TestCase):
     def test_arc_uses_official_node_with_wide_windows_and_pacing(self):
         url, contract, _secs, window, _batch = crawlers.BULK_LOG_CHAINS["arc"]

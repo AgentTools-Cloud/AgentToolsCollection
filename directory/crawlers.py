@@ -1003,7 +1003,7 @@ ETHERSCAN_V2_URL = "https://api.etherscan.io/v2/api"
 # chain key -> chain id; only chains the Etherscan free tier serves.
 ETHERSCAN_FREE_CHAINS = {"ethereum": 1, "polygon": 137, "arbitrum": 42161,
                          "worldchain": 480, "monad": 143, "sei": 1329,
-                         "unichain": 130, "sonic": 146, "hyperevm": 999}
+                         "unichain": 130, "sonic": 146}
 # Free tier allows 3 calls/second; stay under it.
 _ETHERSCAN_MIN_INTERVAL = 0.4
 _etherscan_last_call = 0.0
@@ -1302,6 +1302,8 @@ BULK_LOG_CHAINS = {
                "0xddafbb505ad214d7b80b1f830fccc89b60fb7a83", 5.0, 10000, 400),
     "celo": ("https://forno.celo.org",
              "0xceba9300f2b948710d2653dd7b07f33a8b32118c", 1.0, 1000, 400),
+    "hyperevm": ("https://rpc.hypurrscan.io",
+                 "0xb88339cb7199b77e23db6e890353e22632ba630f", 1.0, 1000, 400),
     # Arc mainnet: thirdweb's 5042 gateway answered ~all eth_getLogs with 429
     # even at one call per 2 s and refused 10k-block windows; the 2026-11-02
     # sweep crawled 700/5113 windows in 14 h. The official node (and QuickNode's
@@ -1311,7 +1313,7 @@ BULK_LOG_CHAINS = {
             "0x3600000000000000000000000000000000000000", 0.5, 10000, 400),
 }
 # Minimum seconds between eth_getLogs calls for nodes that throttle bursts.
-BULK_LOG_MIN_INTERVAL = {"arc": 2.0}
+BULK_LOG_MIN_INTERVAL = {"arc": 2.0, "hyperevm": 1.0}
 _TRANSFER_TOPIC = (
     "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef")
 
@@ -1336,7 +1338,7 @@ def _oversized_range(exc):
         return False
     msg = str(exc).lower()
     return any(k in msg for k in ("max results", "response size",
-                                  "range too large", "block range"))
+                                  "response is too big", "range too large", "block range"))
 
 
 def _rpc(client, url, method, params):
