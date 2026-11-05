@@ -407,22 +407,32 @@ def claim_domain(request: Request, host: str = Form(...),
 @router.post("/account/domains/{ownership_id}/verify", include_in_schema=False)
 def verify_domain(request: Request, ownership_id: int, token: str = Form(...)):
     from . import ownership as own
-    from .routes import TEMPLATES
+    from .routes import TEMPLATES, _submission_write
     user = _require_user(request)
-    with db.connect(read_only=True) as conn:
+    token = (token or "").strip()
+    conn = db.connect(read_only=True)
+    try:
         row = conn.execute("SELECT user_id FROM domain_ownership WHERE id=?",
                            (ownership_id,)).fetchone()
-    if row is None or row["user_id"] != user["id"]:
-        raise HTTPException(404, "No such claim")
+        if row is None or row["user_id"] != user["id"]:
+            raise HTTPException(404, "No such claim")
+        prepared = own.prepare_claim_verification(conn, ownership_id, token)
+    finally:
+        conn.close()
 
-    def op():
-        with db.writer() as conn:
-            result = own.verify_claim(conn, ownership_id, (token or "").strip())
+    if prepared.claim is None:
+        ok, detail, notification = False, prepared.detail, None
+    else:
+        def persist(conn):
+            result = own.apply_claim_verification(
+                conn, ownership_id, token, verification=prepared)
             if result[0]:
                 db.sync_owner_verified(conn)
             return result
-    ok, detail = db.with_retry(op)
+
+        ok, detail, notification = _submission_write(persist, busy_error="claim_busy")
     if ok:
+        own.notify_claim_displaced(notification)
         return RedirectResponse("/account", status_code=302)
     return TEMPLATES.TemplateResponse(
         request, "account.html",

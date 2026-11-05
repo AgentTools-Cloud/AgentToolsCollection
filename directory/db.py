@@ -3740,6 +3740,12 @@ def upsert_mcp_server(conn: sqlite3.Connection, row: dict) -> tuple:
         _record_source(conn, "mcp", existing["id"], _src)
         return False, int(existing["id"])
     # metadata-only refresh must not reset a previously probed health
+    if row.get("_partial_metadata"):
+        identity_fields = {"id", "slug", "source", "source_id", "source_url", "kind",
+                           "endpoint_url", "created_at", "updated_at", "last_seen"}
+        for field in _MCP_COLS:
+            if field not in identity_fields and row.get(field) is None:
+                row[field] = existing[field]
     for _keep in ("health", "health_checked", "last_success_at",
                   "latency_ms", "http_status"):
         if row.get(_keep) is None:
