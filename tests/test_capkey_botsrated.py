@@ -41,18 +41,60 @@ class CapkeyTests(unittest.TestCase):
             self.assertIsNone(capkey._row(item), item)
 
     def test_fetch_maps_catalog(self):
-        payload = {"items": [self.item(), self.item(id=8, badge="dead")]}
-
-        class Response:
-            def raise_for_status(self):
-                return None
-
-            def json(self):
-                return payload
-
-        with patch.object(capkey.httpx.Client, "get", return_value=Response()):
+        payload = {"total": 2, "page": 1, "pageSize": 50, "totalPages": 1,
+                   "items": [self.item(kind="MCP", isTemplate=False),
+                             self.item(id=8, kind="MCP", badge="dead", isTemplate=False)]}
+        client = capkey.httpx.Client(transport=capkey.httpx.MockTransport(
+            lambda _request: capkey.httpx.Response(200, json=payload)))
+        with patch.object(capkey.httpx, "Client", return_value=client):
             rows = capkey.fetch_capkey_mcp()
         self.assertEqual(len(rows), 1)
+
+    def test_fetch_uses_bounded_public_search_pages(self):
+        requested = []
+
+        def item(identifier):
+            return {"id": identifier, "kind": "MCP", "badge": "live",
+                    "isTemplate": False, "name": f"Fixture {identifier}",
+                    "url": f"https://api.example/{identifier}/mcp"}
+
+        def handler(request):
+            self.assertEqual(request.url.path, "/api/v1/search")
+            self.assertEqual(request.url.params.get("kind"), "mcp")
+            self.assertEqual(request.url.params.get("badge"), "live")
+            page = int(request.url.params.get("page", "1"))
+            requested.append(page)
+            return capkey.httpx.Response(200, json={
+                "total": 3, "page": page, "pageSize": 2, "totalPages": 2,
+                "items": [item(1), item(2)] if page == 1 else [item(3)],
+            })
+
+        client = capkey.httpx.Client(transport=capkey.httpx.MockTransport(handler))
+        with patch.object(capkey.httpx, "Client", return_value=client), \
+                patch.object(capkey, "PAGE_LIMIT", 2, create=True):
+            rows = capkey.fetch_capkey_mcp()
+        self.assertEqual(requested, [1, 2])
+        self.assertEqual({row["source_id"] for row in rows}, {"1", "2", "3"})
+        self.assertTrue(all(row.get("_partial_metadata") for row in rows))
+
+    def test_partial_capkey_metadata_preserves_existing_fields(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = str(Path(temporary) / "test.db")
+            db.init_db(path)
+            with db.writer(path) as conn:
+                row = capkey._row(self.item())
+                row.update(description="Existing description", transport="sse",
+                           auth_method="api-key")
+                db.upsert_mcp_server(conn, row)
+                refresh = capkey._row(self.item())
+                refresh.update(description=None, transport=None, auth_method=None,
+                               _partial_metadata=True)
+                db.upsert_mcp_server(conn, refresh)
+            with db.connect(path, read_only=True) as conn:
+                stored = conn.execute("SELECT * FROM mcp_servers").fetchone()
+                self.assertEqual(stored["description"], "Existing description")
+                self.assertEqual(stored["transport"], "sse")
+                self.assertEqual(stored["auth_method"], "api-key")
 
 
 class BotsRatedTests(unittest.TestCase):

@@ -86,6 +86,16 @@ class ClaimError(Exception):
     """A claim cannot be issued (shared host, already owned, bad method)."""
 
 
+@dataclass(frozen=True)
+class ClaimVerification:
+    claim: tuple[Any, ...] | None
+    ok: bool
+    detail: str
+
+
+ClaimNotification = tuple[str, int, int, str]
+
+
 def new_token() -> str:
     return "atc_" + secrets.token_urlsafe(24)
 
@@ -344,27 +354,45 @@ def issue(conn: sqlite3.Connection, user_id: int, host: str,
     return int(cur.lastrowid), token
 
 
-def verify_claim(conn: sqlite3.Connection, ownership_id: int,
-                 token: str) -> tuple[bool, str]:
-    """Check a pending claim. The caller supplies the token it was shown."""
+def _claim_snapshot(row: sqlite3.Row) -> tuple[Any, ...]:
+    return tuple(row[key] for key in (
+        "id", "user_id", "host", "scope_path", "method", "token_hash", "status"))
+
+
+def prepare_claim_verification(conn: sqlite3.Connection, ownership_id: int,
+                               token: str) -> ClaimVerification:
     row = conn.execute(
         "SELECT * FROM domain_ownership WHERE id=?", (ownership_id,)
     ).fetchone()
     if row is None:
-        return False, "no such claim"
+        return ClaimVerification(None, False, "no such claim")
     if row["token_hash"] != token_hash(token):
-        return False, "token mismatch"
+        return ClaimVerification(None, False, "token mismatch")
     if db.is_shared_host(conn, row["host"]):
-        return False, "host is shared; whole-host verification is unavailable"
+        return ClaimVerification(
+            None, False, "host is shared; whole-host verification is unavailable")
     ok, detail = probe(row["method"], row["host"], token)
-    conn.execute("BEGIN IMMEDIATE")
+    return ClaimVerification(_claim_snapshot(row), ok, detail)
+
+
+def apply_claim_verification(conn: sqlite3.Connection, ownership_id: int,
+                             token: str, *, verification: ClaimVerification | None = None
+                             ) -> tuple[bool, str, ClaimNotification | None]:
+    prepared = verification or prepare_claim_verification(conn, ownership_id, token)
+    if prepared.claim is None:
+        return False, prepared.detail, None
+    if not conn.in_transaction:
+        conn.execute("BEGIN IMMEDIATE")
     row = conn.execute(
         "SELECT * FROM domain_ownership WHERE id=?", (ownership_id,)
     ).fetchone()
-    if row is None or row["token_hash"] != token_hash(token):
-        return False, "claim changed during verification"
+    if (row is None or _claim_snapshot(row) != prepared.claim
+            or row["token_hash"] != token_hash(token)):
+        return False, "claim changed during verification", None
     if db.is_shared_host(conn, row["host"]):
-        return False, "host is shared; whole-host verification is unavailable"
+        return False, "host is shared; whole-host verification is unavailable", None
+    ok, detail = prepared.ok, prepared.detail
+    notification = None
     now = int(time.time())
     if ok:
         # Whoever can publish on the host today owns it. If someone else held
@@ -391,15 +419,39 @@ def verify_claim(conn: sqlite3.Connection, ownership_id: int,
             (token, now, now, ownership_id),
         )
         if displaced is not None:
-            _notify_displaced(conn, row["host"], displaced["user_id"],
-                              row["user_id"], row["method"])
+            notification = (row["host"], int(displaced["user_id"]),
+                            int(row["user_id"]), row["method"])
     else:
         conn.execute(
             "UPDATE domain_ownership SET last_checked=?, "
             "fail_count=fail_count+1 WHERE id=?",
             (now, ownership_id),
         )
+    return ok, detail, notification
+
+
+def verify_claim(conn: sqlite3.Connection, ownership_id: int,
+                 token: str, *, verification: ClaimVerification | None = None
+                 ) -> tuple[bool, str]:
+    """Check a pending claim. The caller supplies the token it was shown."""
+    ok, detail, notification = apply_claim_verification(
+        conn, ownership_id, token, verification=verification)
+    if notification is not None:
+        _notify_displaced(conn, *notification)
     return ok, detail
+
+
+def notify_claim_displaced(notification: ClaimNotification | None) -> None:
+    if notification is None:
+        return
+    try:
+        conn = db.connect(read_only=True, timeout=0.25)
+        try:
+            _notify_displaced(conn, *notification)
+        finally:
+            conn.close()
+    except Exception:
+        log.warning("could not open the displaced-owner notification reader")
 
 
 def recheck(conn: sqlite3.Connection) -> tuple[int, int]:

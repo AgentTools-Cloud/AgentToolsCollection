@@ -2,7 +2,10 @@
 
 from contextlib import closing
 from dataclasses import replace
+import asyncio
 import json
+import sqlite3
+import threading
 import time
 from unittest.mock import patch
 
@@ -40,6 +43,196 @@ class OwnershipFixture(TemporaryDatabaseTestCase):
         with closing(db.connect(read_only=True)) as conn:
             return dict(conn.execute("SELECT * FROM domain_ownership WHERE id=?",
                                      (self.claim,)).fetchone())
+
+
+class ClaimVerificationContentionTests(OwnershipFixture):
+    def setUp(self):
+        super().setUp()
+        with db.writer() as conn:
+            conn.execute(
+                "UPDATE domain_ownership SET status='pending',token=NULL,"
+                "verified_at=NULL WHERE id=?", (self.claim,))
+        self.enterContext(patch.object(
+            routes, "_require_api_user", return_value={"id": self.uid}))
+        self.probe = self.enterContext(patch.object(
+            ownership, "probe", return_value=(True, "fixture")))
+        self.enterContext(patch.object(auth, "_require_user", return_value={
+            "id": self.uid, "login": "lifecycle-fixture", "status": "active"}))
+        self.app = FastAPI()
+        self.app.include_router(routes.router)
+        self.app.include_router(auth.router)
+        self.client = TestClient(self.app, raise_server_exceptions=False)
+
+    def verify(self):
+        return self.client.post(
+            f"/api/v1/claims/{self.claim}/verify", json={"token": self.token})
+
+    def test_claim_write_lock_returns_retryable_503_without_changes(self):
+        before = self.claim_row()
+        with closing(db.connect()) as blocker:
+            blocker.execute("BEGIN IMMEDIATE")
+            started = time.monotonic()
+            try:
+                response = self.verify()
+                elapsed = time.monotonic() - started
+            finally:
+                blocker.rollback()
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.headers.get("retry-after"), "2")
+        self.assertLess(elapsed, 3.0)
+        self.assertEqual(self.claim_row(), before)
+        self.probe.assert_called_once()
+
+    def test_claim_recovers_from_short_lock_without_repeating_probe(self):
+        with closing(db.connect()) as blocker:
+            blocker.execute("BEGIN IMMEDIATE")
+            release = threading.Timer(0.15, blocker.rollback)
+            release.start()
+            try:
+                response = self.verify()
+            finally:
+                release.join(timeout=2.0)
+                blocker.rollback()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.claim_row()["status"], "verified")
+        self.probe.assert_called_once()
+
+    def verify_browser(self):
+        return self.client.post(
+            f"/account/domains/{self.claim}/verify", data={"token": self.token},
+            follow_redirects=False)
+
+    def test_browser_claim_lock_returns_retryable_503_without_changes(self):
+        before = self.claim_row()
+        with closing(db.connect()) as blocker:
+            blocker.execute("BEGIN IMMEDIATE")
+            started = time.monotonic()
+            try:
+                response = self.verify_browser()
+                elapsed = time.monotonic() - started
+            finally:
+                blocker.rollback()
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.headers.get("retry-after"), "2")
+        self.assertLess(elapsed, 3.0)
+        self.assertEqual(self.claim_row(), before)
+        self.probe.assert_called_once()
+
+    def test_browser_claim_short_lock_preserves_success_redirect(self):
+        with closing(db.connect()) as blocker:
+            blocker.execute("BEGIN IMMEDIATE")
+            release = threading.Timer(0.15, blocker.rollback)
+            release.start()
+            try:
+                response = self.verify_browser()
+            finally:
+                release.join(timeout=2.0)
+                blocker.rollback()
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.headers["location"], "/account")
+        self.assertEqual(self.claim_row()["status"], "verified")
+        self.probe.assert_called_once()
+
+    def test_wrong_account_and_token_never_probe_or_change_claim(self):
+        before = self.claim_row()
+        with patch.object(routes, "_require_api_user", return_value={"id": self.uid + 1}):
+            response = self.verify()
+        self.assertEqual(response.status_code, 403)
+        response = self.client.post(
+            f"/api/v1/claims/{self.claim}/verify", json={"token": "wrong-fixture-token"})
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(self.claim_row(), before)
+        self.probe.assert_not_called()
+
+    def test_claim_changes_after_probe_are_not_accepted(self):
+        before = self.claim_row()
+        for column, value in (
+                ("host", "changed.example"), ("method", "dns_txt"),
+                ("token_hash", ownership.token_hash("changed-fixture-token")),
+                ("status", "revoked"), ("scope_path", "/tenant")):
+            with self.subTest(column=column):
+                def change_claim(*_args):
+                    with db.writer() as conn:
+                        conn.execute(
+                            f"UPDATE domain_ownership SET {column}=? WHERE id=?",
+                            (value, self.claim))
+                    return True, "fixture"
+
+                self.probe.reset_mock()
+                self.probe.side_effect = change_claim
+                response = self.verify()
+                self.assertEqual(response.status_code, 422)
+                self.assertIsNone(self.claim_row()["token"])
+                self.assertIsNone(self.claim_row()["verified_at"])
+                self.probe.assert_called_once()
+                with db.writer() as conn:
+                    conn.execute(
+                        f"UPDATE domain_ownership SET {column}=? WHERE id=?",
+                        (before[column], self.claim))
+
+    def test_probe_does_not_block_the_http_event_loop(self):
+        entered = threading.Event()
+
+        def slow_probe(*_args):
+            entered.set()
+            threading.Event().wait(0.3)
+            return True, "fixture"
+
+        self.probe.side_effect = slow_probe
+
+        @self.app.get("/fixture-responsive")
+        def responsive():
+            return {"ok": True}
+
+        async def exercise():
+            transport = httpx.ASGITransport(app=self.app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://fixture") as client:
+                verification = asyncio.create_task(client.post(
+                    f"/api/v1/claims/{self.claim}/verify", json={"token": self.token}))
+                try:
+                    self.assertTrue(await asyncio.to_thread(entered.wait, 1.0))
+                    self.assertFalse(verification.done())
+                    started = time.monotonic()
+                    response = await client.get("/fixture-responsive")
+                    self.assertEqual(response.status_code, 200)
+                    self.assertLess(time.monotonic() - started, 0.15)
+                finally:
+                    result = await verification
+                self.assertEqual(result.status_code, 200)
+
+        asyncio.run(exercise())
+
+    def test_transfer_notification_runs_once_after_commit_without_write_lock(self):
+        with db.writer() as conn:
+            previous_uid = conn.execute(
+                "INSERT INTO users(provider,provider_uid,login,status,created_at) "
+                "VALUES('github','previous-fixture','previous-fixture','active',1)"
+            ).lastrowid
+            conn.execute(
+                "INSERT INTO domain_ownership(user_id,host,method,token_hash,token,"
+                "status,created_at,verified_at,last_checked,fail_count) "
+                "VALUES(?,'owned.example','descriptor',?,'previous-fixture-token',"
+                "'verified',1,1,1,0)",
+                (previous_uid, ownership.token_hash("previous-fixture-token")))
+        observations = []
+
+        def observe_notification(*_args):
+            committed = self.claim_row()["status"] == "verified"
+            with closing(db.connect(timeout=0.05)) as writer:
+                try:
+                    writer.execute("BEGIN IMMEDIATE")
+                except sqlite3.OperationalError:
+                    observations.append(False)
+                else:
+                    observations.append(committed)
+                    writer.rollback()
+
+        with patch.object(ownership, "_notify_displaced", side_effect=observe_notification) as notify:
+            response = self.verify()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(observations, [True])
+        notify.assert_called_once()
+        self.probe.assert_called_once()
 
 
 class FreshOwnershipTests(OwnershipFixture):

@@ -1106,7 +1106,7 @@ def _enforce_submit_limit(request: Request, scope: str) -> str:
     return client_ip
 
 
-def _submission_write(operation):
+def _submission_write(operation, *, busy_error="submission_busy"):
     deadline = time.monotonic() + 2.5
     last_error = None
     while time.monotonic() < deadline:
@@ -1121,7 +1121,7 @@ def _submission_write(operation):
             time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
     raise HTTPException(
         status_code=503,
-        detail={"error": "submission_busy", "message": "Please retry shortly."},
+        detail={"error": busy_error, "message": "Please retry shortly."},
         headers={"Retry-After": "2", "Cache-Control": "private, no-store"},
     ) from last_error
 
@@ -1290,46 +1290,64 @@ async def api_open_claim(request: Request, payload: ClaimRequest):
 async def api_verify_claim(request: Request, claim_id: int,
                            payload: ClaimVerifyRequest):
     """Check that the token is live on the host, and hand over the listings."""
-    user = _require_api_user(request)
-    with db.connect(read_only=True) as conn:
-        row = conn.execute(
-            "SELECT user_id, host, method FROM domain_ownership WHERE id=?",
-            (claim_id,)).fetchone()
-    if row is None:
-        raise HTTPException(404, {"error": "no_such_claim"})
-    if int(row["user_id"]) != int(user["id"]):
-        # The token is public by design, so the claim it belongs to is what
-        # decides who gets the host.
-        raise HTTPException(403, {
-            "error": "not_your_claim",
-            "message": "Open your own claim with POST /api/v1/claims.",
-        })
+    def verify():
+        user = _require_api_user(request)
+        token = payload.token.strip()
+        conn = db.connect(read_only=True)
+        try:
+            row = conn.execute(
+                "SELECT user_id, host, method FROM domain_ownership WHERE id=?",
+                (claim_id,)).fetchone()
+            if row is None:
+                raise HTTPException(404, {"error": "no_such_claim"})
+            if int(row["user_id"]) != int(user["id"]):
+                raise HTTPException(403, {
+                    "error": "not_your_claim",
+                    "message": "Open your own claim with POST /api/v1/claims.",
+                })
+            prepared = directory_ownership.prepare_claim_verification(
+                conn, claim_id, token)
+        finally:
+            conn.close()
 
-    with db.writer() as conn:
-        ok, detail = directory_ownership.verify_claim(
-            conn, claim_id, payload.token.strip())
-        if ok:
-            db.sync_owner_verified(conn)
-    if not ok:
-        raise HTTPException(422, {
-            "error": "not_verified",
-            "message": detail,
-            "publish": _PUBLISH_HINT.get(row["method"], "").format(
-                host=row["host"]),
-        })
+        if prepared.claim is None:
+            ok, detail, notification = False, prepared.detail, None
+        else:
+            def persist(conn):
+                ok, detail, notification = directory_ownership.apply_claim_verification(
+                    conn, claim_id, token, verification=prepared)
+                if ok:
+                    db.sync_owner_verified(conn)
+                return ok, detail, notification
 
-    with db.connect(read_only=True) as conn:
-        mine = db.listings_for_host(conn, row["host"])
-    return {
-        "status": "verified",
-        "host": row["host"],
-        "listings": mine,
-        "next": {
-            "method": "PATCH",
-            "url": "/api/v1/listings/{kind}/{slug}",
-            "auth": "Authorization: Bearer <api_key>",
-        },
-    }
+            ok, detail, notification = _submission_write(persist, busy_error="claim_busy")
+        if not ok:
+            raise HTTPException(422, {
+                "error": "not_verified",
+                "message": detail,
+                "publish": _PUBLISH_HINT.get(row["method"], "").format(
+                    host=row["host"]),
+            })
+
+        directory_ownership.notify_claim_displaced(notification)
+
+        conn = db.connect(read_only=True)
+        try:
+            mine = db.listings_for_host(conn, row["host"])
+        finally:
+            conn.close()
+        return {
+            "status": "verified",
+            "host": row["host"],
+            "listings": mine,
+            "next": {
+                "method": "PATCH",
+                "url": "/api/v1/listings/{kind}/{slug}",
+                "auth": "Authorization: Bearer <api_key>",
+            },
+        }
+
+    return await run_in_threadpool(verify)
 
 
 def _api_editable(request: Request, kind: str, slug: str):
