@@ -157,6 +157,7 @@ def normalize_service(row: dict, as_mcp: bool = False,
 
 def normalize_mcp_server(row: dict, include_sort_meta: bool = False) -> dict:
     """Normalise a standalone mcp_servers row into the unified shape."""
+    from . import mcp_pricing
     protocols = ["mcp"]
     if row.get("x402_supported"):
         protocols.append("x402")
@@ -183,12 +184,19 @@ def normalize_mcp_server(row: dict, include_sort_meta: bool = False) -> dict:
         "access": _access_model(row.get("x402_supported"),
                                 auth=row.get("auth_method"),
                                 cost_hint=row.get("cost_hint")),
+        "pricing": row.get("pricing"),
         "kind": row.get("kind") or ("callable" if endpoint else "catalog"),
         "health_status": row.get("health") or "unknown",
         "confidence": row.get("confidence"),
         "call_hint": call_hint,
         "detail_url": f"https://agent-tools.cloud/api/v1/mcp/servers/{row.get('slug')}",
     }
+    if row.get("pricing"):
+        summary = mcp_pricing.access_summary(row["pricing"])
+        item["access"].update(summary)
+        if summary["paid"] and summary["buyer_approval_required"] is not False:
+            item["access"]["agent_can_self_serve"] = False
+            item["access"]["label"] = "Public discovery; paid operations require buyer approval" if summary["buyer_approval_required"] else "Public discovery; paid-operation approval is unspecified"
     if include_sort_meta:
         item.update({
             "_search_priority": row.get("search_priority"),

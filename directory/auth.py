@@ -465,6 +465,9 @@ _FIELD_LABELS = {
     "card_url": "Agent Card URL (must be on a host you have verified)",
     "method": "Primary HTTP method",
     "price_usdc": "Primary price (USDC)",
+    "cost_hint": "Cost",
+    "auth_method": "Auth scheme (not credentials)",
+    "pricing": "Operation pricing (JSON)",
     "resources": "Resources (JSON array)",
     "well_known_url": "x402 descriptor URL",
     "openapi_url": "OpenAPI URL",
@@ -549,7 +552,12 @@ def may_edit_listing(request: Request, kind: str, listing_url: str) -> bool:
 def editable_values(kind, row):
     if kind == "x402":
         return owner_declarations.editable_fields(row)
-    return {name: row[name] for name in db._EDITABLE_FIELDS[kind]}
+    values = {name: row[name] for name in db._EDITABLE_FIELDS[kind]}
+    if kind == "mcp":
+        from . import mcp_pricing
+        value = values["pricing"]
+        values["pricing"] = mcp_pricing.normalize(value) if isinstance(value, dict) else mcp_pricing.read(value, row["endpoint_url"])
+    return values
 
 
 async def verify_owner_listing(request, kind, row, user, owner):
@@ -576,9 +584,16 @@ def _edit_context(request, kind, slug, user, row, host, saved=None, error=None):
     values = editable_values(kind, row)
     fields = [
         {"name": f, "label": _FIELD_LABELS.get(f, f), "value": values[f],
-         "multiline": f == "description"}
+         "multiline": f in ("description", "cost_hint", "pricing")}
         for f in db._EDITABLE_FIELDS[kind] if f not in owner_declarations.FIELDS
     ]
+    if kind == "mcp":
+        from . import mcp_pricing
+        for field in fields:
+            if field["name"] == "pricing":
+                field["value"] = json.dumps(values["pricing"], ensure_ascii=False, indent=2) if values["pricing"] else ""
+            elif field["name"] == "auth_method":
+                field["choices"] = mcp_pricing.auth_choices(field["value"])
     declaration = owner_declarations.public_state(row) if kind == "x402" else None
     interface_fields = []
     if kind == "x402":

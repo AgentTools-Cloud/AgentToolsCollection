@@ -351,6 +351,7 @@ CREATE TABLE IF NOT EXISTS mcp_servers (
   transport         TEXT,
   auth_method       TEXT,
   cost_hint         TEXT,
+    pricing           TEXT,
   source_code_url   TEXT,
   package_registry  TEXT,
   package_name      TEXT,
@@ -711,6 +712,7 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
             "ALTER TABLE mcp_servers ADD COLUMN protocol_version TEXT",
             "ALTER TABLE mcp_servers ADD COLUMN kind TEXT",
             "ALTER TABLE mcp_servers ADD COLUMN quality TEXT",
+            "ALTER TABLE mcp_servers ADD COLUMN pricing TEXT",
             "ALTER TABLE a2a_agents ADD COLUMN conformance TEXT",
             "ALTER TABLE services ADD COLUMN down_since INTEGER",
             "ALTER TABLE mcp_servers ADD COLUMN down_since INTEGER",
@@ -3610,7 +3612,9 @@ _MCP_JSON_COLS = ("tags", "quality")
 
 
 def mcp_row_to_dict(row) -> dict:
+    from . import mcp_pricing
     d = dict(row)
+    d["pricing"] = mcp_pricing.read(d.get("pricing"), d.get("endpoint_url"))
     for k in _MCP_JSON_COLS:
         if d.get(k):
             try:
@@ -4834,7 +4838,7 @@ def upsert_user(conn: sqlite3.Connection, provider: str, provider_uid: str,
 _EDITABLE_FIELDS = {
     "x402": ("name", "description", "category", "url", "mcp_url",
              "method", "price_usdc", "resources", "well_known_url", "openapi_url"),
-    "mcp": ("name", "description", "homepage_url", "endpoint_url"),
+    "mcp": ("name", "description", "homepage_url", "endpoint_url", "cost_hint", "auth_method", "pricing"),
     "a2a": ("name", "description", "homepage_url", "documentation_url",
             "provider_name", "endpoint_url", "card_url"),
 }
@@ -4937,6 +4941,27 @@ def apply_listing_edits(conn: sqlite3.Connection, kind: str, listing_id: int,
     allowed = _EDITABLE_FIELDS[kind]
     endpoints = _ENDPOINT_FIELDS.get(kind, ())
     current, ownership = owner_edit_state(conn, kind, listing_id, user_id, ownership_id)
+    if kind == "mcp":
+        from . import mcp_pricing
+        changes = dict(changes)
+        try:
+            if "cost_hint" in changes:
+                value = changes["cost_hint"]
+                if value is not None and (not isinstance(value, str) or len(value) > 2000):
+                    raise ValueError("Cost must be text of at most 2000 characters")
+            if "auth_method" in changes:
+                changes["auth_method"] = mcp_pricing.normalize_auth(changes["auth_method"], current["auth_method"])
+            if "pricing" in changes:
+                pricing = mcp_pricing.normalize(changes["pricing"])
+                endpoint = changes.get("endpoint_url")
+                if pricing and isinstance(endpoint, str) and _exact_endpoint(endpoint.strip()) != current["endpoint_url"]:
+                    if pricing != mcp_pricing.read(current["pricing"], current["endpoint_url"]):
+                        raise ValueError("Save the new endpoint before declaring its pricing")
+                    changes.pop("pricing")
+                else:
+                    changes["pricing"] = mcp_pricing.serialize(pricing, current["endpoint_url"])
+        except ValueError as exc:
+            return [], [str(exc)]
     from . import owner_declarations
     declaration_changes = {key: value for key, value in changes.items()
                            if kind == "x402" and key in owner_declarations.FIELDS}
@@ -5027,6 +5052,13 @@ def apply_listing_edits(conn: sqlite3.Connection, kind: str, listing_id: int,
                 "DELETE FROM service_paytos WHERE service_id=?", (listing_id,)
             )
             conn.execute("UPDATE services SET owner_declaration=NULL WHERE id=?", (listing_id,))
+        elif kind == "mcp" and current["pricing"] and "pricing" not in applied:
+            conn.execute("UPDATE mcp_servers SET pricing=NULL WHERE id=?", (listing_id,))
+            conn.execute(
+                "INSERT INTO listing_edits(kind, listing_id, user_id, ownership_id, "
+                "field, old_value, new_value, applied_at, via) VALUES (?,?,?,?,?,?,?,?,?)",
+                (kind, listing_id, user_id, ownership_id, "pricing", current["pricing"], None, now, via))
+            applied.append("pricing")
     if applied:
         try:
             marked = set(json.loads(current["owner_edited"] or "[]"))
