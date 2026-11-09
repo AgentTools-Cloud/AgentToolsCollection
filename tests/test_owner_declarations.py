@@ -122,6 +122,17 @@ class OwnerDeclarationTests(TemporaryDatabaseTestCase):
         for field in ('openapi_url', 'quality', 'confidence', 'currency', 'conformance'):
             self.assertIsNone(row[field], field)
 
+    def test_equivalent_primary_keeps_declaration_and_measurements(self):
+        self.edit({'method': 'POST'})
+        before = self.row()
+        applied, rejected = self.edit({'url': 'https://OWNED.EXAMPLE/v1/ping'})
+        self.assertFalse(applied)
+        self.assertFalse(rejected)
+        self.assertEqual(self.row()['url'], before['url'])
+        self.assertEqual(self.row()['owner_declaration'], before['owner_declaration'])
+        for field in ('health', 'x402_ok', 'quality_score', 'price_min', 'tx_30d'):
+            self.assertEqual(self.row()[field], before[field], field)
+
     def test_primary_resource_and_price_consistency(self):
         applied, rejected = self.edit(dict(method='POST', price_usdc=0.003,
             resources=[dict(url='https://owned.example/v1/ping', method='GET', price_usdc=0.001)]))
