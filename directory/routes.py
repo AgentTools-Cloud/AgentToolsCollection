@@ -54,8 +54,9 @@ LEGACY_MCP_SLUG_REDIRECTS = {
 # field on each result.
 SEARCH_SORT_PATTERN = "^(default|relevance|quality|newest|name)$"
 SEARCH_SORT_DOC = (
-    "Result order: default (existing health-and-demand ranking), relevance "
-    "(text relevance; falls back to default without q), quality, newest, or name."
+    "Result order: default (text relevance with q, health-and-demand without q), "
+    "relevance (title/description matches first; health and measured quality "
+    "break ties; falls back to default without q), quality, newest, or name."
 )
 
 HEALTH_DOC = (
@@ -517,6 +518,7 @@ def api_search(
         svc.pop("source", None)
         svc.pop("source_id", None)
         svc.pop("search_rank", None)
+        svc.pop("search_priority", None)
         if svc.get("slug"):
             svc["service_card_url"] = f"/api/v1/services/{svc['slug']}"
     return {
@@ -712,11 +714,14 @@ def api_mcp_search(
     Unions the standalone MCP directory (PulseMCP / official registry import)
     with x402 services that also expose an mcp_url.
     """
-    effective_sort = "default" if sort == "relevance" and not (q or "").strip() else sort
+    effective_sort = db.effective_search_sort(q, sort)
     pull = limit + offset
     servers: list[dict] = []
     seen: set[str] = set()
     with _conn() as c:
+        c.execute("BEGIN")
+        mcp_keys, service_keys = db.mcp_search_keys(c, q=q, chain=chain, health=health)
+        total_matched = len(mcp_keys | service_keys)
         for r in db.search_mcp(c, q=q, health=health, sort=effective_sort, limit=pull):
             item = directory_resources.normalize_mcp_server(
                 r, include_sort_meta=effective_sort != "default")
@@ -725,15 +730,31 @@ def api_mcp_search(
                 continue
             seen.add(key)
             servers.append(item)
-        for r in db.search(c, q=q, chain=chain, health=health,
-                           has_mcp=True, sort=effective_sort, limit=pull):
-            item = directory_resources.normalize_service(
-                r, as_mcp=True, include_sort_meta=effective_sort != "default")
-            key = (item.get("endpoint_url") or item.get("slug") or "").lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            servers.append(item)
+        service_target = min(pull, len(service_keys - mcp_keys))
+        if effective_sort == "default" and len(servers) >= pull:
+            service_target = 0
+        service_count = service_offset = 0
+        chunk = max(pull, 50)
+        while service_count < service_target:
+            rows = db.search(c, q=q, chain=chain, health=health,
+                             has_mcp=True, sort=effective_sort,
+                             limit=chunk, offset=service_offset)
+            if not rows:
+                break
+            service_offset += len(rows)
+            for row in rows:
+                key = ((row.get("mcp_url") or "").strip()
+                       or row.get("url") or row.get("slug") or "").lower()
+                if key in seen or key in mcp_keys or key not in service_keys:
+                    continue
+                seen.add(key)
+                servers.append(directory_resources.normalize_service(
+                    row, as_mcp=True, include_sort_meta=effective_sort != "default"))
+                service_count += 1
+                if service_count >= service_target:
+                    break
+            if len(rows) < chunk:
+                break
     if effective_sort != "default":
         directory_resources.sort_resources(servers, effective_sort, q)
     window = servers[offset:offset + limit]
@@ -745,7 +766,7 @@ def api_mcp_search(
         "query": q,
         "sort": sort,
         "count": len(window),
-        "total_matched": len(servers),
+        "total_matched": total_matched,
         "servers": window,
         "exact_name_matches": next(
             (group for group in exact_name_groups if group["query_exact"]), None),
