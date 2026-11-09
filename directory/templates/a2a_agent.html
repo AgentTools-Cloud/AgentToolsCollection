@@ -8,7 +8,6 @@
   "name": a.name,
   "description": (a.description or a.name),
   "url": "https://agent-tools.cloud/a2a/agents/" + a.slug,
-  "offers": {"@type": "Offer", "price": "0", "priceCurrency": "USD"}
 }|tojson }}</script>{% endblock %}
 {% block track %}<script>atTrackView('a2a', {{ a.slug|tojson }});</script>{% endblock %}
 {% block content %}

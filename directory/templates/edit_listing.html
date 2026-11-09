@@ -22,7 +22,12 @@
         <span class="block font-medium mb-1">{{ f.label }}</span>
         {% if f.multiline %}
           <textarea name="{{ f.name }}" rows="4"
+                    {% if f.name == 'pricing' %}maxlength="32768" spellcheck="false"{% elif f.name == 'cost_hint' %}maxlength="2000"{% endif %}
                     class="w-full rounded border border-slate-300 px-3 py-2 text-sm">{{ f.value or '' }}</textarea>
+        {% elif f.get('choices') %}
+          <select name="{{ f.name }}" class="w-full rounded border border-slate-300 px-3 py-2 text-sm">
+            {% for choice in f.choices %}<option value="{{ choice.value }}"{% if (f.value or '') == choice.value %} selected{% endif %}>{{ choice.label }}</option>{% endfor %}
+          </select>
         {% else %}
           <input type="text" name="{{ f.name }}" value="{{ f.value or '' }}"
                  class="w-full rounded border border-slate-300 px-3 py-2 text-sm">
