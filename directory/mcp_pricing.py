@@ -69,11 +69,13 @@ def normalize(value):
             raise ValueError("Offer description must be text of at most 2000 characters")
         price = offer.get("price")
         currency = offer.get("priceCurrency")
-        if (isinstance(price, bool) or not isinstance(price, (str, int, float))
-                or not re.fullmatch(r"\d{1,12}(?:\.\d{1,8})?", str(price))):
+        if isinstance(price, bool) or not isinstance(price, (str, int, float)):
+            raise ValueError("Each offer requires an explicit non-negative decimal price")
+        price_text = format(Decimal(str(price)), "f") if isinstance(price, float) else str(price)
+        if not re.fullmatch(r"\d{1,12}(?:\.\d{1,8})?", price_text):
             raise ValueError("Each offer requires an explicit non-negative decimal price")
         try:
-            amount = Decimal(str(price))
+            amount = Decimal(price_text)
         except InvalidOperation:
             raise ValueError("Invalid pricing amount") from None
         if not amount.is_finite() or amount > Decimal("1000000"):

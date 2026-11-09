@@ -5009,6 +5009,8 @@ def apply_listing_edits(conn: sqlite3.Connection, kind: str, listing_id: int,
             if not new:
                 rejected.append("%s is not a valid URL" % field)
                 continue
+            if new == _exact_endpoint(old):
+                continue
             host, _ = _host_and_path(new)
             if host not in hosts:
                 rejected.append(

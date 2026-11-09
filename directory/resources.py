@@ -193,10 +193,15 @@ def normalize_mcp_server(row: dict, include_sort_meta: bool = False) -> dict:
     }
     if row.get("pricing"):
         summary = mcp_pricing.access_summary(row["pricing"])
-        item["access"].update(summary)
-        if summary["paid"] and summary["buyer_approval_required"] is not False:
-            item["access"]["agent_can_self_serve"] = False
-            item["access"]["label"] = "Public discovery; paid operations require buyer approval" if summary["buyer_approval_required"] else "Public discovery; paid-operation approval is unspecified"
+        access = item["access"]
+        access["buyer_approval_required"] = summary["buyer_approval_required"]
+        if access["model"] != "agent_pays":
+            access.update(summary)
+        if access["paid"] and summary["buyer_approval_required"] is not False:
+            access["agent_can_self_serve"] = False
+            label = "Public discovery" if access["model"] == "open" else access["label"]
+            approval_hint = "paid operations require buyer approval" if summary["buyer_approval_required"] else "paid-operation approval is unspecified"
+            access["label"] = label + "; " + approval_hint
     if include_sort_meta:
         item.update({
             "_search_priority": row.get("search_priority"),
