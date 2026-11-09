@@ -1444,12 +1444,26 @@ def _query_tokens(q: str) -> list[str]:
 SEARCH_SORTS = ("default", "relevance", "quality", "newest", "name")
 
 
+def effective_search_sort(q: str | None, sort: str) -> str:
+    if sort not in SEARCH_SORTS:
+        raise ValueError("unsupported search sort: %s" % sort)
+    if sort in ("default", "relevance"):
+        return "relevance" if _query_tokens(q or "") else "default"
+    return sort
+
+
 def _search_order(sort: str, alias: str, default_order: str,
-                  relevance_expr: str | None = None) -> str:
+                  relevance_expr: str | None = None,
+                  priority_expr: str | None = None) -> str:
     if sort not in SEARCH_SORTS:
         raise ValueError("unsupported search sort: %s" % sort)
     if sort == "relevance" and relevance_expr:
-        return "%s ASC, %s.id ASC" % (relevance_expr, alias)
+        priority = "%s ASC, " % priority_expr if priority_expr else ""
+        return (priority + "%s ASC, CASE %s.health WHEN 'ok' THEN 0 "
+                "WHEN 'degraded' THEN 1 WHEN 'unknown' THEN 2 "
+                "WHEN 'down' THEN 3 ELSE 4 END ASC, "
+                "COALESCE(%s.quality_score, -1) DESC, %s.id ASC"
+                % (relevance_expr, alias, alias, alias))
     if sort == "quality":
         return ("COALESCE(%s.quality_score, -1) DESC, %s.id DESC"
                 % (alias, alias))
@@ -1458,6 +1472,12 @@ def _search_order(sort: str, alias: str, default_order: str,
     if sort == "name":
         return ("LOWER(COALESCE(%s.name, '')) ASC, %s.id ASC" % (alias, alias))
     return default_order
+
+
+def _search_priority_sql(fts_table: str, alias: str) -> str:
+    return ("CASE WHEN %s.id IN (SELECT rowid FROM %s WHERE %s MATCH ?) THEN 0 "
+            "WHEN %s.id IN (SELECT rowid FROM %s WHERE %s MATCH ?) THEN 1 "
+            "ELSE 2 END" % (alias, fts_table, fts_table, alias, fts_table, fts_table))
 
 
 def _fts_literal(value: str, prefix: bool = False) -> str:
@@ -1481,8 +1501,6 @@ def _expand_fts_query(q: str) -> str | None:
         if syns:
             quoted = [_fts_literal(s) for s in syns]
             groups.append("(" + " OR ".join(quoted) + ")")
-        elif len(tokens) == 1:
-            groups.append(_fts_literal(t, prefix=True))
         else:
             groups.append(_fts_literal(t))
     return " AND ".join(groups)
@@ -1560,6 +1578,7 @@ def search(conn, q=None, category=None, chain=None, region=None, health=None,
     where: list[str] = []
     params: list = []
 
+    sort = effective_search_sort(q, sort)
     fts_query = None
     if q:
         fts_query = _expand_fts_query(q)
@@ -1571,7 +1590,10 @@ def search(conn, q=None, category=None, chain=None, region=None, health=None,
             "snippet(services_fts, -1, '[[', ']]', '…', 12) AS match_snippet"
         )
         if sort == "relevance":
+            select_cols.append(_search_priority_sql("services_fts", "s") + " AS search_priority")
             select_cols.append(service_rank + " AS search_rank")
+            params.extend(["{name name_zh} : (" + fts_query + ")",
+                           "{description description_zh} : (" + fts_query + ")"])
         sql_parts = ["SELECT " + ", ".join(select_cols) + " FROM services s"]
         sql_parts.append("JOIN services_fts f ON f.rowid = s.id")
         where.append("services_fts MATCH ?")
@@ -1613,7 +1635,8 @@ def search(conn, q=None, category=None, chain=None, region=None, health=None,
     )
     sql_parts.append("ORDER BY " + _search_order(
         sort, "s", service_default_order,
-        service_rank if fts_query is not None else None))
+        service_rank if fts_query is not None else None,
+        "search_priority" if sort == "relevance" and fts_query is not None else None))
     sql_parts.append("LIMIT ? OFFSET ?")
     params.extend([limit, offset])
     rows = conn.execute(" ".join(sql_parts), params).fetchall()
@@ -1642,13 +1665,17 @@ def search(conn, q=None, category=None, chain=None, region=None, health=None,
                 where.append("s.mcp_url IS NOT NULL AND s.mcp_url != ''")
             sql_parts.append("WHERE " + " AND ".join(where))
             if sort == "relevance":
+                select_cols.append(_search_priority_sql("services_fts", "s") + " AS search_priority")
                 select_cols.append(service_rank + " AS search_rank")
+                params[:0] = ["{name name_zh} : (" + relaxed + ")",
+                              "{description description_zh} : (" + relaxed + ")"]
                 sql_parts[0] = "SELECT " + ", ".join(select_cols) + " FROM services s"
             if sort == "default":
                 # Preserve the pre-sort-option fallback order exactly.
                 order = "bm25(services_fts), " + service_default_order
             else:
-                order = _search_order(sort, "s", service_default_order, service_rank)
+                order = _search_order(sort, "s", service_default_order, service_rank,
+                                      "search_priority" if sort == "relevance" else None)
             sql_parts.append("ORDER BY " + order)
             sql_parts.append("LIMIT ? OFFSET ?")
             params.extend([limit, offset])
@@ -3366,6 +3393,7 @@ def upsert_a2a_agent(conn: sqlite3.Connection, row: dict) -> tuple:
 def search_a2a(conn, q=None, health=None, x402_only=False,
                access=None, limit=50, offset=0, sort: str = "default"):
     """Search A2A agents. Ranks healthy + x402-capable + confident first."""
+    sort = effective_search_sort(q, sort)
     select_cols = ["a.*"]
     where: list[str] = []
     params: list = []
@@ -3377,7 +3405,10 @@ def search_a2a(conn, q=None, health=None, x402_only=False,
             "snippet(a2a_fts, -1, '[[', ']]', '…', 12) AS match_snippet"
         )
         if sort == "relevance":
+            select_cols.append(_search_priority_sql("a2a_fts", "a") + " AS search_priority")
             select_cols.append(a2a_rank + " AS search_rank")
+            params.extend(["name : (" + fts_query + ")",
+                           "description : (" + fts_query + ")"])
         sql = ["SELECT " + ", ".join(select_cols) + " FROM a2a_agents a"]
         sql.append("JOIN a2a_fts f ON f.rowid = a.id")
         where.append("a2a_fts MATCH ?")
@@ -3403,7 +3434,8 @@ def search_a2a(conn, q=None, health=None, x402_only=False,
     )
     sql.append("ORDER BY " + _search_order(
         sort, "a", a2a_default_order,
-        a2a_rank if fts_query is not None else None))
+        a2a_rank if fts_query is not None else None,
+        "search_priority" if sort == "relevance" and fts_query is not None else None))
     sql.append("LIMIT ? OFFSET ?")
     params.extend([limit, offset])
     rows = conn.execute(" ".join(sql), params).fetchall()
@@ -3805,6 +3837,7 @@ def _access_case(alias, kind):
 def search_mcp(conn, q=None, health=None, x402_only=False, kind=None,
                access=None, limit=50, offset=0, sort: str = "default"):
     """Search standalone MCP servers. Ranks healthy + remotely callable first."""
+    sort = effective_search_sort(q, sort)
     select_cols = ["m.*"]
     where: list[str] = []
     params: list = []
@@ -3814,7 +3847,10 @@ def search_mcp(conn, q=None, health=None, x402_only=False, kind=None,
     if fts_query is not None:
         select_cols.append("snippet(mcp_fts, -1, '[[', ']]', '…', 12) AS match_snippet")
         if sort == "relevance":
+            select_cols.append(_search_priority_sql("mcp_fts", "m") + " AS search_priority")
             select_cols.append(mcp_rank + " AS search_rank")
+            params.extend(["name : (" + fts_query + ")",
+                           "description : (" + fts_query + ")"])
         sql = ["SELECT " + ", ".join(select_cols) + " FROM mcp_servers m"]
         sql.append("JOIN mcp_fts f ON f.rowid = m.id")
         where.append("mcp_fts MATCH ?")
@@ -3843,7 +3879,8 @@ def search_mcp(conn, q=None, health=None, x402_only=False, kind=None,
     )
     sql.append("ORDER BY " + _search_order(
         sort, "m", mcp_default_order,
-        mcp_rank if fts_query is not None else None))
+        mcp_rank if fts_query is not None else None,
+        "search_priority" if sort == "relevance" and fts_query is not None else None))
     sql.append("LIMIT ? OFFSET ?")
     params.extend([limit, offset])
     rows = conn.execute(" ".join(sql), params).fetchall()
@@ -3854,6 +3891,55 @@ def search_mcp(conn, q=None, health=None, x402_only=False, kind=None,
             d.pop("match_snippet", None)
         out.append(d)
     return out
+
+
+def mcp_search_keys(conn, q=None, chain=None, health=None) -> tuple[set[str], set[str]]:
+    """Complete per-source MCP identities, without loading tool descriptions."""
+    fts_query = _expand_fts_query(q) if q else None
+    mcp_sql = "SELECT m.endpoint_url, m.slug FROM mcp_servers m"
+    mcp_where = []
+    mcp_params = []
+    if fts_query is not None:
+        mcp_sql += " JOIN mcp_fts ON mcp_fts.rowid = m.id"
+        mcp_where.append("mcp_fts MATCH ?")
+        mcp_params.append(fts_query)
+    if health:
+        mcp_where.append("m.health=?")
+        mcp_params.append(health)
+    if mcp_where:
+        mcp_sql += " WHERE " + " AND ".join(mcp_where)
+    keys = {(row["endpoint_url"] or row["slug"] or "").lower()
+            for row in conn.execute(mcp_sql, mcp_params)}
+
+    def service_keys(match_query):
+        sql = "SELECT s.mcp_url, s.url, s.slug FROM services s"
+        where = ["s.mcp_url IS NOT NULL AND s.mcp_url != ''"]
+        params = []
+        if match_query is not None:
+            sql += " JOIN services_fts ON services_fts.rowid = s.id"
+            where.append("services_fts MATCH ?")
+            params.append(match_query)
+        if chain:
+            where.append("s.chains LIKE ?")
+            params.append(f'%"{chain}"%')
+        if health:
+            where.append("s.health=?")
+            params.append(health)
+        sql += " WHERE " + " AND ".join(where)
+        return {((row["mcp_url"] or "").strip() or row["url"] or row["slug"] or "").lower()
+                for row in conn.execute(sql, params)}
+
+    matched_services = service_keys(fts_query)
+    if not matched_services and fts_query is not None:
+        relaxed = _expand_fts_query_relaxed(q)
+        if relaxed:
+            matched_services = service_keys(relaxed)
+    return keys, matched_services
+
+
+def count_mcp_search(conn, q=None, chain=None, health=None) -> int:
+    mcp_keys, service_keys = mcp_search_keys(conn, q=q, chain=chain, health=health)
+    return len(mcp_keys | service_keys)
 
 
 def get_mcp_by_slug(conn, slug):
