@@ -22,10 +22,10 @@
       <div class="text-slate-500 text-sm mt-1">{{ svc.name }}</div>
     {% endif %}
     <a href="{{ svc.url }}" target="_blank" rel="noopener" class="text-blue-600 hover:underline text-sm mono break-all mt-2 inline-block">{{ svc.url }}</a>
-    <div class="mt-3 hidden" data-edit-host="{{ url_host(svc.url) }}">
+    <div class="mt-3 hidden" data-edit-host="{{ url_host(svc.url) }}" data-edit-kind="x402" data-edit-slug="{{ svc.slug }}">
       <a href="/listings/x402/{{ svc.slug }}/edit"
          class="inline-flex items-center gap-1.5 rounded border border-slate-300 bg-white px-3 py-1.5 text-sm hover:border-slate-400">Edit this listing</a>
-      <span class="ml-2 text-xs text-slate-500">You verified control of this domain</span>
+      <span class="ml-2 text-xs text-slate-500">Verified control of this listing</span>
     </div>
 
   </div>
@@ -46,6 +46,11 @@
 {% if svc.description_zh or svc.description %}
 <section class="svc-card p-6 mb-6">
   <p class="text-slate-800 whitespace-pre-line leading-relaxed">{{ svc.description_zh or svc.description }}</p>
+  {% if svc.tags is iterable and svc.tags is not string and svc.tags and '"tags"' in (svc.owner_edited or '') %}
+  <ul class="mt-3 flex flex-wrap gap-2" aria-label="Tags">
+    {% for tag in svc.tags[:8] %}<li class="text-xs rounded bg-slate-100 text-slate-700 px-2 py-0.5">{{ tag }}</li>{% endfor %}
+  </ul>
+  {% endif %}
 </section>
 {% endif %}
 

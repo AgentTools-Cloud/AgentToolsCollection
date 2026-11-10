@@ -26,9 +26,9 @@
   <span class="inline-flex items-center justify-center min-w-[28px] px-1.5 py-0.5 rounded-md text-xs font-bold {{ cls }}">{{ g }}</span>
 {%- endmacro %}
 
-{#- Score pill, e.g. 8.26 -#}
+{#- Score pill, e.g. 8.260 -#}
 {% macro score_pill(score) -%}
-  <span class="mono text-sm font-semibold text-slate-800">{{ "%.2f"|format(score or 0) }}</span>
+  <span class="mono text-sm font-semibold text-slate-800">{{ "%.3f"|format(score or 0) }}</span>
 {%- endmacro %}
 
 {#- Top-rated leaderboard table. `kind` in (mcp, a2a, x402); rows are
@@ -41,15 +41,15 @@
       {% if not compact %}<span class="text-xs text-slate-400">by quality score · health · trust signals</span>{% endif %}
     </div>
     <div class="{% if not compact %}overflow-x-auto{% endif %}">
-      <table class="w-full text-sm {% if compact %}table-fixed{% endif %}">
+      <table class="w-full text-sm table-fixed">
         <thead>
           <tr class="text-left text-[11px] uppercase tracking-wider text-slate-400">
-            <th class="pl-4 pr-1 py-2 font-medium w-7">#</th>
+            <th class="pl-4 pr-1 py-2 font-medium w-10">#</th>
             <th class="px-1 py-2 font-medium">Tool</th>
             <th class="px-1 py-2 font-medium w-12">Grade</th>
-            <th class="pl-1 pr-4 py-2 font-medium w-14">Score</th>
-            {% if not compact %}<th class="px-2 py-2 font-medium hidden md:table-cell">Category</th>
-            <th class="px-5 py-2 font-medium hidden sm:table-cell">Access</th>{% endif %}
+            <th class="pl-1 pr-4 py-2 font-medium w-20">Score</th>
+            {% if not compact %}<th class="px-2 py-2 font-medium w-28 hidden md:table-cell">Category</th>
+            <th class="px-5 py-2 font-medium w-48 hidden sm:table-cell">Access</th>{% endif %}
           </tr>
         </thead>
         <tbody class="divide-y divide-slate-50">
@@ -59,15 +59,14 @@
           {%- elif kind == 'a2a' -%}{% set ax = r.x402_supported %}{% set au = r.auth_schemes %}
           {%- else -%}{% set ax = r.x402_supported %}{% set au = r.auth_method %}{%- endif -%}
           <tr class="hover:bg-slate-50/60">
-            <td class="pl-4 pr-1 py-3 text-slate-400 mono align-middle">{{ loop.index }}</td>
-            <td class="px-1 py-3 align-middle min-w-0">
-              <a href="{{ prefix }}{{ r.slug }}" class="block truncate font-semibold text-slate-900 hover:text-blue-600">{{ r.name }}</a>
-              {% if not compact and r.description %}<div class="text-xs text-slate-500 line-clamp-1 max-w-md">{{ r.description }}</div>{% endif %}
+            <td class="pl-4 pr-1 py-0.5 text-slate-400 mono align-middle">{{ loop.index }}</td>
+            <td class="px-1 py-0.5 align-middle min-w-0">
+              <a href="{{ prefix }}{{ r.slug }}" title="{{ r.name }}{% if r.description %}: {{ r.description }}{% endif %}" class="block truncate font-semibold text-slate-900 hover:text-blue-600">{{ r.name }}</a>
             </td>
-            <td class="px-1 py-3 align-middle">{{ grade_badge(r.grade) }}</td>
-            <td class="pl-1 pr-4 py-3 align-middle">{{ score_pill(r.score) }}</td>
-            {% if not compact %}<td class="px-2 py-3 hidden md:table-cell text-slate-500 text-xs">{{ cat }}</td>
-            <td class="px-5 py-3 hidden sm:table-cell">{{ access_badge(ax, au) }}</td>{% endif %}
+            <td class="px-1 py-0.5 align-middle">{{ grade_badge(r.grade) }}</td>
+            <td class="pl-1 pr-4 py-0.5 align-middle">{{ score_pill(r.score) }}</td>
+            {% if not compact %}<td class="px-2 py-0.5 hidden md:table-cell text-slate-500 text-xs truncate" title="{{ cat }}">{{ cat }}</td>
+            <td class="px-5 py-0.5 hidden sm:table-cell whitespace-nowrap">{{ access_badge(ax, au) }}</td>{% endif %}
           </tr>
           {% endfor %}
         </tbody>

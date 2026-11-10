@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import time
+from datetime import datetime
 from urllib.parse import parse_qsl, urlsplit
 
 import httpx
@@ -23,6 +24,8 @@ MAX_PAGES = 500
 MAX_PAGE_BYTES = 1024 * 1024
 MAX_SECONDS = 300
 PAGE_DELAY = 0.2
+MAX_CATALOG_BYTES = 512 * 1024 * 1024
+MAX_CATALOG_RECORDS = 200000
 _PLACEHOLDER = re.compile(
     r"(?:\{[^{}]+\}|<[^<>]+>|%(?:7b|3c)[^&?#]*(?:%7d|%3e)|"
     r"(?:^|[?&])(?:token|key|api[_-]?key|access[_-]?token)=(?:your|replace|example|xxx|placeholder))",
@@ -120,7 +123,7 @@ def _request_page(client, page: int, deadline: float) -> dict:
     raise RuntimeError("Capkey page unavailable")
 
 
-def fetch_capkey_mcp() -> list[dict]:
+def _fetch_search_pages() -> list[dict]:
     rows = []
     seen = set()
     total = None
@@ -167,3 +170,125 @@ def fetch_capkey_mcp() -> list[dict]:
         len(seen), len(rows),
     )
     return rows
+
+
+class _CatalogReader:
+    def __init__(self, response, deadline):
+        self.chunks = response.iter_bytes(chunk_size=65536)
+        self.deadline = deadline
+        self.buffer = b""
+        self.total_bytes = 0
+        self.finished = False
+
+    def read(self, size=-1):
+        if size == 0:
+            return b""
+        target = min(65536, size) if size > 0 else 65536
+        output = bytearray()
+        while len(output) < target:
+            if time.monotonic() >= self.deadline:
+                raise TimeoutError("Capkey catalog deadline reached")
+            if not self.buffer:
+                if self.finished:
+                    break
+                try:
+                    self.buffer = next(self.chunks)
+                except StopIteration:
+                    self.finished = True
+                    break
+                self.total_bytes += len(self.buffer)
+                if self.total_bytes > MAX_CATALOG_BYTES:
+                    raise RuntimeError("Capkey catalog exceeds size limit")
+            take = min(target - len(output), len(self.buffer))
+            output.extend(self.buffer[:take])
+            self.buffer = self.buffer[take:]
+        return bytes(output)
+
+
+def _fetch_catalog() -> list[dict]:
+    import ijson
+
+    fields = {"id", "kind", "url", "name", "description", "status", "badge", "is_template"}
+    header = {}
+    rows = []
+    seen = set()
+    current = None
+    total_records = 0
+    root_complete = False
+    items_started = False
+    deadline = time.monotonic() + MAX_SECONDS
+    with httpx.Client(timeout=httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=10.0),
+                      follow_redirects=True, headers={"User-Agent": UA, "Accept": "application/json"}) as client:
+        with client.stream("GET", CATALOG_URL) as response:
+            response.raise_for_status()
+            for prefix, event, value in ijson.parse(_CatalogReader(response, deadline)):
+                if prefix in ("version", "generated_at", "total_count"):
+                    if event not in ("string", "number"):
+                        raise RuntimeError("Capkey catalog metadata is not scalar")
+                    if prefix in header:
+                        raise RuntimeError("Capkey catalog repeated metadata")
+                    header[prefix] = value
+                elif prefix == "items":
+                    if event == "start_array" and not items_started:
+                        items_started = True
+                    elif event != "end_array":
+                        raise RuntimeError("Capkey catalog items is not a unique array")
+                elif prefix == "items.item" and event == "start_map":
+                    current = {}
+                elif prefix.startswith("items.item.") and current is not None:
+                    field = prefix[len("items.item."):]
+                    if field in fields:
+                        if event not in ("string", "number", "boolean", "null"):
+                            raise RuntimeError("Capkey catalog item field is not scalar")
+                        if field in current:
+                            raise RuntimeError("Capkey catalog repeated item field")
+                        if isinstance(value, str) and len(value) > MAX_PAGE_BYTES:
+                            raise RuntimeError("Capkey catalog field exceeds size limit")
+                        current[field] = value
+                elif prefix == "items.item" and event == "end_map":
+                    total_records += 1
+                    if total_records > MAX_CATALOG_RECORDS:
+                        raise RuntimeError("Capkey catalog record limit reached")
+                    if (current.get("kind") == "mcp_http" and current.get("status") == "active"
+                            and current.get("badge") == "live" and not current.get("is_template")):
+                        identifier = str(current.get("id") or "")
+                        if not identifier or identifier in seen:
+                            raise RuntimeError("Capkey catalog has missing or duplicate MCP identities")
+                        seen.add(identifier)
+                    row = _row(current)
+                    if row is not None:
+                        row["transport"] = None
+                        row["_partial_metadata"] = True
+                        rows.append(row)
+                    current = None
+                elif prefix == "items.item" and event not in ("map_key",):
+                    raise RuntimeError("Capkey catalog item is not an object")
+                elif prefix == "" and event == "end_map":
+                    root_complete = True
+    if (not root_complete or not items_started or header.get("version") != "0.1"
+            or type(header.get("total_count")) is not int
+            or header["total_count"] != total_records or total_records == 0):
+        raise RuntimeError("Capkey catalog traversal or metadata is incomplete")
+    generated = header.get("generated_at")
+    if not isinstance(generated, str):
+        raise RuntimeError("Capkey catalog timestamp missing")
+    stamp = datetime.fromisoformat(generated.replace("Z", "+00:00"))
+    if stamp.tzinfo is None or not -300 <= time.time() - stamp.timestamp() <= 86400:
+        raise RuntimeError("Capkey catalog snapshot is not fresh")
+    log.info("capkey complete catalog: %d records, %d live MCP identities, %d concrete endpoints",
+             total_records, len(seen), len(rows))
+    return rows
+
+
+def fetch_capkey_mcp() -> list[dict]:
+    try:
+        return _fetch_search_pages()
+    except Exception as search_error:
+        try:
+            return _fetch_catalog()
+        except Exception as catalog_error:
+            if isinstance(search_error, PartialCrawl):
+                raise PartialCrawl(search_error.items,
+                                   "Capkey search remains incomplete; full catalog unavailable: "
+                                   + type(catalog_error).__name__) from catalog_error
+            raise RuntimeError("Capkey public search and full catalog unavailable") from catalog_error

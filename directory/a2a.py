@@ -29,7 +29,9 @@ from . import crawlers, db, public_http
 log = logging.getLogger("directory.a2a")
 
 SITE = "https://agent-tools.cloud"
-PROTOCOL_VERSION = "0.3.0"
+PROTOCOL_VERSION = "0.3.0"  # legacy top-level field kept for 0.3 clients
+SUPPORTED_A2A_VERSIONS = ("1.0", "0.3")  # preference order, Major.Minor
+AGENT_VERSION = "0.6.0"
 
 UA = "agent-tools.cloud-a2a/0.1 (+https://agent-tools.cloud)"
 TIMEOUT = httpx.Timeout(connect=10.0, read=20.0, write=10.0, pool=10.0)
@@ -70,7 +72,16 @@ def _upsert_rows(rows: list[dict]) -> tuple[int, int]:
 def own_agent_card(base_url: str = SITE) -> dict:
     """The A2A Agent Card describing agent-tools.cloud itself."""
     base = base_url.rstrip("/")
+    endpoint = f"{base}/a2a"
     return {
+        # A2A 1.0: interfaces are the normative declaration (first = preferred).
+        # Both versions are served on the same JSON-RPC URL and selected by the
+        # A2A-Version header (empty header = 0.3, per spec section 3.6.2).
+        "supportedInterfaces": [
+            {"url": endpoint, "protocolBinding": "JSONRPC", "protocolVersion": v}
+            for v in SUPPORTED_A2A_VERSIONS
+        ],
+        # Legacy 0.3 top-level fields; 1.0 clients ignore unknown fields.
         "protocolVersion": PROTOCOL_VERSION,
         "name": "Agent Tools Directory",
         "description": (
@@ -79,18 +90,18 @@ def own_agent_card(base_url: str = SITE) -> dict:
             "recommends payable endpoints for a given intent, and scans MCP "
             "servers for malware / prompt-injection before you connect."
         ),
-        "url": f"{base}/a2a",
+        "url": endpoint,
         "preferredTransport": "JSONRPC",
         "provider": {
             "organization": "agent-tools.cloud",
             "url": base,
         },
-        "version": "0.5.0",
+        "version": AGENT_VERSION,
         "documentationUrl": f"{base}/about",
         "capabilities": {
             "streaming": False,
             "pushNotifications": False,
-            "stateTransitionHistory": False,
+            "extendedAgentCard": False,
         },
         "defaultInputModes": ["text/plain"],
         "defaultOutputModes": ["text/plain", "application/json"],
@@ -205,7 +216,8 @@ def _safety_scan_request(message: dict, text: str) -> dict | None:
     """Return scan kwargs if this message is a safety-scan request, else None."""
     # 1. explicit structured request via a data part
     for p in (message.get("parts") or []):
-        if isinstance(p, dict) and p.get("kind") == "data" and isinstance(p.get("data"), dict):
+        if (isinstance(p, dict) and isinstance(p.get("data"), dict)
+                and p.get("kind") in ("data", None)):
             d = p["data"]
             skill = str(d.get("skill") or d.get("id") or d.get("intent") or "").lower()
             url = d.get("endpoint_url") or d.get("url")
@@ -225,17 +237,127 @@ def _safety_scan_request(message: dict, text: str) -> dict | None:
     return None
 
 
-def handle_jsonrpc(payload: dict) -> dict:
-    """Minimal JSON-RPC handler. Supports `message/send` only."""
+_V1_METHODS = frozenset({
+    "SendMessage", "SendStreamingMessage", "GetTask", "ListTasks", "CancelTask",
+    "SubscribeToTask", "CreateTaskPushNotificationConfig",
+    "GetTaskPushNotificationConfig", "ListTaskPushNotificationConfigs",
+    "DeleteTaskPushNotificationConfig", "GetExtendedAgentCard",
+})
+_V1_PUSH_METHODS = frozenset({
+    "CreateTaskPushNotificationConfig", "GetTaskPushNotificationConfig",
+    "ListTaskPushNotificationConfigs", "DeleteTaskPushNotificationConfig",
+})
+_VERSION_HEADER_RE = re.compile(r"^v?(\d+)(?:\.(\d+))?(?:\.\d+)?$", re.I)
+
+
+def negotiate_version(header: str | None, method: Any = None) -> str | None:
+    """Map an A2A-Version service parameter to a supported Major.Minor.
+
+    Empty means 0.3 (spec 3.6.2). As a lenient exception, a request without
+    the header that uses a 1.0-only PascalCase method is served as 1.0 because
+    that method name does not exist in 0.3. Returns None when unsupported.
+    """
+    raw = (header or "").strip()
+    if not raw:
+        return "1.0" if method in _V1_METHODS else "0.3"
+    m = _VERSION_HEADER_RE.match(raw)
+    if not m:
+        return None
+    major_minor = f"{int(m.group(1))}.{int(m.group(2) or 0)}"
+    return major_minor if major_minor in SUPPORTED_A2A_VERSIONS else None
+
+
+def _a2a_error(req_id, code: int, message: str, reason: str,
+               metadata: dict | None = None) -> dict:
+    info = {"@type": "type.googleapis.com/google.rpc.ErrorInfo",
+            "reason": reason, "domain": "a2a-protocol.org"}
+    if metadata:
+        info["metadata"] = {str(k): str(v) for k, v in metadata.items()}
+    return {"jsonrpc": "2.0", "id": req_id,
+            "error": {"code": code, "message": message, "data": [info]}}
+
+
+def _agent_message_v1(text: str, data: Any = None,
+                      context_id: Any = None) -> dict:
+    import uuid
+    parts: list[dict] = [{"text": text, "mediaType": "text/plain"}]
+    if data is not None:
+        parts.append({"data": data, "mediaType": "application/json"})
+    return {
+        "messageId": str(uuid.uuid4()),
+        "contextId": (context_id if isinstance(context_id, str) and context_id.strip()
+                      else str(uuid.uuid4())),
+        "role": "ROLE_AGENT",
+        "parts": parts,
+    }
+
+
+def handle_jsonrpc(payload: dict, a2a_version: str | None = None) -> dict:
+    """A2A JSON-RPC handler serving 0.3 (`message/send`) and 1.0 (`SendMessage`).
+
+    The version comes from the A2A-Version header; this agent answers with a
+    direct Message and never creates tasks.
+    """
     if not isinstance(payload, dict):
         return _jsonrpc_error(None, -32600, "Invalid Request")
     req_id = payload.get("id")
     method = payload.get("method")
+    version = negotiate_version(a2a_version, method)
+    if version is None:
+        return _a2a_error(
+            req_id, -32009,
+            f"A2A version {str(a2a_version)[:20]!r} is not supported",
+            "VERSION_NOT_SUPPORTED",
+            {"supportedVersions": ",".join(SUPPORTED_A2A_VERSIONS)})
+    params = payload.get("params")
+    params = params if isinstance(params, dict) else {}
+    if version == "1.0":
+        return _handle_v1(req_id, method, params)
+
     if method not in ("message/send", "message/stream"):
         return _jsonrpc_error(req_id, -32601, f"Method not found: {method}")
-
-    params = payload.get("params") or {}
     message = params.get("message") or {}
+    outcome = _answer(message if isinstance(message, dict) else {})
+    if "error" in outcome:
+        code, msg = outcome["error"]
+        return _jsonrpc_error(req_id, code, msg)
+    return _jsonrpc_result(req_id, _agent_message(outcome["text"], data=outcome.get("data")))
+
+
+def _handle_v1(req_id, method, params: dict) -> dict:
+    if method == "SendMessage":
+        message = params.get("message")
+        if not isinstance(message, dict):
+            return _jsonrpc_error(req_id, -32602, "params.message is required")
+        if message.get("taskId"):
+            return _a2a_error(req_id, -32001, "Task not found", "TASK_NOT_FOUND",
+                              {"taskId": str(message.get("taskId"))[:120]})
+        outcome = _answer(message)
+        if "error" in outcome:
+            code, msg = outcome["error"]
+            return _jsonrpc_error(req_id, code, msg)
+        return _jsonrpc_result(req_id, {"message": _agent_message_v1(
+            outcome["text"], outcome.get("data"), message.get("contextId"))})
+    if method in ("SendStreamingMessage", "SubscribeToTask", "GetExtendedAgentCard"):
+        return _a2a_error(req_id, -32004, f"{method} is not supported by this agent",
+                          "UNSUPPORTED_OPERATION")
+    if method in ("GetTask", "CancelTask"):
+        return _a2a_error(req_id, -32001, "Task not found", "TASK_NOT_FOUND",
+                          {"taskId": str(params.get("id") or "")[:120]})
+    if method == "ListTasks":
+        size = params.get("pageSize", 50)
+        if isinstance(size, bool) or not isinstance(size, int) or not 1 <= size <= 100:
+            return _jsonrpc_error(req_id, -32602, "pageSize must be an integer from 1 to 100")
+        return _jsonrpc_result(req_id, {"tasks": [], "nextPageToken": "",
+                                        "pageSize": size, "totalSize": 0})
+    if method in _V1_PUSH_METHODS:
+        return _a2a_error(req_id, -32003, "Push notifications are not supported",
+                          "PUSH_NOTIFICATION_NOT_SUPPORTED")
+    return _jsonrpc_error(req_id, -32601, f"Method not found: {method}")
+
+
+def _answer(message: dict) -> dict:
+    """Version-neutral core: returns {text, data} or {error: (code, message)}."""
     text = _extract_text(message)
 
     # Safety-scan skill: vet an MCP server by endpoint URL via the shared core.
@@ -246,8 +368,7 @@ def handle_jsonrpc(payload: dict) -> dict:
             verdict = safety_service.scan_endpoint(**scan_req)
         except Exception:
             log.exception("a2a message/send: safety scan failed")
-            return _jsonrpc_result(
-                req_id, _agent_message("Safety scan failed.", data={"error": "scan_failed"}))
+            return {"text": "Safety scan failed.", "data": {"error": "scan_failed"}}
         v = verdict.get("verdict")
         if v:
             summary = (
@@ -259,10 +380,10 @@ def handle_jsonrpc(payload: dict) -> dict:
                 summary += " " + adv
         else:
             summary = f"Could not scan: {verdict.get('message') or verdict.get('error')}"
-        return _jsonrpc_result(req_id, _agent_message(summary, data=verdict))
+        return {"text": summary, "data": verdict}
 
     if not text:
-        return _jsonrpc_error(req_id, -32602, "params.message must contain a text part")
+        return {"error": (-32602, "params.message must contain a text part")}
 
     services: list[dict] = []
     agents: list[dict] = []
@@ -304,10 +425,7 @@ def handle_jsonrpc(payload: dict) -> dict:
     else:
         summary = f"No directory matches for: {text}"
 
-    result_message = _agent_message(
-        summary, data={"services": svc_brief, "agents": agent_brief}
-    )
-    return _jsonrpc_result(req_id, result_message)
+    return {"text": summary, "data": {"services": svc_brief, "agents": agent_brief}}
 
 
 # ---------------------------------------------------------------------------
@@ -487,6 +605,57 @@ def _text(v) -> str | None:
     return str(v).strip() or None
 
 
+_A2A_VERSION_RE = re.compile(r"^v?(\d+)(?:\.(\d+))?(?:\.(\d+))?$", re.I)
+_CARD_INTERFACE_KEYS = ("supportedInterfaces", "additionalInterfaces", "interfaces")
+
+
+def _card_interfaces(card: dict) -> list[dict]:
+    out: list[dict] = []
+    for key in _CARD_INTERFACE_KEYS:
+        items = card.get(key)
+        if isinstance(items, list):
+            out.extend(item for item in items if isinstance(item, dict))
+    return out
+
+
+def _card_protocol_version(card: dict) -> str | None:
+    """Return the A2A *protocol* version a card declares.
+
+    A2A 1.0 moved ``protocolVersion`` from the card into each entry of
+    ``supportedInterfaces``; 0.3 keeps it at the top level. The card's own
+    ``version`` is the agent's release version and is never a protocol
+    version. When several A2A versions are declared (dual 1.0 + 0.3
+    interfaces), the highest one is recorded.
+    """
+    declared: list[str] = []
+    for itf in _card_interfaces(card):
+        value = _text(itf.get("protocolVersion"))
+        if value:
+            declared.append(value[:80])
+    top = _text(card.get("protocolVersion"))
+    if top:
+        declared.append(top[:80])
+    numeric = []
+    for value in declared:
+        m = _A2A_VERSION_RE.match(value)
+        if m:
+            numeric.append((tuple(int(g or 0) for g in m.groups()), value))
+    if numeric:
+        return max(numeric, key=lambda item: item[0])[1]
+    return declared[0] if declared else None
+
+
+def _card_transport(card: dict) -> str | None:
+    top = _text(card.get("preferredTransport"))
+    if top:
+        return top
+    for itf in _card_interfaces(card):
+        binding = _text(itf.get("protocolBinding")) or _text(itf.get("transport"))
+        if binding:
+            return binding[:40]
+    return None
+
+
 def card_to_row(card: dict, card_url: str, source: str = "manual",
                 source_id: str | None = None, slug: str | None = None) -> dict:
     """Normalise an A2A Agent Card into an a2a_agents row dict."""
@@ -515,9 +684,8 @@ def card_to_row(card: dict, card_url: str, source: str = "manual",
         "homepage_url": _text(provider.get("url")),
         "documentation_url": (_text(card.get("documentationUrl"))
                               or _text(card.get("documentationURL"))),
-        "protocol_version": (_text(card.get("protocolVersion"))
-                             or _text(card.get("version"))),
-        "preferred_transport": _text(card.get("preferredTransport")),
+        "protocol_version": _card_protocol_version(card),
+        "preferred_transport": _card_transport(card),
         "skills": skills,
         "capabilities": caps,
         "default_input_modes": card.get("defaultInputModes"),

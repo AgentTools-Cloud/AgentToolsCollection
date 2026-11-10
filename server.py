@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
@@ -19,9 +20,11 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from directory import db as directory_db
-from directory.routes import router as directory_router
+from directory.routes import TEMPLATES, router as directory_router
 from directory.auth import router as auth_router
+from directory.articles import ArticleStore
 from directory.paid_verify_routes import router as paid_verify_router
+from directory.claim_invite_routes import router as claim_invite_router
 from directory.mcp_app import discover_mcp, wrap_with_client_capture
 from metrics import PrometheusMiddleware, metrics_endpoint
 
@@ -34,6 +37,11 @@ ALLOWED_MODELS = {
     for m in os.getenv("ALLOWED_MODELS", "Qwen/Qwen3-8B").split(",")
     if m.strip()
 }
+
+ARTICLES_ENABLED = os.getenv("ARTICLES_ENABLED", "0") == "1"
+ARTICLE_STORE = (ArticleStore(os.getenv("ARTICLE_DB_PATH", str(Path(directory_db.DEFAULT_DB_PATH).with_name("articles.db"))))
+                 if ARTICLES_ENABLED else None)
+TEMPLATES.env.globals["articles_enabled"] = ARTICLES_ENABLED
 
 # --- FastAPI app ----------------------------------------------------------
 
@@ -49,6 +57,8 @@ async def lifespan(app: FastAPI):
         import logging
         logging.getLogger("mcpserver").exception("directory db init failed")
         raise
+    if ARTICLE_STORE is not None:
+        ARTICLE_STORE.init()
     # FastMCP streamable-http needs its own session-manager lifespan.
     # Only the free directory-discovery MCP at /mcp-discovery is mounted now
     # (the paid /mcp mount was retired 2026-05-25).
@@ -59,6 +69,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="mcpserver", version="0.2.0", lifespan=lifespan, openapi_url=None
 )
+app.state.article_store = ARTICLE_STORE
 
 
 @app.exception_handler(404)
@@ -73,6 +84,11 @@ async def _not_found(request: Request, exc):
     accepts_html = "text/html" in request.headers.get("accept", "")
     is_api = (
         path.startswith("/api/")
+        or path.startswith("/admin/articles/api")
+        or path.startswith("/admin/articles/media")
+        or path.startswith("/account/articles/api")
+        or path.startswith("/account/articles/media")
+        or path.endswith(".md")
         or path.startswith("/mcp-discovery")
         or path.startswith("/.well-known/")
         or path.endswith(".json")
@@ -129,6 +145,9 @@ _CACHEABLE_DETAIL = ("/mcp/servers/", "/a2a/agents/", "/services/")
 @app.middleware("http")
 async def _no_cache_html(request: Request, call_next):
     resp = await call_next(request)
+    if request.url.path.startswith(("/admin/articles", "/account/articles")):
+        resp.headers["Cache-Control"] = "private, no-store"
+        resp.headers["X-Robots-Tag"] = "noindex, nofollow"
     # Lightweight security headers on every response (HSTS is handled at the
     # Cloudflare edge). These are cheap, widely-recommended defaults.
     resp.headers.setdefault("X-Content-Type-Options", "nosniff")
@@ -180,69 +199,58 @@ def favicon():
 
 _LLMS_TXT = """# agent-tools.cloud
 
-> Open, agent-readable discovery directory of x402 paid services, MCP servers
-> and A2A agents. Crawled, health-checked and safety-scanned. Free to search
-> and use, no signup, no API key. We are a catalogue only — we do not host,
-> operate, broker or take payment for listed third-party services.
+> Discovery directory of x402 services, MCP servers and A2A agents.
+> Public search and service cards are free. We do not operate listed services.
 
-## Use it programmatically
+## Discovery
 
-- Unified search: GET /api/v1/search?q=...
-- MCP servers: GET /api/v1/mcp/search?q=...  | details: /api/v1/mcp/servers/{slug}
-- A2A agents:  GET /api/v1/a2a/search?q=...  | details: /api/v1/a2a/agents/{slug}
-- x402 services: GET /api/v1/services/{slug}
-  (price_min/price_max span every resource the origin advertises; each
-  call.resource_samples[] entry has its own price_usd and accepts[] -- use
-  those, not the headline range, to price a specific endpoint)
-- LLM-ranked recommendation: GET /api/v1/ask?q=...
-- Directory stats: GET /api/v1/stats
-- OpenAPI: /openapi.json
+- Search all types: GET /api/v1/resources/search?q=...
+- MCP: GET /api/v1/mcp/search and /api/v1/mcp/servers/{slug}
+- A2A: GET /api/v1/a2a/search and /api/v1/a2a/agents/{slug}
+- x402 card: GET /api/v1/services/{slug}
+- Recommendations: GET /api/v1/ask?q=...
+- Categories and stats: /api/v1/categories, /api/v1/stats
 
-## MCP discovery endpoint
+Read each resource's payment requirements before calling it; headline price ranges are not per-call quotes.
 
-- Streamable-HTTP MCP server: https://agent-tools.cloud/mcp-discovery/
-  Tools: search, get, search_mcp_servers, get_mcp_server, search_a2a_agents,
-  search_resources, ask_services, list_categories, stats, scan_mcp_safety,
-  register, prepare_paid_verification, execute_paid_verification,
-  get_paid_verification.
+## HTTP MCP
 
-## Sponsored paid verification (x402)
+Endpoint: https://agent-tools.cloud/mcp-discovery/
+Tools: search, get, search_mcp_servers, get_mcp_server, search_a2a_agents,
+search_resources, ask_services, list_categories, stats, scan_mcp_safety, register,
+prepare_paid_verification, execute_paid_verification, get_paid_verification,
+claim_service_url, verify_service_url, get_owned_listing, edit_owned_listing.
 
-Pay a listed x402 service once from your own wallet; we call it once and
-publish the result. Funds go straight to the service's payTo (EIP-3009,
-Base USDC, <= $1). We never hold funds or sign for you. GET, or POST with the
-listing's public JSON probe_body (<= 16 KiB).
+## Claim and edit an exact service URL
 
-HTTP:
-1. POST /api/v1/keys -> api_key (no signup). Send Authorization: Bearer <api_key>.
-2. POST /api/v1/services/{slug}/paid-verifications {"payer": "0x..."} -> id, typed_data
-3. Sign typed_data with the payer wallet (eth_signTypedData_v4).
-4. POST /api/v1/paid-verifications/{id}/execute {"signature": "0x..."} -> status, score, tx_hash
-5. GET /api/v1/paid-verifications/{id}
+Send Authorization: Bearer <API_KEY>. Obtain a key with POST /api/v1/keys.
+claim_service_url(url, method=None) -> publish the returned token ->
+verify_service_url(claim_id, token) -> get_owned_listing(kind, slug) ->
+edit_owned_listing(kind, slug, fields).
+These ownership tools use HTTP MCP; keys are headers, not tool arguments.
+REST: POST /api/v1/listing-claims -> publish proof ->
+POST /api/v1/listing-claims/{claim_id}/verify -> GET/PATCH /api/v1/listings/{kind}/{slug}.
+Only the exact public HTTPS URL, including path and query, is covered.
+Other URLs and whole-host rights are separate. Pending tokens expire after 24 hours.
+Whole-host claims use /api/v1/claims; shared hosts cannot be claimed.
+Steps and proof methods: https://agent-tools.cloud/docs/claim
 
-MCP (same flow; API key as header or api_key argument):
-prepare_paid_verification(slug, payer) -> execute_paid_verification(id, signature)
--> get_paid_verification(id)
+## Paid verification
 
-Price and recipient are re-checked before paying; the call is never retried.
-settled requires matching Base-USDC AuthorizationUsed and Transfer events.
-Results (failures included) are public for 30 days in GET /api/v1/services/{slug}.
-Evidence is hidden if the listing changes. Signatures and response bodies are not stored.
+Requires an account key and a signed authorization from the buyer's wallet.
+Base USDC, at most $1, paid directly to the service. We do not hold funds or sign.
+Prepare at POST /api/v1/services/{slug}/paid-verifications; execute at
+POST /api/v1/paid-verifications/{id}/execute; read at GET /api/v1/paid-verifications/{id}.
+The request is rechecked and sent once, never retried.
+MCP: prepare_paid_verification(slug, payer) -> execute_paid_verification(id, signature)
+-> get_paid_verification(id).
 
-## Discovery manifests
+## References
 
-- /.well-known/mcp.json
-- /.well-known/agent-tools.json
-- /.well-known/agent-card.json
-- /.well-known/x402
-- /sitemap.xml
-
-## Notes for agents
-
-- All search/read endpoints are free and unauthenticated.
-- Listings include a heuristic safety verdict (malware / prompt-injection /
-  tool-poisoning advisory) — advisory only, verify before connecting.
-- Terms: /terms  ·  Privacy: /privacy  ·  Contact: contact@agent-tools.cloud
+OpenAPI: /openapi.json
+Manifests: /.well-known/mcp.json, /.well-known/agent-tools.json, /.well-known/agent-card.json
+Safety verdicts are advisory; verify services before connecting.
+Terms: /terms | Privacy: /privacy | Contact: contact@agent-tools.cloud
 """
 
 
@@ -395,6 +403,10 @@ def well_known_mcp(request: Request) -> dict[str, Any]:
             {"name": "prepare_paid_verification", "description": "Quote a sponsored paid verification of an x402 service: returns EIP-712 typed data for your own wallet to sign (non-custodial, Base USDC, <= $1)."},
             {"name": "execute_paid_verification", "description": "Relay your signed authorization to the service exactly once and score the paid call."},
             {"name": "get_paid_verification", "description": "Read one of your own paid verifications."},
+            {"name": "claim_service_url", "description": "Issue a fresh token for one exact public HTTPS URL. Requires an account API key in the MCP Authorization: Bearer header.", "transports": ["streamable_http"]},
+            {"name": "verify_service_url", "description": "Verify your published ownership token; grants rights only for the exact URL and returns its listings.", "transports": ["streamable_http"]},
+            {"name": "get_owned_listing", "description": "Read editable metadata for a listing covered by your verified claim.", "transports": ["streamable_http"]},
+            {"name": "edit_owned_listing", "description": "Edit metadata for your own listing using the same authorization and audit trail as REST.", "transports": ["streamable_http"]},
         ],
     }
 
@@ -412,7 +424,7 @@ def well_known_agent_card(request: Request) -> dict[str, Any]:
 
 @app.post("/a2a", tags=["a2a"])
 async def a2a_jsonrpc(request: Request):
-    """Minimal A2A JSON-RPC endpoint (message/send)."""
+    """A2A JSON-RPC endpoint: 1.0 `SendMessage` and 0.3 `message/send` (A2A-Version header)."""
     from fastapi.concurrency import run_in_threadpool
     from directory import a2a as directory_a2a
 
@@ -424,9 +436,12 @@ async def a2a_jsonrpc(request: Request):
              "error": {"code": -32700, "message": "Parse error"}},
             status_code=400,
         )
+    # A2A service parameter: header, or request parameter as the spec allows.
+    a2a_version = (request.headers.get("a2a-version")
+                   or request.query_params.get("A2A-Version"))
     # handle_jsonrpc is synchronous and may do blocking work (a safety scan can
     # probe a remote endpoint + call the LLM), so run it off the event loop.
-    result = await run_in_threadpool(directory_a2a.handle_jsonrpc, payload)
+    result = await run_in_threadpool(directory_a2a.handle_jsonrpc, payload, a2a_version)
     return JSONResponse(result)
 
 
@@ -457,42 +472,22 @@ def _build_openapi() -> dict[str, Any]:
 
     title = "agent-tools.cloud — x402 service directory + MCP discovery"
     description = (
-        "Free directory and discovery layer for x402 paid APIs and MCP services. "
-        "Agents can search the indexed ecosystem, ask for intent-level recommendations, "
-        "retrieve service cards with payment/call/quality metadata, browse categories, "
-        "scan any MCP server for malware / prompt-injection before connecting, "
-        "submit services for review, run a sponsored paid verification of an x402 service "
-        "with your own wallet (non-custodial), or connect via the ungated MCP discovery server at "
-        "/mcp-discovery. The previously hosted paid Qwen relay and crypto verticals were "
-        "retired on 2026-05-25; this host no longer serves paid endpoints."
+        "Directory of x402 services, MCP servers and A2A agents. "
+        "Search public service cards or verify ownership to edit your listings."
     )
     guidance = (
-        "Use POST /api/v1/ask for intent-level recommendations grounded "
-        "in indexed directory candidates. Use GET /api/v1/search?q=&category=&chain= "
-        "for faceted retrieval, then GET /api/v1/services/{slug} for the "
-        "agent-readable service card before paying or calling an external "
-        "service. GET /api/v1/categories and /api/v1/stats expose facets and "
-        "health. POST /mcp-discovery/ is an ungated MCP streamable-http server "
-        "with search, ask_services, get, list_categories, stats, scan_mcp_safety "
-        "(malware / prompt-injection check for any MCP endpoint), register, and "
-        "prepare_paid_verification / execute_paid_verification / "
-        "get_paid_verification (sponsored paid verification over MCP). "
-        "agent-tools.cloud itself is discovery-only; paid relay routes were retired. "
-        "Every indexed resource (x402 service, MCP server, A2A agent) carries a "
-        "liveness `health_status`: `ok` = answered a live probe and is callable; "
-        "`degraded` = reachable but needs caller auth/credentials or paywalled "
-        "(401/402/403); `down` = unreachable/5xx; `unknown` = not yet probed. "
-        "Filter any search with health= and read health_status/http_status/latency_ms "
-        "per result; results rank ok > degraded > unknown > down. "
-        "Sponsored paid verification: POST /api/v1/services/{slug}/paid-verifications "
-        "with {payer} returns EIP-712 typed data for one EIP-3009 Base-USDC authorization "
-        "paid directly to the service's payTo (<= $1; GET or a declared JSON POST probe); "
-        "sign it with the "
-        "payer wallet and POST /api/v1/paid-verifications/{id}/execute with {signature}. "
-        "We re-check the request template and price before paying, relay once and never retry; "
-        "settled requires matching Base-USDC authorization and transfer events; "
-        "pending RPC checks can be refreshed. Signatures and response bodies are not stored. Needs "
-        "Authorization: Bearer <api_key> from POST /api/v1/keys (no signup)."
+        "Search with GET /api/v1/resources/search; read a service card before calling it. "
+        "For recommendations use POST /api/v1/ask. "
+        "Claim an exact HTTPS URL with POST /api/v1/listing-claims, publish its token, "
+        "then POST /api/v1/listing-claims/{claim_id}/verify. Read or edit through "
+        "GET/PATCH /api/v1/listings/{kind}/{slug}. "
+        "HTTP MCP at /mcp-discovery/ provides claim_service_url, verify_service_url, "
+        "get_owned_listing and edit_owned_listing. Use Authorization: Bearer <API_KEY>, "
+        "not key arguments. Verification covers only the claimed path and query, not other services. "
+        "Whole-host claims use /api/v1/claims and are unavailable on shared hosts. "
+        "Paid verification requires the buyer's signed wallet authorization and is never retried. "
+        "MCP provides prepare_paid_verification, execute_paid_verification and get_paid_verification. "
+        "Proof methods: https://agent-tools.cloud/docs/claim."
     )
 
     schema = get_openapi(
@@ -507,9 +502,13 @@ def _build_openapi() -> dict[str, Any]:
     return schema
 
 
+if ARTICLE_STORE is not None:
+    from directory.article_routes import create_article_router
+    app.include_router(create_article_router(ARTICLE_STORE, TEMPLATES))
 app.include_router(auth_router)
 app.include_router(directory_router)
 app.include_router(paid_verify_router)
+app.include_router(claim_invite_router)
 app.add_api_route("/metrics", metrics_endpoint, include_in_schema=False, methods=["GET"])
 
 

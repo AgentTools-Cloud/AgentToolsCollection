@@ -522,7 +522,8 @@ CREATE TABLE IF NOT EXISTS domain_ownership (
   created_at   INTEGER NOT NULL,
   verified_at  INTEGER,
   last_checked INTEGER,
-  fail_count   INTEGER NOT NULL DEFAULT 0
+    fail_count   INTEGER NOT NULL DEFAULT 0,
+    verification_revision INTEGER NOT NULL DEFAULT 0
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ux_domain_scope
   ON domain_ownership(host, IFNULL(scope_path, ''))
@@ -624,6 +625,18 @@ def with_retry(fn: Callable[[], Any], *, attempts: int = 6, base_delay: float = 
             time.sleep(base_delay * (2 ** i) + random.uniform(0, base_delay))
     if last:
         raise last
+
+
+def ensure_ownership_verification_revision(conn: sqlite3.Connection) -> None:
+    columns = {column[1] for column in conn.execute('PRAGMA table_info(domain_ownership)')}
+    if 'verification_revision' not in columns:
+        conn.execute('ALTER TABLE domain_ownership ADD COLUMN '
+                     'verification_revision INTEGER NOT NULL DEFAULT 0')
+    conn.execute('CREATE TRIGGER IF NOT EXISTS domain_ownership_verification_revision '
+                 'AFTER UPDATE OF id,user_id,host,scope_path,method,token_hash,token,status,'
+                 'created_at,verified_at,last_checked,fail_count ON domain_ownership '
+                 'BEGIN UPDATE domain_ownership SET verification_revision=OLD.verification_revision+1 '
+                 'WHERE id=NEW.id; END')
 
 
 def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
@@ -732,6 +745,7 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
             except sqlite3.OperationalError as e:
                 if "duplicate column" not in str(e).lower():
                     raise
+        ensure_ownership_verification_revision(c)
         backfill_key_user_logins(c)
         _migrate_mcp_fts_tools(c)
         _migrate_services_fts_resources(c)
@@ -745,6 +759,10 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
         from . import paid_verify
 
         paid_verify.ensure_schema(c)
+        c.commit()
+        from . import claim_invites
+
+        claim_invites.init_schema(c)
         c.commit()
         # Housekeeping, not schema: every job calls init_db at start, and the
         # 00:30 crawl holds the write lock for hours, so quarantine (01:15) and
@@ -4507,10 +4525,10 @@ def rescore_mcp(conn) -> int:
 
 
 def attach_ratings(kind: str, rows: list) -> list:
-    """Annotate each row dict in-place with score (0-10, 1dp) + grade letter."""
+    """Annotate each row dict in-place with unrounded score (0-10) + grade."""
     for d in rows:
         s100, g = rate_row(kind, d)
-        d["score"] = round(s100 / 10.0, 2)
+        d["score"] = s100 / 10.0
         d["score100"] = s100
         d["grade"] = g
     return rows
@@ -4542,11 +4560,12 @@ def grade_mix_all(conn) -> dict:
     return out
 
 
-def top_rated(conn, kind: str, limit: int = 10) -> list:
+def top_rated(conn, kind: str, limit: int = 20) -> list:
     """Highest-rated healthy resources of a type, annotated with score+grade."""
     if kind == "mcp":
         raw = conn.execute(
             "SELECT * FROM mcp_servers WHERE health='ok' "
+            "AND slug!='agent-tools-x402-directory' "
             "ORDER BY quality_score DESC, confidence DESC, updated_at DESC "
             "LIMIT ?", (limit,)).fetchall()
         rows = [mcp_row_to_dict(r) for r in raw]
@@ -4745,11 +4764,15 @@ def sync_owner_verified(conn: sqlite3.Connection) -> dict[str, int]:
     Rows whose flag moved are rescored here too -- a badge that appears hours
     before the score it earns reads like a bug.
     """
-    hosts = {
-        r["host"]
-        for r in conn.execute(
-            "SELECT host FROM domain_ownership WHERE status='verified'")
-    }
+    from . import ownership
+    claims = list(conn.execute(
+        "SELECT host,scope_path,method FROM domain_ownership WHERE status='verified'"))
+    hosts = {claim["host"] for claim in claims
+             if claim["scope_path"] is None and claim["method"] in ownership.METHODS
+             and not is_shared_host(conn, claim["host"])}
+    scopes = {(claim["host"], claim["scope_path"]) for claim in claims
+              if claim["scope_path"] is not None and claim["method"] in ownership.URL_METHODS}
+    scoped_hosts = {host for host, _scope in scopes}
     out: dict[str, int] = {}
     for table, url_expr, score_fn in (
         ("services", "url", _score_x402),
@@ -4763,6 +4786,11 @@ def sync_owner_verified(conn: sqlite3.Connection) -> dict[str, int]:
                 % (url_expr, table)):
             host, _ = _host_and_path(r["_u"] or "")
             flag = 1 if host in hosts else 0
+            if not flag and host in scoped_hosts:
+                try:
+                    flag = int(ownership.claim_url_scope(r["_u"]) in scopes)
+                except ownership.UnsafeTarget:
+                    flag = 0
             if flag:
                 marked.append(r["id"])
             if flag != r["_v"]:
@@ -4836,9 +4864,9 @@ def upsert_user(conn: sqlite3.Connection, provider: str, provider_uid: str,
 
 
 _EDITABLE_FIELDS = {
-    "x402": ("name", "description", "category", "url", "mcp_url",
+    "x402": ("name", "description", "category", "tags", "url", "mcp_url",
              "method", "price_usdc", "resources", "well_known_url", "openapi_url"),
-    "mcp": ("name", "description", "homepage_url", "endpoint_url", "cost_hint", "auth_method", "pricing"),
+    "mcp": ("name", "description", "tags", "homepage_url", "endpoint_url", "cost_hint", "auth_method", "pricing"),
     "a2a": ("name", "description", "homepage_url", "documentation_url",
             "provider_name", "endpoint_url", "card_url"),
 }
@@ -4875,6 +4903,52 @@ _KIND_TABLE = {"x402": "services", "mcp": "mcp_servers", "a2a": "a2a_agents"}
 _PRIMARY_ENDPOINT = {"x402": "url", "mcp": "endpoint_url", "a2a": "endpoint_url"}
 
 
+MAX_OWNER_TAGS = 8
+_OWNER_TAG = re.compile(r"[A-Za-z0-9][A-Za-z0-9 .&+/_-]{0,30}[A-Za-z0-9+]")
+
+
+def stored_tags(value) -> list[str]:
+    if isinstance(value, list):
+        return [str(tag) for tag in value]
+    try:
+        parsed = json.loads(value) if value else []
+    except (TypeError, json.JSONDecodeError):
+        return []
+    return [str(tag) for tag in parsed] if isinstance(parsed, list) else []
+
+
+def normalize_owner_tags(value) -> list[str]:
+    """Owner tags: a list or comma-separated text, short plain phrases only.
+
+    Tags feed search, so they stay few and readable; duplicates differing only
+    in case collapse to the first spelling.
+    """
+    if value is None:
+        items = []
+    elif isinstance(value, str):
+        items = value.split(",")
+    elif isinstance(value, list) and all(isinstance(item, str) for item in value):
+        items = value
+    else:
+        raise ValueError("tags must be a list of text or comma-separated text")
+    tags: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        tag = " ".join(item.split())
+        if not tag:
+            continue
+        if not _OWNER_TAG.fullmatch(tag):
+            raise ValueError("tag %r must be 2-32 characters of letters, digits, "
+                             "spaces or . & + / _ -" % tag[:40])
+        if tag.lower() in seen:
+            continue
+        seen.add(tag.lower())
+        tags.append(tag)
+    if len(tags) > MAX_OWNER_TAGS:
+        raise ValueError("at most %d tags" % MAX_OWNER_TAGS)
+    return tags
+
+
 def owner_edit_state(conn, kind, listing_id, user_id, ownership_id):
     table = _KIND_TABLE[kind]
     current = conn.execute("SELECT * FROM %s WHERE id=?" % table, (listing_id,)).fetchone()
@@ -4883,11 +4957,13 @@ def owner_edit_state(conn, kind, listing_id, user_id, ownership_id):
     user = conn.execute("SELECT status FROM users WHERE id=?", (user_id,)).fetchone()
     if user is None or user["status"] != "active":
         raise PermissionError("account is no longer active")
-    ownership = conn.execute(
-        "SELECT * FROM domain_ownership WHERE id=? AND user_id=? "
-        "AND status='verified' AND scope_path IS NULL", (ownership_id, user_id)).fetchone()
-    host, _ = _host_and_path(current[_PRIMARY_ENDPOINT[kind]] or "")
-    if ownership is None or ownership["host"] != host:
+    from . import ownership as own
+    target = current[_PRIMARY_ENDPOINT[kind]]
+    if kind == "a2a" and not target:
+        target = current["card_url"]
+    ownership = own.owner_for_url(conn, target or "")
+    if (ownership is None or ownership["id"] != ownership_id
+            or ownership["user_id"] != user_id):
         raise PermissionError("verified ownership changed before the edit")
     assert_listing_not_retired(conn, kind, dict(current))
     return current, ownership
@@ -4941,6 +5017,16 @@ def apply_listing_edits(conn: sqlite3.Connection, kind: str, listing_id: int,
     allowed = _EDITABLE_FIELDS[kind]
     endpoints = _ENDPOINT_FIELDS.get(kind, ())
     current, ownership = owner_edit_state(conn, kind, listing_id, user_id, ownership_id)
+    if "tags" in changes and "tags" in allowed:
+        changes = dict(changes)
+        try:
+            tags = normalize_owner_tags(changes["tags"])
+        except ValueError as exc:
+            return [], [str(exc)]
+        if tags == stored_tags(current["tags"]):
+            changes.pop("tags")
+        else:
+            changes["tags"] = json.dumps(tags, ensure_ascii=False) if tags else ""
     if kind == "mcp":
         from . import mcp_pricing
         changes = dict(changes)
@@ -4954,7 +5040,7 @@ def apply_listing_edits(conn: sqlite3.Connection, kind: str, listing_id: int,
             if "pricing" in changes:
                 pricing = mcp_pricing.normalize(changes["pricing"])
                 endpoint = changes.get("endpoint_url")
-                if pricing and isinstance(endpoint, str) and _exact_endpoint(endpoint.strip()) != current["endpoint_url"]:
+                if pricing and isinstance(endpoint, str) and _exact_endpoint(endpoint.strip()) != _exact_endpoint(current["endpoint_url"]):
                     if pricing != mcp_pricing.read(current["pricing"], current["endpoint_url"]):
                         raise ValueError("Save the new endpoint before declaring its pricing")
                     changes.pop("pricing")
@@ -4966,20 +5052,18 @@ def apply_listing_edits(conn: sqlite3.Connection, kind: str, listing_id: int,
     declaration_changes = {key: value for key, value in changes.items()
                            if kind == "x402" and key in owner_declarations.FIELDS}
     if declaration_changes:
+        if not owner_declarations.has_domain_authority(conn, user_id, current['url']):
+            return [], [owner_declarations.DOMAIN_AUTHORITY_ERROR]
         candidate = dict(current)
         if isinstance(changes.get("url"), str) and changes["url"].strip():
             candidate["url"] = _exact_endpoint(changes["url"].strip())
+        if not owner_declarations.has_domain_authority(conn, user_id, candidate['url']):
+            return [], [owner_declarations.DOMAIN_AUTHORITY_ERROR]
         try:
             owner_declarations.prepare(candidate, declaration_changes)
         except (owner_declarations.DeclarationError, ValueError) as exc:
             return [], [str(exc)]
-    hosts = {
-        str(row["host"]).lower()
-        for row in conn.execute(
-            "SELECT host FROM domain_ownership WHERE user_id=? "
-            "AND status='verified' AND scope_path IS NULL",
-            (user_id,))
-    }
+    from . import ownership as own
     now = int(time.time())
     applied: list[str] = []
     rejected: list[str] = []
@@ -5012,9 +5096,9 @@ def apply_listing_edits(conn: sqlite3.Connection, kind: str, listing_id: int,
             if new == _exact_endpoint(old):
                 continue
             host, _ = _host_and_path(new)
-            if host not in hosts:
+            if not own.may_edit(conn, user_id, new):
                 rejected.append(
-                    "%s: you have not verified control of %s" % (field, host))
+                    "%s: you have not verified control of %s" % (field, new))
                 continue
             identity_columns = {
                 "x402": (field,),
@@ -5071,6 +5155,8 @@ def apply_listing_edits(conn: sqlite3.Connection, kind: str, listing_id: int,
                      (json.dumps(sorted(marked)), listing_id))
     if declaration_changes:
         fresh = conn.execute("SELECT * FROM services WHERE id=?", (listing_id,)).fetchone()
+        if not owner_declarations.has_domain_authority(conn, user_id, fresh['url']):
+            raise PermissionError(owner_declarations.DOMAIN_AUTHORITY_ERROR)
         try:
             declaration, changed_fields = owner_declarations.prepare(fresh, declaration_changes)
         except (owner_declarations.DeclarationError, ValueError) as exc:

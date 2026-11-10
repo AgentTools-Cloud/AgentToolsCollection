@@ -4,6 +4,7 @@ Only typed summaries and privacy-gated listing references are exported. Request
 payloads, contact/client data, credentials and raw crawler errors are excluded.
 """
 
+from collections import Counter
 from contextlib import closing
 import hashlib
 import json
@@ -193,7 +194,8 @@ def publish_watchdog(title, problems, *, advisory_only=False):
 
 def publish_mail_result(purpose, state, event_id):
     """Anonymous fixed-label receipt, not an email-body archive or delivery proof."""
-    labels = {'approval': '上架确认邮件', 'rejection': '提交拒绝邮件', 'external': '外部业务邮件'}
+    labels = {'approval': '上架确认邮件', 'rejection': '提交拒绝邮件', 'external': '外部业务邮件',
+              'claim_invitation': '认领邀请邮件'}
     states = {
         'accepted': ('info', 'SMTP 已接收；对方邮箱是否送达尚未验证。'),
         'failed_or_unknown': ('warning', '发送失败或接收状态未知；未自动重发。'),
@@ -271,6 +273,41 @@ def _history(conn, now):
     return result
 
 
+def _reviewed_binding_partial(conn, run, now):
+    scopes = {'mcp:wellknown': ('mcp', 'source binding held: '),
+              'a2a:crawl': ('a2a', 'wellknown: source binding held: ')}
+    if run['status'] != 'partial' or run['source'] not in scopes or not conn.in_transaction:
+        return False
+    started, finished = run['started_at'], run['finished_at']
+    if type(started) is not int or type(finished) is not int or not 0 < started <= finished <= now:
+        return False
+    kind, prefix = scopes[run['source']]
+    reasons = {'wellknown_binding_target_changed', 'wellknown_new_endpoint_requires_review',
+               'wellknown_synthetic_card_collision', 'wellknown_owner_endpoint_changed',
+               'wellknown_endpoint_mismatch'}
+    errors = run['errors']
+    if not isinstance(errors, str) or not errors:
+        return False
+    expected = Counter()
+    for line in errors.splitlines():
+        if not line.startswith(prefix) or line[len(prefix):] not in reasons:
+            return False
+        expected[line[len(prefix):]] += 1
+    if conn.execute('SELECT 1 FROM ingestion_issues WHERE kind=? AND source=? '
+                    'AND disposition=? AND resolved_at IS NULL LIMIT 1',
+                    (kind, 'wellknown', 'hold')).fetchone() is not None:
+        return False
+    observed = list(conn.execute(
+        'SELECT reason,COUNT(*) versions,'
+        'SUM(CASE WHEN resolved_at>? AND resolved_at<=? THEN 1 ELSE 0 END) reviewed '
+        'FROM ingestion_issues WHERE kind=? AND source=? AND disposition=? '
+        'AND last_seen BETWEEN ? AND ? GROUP BY reason',
+        (finished, now, kind, 'wellknown', 'hold', started, finished)))
+    if Counter({row['reason']: row['versions'] for row in observed}) != expected:
+        return False
+    return all(row['versions'] == row['reviewed'] for row in observed)
+
+
 def _active_rows(conn, now):
     result = []
     for row in conn.execute(
@@ -322,12 +359,15 @@ def _active_rows(conn, now):
         seen.add(row['source'])
         if row['status'] not in ('error', 'partial'):
             continue
+        reviewed = _reviewed_binding_partial(conn, row, now)
         key = json.dumps(['crawl', row['source']])
         result.append({'id': hashlib.sha256(key.encode()).hexdigest(), 'category': 'crawl',
-                       'severity': 'error' if row['status'] == 'error' else 'warning', 'status': 'active',
+                       'severity': 'error' if row['status'] == 'error' else 'warning',
+                       'status': 'resolved' if reviewed else 'active',
                        'title': '抓取来源 · ' + safe_text(row['source'], 60),
                        'summary': f'最近完成状态 {row["status"]}；新增 {row["added"]}，返回更新 {row["updated"]}，'
-                                  f'分类错误 {len((row["errors"] or "").splitlines())} 条。原始异常/请求不导出。',
+                                  f'分类错误 {len((row["errors"] or "").splitlines())} 条。原始异常/请求不导出。'
+                                  + (' 该轮绑定待审已逐版处置，仅保留历史；下轮仍重新判断。' if reviewed else ''),
                        'first_seen': row['started_at'], 'last_seen': row['finished_at'] or row['started_at'],
                        'occurrences': 1, 'data': {'added': row['added'], 'updated': row['updated']}})
     return result

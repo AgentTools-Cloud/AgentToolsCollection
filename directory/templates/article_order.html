@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% from "_article_macros.html" import icon %}
+{% block language %}en{% endblock %}
+{% block title %}Publication order &middot; Agent Tools{% endblock %}
+{% block robots %}<meta name="robots" content="noindex,nofollow">{% endblock %}
+{% block canonical %}{% endblock %}
+{% block head_extra %}<link rel="stylesheet" href="/article-assets/articles.css"><script src="/article-assets/orders.js" defer></script>{% endblock %}
+{% block content %}
+{% set work_area = '/account/article-orders' if author_mode else '/admin/article-orders' %}
+<div class="article-page article-order" id="article-order" data-order-id="{{ order.id }}" data-base-url="{{ work_area }}/api">
+  <header class="article-heading"><div><a href="{{ work_area }}" class="article-back">{{ icon("arrow-left") }}Publication orders</a><h1>Publication order</h1></div><span class="article-status {{ order.status }}" id="article-order-status">{{ article_order_labels[order.status] }}</span></header>
+  <dl class="article-order-metadata"><div><dt>Order</dt><dd class="mono">{{ order.id }}</dd></div><div><dt>Price</dt><dd>${{ '%.2f' | format(order.price_usd_cents / 100) }} USD</dd></div><div><dt>Plan</dt><dd>{{ order.plan | title }}</dd></div><div><dt>Frozen version</dt><dd>V{{ order.version }}</dd></div><div class="wide"><dt>Content SHA-256</dt><dd class="mono">{{ order.snapshot_hash }}</dd></div></dl>
+  <section class="article-order-copy"><header class="article-title"><div class="article-sponsor-disclosure"><span class="article-status sponsored">Sponsored</span><span>by {{ snapshot.sponsor_name }}</span></div><h2>{{ snapshot.title }}</h2><p class="article-summary">{{ snapshot.summary }}</p><div class="article-meta">{{ snapshot.author }}</div></header><div class="article-body">{{ html | safe }}</div></section>
+  <details class="article-order-terms" open><summary>Publication terms - {{ order.terms_version }}</summary><div class="article-terms-text">{{ order.terms_text }}</div></details>
+  <div class="article-message" id="article-order-message" role="alert" hidden></div>
+  <form id="article-order-form" class="article-order-controls">
+    {% if author_mode and order.status == 'awaiting_confirmation' %}<label class="article-check"><input type="checkbox" id="article-accept-terms" required>I accept this frozen article, the ${{ '%.2f' | format(order.price_usd_cents / 100) }} USD price and the publication terms.</label><div class="article-actions"><button class="article-button primary" id="article-order-confirm" type="button" disabled>{{ icon("send") }}Confirm publication order</button><button class="article-button danger" id="article-order-cancel" type="button">{{ icon("archive-x") }}Cancel order</button></div>
+    {% elif author_mode and order.status == 'awaiting_payment' %}<label class="article-field">Payment currency<select id="article-pay-currency" {% if not checkout_available %}disabled{% endif %}>{% for currency, network in sponsored_currencies.items() %}<option value="{{ currency }}">{{ currency | upper }} - {{ network | upper }}</option>{% endfor %}</select></label><div class="article-actions"><button class="article-button primary" id="article-order-checkout" type="button" {% if not checkout_available %}disabled{% endif %}>{{ icon("external-link") }}Create payment invoice</button><button class="article-button danger" id="article-order-cancel" type="button">{{ icon("archive-x") }}Cancel order</button></div>{% if not checkout_available %}<p class="article-message">Payment configuration changed. This order requires review.</p>{% endif %}
+    {% endif %}
+    {% if order.invoice_id or order.payment_id %}<div class="article-meta">{% if order.invoice_id %}<span>Invoice {{ order.invoice_id }}</span>{% endif %}{% if order.payment_id %}<span>Payment {{ order.payment_id }}</span>{% endif %}</div>{% endif %}
+    {% if not author_mode and order.status in ['creation_unknown', 'manual_review', 'payment_pending', 'paid', 'expired'] %}<label class="article-field">Payment ID<input id="article-payment-id" inputmode="numeric" pattern="[1-9][0-9]{0,63}" maxlength="64" value="{{ order.payment_id or '' }}" {% if order.payment_id %}readonly{% endif %}></label>{% endif %}
+    <div class="article-actions">{% if author_mode and order.invoice_url and order.status == 'payment_pending' %}<a class="article-button primary" href="{{ order.invoice_url }}" rel="noopener noreferrer">{{ icon("external-link") }}Open payment invoice</a>{% endif %}{% if order.status in ['creation_unknown', 'payment_pending', 'paid', 'published', 'manual_review', 'expired'] %}<button class="article-icon-button" id="article-order-refresh" type="button" title="Verify payment and publication status" aria-label="Verify payment and publication status">{{ icon("refresh-cw") }}</button>{% endif %}<a class="article-back" href="{{ '/account/articles' if author_mode else '/admin/articles' }}/{{ order.article_id }}">{{ icon("pencil-line") }}Article</a>{% if order.status == 'published' %}<a class="article-back" href="/articles/{{ slug }}">{{ icon("external-link") }}Public article</a>{% endif %}</div>
+  </form>
+  <script type="application/json" id="article-order-data">{{ order | tojson }}</script>
+</div>
+{% endblock %}

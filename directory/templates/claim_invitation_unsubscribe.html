@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex,nofollow">
+  <meta name="referrer" content="no-referrer">
+  <title>Claim invitation preferences - Agent Tools</title>
+  <link rel="stylesheet" href="/assets/claim-invitations.css?v=20261108">
+  {% if state == 'confirm' %}<script src="/assets/claim-invitations.js?v=20261108.2" defer></script>{% endif %}
+</head>
+<body>
+  <header><div class="shell"><a class="brand" href="/">
+    <img width="28" height="28" alt="" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232563eb'/%3E%3Ctext x='16' y='23' font-family='Inter,Arial,sans-serif' font-size='20' font-weight='700' fill='white' text-anchor='middle'%3EA%3C/text%3E%3C/svg%3E">
+    <span>Agent Tools</span></a></div></header>
+  <main class="shell preferences">
+    {% if state == 'confirm' %}
+    <h1>Stop claim invitations</h1>
+    <p id="link-status" class="muted" role="status">This link is missing or invalid.</p>
+    <form id="optout-form" method="post" action="/email/claim-invitations/unsubscribe">
+      <input id="optout-token" type="hidden" name="token" value="">
+      <button id="optout-button" type="submit" disabled>Stop invitations</button>
+    </form>
+    {% elif state == 'stopped' %}
+    <div class="status-mark success" aria-hidden="true">&#10003;</div>
+    <h1>Invitations stopped</h1>
+    <p>Future claim invitations to this address are blocked.</p>
+    {% elif state == 'busy' %}
+    <h1>Please try again</h1>
+    <p>This request could not be completed yet.</p>
+    {% else %}
+    <h1>Link unavailable</h1>
+    <p>This link is invalid or no longer available.</p>
+    {% endif %}
+    <a class="support" href="mailto:contact@agent-tools.cloud">contact@agent-tools.cloud</a>
+  </main>
+  <footer class="shell"><a href="/privacy">Privacy</a><span>agent-tools.cloud</span></footer>
+</body>
+</html>

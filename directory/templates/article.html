@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% from "_article_macros.html" import icon %}
+{% block language %}en{% endblock %}
+{% block title %}{{ article.title }} · Agent Tools{% endblock %}
+{% block desc %}{{ article.summary }}{% endblock %}
+{% block og_type %}article{% endblock %}
+{% block og_title %}{{ article.title }}{% endblock %}
+{% block og_desc %}{{ article.summary }}{% endblock %}
+{% block twitter_title %}{{ article.title }}{% endblock %}
+{% block twitter_desc %}{{ article.summary }}{% endblock %}
+{% block canonical %}<link rel="canonical" href="{{ page_canonical }}">{% endblock %}
+{% block head_extra %}
+<link rel="stylesheet" href="/article-assets/articles.css">
+<link rel="alternate" type="application/rss+xml" title="Agent Tools Blog" href="/articles/feed.xml">
+<meta property="article:published_time" content="{{ published_iso }}"><meta property="article:modified_time" content="{{ updated_iso }}">
+{% if article.cover_id %}<meta property="og:image" content="{{ structured_article.image }}">{% endif %}
+<script type="application/ld+json">{{ structured_article | tojson }}</script>
+{% endblock %}
+{% block content %}
+<article class="article-page article-reading">
+  <div class="article-reading-toolbar"><a href="/articles" class="article-back">{{ icon("arrow-left") }}Blog</a><a href="/articles/{{ article.slug }}.md" class="article-button" title="View Markdown">{{ icon("external-link") }}Markdown</a></div>
+  <header class="article-title">
+    {% if article.publication_type | default('ordinary') == 'sponsored' %}<div class="article-sponsor-disclosure"><span class="article-status sponsored">Sponsored</span><span>by {{ article.sponsor_name }}</span></div>{% endif %}
+    <div class="article-meta">{% for tag in article.tags %}<a href="/articles?tag={{ tag | urlencode }}">{{ tag }}</a>{% endfor %}</div>
+    <h1>{{ article.title }}</h1><p class="article-summary">{{ article.summary }}</p>
+    <div class="article-meta"><span>{{ article.author }}</span><time datetime="{{ published_iso }}">{{ article.published_at | article_date }}</time>{% if article.updated_at != article.published_at %}<span>Updated <time datetime="{{ updated_iso }}">{{ article.updated_at | article_date }}</time></span>{% endif %}</div>
+  </header>
+  {% if article.cover_id %}<figure class="article-cover"><img src="/articles/media/{{ article.cover_id }}" alt="{{ article.title }}" fetchpriority="high"></figure>{% endif %}
+  <div class="article-reading-layout">
+    <div class="article-body">{{ article.html | safe }}</div>
+    {% if article.toc %}<aside class="article-toc"><details open><summary>Contents</summary><nav aria-label="Table of contents">{% for heading in article.toc %}<a class="article-toc-level-{{ heading.level }}" href="#{{ heading.id }}">{{ heading.title }}</a>{% endfor %}</nav></details></aside>{% endif %}
+  </div>
+  <footer class="article-end"><a href="/articles" class="article-back">{{ icon("arrow-left") }}Back to blog</a><a href="/mcp">MCP</a><a href="/x402">x402</a><a href="/a2a">A2A</a></footer>
+</article>
+{% endblock %}

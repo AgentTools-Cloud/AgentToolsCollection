@@ -11,14 +11,16 @@ from contextlib import closing
 from pathlib import Path
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.security import HTTPBearer
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl, SecretStr
 from starlette.concurrency import run_in_threadpool
 
 from . import ask as directory_ask
 from . import cards, db
+from .articles import ArticleError
 from . import a2a as directory_a2a
 from . import crawlers as directory_crawlers
 from . import jobs as directory_jobs
@@ -142,8 +144,10 @@ def _home_payload():
 
 @router.get("/", response_class=HTMLResponse, include_in_schema=False)
 def home(request: Request):
+    article_store = getattr(request.app.state, "article_store", None)
+    latest_articles = article_store.list_published(page_size=3)["items"] if article_store is not None else []
     return TEMPLATES.TemplateResponse(
-        request, "home.html", {"request": request, **_home_payload()})
+        request, "home.html", {"request": request, "latest_articles": latest_articles, **_home_payload()})
 
 
 @router.get("/x402", response_class=HTMLResponse, include_in_schema=False)
@@ -165,7 +169,7 @@ def x402_page(
             c, q, (item.get("name") for item in services))
         cats = db.list_categories(c)
         s = db.stats(c)
-        leaders = db.top_rated(c, "x402", 10)
+        leaders = db.top_rated(c, "x402", 20)
     return TEMPLATES.TemplateResponse(request, "index.html", {
             "request": request, "services": services, "categories": cats,
             "stats": s, "q": q or "", "active_category": category,
@@ -358,7 +362,7 @@ def mcp_page(
         exact_name_groups = directory_resources.exact_name_groups(
             c, q, (item.get("name") for item in servers))
         s = db.mcp_stats(c)
-        leaders = db.top_rated(c, "mcp", 10)
+        leaders = db.top_rated(c, "mcp", 20)
     return TEMPLATES.TemplateResponse(request, "mcp.html", {
             "request": request, "servers": servers, "stats": s, "q": q or "",
             "active_health": health, "active_x402": bool(x402),
@@ -425,7 +429,7 @@ def a2a_page(
         exact_name_groups = directory_resources.exact_name_groups(
             c, q, (item.get("name") for item in agents))
         s = db.a2a_stats(c)
-        leaders = db.top_rated(c, "a2a", 10)
+        leaders = db.top_rated(c, "a2a", 20)
     return TEMPLATES.TemplateResponse(request, "a2a.html", {
             "request": request, "agents": agents, "stats": s, "q": q or "",
             "active_health": health, "active_x402": bool(x402),
@@ -1210,6 +1214,55 @@ class ClaimRequest(BaseModel):
 
 class ClaimVerifyRequest(BaseModel):
     token: str = Field(min_length=8, max_length=200)
+    gateway_api_key: SecretStr | None = Field(
+        default=None, min_length=8, max_length=200,
+        description=("Optional and normally unnecessary: Agent Tools uses its own key for "
+                     "hosted MCP gateways (currently server.smithery.ai). If sent, used for "
+                     "this single check only and never stored or logged."))
+
+
+class ServiceClaimRequest(BaseModel):
+    model_config = {"extra": "forbid", "json_schema_extra": {"examples": [
+        {"url": "https://provider.example/team/service/mcp", "method": "mcp_resource"},
+        {"url": "https://github.com/owner/repository"},
+        {"url": "https://www.npmjs.com/package/@scope/package"},
+    ]}}
+    url: str = Field(min_length=8, max_length=2000)
+    method: str | None = Field(default=None, max_length=40)
+
+
+class ServiceClaimResponse(BaseModel):
+    claim_id: int
+    url: str
+    host: str
+    scope: str
+    method: str
+    token: str
+    expires_at: int
+    publish: str
+    document: dict[str, str]
+    next: dict
+
+
+_SERVICE_CLAIM_AUTH = HTTPBearer(auto_error=False, scheme_name="AccountAPIKey",
+                                description="An existing account API key. Signed-in account cookies also work.")
+_SERVICE_CLAIM_ERRORS = {
+    401: {"description": "An authenticated account is required."},
+    403: {"description": "The claim belongs to another account or a cookie write is cross-origin."},
+    404: {"description": "No matching URL claim exists."},
+    422: {"description": "The target or method is invalid, the claim expired, or public proof is missing."},
+    429: {"description": "Claim creation or verification rate limit reached."},
+    503: {"description": "The database is busy; retry after the response's Retry-After interval."},
+}
+
+
+def _limit_service_claim(request: Request, user, *, verify: bool = False) -> None:
+    windows = (("minute", 2, 60), ("day", 20, 86400)) if verify else (("day", CLAIM_LIMIT_PER_DAY, 86400),)
+    scope = "verify-url-claim" if verify else "open-url-claim"
+    for identity in ("owner:%s" % user["id"], limits.client_ip_from_request(request)):
+        state = limits.check_ip_limits(identity, scope, windows)
+        if state:
+            limits.raise_rate_limited(state, "Too many service claim requests. Try again later.")
 
 
 def _require_api_user(request: Request):
@@ -1223,7 +1276,7 @@ def _require_api_user(request: Request):
                 "message": ("Present an API key as Authorization: Bearer <key>. "
                             "A key is free and can run account-scoped actions such as "
                             "sponsored paid verification; listing edits still require "
-                            "a verified domain."),
+                            "a verified domain or exact service URL."),
                 "get_a_key": {"method": "POST", "url": "/api/v1/keys"},
             })
     return user
@@ -1307,6 +1360,49 @@ async def api_open_claim(request: Request, payload: ClaimRequest):
     }
 
 
+@router.get("/api/v1/claim-methods", tags=["ownership"])
+def api_claim_methods():
+    return {"url_methods": directory_ownership.URL_METHODS,
+            "claim_url": "/api/v1/listing-claims"}
+
+
+@router.post("/api/v1/listing-claims", tags=["ownership"], status_code=201,
+             response_model=ServiceClaimResponse, responses=_SERVICE_CLAIM_ERRORS,
+             dependencies=[Depends(_SERVICE_CLAIM_AUTH)])
+async def api_open_service_claim(request: Request, payload: ServiceClaimRequest):
+    """Request proof for one exact public HTTPS URL, including its query.
+
+    Supply the complete service URL. It grants no rights until fresh proof
+    is published and verified. The token
+    expires after 24 hours and never authorizes other URLs on the same host.
+    """
+    user = _require_api_user(request)
+    directory_auth._require_same_origin_write(request)
+    _limit_service_claim(request, user)
+    try:
+        target = directory_ownership.resolve_service_url(payload.url)
+        method = payload.method or directory_ownership.default_url_method(target)
+
+        def persist(conn):
+            return directory_ownership.issue_url(conn, int(user["id"]), target, method)
+
+        claim_id, token = _submission_write(persist, busy_error="claim_busy")
+    except directory_ownership.ClaimError as exc:
+        raise HTTPException(422, {"error": "claim_refused", "message": str(exc)}) from None
+    return JSONResponse({
+        "claim_id": claim_id, "url": target,
+        "host": directory_ownership.claim_url_scope(target)[0], "scope": "url",
+        "method": method, "token": token,
+        "expires_at": int(time.time()) + directory_ownership.URL_PENDING_SECONDS,
+        "publish": directory_ownership.url_publish_hint(target, method),
+        "document": {directory_ownership.TOKEN_FIELD: token},
+        "next": {"method": "POST", "url": "/api/v1/listing-claims/%d/verify" % claim_id,
+                 "auth": "Authorization: Bearer <api_key>", "body": {"token": token}},
+    }, status_code=201, headers={"Cache-Control": "private, no-store"})
+
+
+@router.post("/api/v1/listing-claims/{claim_id}/verify", tags=["ownership"],
+             responses=_SERVICE_CLAIM_ERRORS, dependencies=[Depends(_SERVICE_CLAIM_AUTH)])
 @router.post("/api/v1/claims/{claim_id}/verify", tags=["ownership"])
 async def api_verify_claim(request: Request, claim_id: int,
                            payload: ClaimVerifyRequest):
@@ -1317,7 +1413,7 @@ async def api_verify_claim(request: Request, claim_id: int,
         conn = db.connect(read_only=True)
         try:
             row = conn.execute(
-                "SELECT user_id, host, method FROM domain_ownership WHERE id=?",
+                "SELECT user_id,host,scope_path,method FROM domain_ownership WHERE id=?",
                 (claim_id,)).fetchone()
             if row is None:
                 raise HTTPException(404, {"error": "no_such_claim"})
@@ -1326,8 +1422,18 @@ async def api_verify_claim(request: Request, claim_id: int,
                     "error": "not_your_claim",
                     "message": "Open your own claim with POST /api/v1/claims.",
                 })
-            prepared = directory_ownership.prepare_claim_verification(
-                conn, claim_id, token)
+            if request.url.path.startswith("/api/v1/listing-claims/") and row["scope_path"] is None:
+                raise HTTPException(404, {"error": "no_such_url_claim"})
+            if row["scope_path"] is not None:
+                directory_auth._require_same_origin_write(request)
+                _limit_service_claim(request, user, verify=True)
+            if payload.gateway_api_key is not None:
+                prepared = directory_ownership.prepare_claim_verification(
+                    conn, claim_id, token,
+                    gateway_api_key=payload.gateway_api_key.get_secret_value().strip())
+            else:
+                prepared = directory_ownership.prepare_claim_verification(
+                    conn, claim_id, token)
         finally:
             conn.close()
 
@@ -1343,21 +1449,24 @@ async def api_verify_claim(request: Request, claim_id: int,
 
             ok, detail, notification = _submission_write(persist, busy_error="claim_busy")
         if not ok:
+            publish = (directory_ownership.url_publish_hint(
+                "https://%s%s" % (row["host"], row["scope_path"]), row["method"])
+                if row["scope_path"] is not None else
+                _PUBLISH_HINT.get(row["method"], "").format(host=row["host"]))
             raise HTTPException(422, {
                 "error": "not_verified",
                 "message": detail,
-                "publish": _PUBLISH_HINT.get(row["method"], "").format(
-                    host=row["host"]),
+                "publish": publish,
             })
 
         directory_ownership.notify_claim_displaced(notification)
 
         conn = db.connect(read_only=True)
         try:
-            mine = db.listings_for_host(conn, row["host"])
+            mine = directory_ownership.listings_for_claim(conn, row)
         finally:
             conn.close()
-        return {
+        result = {
             "status": "verified",
             "host": row["host"],
             "listings": mine,
@@ -1367,6 +1476,9 @@ async def api_verify_claim(request: Request, claim_id: int,
                 "auth": "Authorization: Bearer <api_key>",
             },
         }
+        if row["scope_path"] is not None:
+            result.update({"scope": "url", "url": "https://%s%s" % (row["host"], row["scope_path"])})
+        return result
 
     return await run_in_threadpool(verify)
 
@@ -1385,7 +1497,7 @@ def _api_editable(request: Request, kind: str, slug: str):
             raise HTTPException(403, {
                 "error": "not_verified_owner",
                 "message": exc.detail,
-                "claim_it": {"method": "POST", "url": "/api/v1/claims"},
+                "claim_it": {"method": "POST", "url": "/api/v1/listing-claims"},
             })
         if exc.status_code == 404 and isinstance(exc.detail, str):
             raise HTTPException(404, {"error": "not_found",
@@ -1400,17 +1512,19 @@ def _api_editable(request: Request, kind: str, slug: str):
 @router.get("/api/v1/listings/{kind}/{slug}", tags=["ownership"])
 async def api_get_listing(request: Request, kind: str, slug: str):
     """Read a listing you own, in the shape PATCH expects back."""
-    _user, row, host, _owner = _api_editable(request, kind, slug)
+    user, row, host, _owner = _api_editable(request, kind, slug)
+    fields = directory_auth.editable_values(kind, row, user_id=user["id"])
     return JSONResponse({
         "kind": kind,
         "slug": slug,
         "host": host,
-        "fields": directory_auth.editable_values(kind, row),
-        "declaration": directory_auth.owner_declarations.public_state(row) if kind == "x402" else None,
+        "fields": fields,
+        "declaration": directory_auth.owner_declarations.public_state(row)
+                   if kind == "x402" and "resources" in fields else None,
         "endpoint_fields": list(db._ENDPOINT_FIELDS.get(kind, ())),
         "note": ("Changing an endpoint clears the measured columns: a listing "
                  "cannot carry a reputation to a different address. The new "
-                 "endpoint must be on a host you have already verified."),
+                 "endpoint must be an exact URL or whole host you have already verified."),
     }, headers={"Cache-Control": "private, no-store"})
 
 
@@ -1424,6 +1538,8 @@ async def api_patch_listing(request: Request, kind: str, slug: str,
     """
     user, row, host, owner = _api_editable(request, kind, slug)
     allowed = db._EDITABLE_FIELDS[kind]
+    if kind == "x402":
+        allowed = tuple(directory_auth.editable_values(kind, row, user_id=user["id"]))
     unknown = sorted(k for k in payload if k not in allowed)
     if unknown:
         raise HTTPException(422, {
@@ -1454,11 +1570,13 @@ async def api_patch_listing(request: Request, kind: str, slug: str,
     with db.connect(read_only=True) as conn:
         fresh = conn.execute("SELECT * FROM %s WHERE id=?" % table,
                              (row["id"],)).fetchone()
+    fields = directory_auth.editable_values(kind, fresh, user_id=user["id"])
     body = {
         "kind": kind, "slug": slug, "host": host,
         "applied": applied, "rejected": rejected,
-        "fields": directory_auth.editable_values(kind, fresh),
-        "declaration": directory_auth.owner_declarations.public_state(fresh) if kind == "x402" else None,
+        "fields": fields,
+        "declaration": directory_auth.owner_declarations.public_state(fresh)
+                   if kind == "x402" and "resources" in fields else None,
     }
     if rejected and not applied:
         raise HTTPException(422, dict(body, error="nothing_applied"))
@@ -1928,7 +2046,7 @@ def well_known():
 
 
 @router.get("/sitemap.xml", include_in_schema=False)
-def sitemap_xml() -> Response:
+def sitemap_xml(request: Request) -> Response:
     """Dynamic sitemap for the canonical public pages.
 
     Keep this intentionally selective. The directory contains thousands of
@@ -1974,6 +2092,15 @@ def sitemap_xml() -> Response:
     for path, prio, freq in static_pages:
         parts.append(_url(base + path, priority=prio, changefreq=freq))
 
+    article_store = getattr(request.app.state, "article_store", None)
+    if article_store is not None:
+        parts.append(_url(base + "/articles", priority="0.6", changefreq="weekly"))
+        try:
+            for article in article_store.sitemap_entries():
+                parts.append(_url(base + "/articles/" + article["slug"], _iso(article["updated_at"]), "0.6"))
+        except (ArticleError, sqlite3.Error):
+            raise HTTPException(503, "文章索引暂不可用", headers={"Cache-Control": "no-cache"}) from None
+
     with _conn() as c:
         for slug, ts in c.execute(
                   "SELECT slug, updated_at FROM mcp_servers "
@@ -1997,7 +2124,8 @@ def sitemap_xml() -> Response:
     parts.append("</urlset>")
     xml = "\n".join(parts) + "\n"
     return Response(content=xml, media_type="application/xml",
-                    headers={"Cache-Control": "public, max-age=3600"})
+                    headers={"Cache-Control": "no-cache, must-revalidate" if article_store is not None
+                             else "public, max-age=3600"})
 
 
 @router.get("/robots.txt", include_in_schema=False)
