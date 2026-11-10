@@ -3,6 +3,7 @@
 from contextlib import closing
 from dataclasses import replace
 import asyncio
+import io
 import json
 import sqlite3
 import threading
@@ -12,9 +13,10 @@ from unittest.mock import patch
 import httpx
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
 from directory import auth, routes
-from directory import db, owner_lifecycle as lifecycle, ownership
+from directory import db, jobs, owner_lifecycle as lifecycle, ownership
 from test_ingestion_pipeline import TemporaryDatabaseTestCase
 
 
@@ -43,6 +45,825 @@ class OwnershipFixture(TemporaryDatabaseTestCase):
         with closing(db.connect(read_only=True)) as conn:
             return dict(conn.execute("SELECT * FROM domain_ownership WHERE id=?",
                                      (self.claim,)).fetchone())
+
+
+class ScopedOwnershipTests(OwnershipFixture):
+    def add_scope(self, scope, host="platform.example", user_id=None):
+        with db.writer() as conn:
+            return conn.execute(
+                "INSERT INTO domain_ownership(user_id,host,scope_path,method,token_hash,"
+                "token,status,created_at,verified_at,last_checked) "
+                "VALUES(?,?,?,'url_descriptor',?,?,'verified',1,1,1)",
+                (self.uid if user_id is None else user_id, host, scope,
+                 ownership.token_hash(self.token), self.token),
+            ).lastrowid
+
+    def test_path_claim_is_not_whole_host_ownership(self):
+        self.add_scope("/team/one/mcp")
+        with closing(db.connect(read_only=True)) as conn:
+            self.assertIsNone(ownership.owner_of_host(conn, "platform.example"))
+            self.assertEqual(ownership.hosts_for_user(conn, self.uid), ["owned.example"])
+
+    def test_path_claim_only_matches_the_exact_endpoint(self):
+        claim_id = self.add_scope("/team/one/mcp")
+        with closing(db.connect(read_only=True)) as conn:
+            owner = ownership.owner_for_url(conn, "https://PLATFORM.EXAMPLE:443/team/one/mcp")
+            self.assertEqual(owner["id"], claim_id)
+            for path in ("/team/two/mcp", "/team/one/mcp/child", "/team/one/mcp-other", "/team/one/mcp/"):
+                with self.subTest(path=path):
+                    self.assertIsNone(ownership.owner_for_url(conn, "https://platform.example" + path))
+
+    def test_query_is_part_of_the_exact_endpoint(self):
+        self.add_scope("/team/one/mcp?region=eu")
+        with closing(db.connect(read_only=True)) as conn:
+            self.assertTrue(ownership.may_edit(conn, self.uid, "https://platform.example/team/one/mcp?region=eu"))
+            self.assertFalse(ownership.may_edit(conn, self.uid, "https://platform.example/team/one/mcp?region=us"))
+            self.assertFalse(ownership.may_edit(conn, self.uid, "https://platform.example/team/one/mcp"))
+
+    def test_default_mcp_method_preserves_trailing_slash_target(self):
+        target = 'https://platform.example/team/one/mcp/?region=eu'
+        self.assertEqual(ownership.default_url_method(target), 'mcp_resource')
+        self.assertEqual(ownership.normalize_claim_url(target), target)
+        self.assertEqual(ownership.claim_url_scope(target), ('platform.example', '/team/one/mcp/?region=eu'))
+
+    def test_trailing_slash_claim_matches_ingested_endpoint_and_metadata_edit(self):
+        target = 'https://platform.example/team/one/mcp/'
+        claim_id = self.add_scope('/team/one/mcp/')
+        listing_id = self.add_mcp('scoped-slash', target)
+        with db.writer(immediate=True) as conn:
+            stored = conn.execute('SELECT endpoint_url FROM mcp_servers WHERE id=?', (listing_id,)).fetchone()
+            self.assertEqual(stored['endpoint_url'], target)
+            self.assertTrue(ownership.may_edit(conn, self.uid, target))
+            self.assertFalse(ownership.may_edit(conn, self.uid, target.rstrip('/')))
+            applied, rejected = db.apply_listing_edits(
+                conn, 'mcp', listing_id, self.uid, claim_id, {'description': 'Slash owner correction'})
+            self.assertEqual(applied, ['description'])
+            self.assertFalse(rejected)
+
+    def test_verified_slash_destination_can_be_used_without_borrowing_non_slash_scope(self):
+        source_claim = self.add_scope('/start/mcp')
+        destination_claim = self.add_scope('/end/mcp/')
+        listing_id = self.add_mcp('slash-destination', 'https://platform.example/start/mcp')
+        with db.writer(immediate=True) as conn:
+            applied, rejected = db.apply_listing_edits(
+                conn, 'mcp', listing_id, self.uid, source_claim,
+                {'endpoint_url': 'https://platform.example/end/mcp/'})
+            self.assertEqual(applied, ['endpoint_url'])
+            self.assertFalse(rejected)
+            applied, rejected = db.apply_listing_edits(
+                conn, 'mcp', listing_id, self.uid, destination_claim,
+                {'endpoint_url': 'https://platform.example/end/mcp'})
+            self.assertEqual(applied, [])
+            self.assertTrue(rejected)
+
+    def test_slash_variants_remain_distinct_listing_identities(self):
+        first = self.add_mcp('without-slash', 'https://platform.example/one/mcp')
+        second = self.add_mcp('with-slash', 'https://platform.example/one/mcp/')
+        self.assertNotEqual(first, second)
+        with closing(db.connect(read_only=True)) as conn:
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM mcp_servers').fetchone()[0], 2)
+
+    def test_legacy_root_endpoint_and_pricing_edit_is_not_a_migration(self):
+        listing_id = self.add_mcp('legacy-root-price', 'https://owned.example/')
+        pricing = {'offers': [{'name': 'review-operation', 'price': '1', 'priceCurrency': 'USD'}]}
+        with db.writer(immediate=True) as conn:
+            conn.execute("UPDATE mcp_servers SET endpoint_url='https://owned.example',"
+                         "health='ok',tool_count=7,quality_score=90 WHERE id=?", (listing_id,))
+            applied, rejected = db.apply_listing_edits(
+                conn, 'mcp', listing_id, self.uid, self.claim,
+                {'endpoint_url': 'https://owned.example', 'pricing': pricing})
+            self.assertEqual(applied, ['pricing'])
+            self.assertFalse(rejected)
+            row = conn.execute('SELECT * FROM mcp_servers WHERE id=?', (listing_id,)).fetchone()
+            self.assertEqual(row['endpoint_url'], 'https://owned.example')
+            self.assertEqual((row['health'], row['tool_count'], row['quality_score']), ('ok', 7, 90))
+
+    def test_scoped_owner_takes_precedence_without_changing_whole_host_claim(self):
+        with db.writer() as conn:
+            other_uid = conn.execute(
+                "INSERT INTO users(provider,provider_uid,login,status,created_at) "
+                "VALUES('github','scoped-fixture','scoped-fixture','active',1)"
+            ).lastrowid
+        scoped_claim = self.add_scope("/one/mcp", host="owned.example", user_id=other_uid)
+        with closing(db.connect(read_only=True)) as conn:
+            self.assertEqual(ownership.owner_for_url(conn, "https://owned.example/one/mcp")["id"], scoped_claim)
+            self.assertEqual(ownership.owner_for_url(conn, "https://owned.example/two/mcp")["id"], self.claim)
+            self.assertEqual(ownership.owner_of_host(conn, "owned.example")["id"], self.claim)
+
+    def test_scoped_urls_reject_unsafe_or_ambiguous_targets(self):
+        for target in (
+                "http://platform.example/one", "https://127.0.0.1/one",
+                "https://platform.example:8443/one", "https://user:pass@platform.example/one",
+                "https://platform.example/one#fragment", "https://platform.example/one/../two",
+                "https://platform.example/one/%2e%2e/two", "https://platform.example/one%2ftwo",
+                "https://platform.example/one%255ctwo", "https://platform.example/one?api_key=private",
+                "https://platform.example/one?access_token=private", "https://platform.example/a b",
+                "https://platform.example/one%0atwo", "https://platform.example/one\x00two",
+                "https://platform.example/one%invalid"):
+            with self.subTest(target=target):
+                with self.assertRaises(ownership.UnsafeTarget):
+                    ownership.normalize_claim_url(target)
+
+    def issue_scoped(self, target="https://platform.example/team/one/mcp"):
+        with db.writer() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO shared_hosts(host,path_count,listing_count,verdict,updated_at) "
+                "VALUES('platform.example',25,25,'shared',1)")
+            return ownership.issue_url(conn, self.uid, target, "url_descriptor")
+
+    def test_scoped_claim_verifies_shared_endpoint_without_granting_the_host(self):
+        claim_id, token = self.issue_scoped()
+        response = ownership._FetchResponse(200, json.dumps({
+            ownership.TOKEN_FIELD: token}).encode(), {})
+        with patch.object(ownership, "_read_https", return_value=response) as reader:
+            with db.writer() as conn:
+                self.assertTrue(ownership.verify_claim(conn, claim_id, token)[0])
+                self.assertTrue(ownership.may_edit(conn, self.uid, "https://platform.example/team/one/mcp"))
+                self.assertFalse(ownership.may_edit(conn, self.uid, "https://platform.example/team/two/mcp"))
+                self.assertIsNone(ownership.owner_of_host(conn, "platform.example"))
+            reader.assert_called_once_with("platform.example", "/team/one/mcp", "application/json")
+            self.assertNotIn(token, str(reader.call_args))
+
+    def test_url_claim_does_not_delete_other_pending_scopes_or_domain_claims(self):
+        target = "https://owned.example/team/one/mcp"
+        with db.writer() as conn:
+            first, _token = ownership.issue_url(conn, self.uid, target, "url_descriptor")
+            second, _token = ownership.issue_url(conn, self.uid, "https://owned.example/team/two/mcp", "url_descriptor")
+            whole, _token = ownership.issue(conn, self.uid, "owned.example", "descriptor")
+            replacement, _token = ownership.issue_url(conn, self.uid, target, "url_descriptor")
+            self.assertIsNone(conn.execute("SELECT id FROM domain_ownership WHERE id=?", (first,)).fetchone())
+            rows = conn.execute("SELECT id FROM domain_ownership WHERE status='pending'").fetchall()
+            self.assertEqual({row["id"] for row in rows}, {second, whole, replacement})
+
+    def test_url_claim_rejects_wrong_token_and_redirected_proof(self):
+        claim_id, token = self.issue_scoped()
+        for response in (
+                ownership._FetchResponse(200, b'{"agentToolsVerify":"someone-else"}', {}),
+                ownership._FetchResponse(302, json.dumps({ownership.TOKEN_FIELD: token}).encode(),
+                                         {"location": "https://another.example/proof"})):
+            with self.subTest(status=response.status_code):
+                with patch.object(ownership, "_read_https", return_value=response) as reader:
+                    with db.writer() as conn:
+                        self.assertFalse(ownership.verify_claim(conn, claim_id, token)[0])
+                        self.assertIsNone(ownership.owner_for_url(conn, "https://platform.example/team/one/mcp"))
+                    reader.assert_called_once()
+
+    def test_expired_url_claim_is_rejected_before_network_access(self):
+        claim_id, token = self.issue_scoped()
+        with db.writer() as conn:
+            conn.execute("UPDATE domain_ownership SET created_at=1 WHERE id=?", (claim_id,))
+        with patch.object(ownership, "_read_https") as reader:
+            with db.writer() as conn:
+                ok, detail = ownership.verify_claim(conn, claim_id, token)
+                self.assertFalse(ok)
+                self.assertIn("expired", detail)
+            reader.assert_not_called()
+
+    def test_shared_endpoint_can_be_rechecked_without_enabling_domain_claims(self):
+        claim_id, token = self.issue_scoped()
+        response = ownership._FetchResponse(200, json.dumps({ownership.TOKEN_FIELD: token}).encode(), {})
+        with patch.object(ownership, "_read_https", return_value=response):
+            with db.writer() as conn:
+                self.assertTrue(ownership.verify_claim(conn, claim_id, token)[0])
+            with patch.object(ownership, "probe", return_value=(True, "domain fixture")):
+                with db.writer() as conn:
+                    self.assertEqual(ownership.recheck(conn), (2, 0))
+                    self.assertIsNotNone(ownership.owner_for_url(conn, "https://platform.example/team/one/mcp"))
+                    with self.assertRaises(ownership.ClaimError):
+                        ownership.issue(conn, self.uid, "platform.example", "descriptor")
+
+    def test_recheck_discards_failure_after_new_success_on_another_connection(self):
+        claim_id = self.add_scope('/review/mcp')
+        with db.writer(immediate=True) as conn:
+            conn.execute('UPDATE domain_ownership SET fail_count=2 WHERE id=?', (claim_id,))
+        verified = []
+
+        def domain_probe(method, host, token):
+            with patch.object(ownership, 'probe_url', return_value=(True, 'fresh fixture proof')):
+                with db.writer(immediate=True) as writer_conn:
+                    verified.append(ownership.verify_claim(writer_conn, claim_id, self.token)[0])
+            return True, 'domain fixture proof'
+
+        with patch.object(ownership, 'probe', side_effect=domain_probe), patch.object(ownership, 'probe_url', return_value=(False, 'old fixture failure')):
+            self.assertEqual(jobs.cmd_ownership_recheck(), 0)
+        self.assertEqual(verified, [True])
+        with closing(db.connect(read_only=True)) as conn:
+            current = conn.execute('SELECT * FROM domain_ownership WHERE id=?', (claim_id,)).fetchone()
+            self.assertEqual(current['status'], 'verified')
+            self.assertEqual(current['fail_count'], 0)
+            self.assertTrue(ownership.may_edit(conn, self.uid, 'https://platform.example/review/mcp'))
+
+    def test_recheck_discards_same_second_success_with_zero_failure_count(self):
+        claim_id = self.add_scope('/team/one/mcp')
+        moment = int(time.time())
+        with db.writer(immediate=True) as conn:
+            conn.execute('UPDATE domain_ownership SET verified_at=?,last_checked=?,fail_count=0 WHERE id=?',
+                         (moment, moment, claim_id))
+        def interrupted_probe(method, target, token):
+            with patch.object(ownership, 'probe_url', return_value=(True, 'fresh fixture proof')):
+                with db.writer(immediate=True) as conn:
+                    self.assertTrue(ownership.verify_claim(conn, claim_id, token)[0])
+            return False, 'old fixture failure'
+        with patch.object(ownership.time, 'time', return_value=moment), \
+                patch.object(ownership, 'probe', return_value=(True, 'domain fixture')), \
+                patch.object(ownership, 'probe_url', side_effect=interrupted_probe):
+            jobs.cmd_ownership_recheck()
+        with closing(db.connect(read_only=True)) as conn:
+            row = conn.execute('SELECT * FROM domain_ownership WHERE id=?', (claim_id,)).fetchone()
+            self.assertEqual((row['status'], row['fail_count']), ('verified', 0))
+            self.assertGreaterEqual(row['verification_revision'], 2)
+
+    def test_verification_revision_upgrade_preserves_existing_claim_fields(self):
+        with closing(sqlite3.connect(':memory:')) as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute('CREATE TABLE domain_ownership '
+                         '(id INTEGER PRIMARY KEY,user_id INTEGER,host TEXT,scope_path TEXT,'
+                         'method TEXT,token_hash TEXT,token TEXT,status TEXT,created_at INTEGER,'
+                         'verified_at INTEGER,last_checked INTEGER,fail_count INTEGER)')
+            conn.execute("INSERT INTO domain_ownership VALUES "
+                         "(1,1,'owned.example',NULL,'descriptor','fixture','published-fixture','verified',1,2,2,0)")
+            before = dict(conn.execute('SELECT * FROM domain_ownership').fetchone())
+            db.ensure_ownership_verification_revision(conn)
+            db.ensure_ownership_verification_revision(conn)
+            after = dict(conn.execute('SELECT * FROM domain_ownership').fetchone())
+            self.assertEqual(after.pop('verification_revision'), 0)
+            self.assertEqual(after, before)
+            for revision in (1, 2):
+                conn.execute('UPDATE domain_ownership SET verified_at=verified_at,'
+                             'last_checked=last_checked,fail_count=fail_count WHERE id=1')
+                after = dict(conn.execute('SELECT * FROM domain_ownership').fetchone())
+                self.assertEqual(after.pop('verification_revision'), revision)
+                self.assertEqual(after, before)
+
+    def test_recheck_retains_consecutive_failure_threshold(self):
+        claim_id = self.add_scope('/review/mcp')
+        with patch.object(ownership, 'probe', return_value=(True, 'domain fixture proof')), patch.object(ownership, 'probe_url', return_value=(False, 'fixture failure')):
+            for expected_count in range(1, ownership.MAX_FAILS + 1):
+                self.assertEqual(jobs.cmd_ownership_recheck(), 0)
+                with closing(db.connect(read_only=True)) as conn:
+                    row = conn.execute('SELECT status,fail_count FROM domain_ownership WHERE id=?', (claim_id,)).fetchone()
+                    self.assertEqual(row['fail_count'], expected_count)
+                    self.assertEqual(row['status'], 'revoked' if expected_count == ownership.MAX_FAILS else 'verified')
+
+    def test_recheck_refuses_to_probe_inside_a_write_transaction(self):
+        with db.writer(immediate=True) as conn, patch.object(ownership, 'probe') as probe:
+            with self.assertRaises(ValueError):
+                ownership.recheck(conn)
+            probe.assert_not_called()
+
+    def mcp_reader(self, token, calls, *, resource_uri=None, redirect=False):
+        def read(host, path, accept, **options):
+            self.assertEqual((host, path), ("platform.example", "/team/one/mcp"))
+            payload = json.loads(options.get("body") or b"{}")
+            self.assertNotIn(token, json.dumps(payload))
+            if redirect:
+                return ownership._FetchResponse(307, b"", {"location": "https://other.example/mcp"})
+            if options["method"] in ("GET", "DELETE"):
+                return ownership._FetchResponse(405 if options["method"] == "GET" else 204, b"", {})
+            method = payload["method"]
+            calls.append(method)
+            if method == "notifications/initialized":
+                return ownership._FetchResponse(202, b"", {})
+            if method == "initialize":
+                result = {"protocolVersion": payload["params"]["protocolVersion"],
+                          "capabilities": {"resources": {}},
+                          "serverInfo": {"name": "fixture", "version": "1"}}
+            else:
+                self.assertEqual(method, "resources/read")
+                self.assertEqual(payload["params"]["uri"], ownership.MCP_VERIFY_RESOURCE)
+                result = {"contents": [{"uri": resource_uri or ownership.MCP_VERIFY_RESOURCE,
+                                         "mimeType": "application/json",
+                                         "text": json.dumps({ownership.TOKEN_FIELD: token})}]}
+            return ownership._FetchResponse(200, json.dumps({
+                "jsonrpc": "2.0", "id": payload["id"], "result": result}).encode(),
+                {"content-type": "application/json", "mcp-session-id": "fixture-session"})
+        return read
+
+    def test_mcp_claim_uses_the_sdk_and_only_reads_its_fixed_resource(self):
+        with db.writer() as conn:
+            claim_id, token = ownership.issue_url(
+                conn, self.uid, "https://platform.example/team/one/mcp", "mcp_resource")
+        calls = []
+        with patch.object(ownership, "_read_https", side_effect=self.mcp_reader(token, calls)):
+            with db.writer() as conn:
+                ok, detail = ownership.verify_claim(conn, claim_id, token)
+                self.assertTrue(ok, detail)
+                self.assertIsNone(ownership.owner_of_host(conn, "platform.example"))
+        self.assertEqual(calls, ["initialize", "notifications/initialized", "resources/read"])
+
+    def test_mcp_claim_rejects_other_resource_uris_and_redirects(self):
+        token = "fixture-resource-token"
+        for options in ({"resource_uri": "agent-tools://another-service"}, {"redirect": True}):
+            with self.subTest(options=options):
+                with patch.object(ownership, "_read_https", side_effect=self.mcp_reader(token, [], **options)):
+                    self.assertFalse(ownership.probe_url(
+                        "mcp_resource", "https://platform.example/team/one/mcp", token)[0])
+
+    def mcp_sse_connection(self, token, calls, *, wrong_id=False, oversized=False):
+        reader = self.mcp_reader(token, calls)
+        connections = []
+
+        class Response:
+            def __init__(self, fetched):
+                self.status = fetched.status_code
+                self.headers = fetched.headers
+                self.stream = io.BytesIO(fetched.body)
+
+            def getheaders(self):
+                return list(self.headers.items())
+
+            def read(self, limit):
+                return self.stream.read(limit)
+
+            def readline(self, limit):
+                return self.stream.readline(limit)
+
+        class Connection:
+            sock = None
+
+            def __init__(self, host, address):
+                self.host = host
+                self.closed = False
+                connections.append(self)
+
+            def request(self, method, path, body=None, headers=None):
+                fetched = reader(self.host, path, 'application/json', method=method, body=body)
+                message = json.loads(body) if body else {}
+                if message.get('method') == 'resources/read':
+                    result = json.loads(fetched.body)
+                    if wrong_id:
+                        result['id'] = 'not-the-request-id'
+                    notification = {'jsonrpc': '2.0', 'method': 'notifications/message',
+                                    'params': {'level': 'info', 'data': 'x' * 65537 if oversized else 'fixture notification'}}
+                    prefix = ': keepalive\n\nevent: message\ndata: ' + json.dumps(notification) + '\n\n'
+                    frame = 'event: message\n' + '\n'.join('data: ' + line for line in json.dumps(result, indent=2).splitlines()) + '\n\n'
+                    fetched = ownership._FetchResponse(200, (prefix + frame).encode(), {'content-type': 'text/event-stream'})
+                self.response = Response(fetched)
+
+            def getresponse(self):
+                return self.response
+
+            def close(self):
+                self.closed = True
+
+        return Connection, connections
+
+    def test_mcp_sse_notification_and_multiline_result_verify_and_close(self):
+        calls = []
+        connection, opened = self.mcp_sse_connection(self.token, calls)
+        with patch.object(ownership, '_public_addresses', return_value=['93.184.216.34']), patch.object(ownership, '_PinnedHTTPSConnection', connection):
+            ok, detail = ownership.probe_url('mcp_resource', 'https://platform.example/team/one/mcp', self.token)
+        self.assertTrue(ok, detail)
+        self.assertEqual(calls, ['initialize', 'notifications/initialized', 'resources/read'])
+        self.assertTrue(opened and all(item.closed for item in opened))
+
+    def test_mcp_sse_wrong_response_id_is_rejected(self):
+        connection, opened = self.mcp_sse_connection(self.token, [], wrong_id=True)
+        with patch.object(ownership, '_public_addresses', return_value=['93.184.216.34']), patch.object(ownership, '_PinnedHTTPSConnection', connection), patch.object(ownership, '_READ_TIMEOUT', 0.2):
+            self.assertFalse(ownership.probe_url('mcp_resource', 'https://platform.example/team/one/mcp', self.token)[0])
+        self.assertTrue(opened and all(item.closed for item in opened))
+
+    def test_mcp_sse_notification_bytes_count_toward_response_limit(self):
+        connection, opened = self.mcp_sse_connection(self.token, [], oversized=True)
+        with patch.object(ownership, '_public_addresses', return_value=['93.184.216.34']), patch.object(ownership, '_PinnedHTTPSConnection', connection):
+            self.assertFalse(ownership.probe_url('mcp_resource', 'https://platform.example/team/one/mcp', self.token)[0])
+        self.assertTrue(opened and all(item.closed for item in opened))
+
+    GATEWAY_URL = "https://server.smithery.ai/acme/tool/mcp"
+    GATEWAY_KEY = "fixture-gateway-key-0001"
+
+    def gateway_reader(self, token, calls, paths, *, require_key=True):
+        def read(host, path, accept, **options):
+            self.assertEqual(host, "server.smithery.ai")
+            paths.append(path)
+            payload = json.loads(options.get("body") or b"{}")
+            self.assertNotIn(self.GATEWAY_KEY, json.dumps(payload))
+            self.assertNotIn(self.GATEWAY_KEY, json.dumps(options.get("request_headers") or {}))
+            if require_key and not path.endswith("/mcp?api_key=" + self.GATEWAY_KEY):
+                return ownership._FetchResponse(401, b'{"error":"unauthorized"}', {"content-type": "application/json"})
+            if options["method"] in ("GET", "DELETE"):
+                return ownership._FetchResponse(405 if options["method"] == "GET" else 204, b"", {})
+            method = payload["method"]
+            calls.append(method)
+            if method == "notifications/initialized":
+                return ownership._FetchResponse(202, b"", {})
+            if method == "initialize":
+                result = {"protocolVersion": payload["params"]["protocolVersion"], "capabilities": {},
+                          "serverInfo": {"name": "gateway-fixture", "version": "1"}}
+            else:
+                self.assertEqual(payload["params"]["uri"], ownership.MCP_VERIFY_RESOURCE)
+                result = {"contents": [{"uri": ownership.MCP_VERIFY_RESOURCE, "mimeType": "application/json",
+                                         "text": json.dumps({ownership.TOKEN_FIELD: token})}]}
+            return ownership._FetchResponse(200, json.dumps({
+                "jsonrpc": "2.0", "id": payload["id"], "result": result}).encode(),
+                {"content-type": "application/json", "mcp-session-id": "gateway-session"})
+        return read
+
+    def no_operator_key(self):
+        self.enterContext(patch.object(ownership, "operator_gateway_key", return_value=None))
+
+    def operator_key(self):
+        self.enterContext(patch.object(ownership, "operator_gateway_key", return_value=self.GATEWAY_KEY))
+
+    def test_operator_gateway_key_verifies_without_claimant_key(self):
+        self.operator_key()
+        with db.writer() as conn:
+            claim_id, token = ownership.issue_url(conn, self.uid, self.GATEWAY_URL, "mcp_resource")
+        calls, paths = [], []
+        with patch.object(ownership, "_read_https", side_effect=self.gateway_reader(token, calls, paths)):
+            with db.writer() as conn:
+                ok, detail = ownership.verify_claim(conn, claim_id, token)
+        self.assertTrue(ok, detail)
+        self.assertEqual(calls, ["initialize", "notifications/initialized", "resources/read"])
+        self.assertTrue(paths and all(path == "/acme/tool/mcp?api_key=" + self.GATEWAY_KEY for path in paths))
+        with closing(sqlite3.connect(self.path)) as raw:
+            self.assertNotIn(self.GATEWAY_KEY, "\n".join(raw.iterdump()))
+
+    def test_operator_gateway_key_is_not_sent_to_other_hosts(self):
+        with patch.object(ownership, "OPERATOR_GATEWAY_KEY_FILES", {}):
+            self.assertIsNone(ownership.operator_gateway_key(self.GATEWAY_URL))
+        self.assertIsNone(ownership.operator_gateway_key("https://platform.example/team/one/mcp"))
+        paths = []
+        self.operator_key()
+        with patch.object(ownership, "_read_https", side_effect=self.mcp_reader(self.token, [])) as reader:
+            ownership.probe_url("mcp_resource", "https://platform.example/team/one/mcp", self.token)
+        self.assertTrue(all("api_key" not in call.args[1] for call in reader.call_args_list))
+        self.assertFalse(paths)
+
+    def test_operator_gateway_key_file_is_validated(self):
+        import tempfile, os
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "key")
+            with patch.object(ownership, "OPERATOR_GATEWAY_KEY_FILES", {"server.smithery.ai": path}):
+                self.assertIsNone(ownership.operator_gateway_key(self.GATEWAY_URL))
+                with open(path, "w") as stream:
+                    stream.write(self.GATEWAY_KEY + "\n")
+                self.assertEqual(ownership.operator_gateway_key(self.GATEWAY_URL), self.GATEWAY_KEY)
+                with open(path, "w") as stream:
+                    stream.write("bad key&x=1")
+                self.assertIsNone(ownership.operator_gateway_key(self.GATEWAY_URL))
+
+    def test_gateway_recheck_with_operator_key_counts_failures(self):
+        self.operator_key()
+        with db.writer() as conn:
+            claim_id = conn.execute(
+                "INSERT INTO domain_ownership(user_id,host,scope_path,method,token_hash,"
+                "token,status,created_at,verified_at,last_checked) "
+                "VALUES(?,'server.smithery.ai','/acme/tool/mcp','mcp_resource',?,?,'verified',1,1,1)",
+                (self.uid, ownership.token_hash(self.token), self.token)).lastrowid
+        with patch.object(ownership, "probe", return_value=(True, "domain fixture")), \
+                patch.object(ownership, "probe_url", return_value=(False, "token removed")):
+            for _ in range(ownership.MAX_FAILS):
+                self.assertEqual(jobs.cmd_ownership_recheck(), 0)
+        with closing(db.connect(read_only=True)) as conn:
+            row = conn.execute("SELECT status FROM domain_ownership WHERE id=?", (claim_id,)).fetchone()
+            self.assertEqual(row["status"], "revoked")
+
+    def test_gateway_key_is_used_once_in_the_probe_query_and_never_stored(self):
+        self.no_operator_key()
+        with db.writer() as conn:
+            claim_id, token = ownership.issue_url(conn, self.uid, self.GATEWAY_URL, "mcp_resource")
+        calls, paths = [], []
+        with patch.object(ownership, "_read_https", side_effect=self.gateway_reader(token, calls, paths)):
+            with closing(db.connect(read_only=True)) as conn:
+                prepared = ownership.prepare_claim_verification(
+                    conn, claim_id, token, gateway_api_key=self.GATEWAY_KEY)
+            self.assertTrue(prepared.ok, prepared.detail)
+            self.assertNotIn(self.GATEWAY_KEY, prepared.detail)
+            with db.writer() as conn:
+                ok, detail, _notification = ownership.apply_claim_verification(
+                    conn, claim_id, token, verification=prepared)
+                self.assertTrue(ok, detail)
+                self.assertIsNone(ownership.owner_of_host(conn, "server.smithery.ai"))
+                self.assertTrue(ownership.may_edit(conn, self.uid, self.GATEWAY_URL))
+                self.assertFalse(ownership.may_edit(conn, self.uid, "https://server.smithery.ai/acme/other/mcp"))
+        self.assertEqual(calls, ["initialize", "notifications/initialized", "resources/read"])
+        self.assertTrue(paths and all(path == "/acme/tool/mcp?api_key=" + self.GATEWAY_KEY for path in paths))
+        with closing(sqlite3.connect(self.path)) as raw:
+            dump = "\n".join(raw.iterdump())
+        self.assertNotIn(self.GATEWAY_KEY, dump)
+
+    def test_gateway_without_any_key_reports_refusal(self):
+        self.no_operator_key()
+        with db.writer() as conn:
+            claim_id, token = ownership.issue_url(conn, self.uid, self.GATEWAY_URL, "mcp_resource")
+        paths = []
+        with patch.object(ownership, "_read_https", side_effect=self.gateway_reader(token, [], paths)):
+            with db.writer() as conn:
+                ok, detail = ownership.verify_claim(conn, claim_id, token)
+        self.assertFalse(ok)
+        self.assertIn("gateway refused", detail)
+        self.assertTrue(paths and all("api_key" not in path for path in paths))
+
+    def test_gateway_key_is_refused_for_other_hosts_methods_and_whole_host_claims(self):
+        with patch.object(ownership, "_read_https") as reader:
+            for method, url, key in (
+                    ("mcp_resource", "https://platform.example/team/one/mcp", self.GATEWAY_KEY),
+                    ("url_descriptor", self.GATEWAY_URL, self.GATEWAY_KEY),
+                    ("mcp_resource", self.GATEWAY_URL, "short"),
+                    ("mcp_resource", self.GATEWAY_URL, "bad key&other=1")):
+                with self.subTest(method=method, url=url, key=key):
+                    ok, detail = ownership.probe_url(method, url, "fixture-token", gateway_api_key=key)
+                    self.assertFalse(ok)
+                    self.assertNotIn(key, detail)
+            with closing(db.connect(read_only=True)) as conn:
+                prepared = ownership.prepare_claim_verification(
+                    conn, self.claim, self.token, gateway_api_key=self.GATEWAY_KEY)
+            self.assertIsNone(prepared.claim)
+            reader.assert_not_called()
+
+    def test_gateway_recheck_without_operator_key_is_inconclusive(self):
+        self.no_operator_key()
+        with db.writer() as conn:
+            claim_id = conn.execute(
+                "INSERT INTO domain_ownership(user_id,host,scope_path,method,token_hash,"
+                "token,status,created_at,verified_at,last_checked) "
+                "VALUES(?,'server.smithery.ai','/acme/tool/mcp','mcp_resource',?,?,'verified',1,1,1)",
+                (self.uid, ownership.token_hash(self.token), self.token)).lastrowid
+        with patch.object(ownership, "probe", return_value=(True, "domain fixture")), \
+                patch.object(ownership, "probe_url", return_value=(False, "gateway refused")) as prober:
+            for _ in range(ownership.MAX_FAILS + 1):
+                self.assertEqual(jobs.cmd_ownership_recheck(), 0)
+        for call in prober.call_args_list:
+            self.assertNotIn("gateway_api_key", call.kwargs)
+        with closing(db.connect(read_only=True)) as conn:
+            row = conn.execute("SELECT status,fail_count FROM domain_ownership WHERE id=?", (claim_id,)).fetchone()
+            self.assertEqual((row["status"], row["fail_count"]), ("verified", 0))
+
+    def test_gateway_key_api_and_browser_verification_paths(self):
+        client = self.browser_client()
+        self.no_operator_key()
+        opened = client.post("/api/v1/listing-claims", json={"url": self.GATEWAY_URL, "method": "mcp_resource"}).json()
+        with patch.object(ownership, "_read_https", side_effect=self.gateway_reader(opened["token"], [], [])):
+            refused = client.post(opened["next"]["url"], json={"token": opened["token"]})
+            self.assertEqual(refused.status_code, 422, refused.text)
+            verified = client.post(opened["next"]["url"], json={
+                "token": opened["token"], "gateway_api_key": self.GATEWAY_KEY})
+        self.assertEqual(verified.status_code, 200, verified.text)
+        self.assertNotIn(self.GATEWAY_KEY, verified.text)
+        self.operator_key()
+        page = client.post("/account/service-claims", data={"url": "https://server.smithery.ai/acme/two/mcp"})
+        self.assertEqual(page.status_code, 200, page.text)
+        self.assertNotIn('name="gateway_api_key"', page.text)
+        with closing(db.connect(read_only=True)) as conn:
+            pending = conn.execute(
+                "SELECT id FROM domain_ownership WHERE scope_path='/acme/two/mcp' AND status='pending'").fetchone()
+        token = page.text.split('name="token" value="', 1)[1].split('"', 1)[0]
+        paths = []
+        with patch.object(ownership, "_read_https", side_effect=self.gateway_reader(token, [], paths)):
+            response = client.post("/account/service-claims/%s/verify" % pending["id"],
+                                   data={"token": token}, follow_redirects=False)
+        self.assertEqual(response.status_code, 302, (paths, response.text[-300:]))
+        self.assertIn("its own gateway key", client.get("/docs/claim").text)
+
+    def add_mcp(self, slug, target):
+        with db.writer() as conn:
+            db.upsert_mcp_server(conn, {
+                "name": slug, "slug": slug, "endpoint_url": target,
+                "source": "fixture", "source_id": slug, "confidence": 0.5})
+            return conn.execute("SELECT id FROM mcp_servers WHERE slug=?", (slug,)).fetchone()["id"]
+
+    def test_verified_projection_and_claim_results_only_include_the_owned_url(self):
+        claim_id = self.add_scope("/team/one/mcp")
+        first = self.add_mcp("scoped-one", "https://platform.example/team/one/mcp")
+        self.add_mcp("scoped-two", "https://platform.example/team/two/mcp")
+        self.add_mcp("scoped-query", "https://platform.example/team/one/mcp?tenant=other")
+        with db.writer() as conn:
+            result = db.sync_owner_verified(conn)
+            self.assertEqual(result["mcp_servers"], 1)
+            rows = conn.execute("SELECT id,owner_verified FROM mcp_servers").fetchall()
+            self.assertEqual({row["id"] for row in rows if row["owner_verified"]}, {first})
+            claim = conn.execute("SELECT * FROM domain_ownership WHERE id=?", (claim_id,)).fetchone()
+            self.assertEqual([row["slug"] for row in ownership.listings_for_claim(conn, claim)], ["scoped-one"])
+
+    def test_scoped_owner_can_edit_metadata_but_not_an_unverified_sibling_endpoint(self):
+        claim_id = self.add_scope("/team/one/mcp")
+        listing_id = self.add_mcp("scoped-one", "https://platform.example/team/one/mcp")
+        with db.writer() as conn:
+            applied, rejected = db.apply_listing_edits(
+                conn, "mcp", listing_id, self.uid, claim_id, {"description": "Owner correction"})
+            self.assertEqual((applied, rejected), (["description"], []))
+            applied, rejected = db.apply_listing_edits(
+                conn, "mcp", listing_id, self.uid, claim_id,
+                {"endpoint_url": "https://platform.example/team/two/mcp"})
+            self.assertEqual(applied, [])
+            self.assertTrue(rejected)
+        destination_claim = self.add_scope("/team/two/mcp")
+        with db.writer() as conn:
+            applied, rejected = db.apply_listing_edits(
+                conn, "mcp", listing_id, self.uid, claim_id,
+                {"endpoint_url": "https://platform.example/team/two/mcp"})
+            self.assertIn("endpoint_url", applied)
+            self.assertEqual(rejected, [])
+            self.assertEqual(db.owner_edit_state(
+                conn, "mcp", listing_id, self.uid, destination_claim)[1]["id"], destination_claim)
+            with self.assertRaises(PermissionError):
+                db.owner_edit_state(conn, "mcp", listing_id, self.uid, claim_id)
+
+    def test_browser_edit_authorization_uses_exact_url_ownership(self):
+        claim_id = self.add_scope("/team/one/mcp")
+        self.add_mcp("scoped-one", "https://platform.example/team/one/mcp")
+        self.add_mcp("scoped-two", "https://platform.example/team/two/mcp")
+        request = Request({"type": "http", "method": "GET", "path": "/", "headers": []})
+        with patch.object(auth, "current_user", return_value={"id": self.uid}):
+            self.assertTrue(auth.may_edit_listing(request, "mcp", "https://platform.example/team/one/mcp"))
+            self.assertFalse(auth.may_edit_listing(request, "mcp", "https://platform.example/team/two/mcp"))
+            self.assertEqual(auth._load_editable(request, "mcp", "scoped-one")[3]["id"], claim_id)
+            with self.assertRaises(Exception) as refused:
+                auth._load_editable(request, "mcp", "scoped-two")
+            self.assertEqual(refused.exception.status_code, 403)
+
+    def test_full_url_is_the_only_identity_and_infers_the_proof_method(self):
+        for target, method in (
+                ("https://glama.ai/endpoints/profile-123/mcp", "mcp_resource"),
+                ("https://github.com/team/service", "github_file"),
+                ("https://www.npmjs.com/package/@team/service", "npm_package"),
+                ("https://unlisted.example/custom?region=eu", "url_descriptor")):
+            with self.subTest(target=target):
+                self.assertEqual(ownership.resolve_service_url(target), target)
+                self.assertEqual(ownership.default_url_method(target), method)
+        for target in ("", "http://platform.example/service", "https://platform.example/../service"):
+            with self.subTest(target=target):
+                with self.assertRaises(ownership.ClaimError):
+                    ownership.resolve_service_url(target)
+
+    def test_url_proof_is_not_taken_from_user_generated_nested_data(self):
+        token = "fixture-top-level-token"
+        for document in (
+                {"items": [{ownership.TOKEN_FIELD: token}]},
+                {"metadata": {ownership.TOKEN_FIELD: token}},
+                [{ownership.TOKEN_FIELD: token}]):
+            with self.subTest(document=document):
+                response = ownership._FetchResponse(200, json.dumps(document).encode(), {})
+                with patch.object(ownership, "_read_https", return_value=response):
+                    self.assertFalse(ownership.probe_url("url_descriptor", "https://platform.example/one", token)[0])
+
+    def test_platform_proof_reads_only_the_expected_repository_or_package(self):
+        token = "fixture-platform-token"
+        proof = json.dumps({ownership.TOKEN_FIELD: token}).encode()
+        with patch.object(ownership, "_read_https", return_value=ownership._FetchResponse(200, proof, {})) as reader:
+            self.assertTrue(ownership.probe_url("github_file", "https://github.com/team/service", token)[0])
+            reader.assert_called_once_with("api.github.com", "/repos/team/service/contents/.well-known/agent-tools.json",
+                                           "application/vnd.github.raw+json")
+        manifest = json.dumps({"name": "@team/service", ownership.TOKEN_FIELD: token}).encode()
+        with patch.object(ownership, "_read_https", return_value=ownership._FetchResponse(200, manifest, {})) as reader:
+            self.assertTrue(ownership.probe_url("npm_package", "https://www.npmjs.com/package/@team/service", token)[0])
+            reader.assert_called_once_with("registry.npmjs.org", "/@team%2Fservice/latest", "application/json")
+        with patch.object(ownership, "_read_https") as reader:
+            self.assertFalse(ownership.probe_url("github_file", "https://github.com.evil.example/team/service", token)[0])
+            reader.assert_not_called()
+        with patch.object(ownership, "_read_https", return_value=ownership._FetchResponse(200, manifest, {})):
+            self.assertFalse(ownership.probe_url("npm_package", "https://www.npmjs.com/package/@team/another", token)[0])
+
+    def service_client(self):
+        self.enterContext(patch.object(routes, "_require_api_user", return_value={"id": self.uid}))
+        self.enterContext(patch.object(auth, "current_user", return_value={"id": self.uid, "status": "active"}))
+        self.enterContext(patch.object(routes.limits, "check_ip_limits", return_value=None))
+        app = FastAPI()
+        app.include_router(routes.router)
+        app.include_router(auth.router)
+        return TestClient(app, raise_server_exceptions=False)
+
+    def test_service_claim_api_only_accepts_complete_urls(self):
+        client = self.service_client()
+        response = client.post("/api/v1/listing-claims", json={"url": "https://glama.ai/endpoints/profile-123/mcp"})
+        self.assertEqual(response.status_code, 201, response.text)
+        result = response.json()
+        self.assertEqual(result["url"], "https://glama.ai/endpoints/profile-123/mcp")
+        self.assertEqual(result["scope"], "url")
+        self.assertEqual(result["method"], "mcp_resource")
+        self.assertEqual(result["document"], {ownership.TOKEN_FIELD: result["token"]})
+        self.assertIn("no-store", response.headers["cache-control"])
+        self.assertIn("/api/v1/listing-claims/", result["next"]["url"])
+        response = client.post("/api/v1/listing-claims", json={
+            "url": "https://unlisted-platform.example/team/resource?region=eu", "method": "url_descriptor"})
+        self.assertEqual(response.status_code, 201, response.text)
+        self.assertEqual(response.json()["url"], "https://unlisted-platform.example/team/resource?region=eu")
+        self.assertEqual(client.post("/api/v1/listing-claims", json={"platform": "glama", "suffix": "profile-123"}).status_code, 422)
+
+    def test_service_claim_api_only_returns_and_edits_the_verified_target(self):
+        client = self.service_client()
+        self.add_mcp("scoped-one", "https://platform.example/team/one/mcp")
+        self.add_mcp("scoped-two", "https://platform.example/team/two/mcp")
+        opened = client.post("/api/v1/listing-claims", json={
+            "url": "https://platform.example/team/one/mcp", "method": "url_descriptor"}).json()
+        response = ownership._FetchResponse(200, json.dumps(opened["document"]).encode(), {})
+        with patch.object(ownership, "_read_https", return_value=response):
+            verified = client.post(opened["next"]["url"], json={"token": opened["token"]})
+        self.assertEqual(verified.status_code, 200, verified.text)
+        self.assertEqual([row["slug"] for row in verified.json()["listings"]], ["scoped-one"])
+        edited = client.patch("/api/v1/listings/mcp/scoped-one", json={"description": "Scoped correction"})
+        self.assertEqual(edited.status_code, 200, edited.text)
+        refused = client.patch("/api/v1/listings/mcp/scoped-two", json={"description": "Not owned"})
+        self.assertEqual(refused.status_code, 403, refused.text)
+
+    def test_service_claim_api_rejects_cross_account_verification_and_unsafe_input(self):
+        client = self.service_client()
+        opened = client.post("/api/v1/listing-claims", json={
+            "url": "https://platform.example/one", "method": "url_descriptor"}).json()
+        with patch.object(routes, "_require_api_user", return_value={"id": self.uid + 100}):
+            with patch.object(ownership, "_read_https") as reader:
+                response = client.post(opened["next"]["url"], json={"token": opened["token"]})
+                self.assertEqual(response.status_code, 403)
+                reader.assert_not_called()
+        for payload in (
+                {"url": "http://platform.example/one"},
+                {"url": "https://127.0.0.1/one"},
+                {"url": "https://platform.example/one?apiKey=private"},
+                {"url": "https://github.com/team/.."},
+                {"url": "https://other.example/one", "method": "github_file"},
+                {"platform": "glama", "url": "https://other.example/one"}):
+            with self.subTest(payload=payload):
+                self.assertEqual(client.post("/api/v1/listing-claims", json=payload).status_code, 422)
+
+    def test_url_claim_rechecks_account_and_privacy_policy_before_persisting_proof(self):
+        claim_id, token = self.issue_scoped()
+        response = ownership._FetchResponse(200, json.dumps({ownership.TOKEN_FIELD: token}).encode(), {})
+        with patch.object(ownership, "_read_https", return_value=response):
+            with closing(db.connect(read_only=True)) as conn:
+                prepared = ownership.prepare_claim_verification(conn, claim_id, token)
+        with db.writer() as conn:
+            conn.execute("UPDATE users SET status='disabled' WHERE id=?", (self.uid,))
+            self.assertFalse(ownership.apply_claim_verification(conn, claim_id, token, verification=prepared)[0])
+            conn.execute("UPDATE users SET status='active' WHERE id=?", (self.uid,))
+            db._add_privacy_suppression(conn, "*", "host", "platform.example", "fixture", "fixture")
+            self.assertFalse(ownership.apply_claim_verification(conn, claim_id, token, verification=prepared)[0])
+            self.assertIsNone(ownership.owner_for_url(conn, "https://platform.example/team/one/mcp"))
+
+    def test_service_claim_openapi_documents_authentication_and_error_states(self):
+        client = self.service_client()
+        schema = client.get("/openapi.json").json()
+        path = schema["paths"]["/api/v1/listing-claims"]["post"]
+        self.assertEqual(path["security"], [{"AccountAPIKey": []}])
+        self.assertTrue({"201", "401", "403", "422", "429", "503"}.issubset(path["responses"]))
+        self.assertIn("ServiceClaimRequest", schema["components"]["schemas"])
+        self.assertEqual(schema["components"]["schemas"]["ServiceClaimRequest"]["required"], ["url"])
+        self.assertNotIn("platform", schema["components"]["schemas"]["ServiceClaimRequest"]["properties"])
+        self.assertEqual(client.get("/api/v1/claim-methods").status_code, 200)
+        self.assertEqual(client.get("/api/v1/claim-platforms").status_code, 404)
+
+    def browser_client(self):
+        client = self.service_client()
+        with closing(db.connect(read_only=True)) as conn:
+            profile = dict(conn.execute("SELECT * FROM users WHERE id=?", (self.uid,)).fetchone())
+        self.enterContext(patch.object(auth, "current_user", return_value=profile))
+        return client
+
+    def test_browser_url_form_issues_a_token_and_shows_the_exact_target(self):
+        client = self.browser_client()
+        response = client.post("/account/service-claims", data={"url": "https://glama.ai/endpoints/profile-123/mcp"})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIn("https://glama.ai/endpoints/profile-123/mcp", response.text)
+        self.assertIn("/account/service-claims/", response.text)
+        self.assertIn("agent-tools://ownership", response.text)
+        self.assertIn("no-store", response.headers["cache-control"])
+        self.assertNotIn('id="claim-platform"', response.text)
+        self.assertNotIn('id="claim-suffix"', response.text)
+        self.assertNotIn("/account/claims.js", response.text)
+
+    def test_browser_account_and_me_do_not_expand_url_permissions_to_the_host(self):
+        client = self.browser_client()
+        self.add_scope("/team/one/mcp")
+        self.add_mcp("scoped-one", "https://platform.example/team/one/mcp")
+        self.add_mcp("scoped-two", "https://platform.example/team/two/mcp")
+        response = client.get("/api/v1/me")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["hosts"], ["owned.example"])
+        self.assertEqual(response.json()["urls"], ["https://platform.example/team/one/mcp"])
+        self.assertTrue(client.get("/api/v1/me?kind=mcp&slug=scoped-one").json()["can_edit_listing"])
+        self.assertFalse(client.get("/api/v1/me?kind=mcp&slug=scoped-two").json()["can_edit_listing"])
+        response = client.get("/account")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIn("/listings/mcp/scoped-one/edit", response.text)
+        self.assertNotIn("/listings/mcp/scoped-two/edit", response.text)
+        response = client.get("/listings/mcp/scoped-one/edit")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertNotIn("Manage listing", response.text)
+
+    def test_cookie_authenticated_url_claim_writes_require_the_same_origin(self):
+        client = self.browser_client()
+        with patch.object(auth, "unsign", return_value={"uid": self.uid}):
+            response = client.post("/account/service-claims", data={"url": "https://platform.example/one"},
+                                   headers={"origin": "https://evil.example"})
+        self.assertEqual(response.status_code, 403, response.text)
+        with closing(db.connect(read_only=True)) as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM domain_ownership WHERE scope_path IS NOT NULL").fetchone()[0], 0)
+
+    def test_cached_detail_permission_is_not_inferred_from_domain_ownership(self):
+        client = self.browser_client()
+        with db.writer() as conn:
+            other_uid = conn.execute(
+                "INSERT INTO users(provider,provider_uid,login,status,created_at) "
+                "VALUES('github','other-owner','other-owner','active',1)").lastrowid
+        self.add_scope("/other/mcp", host="owned.example", user_id=other_uid)
+        self.add_mcp("overlapping-scope", "https://owned.example/other/mcp")
+        response = client.get("/api/v1/me?kind=mcp&slug=overlapping-scope")
+        self.assertIn("owned.example", response.json()["hosts"])
+        self.assertFalse(response.json()["can_edit_listing"])
+        document = client.get("/docs/claim")
+        self.assertEqual(document.status_code, 200)
+        self.assertIn("/api/v1/listing-claims", document.text)
+        self.assertIn("agent-tools://ownership", document.text)
 
 
 class ClaimVerificationContentionTests(OwnershipFixture):
@@ -429,6 +1250,49 @@ class OwnerLifecycleTests(OwnershipFixture):
                       "latency_ms": 12, "well_known_url": None, "openapi_url": None, "resource_count": 1,
                       "resource_samples": [{"url": row["url"], "method": "GET"}]}
         return {"checked_at": checked, "declaration": declaration, "validation": validation}
+
+    def test_dual_scope_owner_restores_with_fresh_domain_authority(self):
+        with db.writer() as conn:
+            conn.execute("INSERT INTO domain_ownership(user_id,host,scope_path,method,token_hash,token,"
+                         "status,created_at,verified_at,last_checked) "
+                         "VALUES(?,'owned.example','/ping','url_descriptor',?,?,'verified',1,1,1)",
+                         (self.uid, ownership.token_hash(self.token), self.token))
+        version = self.retire_fixture()
+        with patch.object(lifecycle, 'observe_restore', return_value=self.restoration_observation()):
+            result = lifecycle.restore('x402', 'owned-lifecycle', self.uid, version,
+                                       '2234567890abcdef1234567890abcdef')
+        self.assertEqual(result['status'], 'restored')
+        self.assertEqual(self.state()['status'], 'active')
+
+    def test_url_only_owner_still_cannot_restore_without_domain_authority(self):
+        version = self.retire_fixture()
+        with db.writer() as conn:
+            conn.execute("INSERT INTO domain_ownership(user_id,host,scope_path,method,token_hash,"
+                         "status,created_at,verified_at) "
+                         "VALUES(?,'owned.example','/ping','url_descriptor','fixture','verified',1,1)", (self.uid,))
+            conn.execute("UPDATE domain_ownership SET status='revoked' WHERE id=?", (self.claim,))
+        with patch.object(lifecycle, 'observe_restore') as observer:
+            with self.assertRaises(ownership.OwnershipBlocked):
+                lifecycle.restore('x402', 'owned-lifecycle', self.uid, version,
+                                  '2234567890abcdef1234567890abcdef')
+            observer.assert_not_called()
+        with closing(db.connect(read_only=True)) as conn:
+            self.assertIsNotNone(db.get_retired_listing(conn, 'x402', 'owned-lifecycle'))
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM services').fetchone()[0], 0)
+
+    def test_restore_does_not_override_another_accounts_url_claim(self):
+        version = self.retire_fixture()
+        with db.writer() as conn:
+            other_uid = conn.execute("INSERT INTO users(provider,provider_uid,login,status,created_at) "
+                                     "VALUES('github','restore-other','restore-other','active',1)").lastrowid
+            conn.execute("INSERT INTO domain_ownership(user_id,host,scope_path,method,token_hash,"
+                         "status,created_at,verified_at) "
+                         "VALUES(?,'owned.example','/ping','url_descriptor','fixture','verified',1,1)", (other_uid,))
+        with patch.object(lifecycle, 'observe_restore', return_value=self.restoration_observation()):
+            with self.assertRaises(lifecycle.LifecycleBlocked):
+                lifecycle.restore('x402', 'owned-lifecycle', self.uid, version,
+                                  '2234567890abcdef1234567890abcdef')
+        self.assertEqual(self.state()['status'], 'retired')
 
     def test_restore_keeps_historical_snapshot_but_not_current_reputation(self):
         version = self.retire_fixture()

@@ -5,6 +5,7 @@ intact; this table records which endpoint was actually observed, independently
 of the historical one-source-per-listing slot. It never transfers ownership.
 """
 import time
+from urllib.parse import urlsplit, urlunsplit
 
 from . import db
 from .ingestion import digest, validate_endpoint
@@ -96,20 +97,24 @@ def record_reviewed_rejection(conn, kind, source_id, endpoint_url):
     )
 
 
-def _reviewed_alias_target(conn, kind, table, ih, eh):
+def _reviewed_alias_target(conn, kind, table, ih, eh, legacy_eh=None):
     alias = conn.execute(
-        'SELECT listing_id, reviewed_at FROM wellknown_reviewed_aliases '
-        'WHERE kind=? AND identity_hash=? AND endpoint_hash=?', (kind, ih, eh),
+        'SELECT listing_id, reviewed_at, endpoint_hash FROM wellknown_reviewed_aliases '
+        'WHERE kind=? AND identity_hash=? AND endpoint_hash IN (?,?) '
+        'ORDER BY reviewed_at DESC, CASE WHEN listing_id=? THEN 0 ELSE 1 END, '
+        'CASE WHEN endpoint_hash=? THEN 0 ELSE 1 END LIMIT 1',
+        (kind, ih, eh, legacy_eh or eh, REVIEW_REJECTED, eh),
     ).fetchone()
     if alias is None:
         return None
+    selected_hash = alias['endpoint_hash']
     if alias['listing_id'] == REVIEW_REJECTED:
         now = int(time.time())
         if now - int(alias['reviewed_at']) >= REVIEW_REJECTED_TTL:
             return None
         conn.execute('UPDATE wellknown_reviewed_aliases SET last_seen=? '
                      'WHERE kind=? AND identity_hash=? AND endpoint_hash=?',
-                     (now, kind, ih, eh))
+                     (now, kind, ih, selected_hash))
         raise db.RetiredListingError({'kind': kind, 'slug': None,
                                       'reason': 'wellknown_review_rejected'})
     target = conn.execute(f'SELECT * FROM {table} WHERE id=?', (alias['listing_id'],)).fetchone()
@@ -118,7 +123,7 @@ def _reviewed_alias_target(conn, kind, table, ih, eh):
     db.assert_listing_not_retired(conn, kind, dict(target))
     conn.execute('UPDATE wellknown_reviewed_aliases SET last_seen=? '
                  'WHERE kind=? AND identity_hash=? AND endpoint_hash=?',
-                 (int(time.time()), kind, ih, eh))
+                 (int(time.time()), kind, ih, selected_hash))
     return target
 
 
@@ -131,7 +136,12 @@ def upsert_listing(conn, kind, row):
     if not sid:
         raise db.MetadataValidationError('missing_upstream_identity')
     ih, eh = digest(sid), digest(endpoint)
-    reviewed = _reviewed_alias_target(conn, kind, table, ih, eh)
+    parsed_endpoint = urlsplit(endpoint)
+    legacy_eh = None
+    if parsed_endpoint.path == '/':
+        legacy_eh = digest(urlunsplit((parsed_endpoint.scheme, parsed_endpoint.netloc,
+                                      '', parsed_endpoint.query, '')))
+    reviewed = _reviewed_alias_target(conn, kind, table, ih, eh, legacy_eh)
     if reviewed is not None:
         return False, int(reviewed['id'])
     binding = conn.execute(

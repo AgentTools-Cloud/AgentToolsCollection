@@ -581,13 +581,16 @@ def restore(kind, slug, user_id, version, request_id, credential_id=None):
             conn.execute("UPDATE %s SET updated_at=? WHERE id=?" % db._KIND_TABLE[kind],
                          (int(time.time()), listing_id))
             if kind == "x402":
+                editing_owner = ownership.owner_for_url(conn, restored['url'])
+                if editing_owner is None or editing_owner['user_id'] != user_id:
+                    raise LifecycleBlocked('listing_changed')
                 declaration = deepcopy(observation["declaration"])
                 declaration["status"] = "pending"
                 declaration.pop("checked_at", None)
                 declaration.pop("blocker", None)
                 conn.execute("UPDATE services SET owner_declaration=?,owner_verified=1 WHERE id=?",
                              (json.dumps(declaration), listing_id))
-                owner_declarations.apply_validation(conn, listing_id, user_id, ownership_id,
+                owner_declarations.apply_validation(conn, listing_id, user_id, editing_owner['id'],
                                                      declaration, observation["validation"])
             else:
                 values = {name: value for name, value in observation["values"].items() if name in columns}

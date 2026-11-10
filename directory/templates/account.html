@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Your account — Agent Tools{% endblock %}
+{% block robots %}<meta name="robots" content="noindex,nofollow">{% endblock %}
 {% block content %}
 <div class="max-w-3xl">
 
@@ -18,46 +19,65 @@
 
   {% if issued %}
   <div class="rounded-lg border border-green-300 bg-green-50 p-5 mb-8">
-    <h2 class="font-semibold mb-2">Publish this token on <span class="mono">{{ issued.host }}</span></h2>
+    <h2 class="font-semibold mb-2 break-all">Publish this token for <span class="mono">{{ issued.host }}</span></h2>
     <p class="text-xs text-slate-600 mb-3">Shown once. Copy it now.</p>
     <div class="mono text-sm bg-white border border-green-200 rounded p-2 mb-3 break-all">{{ issued.token }}</div>
     <div class="text-sm text-slate-700">{{ issued.instruction }}</div>
-    <form method="post" action="/account/domains/{{ issued.id }}/verify" class="mt-3">
+    {% if issued.document %}<pre class="mono text-xs whitespace-pre-wrap break-all mt-3 p-3 border border-green-200 bg-white rounded">{{ issued.document }}</pre>{% endif %}
+    <form method="post" action="{{ issued.verify_url or '/account/domains/' ~ issued.id ~ '/verify' }}" class="mt-3">
       <input type="hidden" name="token" value="{{ issued.token }}">
       <button class="rounded bg-slate-900 text-white px-3 py-1.5 text-sm">I have published it — verify</button>
     </form>
   </div>
   {% endif %}
 
+  {% if error %}<p role="alert" class="text-sm text-red-700 mb-5 break-words">{{ error }}</p>{% endif %}
+
+  <section class="mb-8 border-b border-slate-200 pb-7" id="service-claim">
+    <h2 class="font-semibold mb-4">Claim a service URL</h2>
+    <form method="post" action="/account/service-claims" id="service-claim-form" class="grid gap-4">
+      <label class="text-sm" for="claim-url">
+        <span class="block font-medium mb-1">Complete URL</span>
+        <input type="url" name="url" id="claim-url" value="{{ service_values.url or '' }}" maxlength="2000" required spellcheck="false"
+               placeholder="https://platform.example/team/service/mcp" class="w-full rounded border border-slate-300 px-3 py-2 mono text-sm">
+      </label>
+      <label class="text-sm" for="claim-method">
+        <span class="block font-medium mb-1">Verification method</span>
+        <select name="method" id="claim-method" class="w-full rounded border border-slate-300 px-3 py-2 bg-white">
+          <option value="">Automatic</option>
+          {% for value, label in [('url_descriptor', 'Public JSON document'), ('mcp_resource', 'MCP ownership resource'), ('github_file', 'GitHub default-branch file'), ('npm_package', 'Latest npm package manifest')] %}
+          <option value="{{ value }}"{% if service_values.method == value %} selected{% endif %}>{{ label }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <button class="justify-self-start rounded bg-blue-600 text-white px-4 py-2 text-sm font-medium">Get a token</button>
+    </form>
+  </section>
+
   <div class="rounded-lg border border-slate-200 bg-white p-5 mb-8">
-    <h2 class="font-semibold mb-1">Verified domains</h2>
-    <p class="text-sm text-slate-500 mb-4">
-      Signing in identifies you. Editing a listing needs proof that you control
-      the host it runs on — that proof is a token you publish on that host.
-      <a class="text-blue-600 hover:underline" href="/docs/claim">How it works &rarr;</a>
-    </p>
+    <h2 class="font-semibold mb-4">Verified targets</h2>
 
     {% if verified %}
-      <table class="w-full text-sm">
+      <table class="w-full table-fixed text-sm">
         <thead class="text-slate-400 text-xs uppercase tracking-wide">
           <tr class="text-left">
-            <th class="pb-2">Host</th><th class="pb-2">Method</th>
-            <th class="pb-2">Verified</th><th class="pb-2 text-right">Listings</th>
+            <th class="pb-2 w-[55%] sm:w-1/2">Target</th><th class="pb-2 w-[30%] sm:w-1/4">Method</th>
+            <th class="pb-2 hidden sm:table-cell">Verified</th><th class="pb-2 text-right w-[15%] sm:w-[10%]">Listings</th>
           </tr>
         </thead>
         <tbody>
         {% for d in verified %}
           <tr class="border-t border-slate-100">
-            <td class="py-2 mono">{{ d.host }}</td>
-            <td class="py-2 text-slate-500">{{ d.method }}</td>
-            <td class="py-2 text-slate-500">{{ d.verified_ago or '—' }}</td>
+            <td class="py-2 pr-3 mono break-all">{{ d.target }}</td>
+            <td class="py-2 pr-2 text-slate-500 break-all">{{ d.method }}</td>
+            <td class="py-2 text-slate-500 hidden sm:table-cell">{{ d.verified_ago or '—' }}</td>
             <td class="py-2 text-right">{{ d.listing_count }}</td>
           </tr>
         {% endfor %}
         </tbody>
       </table>
     {% else %}
-      <p class="text-sm text-slate-500">You have not verified any domain yet.</p>
+      <p class="text-sm text-slate-500">No verified targets yet.</p>
     {% endif %}
   </div>
 
@@ -66,18 +86,34 @@
     <h2 class="font-semibold mb-3">Pending verification</h2>
     {% for d in pending %}
       <div class="text-sm mb-4">
-        <div class="mono font-medium">{{ d.host }}</div>
+        <div class="mono font-medium break-all">{{ d.target }}</div>
         <div class="text-slate-600 mt-1">
           Method: <span class="mono">{{ d.method }}</span>{% if d.fail_count %} · {{ d.fail_count }} failed check(s){% endif %}
         </div>
-        <form method="post" action="/account/domains/{{ d.id }}/verify" class="mt-2 flex gap-2">
+        {% if d.expired %}<div class="text-xs text-amber-700 mt-2">Expired</div>{% else %}
+        <form method="post" action="{{ d.verify_url }}" class="mt-2 flex gap-2">
           <input type="text" name="token" placeholder="paste the token you were shown"
-                 class="flex-1 rounded border border-slate-300 px-2 py-1 mono text-xs">
-          <button class="rounded bg-slate-900 text-white px-3 py-1 text-xs">Check now</button>
+                 class="flex-1 min-w-0 rounded border border-slate-300 px-2 py-1 mono text-xs">
+          <button class="shrink-0 rounded bg-slate-900 text-white px-3 py-1 text-xs">Check now</button>
         </form>
+        {% endif %}
       </div>
     {% endfor %}
   </div>
+  {% endif %}
+
+  {% if service_listings %}
+  <section class="mb-8 border-t border-slate-200 pt-5">
+    <h2 class="font-semibold mb-3">Your service listings</h2>
+    <ul class="divide-y divide-slate-200 text-sm">
+      {% for entry in service_listings %}
+      <li class="py-3 flex flex-wrap items-center gap-3">
+        <a href="/listings/{{ entry.kind }}/{{ entry.slug }}/edit" class="text-blue-600 hover:underline break-words min-w-0">{{ entry.name }}</a>
+        <span class="text-xs text-slate-500">{{ entry.kind|upper }}</span>
+      </li>
+      {% endfor %}
+    </ul>
+  </section>
   {% endif %}
 
   {% if managed_listings %}
@@ -96,7 +132,6 @@
 
   <div class="rounded-lg border border-slate-200 bg-white p-5">
     <h2 class="font-semibold mb-3">Claim a domain</h2>
-    {% if error %}<p class="text-sm text-red-600 mb-3">{{ error }}</p>{% endif %}
     <form method="post" action="/account/domains" class="flex flex-col gap-3">
       <input type="text" name="host" placeholder="api.example.com" required
              class="rounded border border-slate-300 px-3 py-2 mono text-sm">
@@ -108,8 +143,8 @@
       <button class="self-start rounded bg-blue-600 text-white px-4 py-2 text-sm font-medium">Get a token</button>
     </form>
     <p class="text-xs text-slate-500 mt-3">
-      Hosts that serve listings by unrelated authors (shared gateways) cannot be
-      self-claimed — email us instead.
+      Shared platforms require a service URL claim, not a whole-domain claim.
+      <a class="text-blue-600 hover:underline" href="/docs/claim">Claim documentation</a>
     </p>
   </div>
 

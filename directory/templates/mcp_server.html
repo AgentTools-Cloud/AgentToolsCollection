@@ -1,15 +1,14 @@
 {% extends "base.html" %}
 {% block title %}{{ m.name }} — MCP server — agent-tools.cloud{% endblock %}
 {% block desc %}{{ (m.description or m.name)|truncate(140) }}{% endblock %}
-{% block head_extra %}<script type="application/ld+json">{{ {
+{% block head_extra %}{% set schema = {
   "@context": "https://schema.org",
   "@type": "SoftwareApplication",
   "applicationCategory": "DeveloperApplication",
   "name": m.name,
   "description": (m.description or m.name),
   "url": "https://agent-tools.cloud/mcp/servers/" + m.slug,
-  "offers": {"@type": "Offer", "price": "0", "priceCurrency": "USD"}
-}|tojson }}</script>{% endblock %}
+} %}{% if m.pricing is mapping and m.pricing.offers %}{% set updated = schema.update({"offers": m.pricing.offers}) %}{% endif %}<script type="application/ld+json">{{ schema|tojson }}</script>{% endblock %}
 {% block track %}<script>atTrackView('mcp', {{ m.slug|tojson }});</script>{% endblock %}
 {% block content %}
 <a href="/mcp" class="text-sm text-slate-500 hover:text-blue-600 inline-flex items-center gap-1">
@@ -21,10 +20,10 @@
   <div class="min-w-0">
     <h1 class="text-3xl md:text-4xl font-extrabold tracking-tight">{{ m.name }}</h1>
 
-    <div class="mt-3 hidden" data-edit-host="{{ url_host(m.endpoint_url) }}">
+    <div class="mt-3 hidden" data-edit-host="{{ url_host(m.endpoint_url) }}" data-edit-kind="mcp" data-edit-slug="{{ m.slug }}">
       <a href="/listings/mcp/{{ m.slug }}/edit"
          class="inline-flex items-center gap-1.5 rounded border border-slate-300 bg-white px-3 py-1.5 text-sm hover:border-slate-400">Edit this listing</a>
-      <span class="ml-2 text-xs text-slate-500">You verified control of this domain</span>
+      <span class="ml-2 text-xs text-slate-500">Verified control of this listing</span>
     </div>
     {% if m.safety %}
     <div class="mt-3 rounded-lg px-4 py-3 text-sm {% if m.safety.verdict == "malicious" %}bg-rose-50 text-rose-800 ring-1 ring-rose-200{% else %}bg-amber-50 text-amber-800 ring-1 ring-amber-200{% endif %}">

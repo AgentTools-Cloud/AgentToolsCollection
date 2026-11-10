@@ -158,8 +158,8 @@ class EndpointValidationTests(OfflineTestCase):
     def test_accepts_case_and_preserves_path_query_identity(self):
         cases = {
             "HTTPS://API.Example:443/MCP/?Token=AbC&x=%2F":
-                "https://api.example/MCP?Token=AbC&x=%2F",
-            "https://api.example/?query=AbC": "https://api.example?query=AbC",
+                "https://api.example/MCP/?Token=AbC&x=%2F",
+            "https://api.example/?query=AbC": "https://api.example/?query=AbC",
             "http://API.Example:80/Mcp": "http://api.example/Mcp",
         }
         for endpoint, expected in cases.items():
@@ -171,6 +171,13 @@ class EndpointValidationTests(OfflineTestCase):
             "https://api.example/MCP?Token=abc", "https://api.example/MCP?token=AbC",
         )}
         self.assertEqual(len(keys), 4)
+
+    def test_non_root_slashes_are_distinct_but_empty_root_is_equivalent(self):
+        self.assertEqual(db._exact_endpoint('https://api.example'), 'https://api.example/')
+        self.assertEqual(db._exact_endpoint('https://api.example/'), 'https://api.example/')
+        targets = ('https://api.example/mcp', 'https://api.example/mcp/',
+                   'https://api.example/mcp//', 'https://api.example/mcp/?region=eu')
+        self.assertEqual(len({db._exact_endpoint(target) for target in targets}), len(targets))
 
 
 class TemporaryDatabaseTestCase(OfflineTestCase):
@@ -649,6 +656,82 @@ class IngestionJobTests(TemporaryDatabaseTestCase):
 
 
 class WellknownBindingTests(TemporaryDatabaseTestCase):
+    def test_legacy_root_rejection_is_preserved_with_query_identity(self):
+        incoming = _row('mcp', 'legacy-root-rejection',
+                        'https://review-root.example/?region=eu', source='wellknown')
+        legacy_hash = _sha('https://review-root.example?region=eu')
+        with patch.object(wellknown_binding.time, 'time', return_value=100), db.writer() as conn:
+            wellknown_binding.record_reviewed_rejection(
+                conn, 'mcp', incoming['source_id'], incoming['endpoint_url'])
+            conn.execute('UPDATE wellknown_reviewed_aliases SET endpoint_hash=? '
+                         'WHERE kind=? AND identity_hash=?',
+                         (legacy_hash, 'mcp', _sha(incoming['source_id'])))
+        with patch.object(wellknown_binding.time, 'time', return_value=200), db.writer() as conn:
+            with self.assertRaises(db.RetiredListingError):
+                wellknown_binding.upsert_listing(conn, 'mcp', deepcopy(incoming))
+        self.assertEqual(self.listings('mcp'), [])
+        self.assertEqual(self.query('SELECT last_seen FROM wellknown_reviewed_aliases '
+                                    'WHERE endpoint_hash=?', (legacy_hash,))[0]['last_seen'], 200)
+
+    def test_legacy_root_alias_keeps_existing_target_and_metadata(self):
+        incoming = _row('mcp', 'legacy-root-alias', 'https://review-root.example/', source='wellknown')
+        target_id = self.seed('mcp', _row('mcp', 'review-root-target',
+                              'https://review-root.example/mcp', source='catalog'))
+        before = self.listings('mcp')
+        with db.writer() as conn:
+            wellknown_binding.record_reviewed_alias(
+                conn, 'mcp', incoming['source_id'], incoming['endpoint_url'], target_id)
+            conn.execute('UPDATE wellknown_reviewed_aliases SET endpoint_hash=? '
+                         'WHERE kind=? AND identity_hash=?',
+                         (_sha('https://review-root.example'), 'mcp', _sha(incoming['source_id'])))
+        self.assertEqual(self.bind('mcp', incoming), (False, target_id))
+        self.assertEqual(self.listings('mcp'), before)
+
+    def test_non_root_slash_does_not_inherit_another_endpoint_rejection(self):
+        incoming = _row('mcp', 'review-slash-isolation',
+                        'https://review-root.example/mcp/', source='wellknown')
+        with db.writer() as conn:
+            wellknown_binding.record_reviewed_rejection(
+                conn, 'mcp', incoming['source_id'], 'https://review-root.example/mcp')
+        created, _listing_id = self.bind('mcp', incoming)
+        self.assertTrue(created)
+
+    def test_newest_root_rejection_and_same_second_rejection_take_precedence(self):
+        incoming = _row('mcp', 'root-review-precedence',
+                        'https://review-root.example/', source='wellknown')
+        target_id = self.seed('mcp', _row('mcp', 'root-review-precedence-target',
+                              'https://review-root.example/mcp', source='catalog'))
+        with patch.object(wellknown_binding.time, 'time', return_value=100), db.writer() as conn:
+            wellknown_binding.record_reviewed_alias(
+                conn, 'mcp', incoming['source_id'], incoming['endpoint_url'], target_id)
+            conn.execute('INSERT INTO wellknown_reviewed_aliases '
+                         '(kind,identity_hash,endpoint_hash,listing_id,reviewed_at) VALUES(?,?,?,?,?)',
+                         ('mcp', _sha(incoming['source_id']), _sha('https://review-root.example'), 0, 200))
+        for reviewed_at in (200, 100):
+            with self.subTest(reviewed_at=reviewed_at):
+                with db.writer() as conn:
+                    conn.execute('UPDATE wellknown_reviewed_aliases SET reviewed_at=? '
+                                 'WHERE kind=? AND identity_hash=? AND endpoint_hash=?',
+                                 (reviewed_at, 'mcp', _sha(incoming['source_id']),
+                                  _sha('https://review-root.example')))
+                with patch.object(wellknown_binding.time, 'time', return_value=300):
+                    with self.assertRaises(db.RetiredListingError):
+                        self.bind('mcp', incoming)
+
+    def test_newest_legacy_root_alias_overrides_older_canonical_rejection(self):
+        incoming = _row('mcp', 'root-review-latest-alias',
+                        'https://review-root.example/', source='wellknown')
+        target_id = self.seed('mcp', _row('mcp', 'root-latest-alias-target',
+                              'https://review-root.example/mcp', source='catalog'))
+        with patch.object(wellknown_binding.time, 'time', return_value=100), db.writer() as conn:
+            wellknown_binding.record_reviewed_rejection(
+                conn, 'mcp', incoming['source_id'], incoming['endpoint_url'])
+            conn.execute('INSERT INTO wellknown_reviewed_aliases '
+                         '(kind,identity_hash,endpoint_hash,listing_id,reviewed_at) VALUES(?,?,?,?,?)',
+                         ('mcp', _sha(incoming['source_id']), _sha('https://review-root.example'), target_id, 200))
+        with patch.object(wellknown_binding.time, 'time', return_value=300):
+            self.assertEqual(self.bind('mcp', incoming), (False, target_id))
+
     def assert_hold(self, kind, row, reason):
         before, sources, bindings = self.listings(kind), self.sources(), self.bindings()
         result = self.ingest_wellknown(kind, [row])
@@ -691,13 +774,26 @@ class WellknownBindingTests(TemporaryDatabaseTestCase):
                 lid = self.seed(kind, row, owner_verified=42,
                                 owner_edited=json.dumps({"name": "Owner's name"}), quality_score=91)
                 before, sources = self.listings(kind), self.sources()
-                incoming = _row(kind, f"replacement-{kind}", row["endpoint_url"] + "/",
+                incoming = _row(kind, f"replacement-{kind}", row["endpoint_url"].replace('.example/', '.EXAMPLE:443/'),
                                 source="wellknown", description="Must not replace", health="down")
                 self.assertEqual(self.bind(kind, incoming), (False, lid))
                 self.assertEqual(self.listings(kind), before)
                 self.assertEqual(self.sources(), sources)
                 self.assertEqual(self.bindings(kind)[0]["listing_id"], lid)
                 self.assertEqual(self.issues(), [])
+
+    def test_non_root_slash_variant_does_not_overwrite_legacy_metadata_or_owner(self):
+        for kind in ('mcp', 'a2a'):
+            with self.subTest(kind=kind):
+                original = _row(kind, 'slash-legacy-' + kind, source='catalog')
+                original_id = self.seed(kind, original, owner_verified=42, owner_edited='["description"]')
+                before = self.listings(kind)
+                incoming = _row(kind, 'slash-new-' + kind, original['endpoint_url'] + '/', source='wellknown')
+                created, new_id = self.bind(kind, incoming)
+                self.assertTrue(created)
+                self.assertNotEqual(new_id, original_id)
+                current = [row for row in self.listings(kind) if row['id'] == original_id]
+                self.assertEqual(current, before)
 
     def test_matching_legacy_source_slot_only_refreshes_last_seen(self):
         for kind in ("mcp", "a2a"):
@@ -786,7 +882,7 @@ class WellknownBindingTests(TemporaryDatabaseTestCase):
                     bindings = [r for r in self.bindings(kind) if r["identity_hash"] == _sha(sid)]
                     self.assertEqual({r["listing_id"] for r in bindings}, {first, second})
                     self.assertEqual({r["endpoint_hash"] for r in bindings},
-                                     {_sha(root.rstrip("/")), _sha(path)})
+                                     {_sha(root), _sha(path)})
         self.assertEqual(self.issues(), [])
 
     def test_multiple_aliases_share_endpoint_without_overwriting_original_source_slot(self):
@@ -892,9 +988,21 @@ class WellknownBindingTests(TemporaryDatabaseTestCase):
                         card_url="https://agent.example/.well-known/agent-card.json")
         self.seed("a2a", existing)
         incoming = _row("a2a", "synthetic-agent", "https://agent.example/other", source="wellknown",
-                        card_url=existing["card_url"] + "/")
+                        card_url=existing["card_url"].replace('.example/', '.EXAMPLE:443/'))
         self.assert_hold("a2a", incoming, "wellknown_synthetic_card_collision")
         self.assert_no_listing_artifacts("a2a", incoming)
+
+    def test_slash_variant_a2a_card_is_distinct_and_preserves_existing_listing(self):
+        existing = _row('a2a', 'slash-card-original', 'https://agent.example/a2a', source='a2a-registry',
+                        card_url='https://agent.example/.well-known/agent-card.json')
+        original_id = self.seed('a2a', existing)
+        before = self.listings('a2a')
+        incoming = _row('a2a', 'slash-card-new', 'https://agent.example/other', source='wellknown',
+                        card_url=existing['card_url'] + '/')
+        created, new_id = self.bind('a2a', incoming)
+        self.assertTrue(created)
+        self.assertNotEqual(new_id, original_id)
+        self.assertEqual([row for row in self.listings('a2a') if row['id'] == original_id], before)
 
     def test_missing_upstream_identity_is_rejected_without_listing_or_binding(self):
         for kind in ("mcp", "a2a"):

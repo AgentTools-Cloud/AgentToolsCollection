@@ -4,13 +4,13 @@
 {% block content %}
 <section class="max-w-3xl mb-8">
   <h1 class="text-3xl md:text-4xl font-extrabold tracking-tight">Privacy Policy</h1>
-  <p class="text-slate-500 mt-2 text-sm">Last updated: 3 October 2026</p>
+  <p class="text-slate-500 mt-2 text-sm">Last updated: 8 November 2026</p>
 </section>
 
 <div class="max-w-3xl space-y-6 text-sm text-slate-600 leading-relaxed">
   <div>
     <h2 class="text-lg font-semibold text-slate-800 mb-2">1. The short version</h2>
-    <p>agent-tools.cloud is a public directory. Browsing it, searching it and calling its read APIs need no account, and there are no tracking cookies. An account supports account-scoped actions such as sponsored paid verification and, after domain verification, correcting listings you control. Everything we store about you comes from those actions, and it is listed below. We collect only the minimal technical data needed to run the service, measure aggregate traffic, and keep it secure. We do not sell data and we do not run third-party advertising trackers.</p>
+    <p>agent-tools.cloud is a public directory. Browsing it, searching it and calling its read APIs need no account, and there are no tracking cookies. An account supports account-scoped actions such as sponsored paid verification and, after domain verification, correcting listings you control. The data we store is listed below. We collect only the minimal technical data needed to run the service, measure aggregate traffic, and keep it secure. We do not sell data and we do not run third-party advertising trackers.</p>
   </div>
 
   <div>
@@ -25,6 +25,7 @@
       <li><span class="font-medium">Sponsored paid-verification records</span> — account id, payer and recipient wallet addresses, amount, authorization nonce and validity window, target URL and request-template hash, status and timing, response type/size/hash, and any reported transaction hash. We do not store the wallet signature or response body. The result and transaction hash are public on the service card for 30 days when they still match the current listing version.</li>
       <li><span class="font-medium">Edit history</span> — when you change a listing you control, we record the field, its old and new value, your account and the time. <b>This record is public</b> on the listing page: it is what makes self-service editing safe to offer.</li>
       <li><span class="font-medium">A contact address, only if you give one</span> — optional when you submit a service or claim a host, and used only to reach you about that listing. We do not verify it and we do not use it for anything else.</li>
+      <li><span class="font-medium">Public business contacts for claim invitations</span> — a published contact email and its first-party source URL, source-page hash and check time, review status, message hash and sending result. Invitations are reviewed individually; we do not use login-account emails or subscribe recipients to a mailing list. Each invitation includes a link to stop further invitations.</li>
     </ul>
   </div>
 
@@ -42,6 +43,7 @@
     <h2 class="text-lg font-semibold text-slate-800 mb-2">5. Retention</h2>
     <p>Logs and view records are kept only as long as useful for operations, security and trend analysis, then rotated or aggregated. We don't build long-term profiles of individuals. Sponsored paid-verification results are public for 30 days and their underlying records are retained for at most 90 days, then pruned. Edit history is different: it is part of a listing's public record and stays for as long as the listing does.</p>
     <p class="mt-2">When we approve a privacy erasure request, we remove the listing, its submitted URLs, ownership claim and linked crawl or measurement records. We retain only keyed, non-reversible digests needed to stop automated sources from recreating the erased listing.</p>
+    <p class="mt-2">For claim invitations, the recipient email and contact-source URL are kept while the draft is under review, then cleared after a sending attempt, rejection, opt-out or deletion of a linked listing. Keyed email, host and publisher digests remain to prevent repeat invitations and honor opt-outs. Sending status, message id and review hashes are kept for operational records. SMTP acceptance is not proof of delivery.</p>
   </div>
 
   <div>

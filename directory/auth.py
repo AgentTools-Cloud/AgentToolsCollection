@@ -344,24 +344,40 @@ def _listing_counts(conn, hosts: list[str]) -> dict[str, int]:
     return counts
 
 
-def _account_context(request: Request, user, issued=None, error=None) -> dict:
+def _account_context(request: Request, user, issued=None, error=None, service_values=None) -> dict:
     with db.connect(read_only=True) as conn:
         rows = [dict(r) for r in conn.execute(
             "SELECT * FROM domain_ownership WHERE user_id=? "
             "AND status IN ('pending','verified') ORDER BY created_at DESC",
             (user["id"],))]
         verified = [r for r in rows if r["status"] == "verified"]
-        counts = _listing_counts(conn, [r["host"] for r in verified])
+        counts = _listing_counts(conn, [r["host"] for r in verified if r["scope_path"] is None])
+        service_listings = []
+        for claim in verified:
+            if claim["scope_path"] is not None:
+                entries = ownership.listings_for_claim(conn, claim)
+                claim["listing_count"] = len(entries)
+                service_listings.extend(entries)
         managed = owner_lifecycle.managed_listings(conn, user["id"])
+    for row in rows:
+        row["target"] = ("https://%s%s" % (row["host"], row["scope_path"])
+                         if row["scope_path"] is not None else row["host"])
+        row["verify_url"] = ("/account/service-claims/%s/verify" % row["id"]
+                             if row["scope_path"] is not None else "/account/domains/%s/verify" % row["id"])
+        row["expired"] = (row["status"] == "pending" and row["scope_path"] is not None
+                          and int(time.time()) - row["created_at"] > ownership.URL_PENDING_SECONDS)
     for r in verified:
         r["verified_ago"] = _ago(r["verified_at"])
-        r["listing_count"] = counts.get(r["host"], 0)
+        if r["scope_path"] is None:
+            r["listing_count"] = counts.get(r["host"], 0)
     return {
         "request": request,
         "user": user,
         "verified": verified,
         "pending": [r for r in rows if r["status"] == "pending"],
         "managed_listings": managed,
+        "service_listings": service_listings,
+        "service_values": service_values or {"url": request.query_params.get("claim_url", "")},
         "issued": issued,
         "error": error,
     }
@@ -375,7 +391,8 @@ def account_page(request: Request):
         return RedirectResponse("/auth/github/login?next=/account",
                                 status_code=302)
     return TEMPLATES.TemplateResponse(request, "account.html",
-                                      _account_context(request, user))
+                                      _account_context(request, user),
+                                      headers={"Cache-Control": "private, no-store"})
 
 
 @router.post("/account/domains", include_in_schema=False)
@@ -404,21 +421,63 @@ def claim_domain(request: Request, host: str = Form(...),
         _account_context(request, user, issued=issued))
 
 
+@router.post("/account/service-claims", include_in_schema=False)
+def claim_service(request: Request, url: str = Form(...), method: str = Form("")):
+    from .routes import TEMPLATES, _limit_service_claim, _submission_write
+    user = _require_user(request)
+    _require_same_origin_write(request)
+    _limit_service_claim(request, user)
+    values = {"url": url, "method": method}
+    try:
+        target = ownership.resolve_service_url(url)
+        selected = method or ownership.default_url_method(target)
+
+        def persist(conn):
+            return ownership.issue_url(conn, int(user["id"]), target, selected)
+
+        claim_id, token = _submission_write(persist, busy_error="claim_busy")
+    except ownership.ClaimError as exc:
+        return TEMPLATES.TemplateResponse(
+            request, "account.html", _account_context(request, user, error=str(exc), service_values=values),
+            status_code=400, headers={"Cache-Control": "private, no-store"})
+    issued = {"id": claim_id, "host": target, "token": token,
+              "instruction": ownership.url_publish_hint(target, selected),
+              "document": json.dumps({ownership.TOKEN_FIELD: token}, indent=2),
+              "verify_url": "/account/service-claims/%s/verify" % claim_id}
+    return TEMPLATES.TemplateResponse(
+        request, "account.html", _account_context(request, user, issued=issued, service_values=values),
+        headers={"Cache-Control": "private, no-store"})
+
+
+@router.post("/account/service-claims/{ownership_id}/verify", include_in_schema=False)
 @router.post("/account/domains/{ownership_id}/verify", include_in_schema=False)
-def verify_domain(request: Request, ownership_id: int, token: str = Form(...)):
+def verify_domain(request: Request, ownership_id: int, token: str = Form(...),
+                  gateway_api_key: str = Form("", max_length=200)):
     from . import ownership as own
     from .routes import TEMPLATES, _submission_write
     user = _require_user(request)
     token = (token or "").strip()
+    gateway_key = (gateway_api_key or "").strip() or None
     conn = db.connect(read_only=True)
     try:
-        row = conn.execute("SELECT user_id FROM domain_ownership WHERE id=?",
+        row = conn.execute("SELECT user_id,host,scope_path,method FROM domain_ownership WHERE id=?",
                            (ownership_id,)).fetchone()
         if row is None or row["user_id"] != user["id"]:
             raise HTTPException(404, "No such claim")
-        prepared = own.prepare_claim_verification(conn, ownership_id, token)
+        if request.url.path.startswith("/account/service-claims/") and row["scope_path"] is None:
+            raise HTTPException(404, "No such service claim")
+        if row["scope_path"] is not None:
+            from .routes import _limit_service_claim
+            _require_same_origin_write(request)
+            _limit_service_claim(request, user, verify=True)
+        if gateway_key is not None:
+            prepared = own.prepare_claim_verification(
+                conn, ownership_id, token, gateway_api_key=gateway_key)
+        else:
+            prepared = own.prepare_claim_verification(conn, ownership_id, token)
     finally:
         conn.close()
+    del gateway_key, gateway_api_key
 
     if prepared.claim is None:
         ok, detail, notification = False, prepared.detail, None
@@ -437,7 +496,7 @@ def verify_domain(request: Request, ownership_id: int, token: str = Form(...)):
     return TEMPLATES.TemplateResponse(
         request, "account.html",
         _account_context(request, user, error="Not verified yet: %s" % detail),
-        status_code=400)
+        status_code=400, headers={"Cache-Control": "private, no-store"})
 
 
 # ------------------------------------------------------ owner edits
@@ -459,12 +518,15 @@ _FIELD_LABELS = {
     "homepage_url": "Homepage URL",
     "documentation_url": "Documentation URL",
     "provider_name": "Provider name",
-    "url": "Endpoint URL (must be on a host you have verified)",
-    "mcp_url": "MCP endpoint URL (must be on a host you have verified)",
-    "endpoint_url": "Endpoint URL (must be on a host you have verified)",
-    "card_url": "Agent Card URL (must be on a host you have verified)",
+    "url": "Endpoint URL (must be verified)",
+    "mcp_url": "MCP endpoint URL (must be verified)",
+    "endpoint_url": "Endpoint URL (must be verified)",
+    "card_url": "Agent Card URL (must be verified)",
     "method": "Primary HTTP method",
     "price_usdc": "Primary price (USDC)",
+    "cost_hint": "Cost",
+    "auth_method": "Auth scheme (not credentials)",
+    "pricing": "Operation pricing (JSON)",
     "resources": "Resources (JSON array)",
     "well_known_url": "x402 descriptor URL",
     "openapi_url": "OpenAPI URL",
@@ -522,12 +584,9 @@ def _load_editable(request: Request, kind: str, slug: str):
         if row is None:
             raise HTTPException(404, "No such listing")
         host, _ = db._host_and_path(row["_listing_url"] or "")
-        owner = conn.execute(
-            "SELECT * FROM domain_ownership WHERE host=? AND status='verified' "
-            "AND scope_path IS NULL",
-            (host,)).fetchone()
+        owner = ownership.owner_for_url(conn, row["_listing_url"] or "")
     if owner is None or owner["user_id"] != user["id"]:
-        raise HTTPException(403, "You have not verified control of %s" % host)
+        raise HTTPException(403, "You have not verified control of %s" % (row["_listing_url"] or host))
     return user, row, host, owner
 
 
@@ -536,25 +595,31 @@ def may_edit_listing(request: Request, kind: str, listing_url: str) -> bool:
     user = current_user(request)
     if user is None:
         return False
-    host, _ = db._host_and_path(listing_url or "")
-    if not host:
-        return False
     with db.connect(read_only=True) as conn:
-        owner = conn.execute(
-            "SELECT user_id FROM domain_ownership "
-            "WHERE host=? AND status='verified' AND scope_path IS NULL", (host,)).fetchone()
-    return owner is not None and owner["user_id"] == user["id"]
+        return ownership.may_edit(conn, user["id"], listing_url)
 
 
-def editable_values(kind, row):
+def editable_values(kind, row, *, user_id):
     if kind == "x402":
-        return owner_declarations.editable_fields(row)
-    return {name: row[name] for name in db._EDITABLE_FIELDS[kind]}
+        values = owner_declarations.editable_fields(row)
+        with db.connect(read_only=True) as conn:
+            domain_scope = owner_declarations.has_domain_authority(conn, user_id, row["url"])
+        return values if domain_scope else {name: value for name, value in values.items()
+                                           if name not in owner_declarations.FIELDS}
+    values = {name: row[name] for name in db._EDITABLE_FIELDS[kind]}
+    if kind == "mcp":
+        from . import mcp_pricing
+        value = values["pricing"]
+        values["pricing"] = mcp_pricing.normalize(value) if isinstance(value, dict) else mcp_pricing.read(value, row["endpoint_url"])
+    return values
 
 
 async def verify_owner_listing(request, kind, row, user, owner):
     if kind != "x402":
         raise HTTPException(404, "Interface declaration verification is available for x402 listings only")
+    with db.connect(read_only=True) as conn:
+        if not owner_declarations.has_domain_authority(conn, user["id"], row["url"]):
+            raise HTTPException(403, owner_declarations.DOMAIN_AUTHORITY_ERROR)
     if not owner_declarations.stored(row):
         raise HTTPException(422, "Save an interface declaration before verification")
     for identity, scope, windows in (
@@ -573,31 +638,44 @@ async def verify_owner_listing(request, kind, row, user, owner):
 
 
 def _edit_context(request, kind, slug, user, row, host, saved=None, error=None):
-    values = editable_values(kind, row)
+    values = editable_values(kind, row, user_id=user["id"])
     fields = [
         {"name": f, "label": _FIELD_LABELS.get(f, f), "value": values[f],
-         "multiline": f == "description"}
+         "multiline": f in ("description", "cost_hint", "pricing")}
         for f in db._EDITABLE_FIELDS[kind] if f not in owner_declarations.FIELDS
     ]
+    if kind == "mcp":
+        from . import mcp_pricing
+        for field in fields:
+            if field["name"] == "pricing":
+                field["value"] = json.dumps(values["pricing"], ensure_ascii=False, indent=2) if values["pricing"] else ""
+            elif field["name"] == "auth_method":
+                field["choices"] = mcp_pricing.auth_choices(field["value"])
     declaration = owner_declarations.public_state(row) if kind == "x402" else None
     interface_fields = []
     if kind == "x402":
         for name in owner_declarations.FIELDS:
+            if name not in values:
+                continue
             value = values[name]
             if name == "resources":
                 value = json.dumps(value, ensure_ascii=False, indent=2) if value is not None else ""
             interface_fields.append({"name": name, "label": _FIELD_LABELS[name], "value": value})
     with db.connect(read_only=True) as conn:
         history = db.listing_edit_history(conn, kind, row["id"])
+        domain_scope = owner_declarations.has_domain_authority(conn, user["id"], row["_listing_url"] or "")
+    if not domain_scope:
+        declaration = None
     for h in history:
         h["ago"] = _ago(h["applied_at"])
     return {
         "request": request, "user": user, "listing": row, "host": host,
+        "verified_target": host if domain_scope else row["_listing_url"],
         "fields": fields, "history": history, "saved": saved, "error": error,
-        "interface_fields": interface_fields, "declaration": declaration,
+        "interface_fields": interface_fields if domain_scope else [], "declaration": declaration,
         "declaration_blocker": owner_declarations.BLOCKERS.get((declaration or {}).get("blocker")),
-        "verify_url": "/listings/%s/%s/verify" % (kind, slug),
-        "lifecycle_url": "/listings/%s/%s/manage" % (kind, slug),
+        "verify_url": "/listings/%s/%s/verify" % (kind, slug) if domain_scope else None,
+        "lifecycle_url": "/listings/%s/%s/manage" % (kind, slug) if domain_scope else None,
         "back_url": _KIND_LOOKUP[kind][1] % slug,
     }
 
@@ -666,7 +744,7 @@ async def verify_listing_form(request: Request, kind: str, slug: str):
 
 
 @router.get("/api/v1/me", include_in_schema=False)
-def whoami(request: Request):
+def whoami(request: Request, kind: str | None = None, slug: str | None = None):
     """Everything about the visitor, kept out of the cacheable HTML.
 
     Detail pages are deliberately CDN-cached, so rendering a name or an Edit
@@ -678,11 +756,20 @@ def whoami(request: Request):
         payload = {"signed_in": False}
     else:
         with db.connect(read_only=True) as conn:
-            hosts = [r["host"] for r in conn.execute(
-                "SELECT host FROM domain_ownership "
-                "WHERE user_id=? AND status='verified'", (user["id"],))]
+            hosts = [host for host in ownership.hosts_for_user(conn, user["id"])
+                     if ownership.owner_of_host(conn, host) is not None]
+            urls = ownership.urls_for_user(conn, user["id"])
+            can_edit = False
+            if kind in _KIND_LOOKUP and slug:
+                table = _KIND_LOOKUP[kind][0]
+                row = conn.execute(
+                    "SELECT %s AS target FROM %s WHERE slug=?" % (_LISTING_URL_COL[kind], table),
+                    (slug,)).fetchone()
+                if row is not None and db.find_privacy_suppression_any(conn, kind, {"slug": slug}) is None:
+                    can_edit = ownership.may_edit(conn, user["id"], row["target"] or "")
         payload = {"signed_in": True, "login": user["login"],
-                   "avatar_url": user["avatar_url"], "hosts": hosts}
+                   "avatar_url": user["avatar_url"], "hosts": hosts, "urls": urls,
+                   "can_edit_listing": can_edit}
     return JSONResponse(payload, headers={"Cache-Control": "no-store"})
 
 

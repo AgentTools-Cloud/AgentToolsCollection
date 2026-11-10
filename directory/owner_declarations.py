@@ -18,6 +18,7 @@ FIELDS = ('method', 'price_usdc', 'resources', 'well_known_url', 'openapi_url')
 METHODS = ('GET', 'POST')
 MAX_RESOURCES = 50
 MAX_BYTES = 65536
+DOMAIN_AUTHORITY_ERROR = 'Interface declarations require verified whole-host control'
 BLOCKERS = {
     'document_unavailable': 'A selected description document did not return JSON directly from its declared URL.',
     'document_too_large': 'The description document or payment response exceeds the verification limit.',
@@ -34,6 +35,17 @@ BLOCKERS = {
 
 class DeclarationError(ValueError):
     pass
+
+
+def has_domain_authority(conn, user_id, primary_url):
+    from . import ownership
+    try:
+        host = ownership.normalize_host(urlsplit(primary_url).hostname or '')
+    except ValueError:
+        return False
+    user = conn.execute('SELECT status FROM users WHERE id=?', (user_id,)).fetchone()
+    owner = ownership.owner_of_host(conn, host)
+    return bool(user and user['status'] == 'active' and owner and owner['user_id'] == user_id)
 
 
 class VerificationBlocked(ValueError):
@@ -416,6 +428,8 @@ def observe(row):
 def apply_validation(conn, listing_id, user_id, ownership_id, expected_declaration, result):
     from . import db
     current, _ = db.owner_edit_state(conn, 'x402', listing_id, user_id, ownership_id)
+    if not has_domain_authority(conn, user_id, current['url']):
+        raise PermissionError(DOMAIN_AUTHORITY_ERROR)
     declaration = stored(current)
     if declaration != expected_declaration or exact_endpoint(current['url']) != exact_endpoint(declaration.get('primary_url')):
         raise DeclarationError('Declaration changed during verification; please retry the current version')
@@ -468,6 +482,8 @@ def verify_listing(listing_id, user_id, ownership_id):
     from . import db
     with closing(db.connect(read_only=True)) as conn:
         current, _ = db.owner_edit_state(conn, 'x402', listing_id, user_id, ownership_id)
+        if not has_domain_authority(conn, user_id, current['url']):
+            raise PermissionError(DOMAIN_AUTHORITY_ERROR)
         row = db.row_to_dict(current)
         declaration = stored(row)
         if not declaration:

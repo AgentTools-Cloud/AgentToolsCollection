@@ -146,6 +146,7 @@ def normalize_service(row: dict, as_mcp: bool = False,
     }
     if include_sort_meta:
         item.update({
+            "_search_priority": row.get("search_priority"),
             "_search_rank": row.get("search_rank"),
             "_quality_score": row.get("quality_score"),
             "_created_at": row.get("created_at"),
@@ -156,6 +157,7 @@ def normalize_service(row: dict, as_mcp: bool = False,
 
 def normalize_mcp_server(row: dict, include_sort_meta: bool = False) -> dict:
     """Normalise a standalone mcp_servers row into the unified shape."""
+    from . import mcp_pricing
     protocols = ["mcp"]
     if row.get("x402_supported"):
         protocols.append("x402")
@@ -182,14 +184,27 @@ def normalize_mcp_server(row: dict, include_sort_meta: bool = False) -> dict:
         "access": _access_model(row.get("x402_supported"),
                                 auth=row.get("auth_method"),
                                 cost_hint=row.get("cost_hint")),
+        "pricing": row.get("pricing"),
         "kind": row.get("kind") or ("callable" if endpoint else "catalog"),
         "health_status": row.get("health") or "unknown",
         "confidence": row.get("confidence"),
         "call_hint": call_hint,
         "detail_url": f"https://agent-tools.cloud/api/v1/mcp/servers/{row.get('slug')}",
     }
+    if row.get("pricing"):
+        summary = mcp_pricing.access_summary(row["pricing"])
+        access = item["access"]
+        access["buyer_approval_required"] = summary["buyer_approval_required"]
+        if access["model"] != "agent_pays":
+            access.update(summary)
+        if access["paid"] and summary["buyer_approval_required"] is not False:
+            access["agent_can_self_serve"] = False
+            label = "Public discovery" if access["model"] == "open" else access["label"]
+            approval_hint = "paid operations require buyer approval" if summary["buyer_approval_required"] else "paid-operation approval is unspecified"
+            access["label"] = label + "; " + approval_hint
     if include_sort_meta:
         item.update({
+            "_search_priority": row.get("search_priority"),
             "_search_rank": row.get("search_rank"),
             "_quality_score": row.get("quality_score"),
             "_created_at": row.get("created_at"),
@@ -226,6 +241,7 @@ def normalize_a2a(row: dict, include_sort_meta: bool = False) -> dict:
     }
     if include_sort_meta:
         item.update({
+            "_search_priority": row.get("search_priority"),
             "_search_rank": row.get("search_rank"),
             "_quality_score": row.get("quality_score"),
             "_created_at": row.get("created_at"),
@@ -379,12 +395,16 @@ def _sort_key(item: dict) -> tuple:
 
 
 def sort_resources(items: list[dict], sort: str, query: str | None = None) -> None:
+    sort = db.effective_search_sort(query, sort)
     if sort == "default":
         items.sort(key=_sort_key)
     elif sort == "relevance":
         items.sort(key=lambda item: (
+            item.get("_search_priority") if item.get("_search_priority") is not None else 2,
             item.get("_search_rank") is None,
             item.get("_search_rank") or 0.0,
+            _HEALTH_RANK.get(item.get("health_status"), 4),
+            -(item.get("_quality_score") if item.get("_quality_score") is not None else -1),
             item.get("_sort_id") or 0,
             item.get("type") or "",
             item.get("slug") or ""))
@@ -412,6 +432,7 @@ def sort_resources(items: list[dict], sort: str, query: str | None = None) -> No
 
 def strip_sort_metadata(items: list[dict]) -> None:
     for item in items:
+        item.pop("_search_priority", None)
         item.pop("_search_rank", None)
         item.pop("_quality_score", None)
         item.pop("_created_at", None)
@@ -427,14 +448,14 @@ def unified_search(conn, q: str | None = None, protocol: str | None = None,
                    sort: str = "default", limit: int = 20, offset: int = 0) -> dict:
     """Union search across x402 / mcp / a2a, returning normalised rows."""
     protocol = (protocol or "").lower() or None
-    effective_sort = "default" if sort == "relevance" and not (q or "").strip() else sort
+    effective_sort = db.effective_search_sort(q, sort)
     pull = limit + offset
     items: list[dict] = []
 
     if protocol in (None, "x402"):
         for r in db.search(conn, q=q, chain=chain, health=health,
                            sort=effective_sort, limit=pull):
-            items.append(normalize_service(r, as_mcp=False, include_sort_meta=sort != "default"))
+            items.append(normalize_service(r, as_mcp=False, include_sort_meta=effective_sort != "default"))
     if protocol in (None, "mcp"):
         for r in db.search_mcp(conn, q=q, health=health,
                                sort=effective_sort, limit=pull):

@@ -15,11 +15,13 @@ import uuid
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import formataddr, formatdate, make_msgid
+from urllib.parse import urlsplit
 
 log = logging.getLogger("directory.mailer")
 
 FROM_NAME = "Agent Tools"
 REPLY_TO = "contact@agent-tools.cloud"
+CLAIM_INVITE_FROM = "noreply@mail.agent-tools.cloud"
 SITE = "https://agent-tools.cloud"
 ADMIN_EMAIL = os.getenv("ADMIN_NOTIFY_EMAIL", "admin@agent-tools.cloud")
 
@@ -46,11 +48,11 @@ def _conf() -> dict | None:
     }
 
 
-def _record_external_result(subject: str, state: str, event_id: str) -> None:
+def _record_external_result(subject: str, state: str, event_id: str, *, purpose: str | None = None) -> None:
     """Best-effort local receipt; never resend or copy a mail to the admin."""
     try:
         from . import notices
-        purpose = {
+        purpose = purpose or {
             "You're listed on Agent Tools (x402 directory)": 'approval',
             "Your Agent Tools submission wasn't listed (here's why)": 'rejection',
         }.get(subject, 'external')
@@ -64,43 +66,77 @@ def _send(to_email: str, subject: str, text: str, html: str) -> bool:
     if str(to_email).strip().lower() in {ADMIN_EMAIL.lower(), 'admin@agent-tools.cloud'}:
         from . import notices
         return notices.capture_legacy_admin(subject, text)
+    return _deliver_external(to_email, subject, text, html)["status"] == "accepted"
+
+
+def claim_invitation_configured() -> bool:
+    try:
+        conf = _conf()
+    except (TypeError, ValueError):
+        return False
+    return bool(conf and conf["from"].casefold() == CLAIM_INVITE_FROM and conf["port"] == 465)
+
+
+def send_claim_invitation(to_email: str, subject: str, text: str, markup: str,
+                  *, message_id: str, before_dispatch=None) -> dict:
+    return _deliver_external(to_email, subject, text, markup, purpose="claim_invitation",
+                    message_id=message_id, expected_sender=CLAIM_INVITE_FROM, before_dispatch=before_dispatch)
+
+
+def _deliver_external(to_email: str, subject: str, text: str, markup: str,
+                      *, purpose: str | None = None, message_id: str | None = None,
+                      expected_sender: str | None = None, before_dispatch=None) -> dict:
     event_id = uuid.uuid4().hex
     accepted = False
-    state = 'failed_or_unknown'
+    status = "failed"
+    reason = None
+    stage = "configuration"
+    message_id = message_id or make_msgid(domain="mail.agent-tools.cloud")
     try:
         conf = _conf()
         if conf is None:
-            state = 'skipped'
+            status = "skipped"
+            reason = "smtp_not_configured"
             log.warning('SMTP not configured; external email not sent')
-            return False
-        sender = conf["from"]
-        msg = MIMEMultipart("alternative")
-        msg["Subject"] = subject
-        msg["From"] = formataddr((FROM_NAME, sender))
-        msg["To"] = to_email
-        msg["Reply-To"] = REPLY_TO
-        msg["Date"] = formatdate(localtime=False)
-        msg["Message-ID"] = make_msgid(domain="mail.agent-tools.cloud")
-        msg.attach(MIMEText(text, "plain", "utf-8"))
-        msg.attach(MIMEText(html, "html", "utf-8"))
-        ctx = ssl.create_default_context()
-        with smtplib.SMTP_SSL(conf["host"], conf["port"], context=ctx, timeout=30) as s:
-            s.login(conf["user"], conf["pass"])
-            # Envelope contains the external recipient only. No CC/BCC or
-            # separate self-copy is sent; the local receipt is the admin copy.
-            refused = s.sendmail(sender, [to_email], msg.as_string())
-            accepted = not bool(refused)
-            state = 'accepted' if accepted else 'failed_or_unknown'
-        if accepted:
-            log.info('external notification accepted by SMTP; delivery unverified')
-        return accepted
-    except Exception as exc:  # noqa: BLE001 - email must never break approval
+        else:
+            if expected_sender and (conf["from"].casefold() != expected_sender or conf["port"] != 465):
+                raise ValueError("claim_invite_sender_configuration_invalid")
+            sender = conf["from"]
+            msg = MIMEMultipart("alternative")
+            msg["Subject"] = subject
+            msg["From"] = formataddr((FROM_NAME, sender))
+            msg["To"] = to_email
+            msg["Reply-To"] = REPLY_TO
+            msg["Date"] = formatdate(localtime=False)
+            msg["Message-ID"] = message_id
+            msg.attach(MIMEText(text, "plain", "utf-8"))
+            msg.attach(MIMEText(markup, "html", "utf-8"))
+            ctx = ssl.create_default_context()
+            stage = "connection"
+            with smtplib.SMTP_SSL(conf["host"], conf["port"], context=ctx, timeout=30) as session:
+                session.login(conf["user"], conf["pass"])
+                if before_dispatch is not None and not before_dispatch():
+                    return {"status": "failed", "reason": "dispatch_guard_blocked", "event_id": event_id, "message_id": message_id}
+                stage = "dispatch"
+                refused = session.sendmail(sender, [to_email], msg.as_string())
+                accepted = not bool(refused)
+                status = "accepted" if accepted else "failed"
+                reason = None if accepted else "smtp_recipient_refused"
+                stage = "complete"
+            if accepted:
+                log.info('external notification accepted by SMTP; delivery unverified')
+    except Exception as exc:
         log.warning('external email transport ended with %s; accepted=%s', type(exc).__name__, accepted)
-        # A QUIT/disconnect failure after sendmail succeeded does not undo
-        # acceptance. Never turn a receipt-storage/cleanup error into a resend.
-        return accepted
+        definite_refusal = isinstance(exc, (smtplib.SMTPRecipientsRefused, smtplib.SMTPSenderRefused, smtplib.SMTPDataError))
+        status = "accepted" if accepted else ("indeterminate" if stage == "dispatch" and not definite_refusal else "failed")
+        reason = None if accepted else type(exc).__name__
     finally:
-        _record_external_result(subject, state, event_id)
+        state = "accepted" if status == "accepted" else ("skipped" if status == "skipped" else "failed_or_unknown")
+        if purpose:
+            _record_external_result(subject, state, event_id, purpose=purpose)
+        else:
+            _record_external_result(subject, state, event_id)
+    return {"status": status, "reason": reason, "event_id": event_id, "message_id": message_id}
 
 
 def _approval_html(service_name: str, service_url: str, verified_line: str | None) -> str:
@@ -218,6 +254,102 @@ def send_approval_email(
     html = _approval_html(service_name, service_url, verified_line)
     return _send(to_email, subject, text, html)
 
+
+def claim_invitation_message(
+    service_name: str,
+    source_name: str,
+    listing_url: str,
+    unsubscribe_url: str,
+) -> tuple[str, str, str]:
+    """Render an English invitation without consulting SMTP or sending mail."""
+    name = " ".join(str(service_name).split())[:160]
+    source = " ".join(str(source_name).split())[:160]
+    if not name or not source:
+        raise ValueError("invitation_name_and_source_required")
+    for value in (listing_url, unsubscribe_url):
+        parsed = urlsplit(value)
+        if (parsed.scheme != "https" or parsed.hostname != "agent-tools.cloud"
+                or parsed.username is not None or parsed.password is not None
+                or parsed.port not in (None, 443)):
+            raise ValueError("invitation_links_must_use_our_site")
+    subject = f"{name} is listed on Agent Tools"
+    claim_url = SITE + "/account"
+    text = (
+        "Hi,\n\n"
+        f'We found "{name}" in {source} and added it to Agent Tools:\n'
+        f"{listing_url}\n\n"
+        "Claiming is free. After verifying control of your host, you can correct "
+        "your listing and maintain its API details:\n"
+        f"{claim_url}\n\n"
+        "Your listing stays up whether or not you claim it.\n"
+        "This is a one-time listing notification. We won't subscribe you to a mailing list.\n"
+        f"Stop these invitations: {unsubscribe_url}\n\n"
+        "Agent Tools\ncontact@agent-tools.cloud\n"
+    )
+    safe_name = html.escape(name, quote=True)
+    safe_source = html.escape(source, quote=True)
+    safe_listing = html.escape(listing_url, quote=True)
+    safe_unsubscribe = html.escape(unsubscribe_url, quote=True)
+    markup = f"""<!DOCTYPE html>
+  <html lang="en"><head><meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1"></head>
+  <body style="margin:0;padding:24px 12px;background:{LIGHT};color:{INK};">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+  <tr><td align="center"><table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+   style="max-width:560px;background:#fff;border:1px solid {BORDER};border-radius:8px;
+   font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;line-height:1.6;">
+  <tr><td style="padding:18px 24px;background:{BLUE};color:#fff;font-size:18px;font-weight:700;">Agent Tools</td></tr>
+  <tr><td style="padding:24px;overflow-wrap:anywhere;">
+  <h1 style="margin:0 0 16px;font-size:22px;line-height:1.3;">{safe_name} is listed</h1>
+  <p>We found your service in {safe_source} and added it to Agent Tools.</p>
+  <p><a href="{safe_listing}" style="color:{BLUE};">View your listing</a></p>
+  <p>Claiming is free. After verifying control of your host, you can correct your listing and maintain its API details.</p>
+  <p><a href="{claim_url}" style="display:inline-block;padding:10px 16px;background:{BLUE};color:#fff;border-radius:6px;text-decoration:none;">Claim your host</a></p>
+  <p>Your listing stays up whether or not you claim it.</p>
+  <p style="font-size:13px;color:{SLATE};">This is a one-time listing notification. We won't subscribe you to a mailing list.
+  <a href="{safe_unsubscribe}" style="color:{SLATE};">Stop these invitations</a>.</p>
+  <p style="font-size:13px;color:{SLATE};">Agent Tools<br>contact@agent-tools.cloud</p>
+  </td></tr></table></td></tr></table></body></html>"""
+    return subject, text, markup
+
+
+
+def claim_invitation_group_message(listings: list[dict], unsubscribe_url: str) -> tuple[str, str, str]:
+  if not listings:
+    raise ValueError("claim_invitation_listings_required")
+  first = listings[0]
+  single = claim_invitation_message(first["name"], first["source_name"], first["listing_url"], unsubscribe_url)
+  if len(listings) == 1:
+    return single
+  entries = []
+  markup_entries = []
+  for listing in listings[:10]:
+    name = " ".join(str(listing["name"]).split())[:160]
+    source = " ".join(str(listing["source_name"]).split())[:160]
+    url = str(listing["listing_url"])
+    parsed = urlsplit(url)
+    if parsed.scheme != "https" or parsed.hostname != "agent-tools.cloud" or parsed.username or parsed.password or parsed.port not in (None, 443):
+      raise ValueError("invitation_links_must_use_our_site")
+    entries.append(f"- {name} ({source}): {url}")
+    markup_entries.append(f'<li><a href="{html.escape(url, quote=True)}">{html.escape(name)}</a> ({html.escape(source)})</li>')
+  more = f"\nAnd {len(listings) - 10} more listings from the same host operator.\n" if len(listings) > 10 else "\n"
+  subject = " ".join(str(first["name"]).split())[:160] + " and other listings on Agent Tools"
+  text = ("Hi,\n\nWe found your public services and added them to Agent Tools:\n" + "\n".join(entries) + more
+      + "\nClaiming is free. After verifying control of the listed hosts, you can correct your listings and maintain their API details:\n"
+      + SITE + "/account\n\nYour listings stay up whether or not you claim them.\n"
+      + "This is a one-time listing notification. We won't subscribe you to a mailing list.\n"
+      + "Stop these invitations: " + unsubscribe_url + "\n\nAgent Tools\ncontact@agent-tools.cloud\n")
+  markup = (f'<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>'
+        f'<body style="margin:0;padding:24px 12px;background:{LIGHT};color:{INK};font-family:Segoe UI,sans-serif;line-height:1.6;">'
+        f'<main style="max-width:560px;margin:auto;background:white;border:1px solid {BORDER};border-radius:8px;padding:24px;overflow-wrap:anywhere;">'
+        '<h1 style="font-size:22px;line-height:1.3;">Your services are listed on Agent Tools</h1>'
+        '<p>We found your public services and added them to Agent Tools.</p><ul>' + "".join(markup_entries) + '</ul>'
+        + (f'<p>And {len(listings) - 10} more listings from the same host operator.</p>' if len(listings) > 10 else '')
+        + '<p>Claiming is free. After verifying control of the listed hosts, you can correct your listings and maintain their API details.</p>'
+        + f'<p><a href="{SITE}/account">Claim your hosts</a></p><p>Your listings stay up whether or not you claim them.</p>'
+        + "<p>This is a one-time listing notification. We won't subscribe you to a mailing list.</p>"
+        + f'<p><a href="{html.escape(unsubscribe_url, quote=True)}">Stop these invitations</a></p><p>Agent Tools<br>contact@agent-tools.cloud</p></main></body></html>')
+  return subject, text, markup
 
 
 def _rejection_html(service_name: str, reason: str | None) -> str:

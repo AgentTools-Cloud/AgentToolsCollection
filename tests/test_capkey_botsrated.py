@@ -2,6 +2,7 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -95,6 +96,94 @@ class CapkeyTests(unittest.TestCase):
                 self.assertEqual(stored["description"], "Existing description")
                 self.assertEqual(stored["transport"], "sse")
                 self.assertEqual(stored["auth_method"], "api-key")
+
+    def fallback_catalog(self, *, truncated=False, duplicate=False, expired=False,
+                         broken=False, oversized=False, malformed_template=False):
+        requested = []
+        real_client = capkey.httpx.Client
+
+        def record(identifier, catalog=False):
+            return {"id": identifier, "kind": "mcp_http" if catalog else "MCP",
+                    "badge": "live", "status": "active", "is_template": False,
+                    "isTemplate": False, "name": "Fixture %d" % identifier,
+                    "url": "https://api.example/%d/mcp" % identifier}
+
+        def handler(request):
+            requested.append(request.url.path)
+            if request.url.path == "/api/v1/search":
+                page = int(request.url.params["page"])
+                return capkey.httpx.Response(200, json={
+                    "total": 3, "page": page, "pageSize": 2,
+                    "items": [record(1), record(2)] if page == 1 else [record(2)],
+                })
+            self.assertEqual(request.url.path, "/api/v1/catalog.json")
+            items = [record(1, True), record(2, True), record(3, True)]
+            if truncated:
+                items.pop()
+            if duplicate:
+                items[2] = record(1, True)
+            if malformed_template:
+                items[0]["is_template"] = {"invalid": True}
+            payload = {
+                "version": "0.1", "total_count": 3,
+                "generated_at": "2000-01-01T00:00:00Z" if expired else datetime.now(timezone.utc).isoformat(),
+                "items": items,
+            }
+            if broken:
+                return capkey.httpx.Response(200, content=json.dumps(payload).encode()[:-12])
+            return capkey.httpx.Response(200, json=payload)
+
+        def client_factory(*arguments, **options):
+            return real_client(transport=capkey.httpx.MockTransport(handler))
+
+        with patch.object(capkey.httpx, "Client", side_effect=client_factory), \
+                patch.object(capkey, "PAGE_LIMIT", 2), \
+                patch.object(capkey, "MAX_CATALOG_BYTES", 64 if oversized else capkey.MAX_CATALOG_BYTES), \
+                patch.object(capkey.time, "sleep"):
+            if truncated or duplicate or expired or broken or oversized or malformed_template:
+                with self.assertRaises(capkey.PartialCrawl) as caught:
+                    capkey.fetch_capkey_mcp()
+                self.assertEqual({row["source_id"] for row in caught.exception.items}, {"1", "2"})
+                self.assertIn("full catalog unavailable", caught.exception.reason)
+            else:
+                rows = capkey.fetch_capkey_mcp()
+                self.assertEqual({row["source_id"] for row in rows}, {"1", "2", "3"})
+                self.assertTrue(all(row["_partial_metadata"] for row in rows))
+                self.assertTrue(all(row["transport"] is None for row in rows))
+        self.assertEqual(requested, ["/api/v1/search", "/api/v1/search", "/api/v1/catalog.json"])
+
+    def test_complete_catalog_recovers_duplicate_search_page(self):
+        self.fallback_catalog()
+
+    def test_incomplete_catalog_keeps_partial_search(self):
+        self.fallback_catalog(truncated=True)
+
+    def test_duplicate_catalog_keeps_partial_search(self):
+        self.fallback_catalog(duplicate=True)
+
+    def test_expired_catalog_keeps_partial_search(self):
+        self.fallback_catalog(expired=True)
+
+    def test_broken_catalog_keeps_partial_search(self):
+        self.fallback_catalog(broken=True)
+
+    def test_oversized_catalog_keeps_partial_search(self):
+        self.fallback_catalog(oversized=True)
+
+    def test_non_scalar_template_keeps_partial_search(self):
+        self.fallback_catalog(malformed_template=True)
+
+    def test_catalog_deadline_keeps_partial_search(self):
+        partial = [capkey._row(self.item())]
+        client = capkey.httpx.Client(transport=capkey.httpx.MockTransport(
+            lambda request: capkey.httpx.Response(200, content=b"{}")))
+        with patch.object(capkey, "_fetch_search_pages", side_effect=capkey.PartialCrawl(partial, "fixture")), \
+                patch.object(capkey.httpx, "Client", return_value=client), \
+                patch.object(capkey, "MAX_SECONDS", 0):
+            with self.assertRaises(capkey.PartialCrawl) as caught:
+                capkey.fetch_capkey_mcp()
+        self.assertEqual(caught.exception.items, partial)
+        self.assertIn("TimeoutError", caught.exception.reason)
 
 
 class BotsRatedTests(unittest.TestCase):
