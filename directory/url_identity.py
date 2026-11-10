@@ -28,7 +28,7 @@ def exact_endpoint(url: str | None) -> str:
         scheme == "https" and port == 443
     )
     authority = host if port is None or default_port else "%s:%d" % (host, port)
-    path = parsed.path.rstrip("/")
+    path = parsed.path or "/"
     params = ";" + parsed.params if parsed.params else ""
     query = "?" + parsed.query if parsed.query else ""
     return "%s://%s%s%s%s" % (scheme, authority, path, params, query)

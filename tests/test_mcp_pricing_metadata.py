@@ -93,6 +93,13 @@ class OwnerPricingTests(TemporaryDatabaseTestCase):
         with closing(db.connect(read_only=True)) as connection:
             return db.get_mcp_by_slug(connection, "owned-pricing")
 
+    def edit_row(self):
+        # auth._edit_context receives the row loaded by the edit routes, which
+        # carry the listing URL as `_listing_url` (see auth._LISTING_URL_COL).
+        row = dict(self.row())
+        row["_listing_url"] = row["endpoint_url"]
+        return row
+
     def test_owner_can_save_cost_auth_and_structured_operations(self):
         applied, rejected = self.edit({"cost_hint": "Free discovery; EUR 9.90 buyer-approved check", "auth_method": "none", "pricing": self.declaration})
         self.assertFalse(rejected)
@@ -169,7 +176,7 @@ class OwnerPricingTests(TemporaryDatabaseTestCase):
 
     def test_edit_context_exposes_cost_auth_and_json_without_payment_verification(self):
         self.edit({"pricing": self.declaration})
-        context = auth._edit_context(None, "mcp", "owned-pricing", {"id": self.user_id}, self.row(), "owned.example")
+        context = auth._edit_context(None, "mcp", "owned-pricing", {"id": self.user_id}, self.edit_row(), "owned.example")
         fields = {field["name"]: field for field in context["fields"]}
         self.assertTrue(fields["pricing"]["multiline"])
         self.assertTrue(fields["cost_hint"]["multiline"])
@@ -179,7 +186,7 @@ class OwnerPricingTests(TemporaryDatabaseTestCase):
 
     def test_editor_renders_cost_auth_select_and_pricing_json(self):
         self.edit({"cost_hint": "Free discovery; EUR 9.90 buyer-approved check", "auth_method": "none", "pricing": self.declaration})
-        context = auth._edit_context(None, "mcp", "owned-pricing", {"id": self.user_id}, self.row(), "owned.example")
+        context = auth._edit_context(None, "mcp", "owned-pricing", {"id": self.user_id}, self.edit_row(), "owned.example")
         loader = ChoiceLoader([DictLoader({"base.html": "<html><body>{% block content %}{% endblock %}</body></html>"}), FileSystemLoader(ROOT / "directory/templates")])
         markup = Environment(loader=loader, autoescape=True).get_template("edit_listing.html").render(**context)
         self.assertIn('name="cost_hint"', markup)

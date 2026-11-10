@@ -109,6 +109,32 @@ See [`.env.example`](.env.example). Required:
 - `AGENT_TOOLS_ASK_RATE_LIMIT_PER_MINUTE` / `AGENT_TOOLS_ASK_RATE_LIMIT_PER_DAY` — public ask abuse limits
 - `METRICS_BEARER_TOKEN` — optional remote access token for `/metrics`; without it metrics are local-only
 
+## Articles (optional)
+
+Disabled by default. `ARTICLES_ENABLED=1` enables `/articles` (list, detail, RSS,
+Markdown mirror), the author workspace `/account/articles` and editor review
+`/admin/articles`. Articles live in a separate SQLite file (`ARTICLE_DB_PATH`,
+default `articles.db` next to the main database); back it up with the SQLite
+backup API so the WAL is not lost.
+
+- Authors must hold at least one verified listing claim. The REST API
+  (`/api/v1/articles`, `/save`, `/submit`, `/cancel-submission`, `/preview`,
+  `/media`) accepts only `Authorization: Bearer <api_key>`.
+- Every submission is reviewed; only accounts in `ARTICLE_EDITOR_IDS` can
+  publish. Public pages read the published version only.
+- Toolbar icons come from `lucide-static` 1.70.0 (licence kept in
+  `directory/article_assets/LICENSE`).
+
+### Sponsored publication (optional)
+
+Paid sponsored posts use a NOWPayments hosted invoice plus a signed IPN
+(HMAC-SHA512 over the sorted JSON body). The private JSON config is read from
+`NOWPAYMENTS_ARTICLES_CONFIG` (default `/etc/agent-tools/nowpayments-articles.json`,
+keep it mode 0600). Order, pricing and IPN endpoints return 404 unless the
+config is complete and `sponsored_articles_enabled` is `true`. Sponsored posts
+carry a visible "Sponsored" disclosure and their links get `rel="sponsored"`;
+payment never changes directory ranking.
+
 ## Smoke test
 
 ```bash

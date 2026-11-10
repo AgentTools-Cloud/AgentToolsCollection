@@ -17,9 +17,11 @@ import os
 import re
 from typing import Any
 
+from fastapi import HTTPException, Request
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ToolAnnotations
 from mcp.server.transport_security import TransportSecuritySettings
+from pydantic import ValidationError
 
 from . import ask as directory_ask
 from . import a2a as directory_a2a
@@ -59,6 +61,11 @@ _INSTRUCTIONS = (
     "  6. `prepare_paid_verification` -> sign `typed_data` in your wallet ->\n"
     "     `execute_paid_verification`: pay a service once and record the\n"
     "     result. Needs an API key (POST /api/v1/keys)."
+    "\n  7. With an account API key in the Authorization: Bearer header, use "
+    "`claim_service_url(url)` -> publish the returned token -> "
+    "`verify_service_url(claim_id, token)` -> `get_owned_listing` / "
+    "`edit_owned_listing`. A claim covers only its exact public HTTPS URL, "
+    "not the host or sibling services."
 )
 
 _READ_ONLY = ToolAnnotations(readOnlyHint=True, openWorldHint=False)
@@ -72,6 +79,12 @@ _QUOTE = ToolAnnotations(readOnlyHint=False, destructiveHint=False,
 # Spends the caller's funds irreversibly, so clients should confirm first.
 _PAYMENT = ToolAnnotations(readOnlyHint=False, destructiveHint=True,
                            idempotentHint=False, openWorldHint=True)
+_CLAIM_URL = ToolAnnotations(readOnlyHint=False, destructiveHint=False,
+                             idempotentHint=False, openWorldHint=False)
+_VERIFY_URL = ToolAnnotations(readOnlyHint=False, destructiveHint=True,
+                              idempotentHint=True, openWorldHint=True)
+_OWNER_EDIT = ToolAnnotations(readOnlyHint=False, destructiveHint=True,
+                              idempotentHint=True, openWorldHint=False)
 
 _TS = TransportSecuritySettings(enable_dns_rebinding_protection=False)
 discover_mcp = FastMCP(
@@ -95,7 +108,7 @@ _current_client_ip: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "agent_tools_client_ip", default=None,
 )
 # Raw `Authorization` header of the current MCP HTTP request. Only read by the
-# paid-verification tools; never logged.
+# authenticated account tools; never logged.
 _current_authorization: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "agent_tools_authorization", default=None,
 )
@@ -908,6 +921,116 @@ async def scan_mcp_safety(
     return out
 
 
+async def _ownership_api(tool_name: str, method: str, path: str, handler,
+                         *arguments, ctx: Context | None = None) -> dict[str, Any]:
+    authorization = _current_authorization.get() or ""
+    scheme, _, raw_key = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not raw_key.strip():
+        return {"error": "unauthorized", "status_code": 401,
+                "message": "Send an account API key in the MCP Authorization: Bearer header.",
+                "get_a_key": {"method": "POST", "url": "https://agent-tools.cloud/api/v1/keys"}}
+    request = Request({
+        "type": "http", "method": method, "path": path, "root_path": "", "scheme": "https",
+        "server": ("agent-tools.cloud", 443), "client": (_current_client_ip.get() or "unknown", 0),
+        "query_string": b"", "headers": [(b"authorization", authorization.encode("latin-1"))],
+    })
+    try:
+        response = await handler(request, *arguments)
+        result = json.loads(response.body) if hasattr(response, "body") else response
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, dict) else {"error": "request_rejected", "message": str(exc.detail)}
+        result = {**detail, "status_code": exc.status_code}
+        if exc.status_code == 401:
+            result["error"] = "unauthorized"
+        if exc.headers and exc.headers.get("Retry-After"):
+            result["retry_after_seconds"] = int(exc.headers["Retry-After"])
+    except ValidationError:
+        result = {"error": "invalid_arguments", "status_code": 422,
+                  "message": "Invalid claim arguments; supply the complete URL or issued claim id and token."}
+    _log_call(tool_name, ctx=ctx, args={"outcome": result.get("error") or result.get("status") or "ok"},
+              result_n=0 if result.get("error") else 1)
+    return result
+
+
+@discover_mcp.tool(annotations=_CLAIM_URL)
+async def claim_service_url(url: str, method: str | None = None,
+                            ctx: Context | None = None) -> dict[str, Any]:
+    """Issue a fresh ownership token for one exact public HTTPS URL.
+
+    Authenticate in the MCP Authorization: Bearer header. Publishing and
+    verifying the token is required before editing; URL input alone grants no rights.
+
+    Args:
+        url: Complete public HTTPS service URL, including its query when present.
+        method: Optional proof method; otherwise inferred from the complete URL.
+    """
+    from . import routes
+
+    async def open_claim(request):
+        return await routes.api_open_service_claim(request, routes.ServiceClaimRequest(url=url, method=method))
+
+    result = await _ownership_api("claim_service_url", "POST", "/api/v1/listing-claims", open_claim, ctx=ctx)
+    if not result.get("error"):
+        result["mcp_next"] = {"tool": "verify_service_url", "arguments": {
+            "claim_id": result["claim_id"], "token": result["token"]}}
+    return result
+
+
+@discover_mcp.tool(annotations=_VERIFY_URL)
+async def verify_service_url(claim_id: int, token: str,
+                             ctx: Context | None = None) -> dict[str, Any]:
+    """Verify public ownership proof for your own exact service URL claim.
+
+    This reads public proof only. It never calls business tools, requests
+    private service credentials, or grants whole-platform permissions.
+
+    Args:
+        claim_id: Claim id returned by claim_service_url.
+        token: The issued token after publishing it in the instructed location.
+    """
+    from . import routes
+
+    async def verify_claim(request):
+        return await routes.api_verify_claim(request, claim_id, routes.ClaimVerifyRequest(token=token))
+
+    result = await _ownership_api("verify_service_url", "POST",
+                                  "/api/v1/listing-claims/%s/verify" % claim_id, verify_claim, ctx=ctx)
+    if not result.get("error"):
+        result["mcp_next"] = {"tool": "get_owned_listing", "note": "Choose a kind and slug from the returned listings."}
+    return result
+
+
+@discover_mcp.tool(annotations=_READ_ONLY)
+async def get_owned_listing(kind: str, slug: str, ctx: Context | None = None) -> dict[str, Any]:
+    """Read editable metadata for a listing covered by your verified claim.
+
+    Args:
+        kind: Listing type: x402, mcp, or a2a.
+        slug: Slug from the verified claim's listings or directory search.
+    """
+    from . import routes
+    return await _ownership_api("get_owned_listing", "GET", "/api/v1/listings/%s/%s" % (kind, slug),
+                                routes.api_get_listing, kind, slug, ctx=ctx)
+
+
+@discover_mcp.tool(annotations=_OWNER_EDIT)
+async def edit_owned_listing(kind: str, slug: str, fields: dict[str, Any],
+                             ctx: Context | None = None) -> dict[str, Any]:
+    """Edit only metadata covered by your verified claim, with the public audit trail.
+
+    An endpoint change requires verified control of the exact destination or
+    its whole host and clears measurements tied to the old primary endpoint.
+
+    Args:
+        kind: Listing type: x402, mcp, or a2a.
+        slug: Slug of the listing you are authorized to edit.
+        fields: Editable fields to change; measured fields are rejected.
+    """
+    from . import routes
+    return await _ownership_api("edit_owned_listing", "PATCH", "/api/v1/listings/%s/%s" % (kind, slug),
+                                routes.api_patch_listing, kind, slug, fields, ctx=ctx)
+
+
 # ---- Sponsored paid verification ----------------------------------------------
 
 _PV_PREPARE_LIMITS = (("minute", 6, 60), ("day", 60, 86400))
@@ -1087,4 +1210,4 @@ for _tool in discover_mcp._tool_manager.list_tools():
             _schema["description"] = _descs[_name]
 
 
-log.info("directory MCP app built (db=%s, tools=14)", DB_PATH)
+log.info("directory MCP app built (db=%s, tools=%s)", DB_PATH, len(discover_mcp._tool_manager.list_tools()))

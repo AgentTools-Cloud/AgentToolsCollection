@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% from "_article_macros.html" import icon %}
+{% block language %}en{% endblock %}
+{% block title %}{{ 'My articles' if author_mode | default(false) else 'Article management' }} · Agent Tools{% endblock %}
+{% block robots %}<meta name="robots" content="noindex,nofollow">{% endblock %}
+{% block canonical %}{% endblock %}
+{% block head_extra %}<link rel="stylesheet" href="/article-assets/articles.css">{% endblock %}
+{% block content %}
+{% set author_mode = author_mode | default(false) %}
+{% set work_area = '/account/articles' if author_mode else '/admin/articles' %}
+{% set queue = queue | default('') %}
+<div class="article-page article-admin">
+  <header class="article-heading"><h1>{{ 'My articles' if author_mode else 'Article management' }}</h1><a class="article-button primary" href="{{ work_area }}/new">{{ icon("plus") }}New article</a></header>
+  {% if sponsored_enabled %}<nav class="article-order-navigation" aria-label="Publication orders"><a href="{{ '/account/article-orders' if author_mode else '/admin/article-orders' }}">Publication orders</a>{% if not author_mode %}<a href="/admin/article-orders/alerts">Payment alerts</a>{% endif %}<a href="/articles/pricing">Publication terms</a></nav>{% endif %}
+  {% if not author_mode %}<nav class="article-tabs" aria-label="Submission scope"><a href="/admin/articles" {% if not queue %}aria-current="page"{% endif %}>All submissions</a><a href="/admin/articles?queue=submitted" {% if queue %}aria-current="page"{% endif %}>Pending review</a></nav>{% endif %}
+  <div class="article-result-count">{{ result.total }} {{ 'article' if result.total == 1 else 'articles' }}</div>
+  <div class="article-table-scroll"><table class="article-admin-table"><thead><tr><th>Article</th><th>Status</th><th>Version</th><th>Updated</th><th><span class="article-visually-hidden">Edit</span></th></tr></thead><tbody>
+  {% for state in result["items"] %}{% set display_status = state.review_status if state.review_status in ['submitted', 'changes_requested', 'rejected'] else state.status %}<tr><td><a href="{{ work_area }}/{{ state.id }}">{{ state.latest.snapshot.title }}</a><div class="article-byline">{{ state.slug }}</div></td><td><span class="article-status {{ display_status }}">{{ article_status_labels[display_status] }}</span></td><td>V{{ state.latest.version }}{% if state.published and state.published.version != state.latest.version %}<div class="article-byline">Published V{{ state.published.version }}</div>{% endif %}</td><td>{{ state.updated_at | article_date }}</td><td><a class="article-icon-button" href="{{ work_area }}/{{ state.id }}" title="Edit article" aria-label="Edit {{ state.latest.snapshot.title }}">{{ icon("pencil-line") }}</a></td></tr>
+  {% else %}<tr><td colspan="5" class="article-empty">No articles yet.</td></tr>{% endfor %}
+  </tbody></table></div>
+  {% if result.page > 1 or result.total > result.page * result.page_size %}<nav class="article-pagination" aria-label="Pagination">{% if result.page > 1 %}<a class="article-icon-button" href="{{ work_area }}?page={{ result.page - 1 }}{% if queue %}&amp;queue=submitted{% endif %}" title="Previous page" aria-label="Previous page">{{ icon("arrow-left") }}</a>{% endif %}<span>{{ result.page }}</span>{% if result.total > result.page * result.page_size %}<a class="article-icon-button" href="{{ work_area }}?page={{ result.page + 1 }}{% if queue %}&amp;queue=submitted{% endif %}" title="Next page" aria-label="Next page">{{ icon("arrow-right") }}</a>{% endif %}</nav>{% endif %}
+</div>
+{% endblock %}

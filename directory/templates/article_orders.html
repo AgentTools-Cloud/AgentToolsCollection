@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% from "_article_macros.html" import icon %}
+{% block language %}en{% endblock %}
+{% block title %}{{ 'Publication terms' if pricing else 'Publication orders' }} &middot; Agent Tools{% endblock %}
+{% block robots %}<meta name="robots" content="noindex,nofollow">{% endblock %}
+{% block canonical %}{% endblock %}
+{% block head_extra %}<link rel="stylesheet" href="/article-assets/articles.css">{% endblock %}
+{% block content %}
+{% set author_mode = author_mode | default(true) %}
+{% set work_area = '/account/article-orders' if author_mode else '/admin/article-orders' %}
+<div class="article-page article-orders">
+  <header class="article-heading"><h1>{{ 'Publication terms' if pricing else 'Payment alerts' if alerts_only | default(false) else 'Publication orders' }}</h1><a href="{{ '/articles' if pricing else '/account/articles' if author_mode else '/admin/articles' }}" class="article-back">{{ icon("arrow-left") }}{{ 'Blog' if pricing else 'My articles' if author_mode else 'Article management' }}</a></header>
+  {% if pricing %}
+  <div class="article-table-scroll"><table class="article-admin-table"><thead><tr><th>Publication</th><th>Price</th><th>External links</th></tr></thead><tbody><tr><td>Ordinary article</td><td>Free</td><td>Relevant sources</td></tr>{% for plan in ['standard', 'premium'] %}<tr><td>Sponsored - {{ plan | title }}</td><td>${{ '%.2f' | format(sponsored_prices[plan] / 100) }} USD</td><td>{{ 1 if plan == 'standard' else 3 }}</td></tr>{% endfor %}</tbody></table></div>
+  <section class="article-order-terms"><h2>Publication terms</h2><div class="article-terms-text">{{ terms_text }}</div></section>
+  {% else %}
+  <nav class="article-order-navigation" aria-label="Order scope"><a href="{{ work_area }}">All orders</a>{% if not author_mode %}<a href="/admin/article-orders/alerts">Payment alerts</a>{% endif %}<a href="/articles/pricing">Publication terms</a></nav>
+  <div class="article-result-count">{{ result.total }} {{ 'order' if result.total == 1 else 'orders' }}</div>
+  <div class="article-table-scroll"><table class="article-admin-table"><thead><tr><th>Order</th><th>Status</th><th>Price</th><th>Updated</th><th><span class="article-visually-hidden">Open order</span></th></tr></thead><tbody>{% for order in result["items"] %}<tr><td><a class="mono" href="{{ work_area }}/{{ order.id }}">{{ order.id }}</a><div class="article-byline">{{ order.plan | title }} &middot; V{{ order.version }}</div></td><td><span class="article-status {{ order.status }}">{{ article_order_labels[order.status] }}</span></td><td>${{ '%.2f' | format(order.price_usd_cents / 100) }} USD</td><td>{{ order.updated_at | article_date }}</td><td><a class="article-icon-button" href="{{ work_area }}/{{ order.id }}" title="Open order" aria-label="Open order {{ order.id }}">{{ icon("external-link") }}</a></td></tr>{% else %}<tr><td colspan="5" class="article-empty">No orders.</td></tr>{% endfor %}</tbody></table></div>
+  {% if result.page > 1 or result.total > result.page * result.page_size %}<nav class="article-pagination" aria-label="Pagination">{% if result.page > 1 %}<a class="article-icon-button" href="{{ '/admin/article-orders/alerts' if alerts_only | default(false) else work_area }}?page={{ result.page - 1 }}" title="Previous page" aria-label="Previous page">{{ icon("arrow-left") }}</a>{% endif %}<span>{{ result.page }}</span>{% if result.total > result.page * result.page_size %}<a class="article-icon-button" href="{{ '/admin/article-orders/alerts' if alerts_only | default(false) else work_area }}?page={{ result.page + 1 }}" title="Next page" aria-label="Next page">{{ icon("arrow-right") }}</a>{% endif %}</nav>{% endif %}
+  {% endif %}
+</div>
+{% endblock %}

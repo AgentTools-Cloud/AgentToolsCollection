@@ -1129,14 +1129,38 @@ def cmd_ownership_recheck() -> int:
     Domains change hands. A badge that is never re-checked is a lie with a
     timestamp on it.
     """
+    reader_conn = db.connect(read_only=True)
+    try:
+        kept, revoked = ownership_mod.recheck(reader_conn)
+    finally:
+        reader_conn.close()
+
     def op():
-        with db.writer() as c:
-            kept, revoked = ownership_mod.recheck(c)
-            projection = db.sync_owner_verified(c)
-            return kept, revoked, projection
-    kept, revoked, projection = db.with_retry(op)
+        with db.writer(immediate=True) as writer_conn:
+            return db.sync_owner_verified(writer_conn)
+
+    projection = db.with_retry(op)
     log.info("ownership recheck: kept=%d revoked=%d projection=%s",
              kept, revoked, projection)
+    return 0
+
+
+def cmd_ownership_pending_recheck() -> int:
+    """Check pending claims on their bounded schedule."""
+    reader_conn = db.connect(read_only=True)
+    try:
+        checked, verified = ownership_mod.recheck_pending(reader_conn)
+    finally:
+        reader_conn.close()
+    projection = None
+    if verified:
+        def op():
+            with db.writer(immediate=True) as writer_conn:
+                return db.sync_owner_verified(writer_conn)
+
+        projection = db.with_retry(op)
+    log.info("ownership pending recheck: checked=%d verified=%d projection=%s",
+             checked, verified, projection)
     return 0
 
 
@@ -2025,6 +2049,9 @@ def main(argv=None) -> int:
     _load_env_file()
     p = argparse.ArgumentParser(prog="directory.jobs")
     sub = p.add_subparsers(dest="cmd", required=True)
+    from . import claim_invites
+
+    claim_invites.add_cli(sub)
     sub.add_parser("init")
     p_crawl = sub.add_parser("crawl")
     p_crawl.add_argument("source", nargs="?", default=None)
@@ -2086,6 +2113,7 @@ def main(argv=None) -> int:
     p_auto.add_argument("--dry-run", action="store_true")
     sub.add_parser("rescore")
     sub.add_parser("ownership-recheck")
+    sub.add_parser("ownership-pending-recheck")
     p_coll = sub.add_parser("collisions")
     p_coll.add_argument("--limit", type=int, default=50)
     p_coll.add_argument("--adjudicate", action="store_true")
@@ -2107,6 +2135,8 @@ def main(argv=None) -> int:
     args = p.parse_args(argv)
     db.init_db()
 
+    if args.cmd == "claim-invites":
+        return claim_invites.run_cli(args)
     if args.cmd == "init":
         return cmd_init()
     if args.cmd == "crawl":
@@ -2165,6 +2195,8 @@ def main(argv=None) -> int:
         return cmd_rescore()
     if args.cmd == "ownership-recheck":
         return cmd_ownership_recheck()
+    if args.cmd == "ownership-pending-recheck":
+        return cmd_ownership_pending_recheck()
     if args.cmd == "collisions":
         return cmd_collisions(limit=args.limit, adjudicate=args.adjudicate)
     if args.cmd == "shared-hosts":

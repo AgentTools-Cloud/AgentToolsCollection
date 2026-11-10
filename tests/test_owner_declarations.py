@@ -27,9 +27,19 @@ class OwnerDeclarationTests(TemporaryDatabaseTestCase):
                 health='ok', health_checked=1, price_min=0.001, price_max=0.001, currency='USDC'))
             conn.execute("UPDATE services SET owner_verified=1,x402_ok=1,http_status=402,quality_score=90,tx_30d=7 WHERE id=?", (self.lid,))
 
-    def edit(self, changes):
+    def edit(self, changes, ownership_id=None):
         with db.writer(immediate=True) as conn:
-            return db.apply_listing_edits(conn, 'x402', self.lid, self.uid, self.claim, changes)
+            return db.apply_listing_edits(conn, 'x402', self.lid, self.uid,
+                                         self.claim if ownership_id is None else ownership_id, changes)
+
+    def url_claim(self, keep_domain=False):
+        with db.writer(immediate=True) as conn:
+            if not keep_domain:
+                conn.execute("UPDATE domain_ownership SET status='revoked' WHERE id=?", (self.claim,))
+            return conn.execute(
+                "INSERT INTO domain_ownership(user_id,host,scope_path,method,token_hash,status,created_at,verified_at) "
+                "VALUES(?,'owned.example','/v1/ping','url_descriptor','fixture','verified',1,1)",
+                (self.uid,)).lastrowid
 
     def row(self):
         with closing(db.connect(read_only=True)) as conn:
@@ -62,6 +72,123 @@ class OwnerDeclarationTests(TemporaryDatabaseTestCase):
         self.assertEqual(applied, ['description'])
         self.assertFalse(rejected)
         self.assertIn('description', json.loads(self.row()['owner_edited']))
+
+    def test_url_only_owner_cannot_save_domain_declarations_or_partially_edit(self):
+        claim_id = self.url_claim()
+        applied, rejected = self.edit({'description': 'must not partially apply', 'method': 'POST'},
+                                      ownership_id=claim_id)
+        self.assertEqual(applied, [])
+        self.assertTrue(rejected)
+        self.assertNotEqual(self.row()['description'], 'must not partially apply')
+        self.assertIsNone(self.row()['owner_declaration'])
+        applied, rejected = self.edit({'description': 'Scoped metadata correction'}, ownership_id=claim_id)
+        self.assertEqual(applied, ['description'])
+        self.assertFalse(rejected)
+
+    def test_url_only_owner_cannot_verify_saved_declaration_before_probe(self):
+        self.edit({'method': 'POST'})
+        claim_id = self.url_claim()
+        with patch.object(declarations, 'observe', side_effect=AssertionError('unauthorized probe')) as observer:
+            with self.assertRaises(PermissionError):
+                declarations.verify_listing(self.lid, self.uid, claim_id)
+            observer.assert_not_called()
+
+    def test_domain_owner_can_declare_when_same_account_url_claim_takes_precedence(self):
+        claim_id = self.url_claim(keep_domain=True)
+        applied, rejected = self.edit({'method': 'POST'}, ownership_id=claim_id)
+        self.assertEqual(applied, ['method'])
+        self.assertFalse(rejected)
+
+    def test_combined_move_checks_destination_domain_before_any_edit(self):
+        with db.writer(immediate=True) as conn:
+            conn.execute(
+                "INSERT INTO domain_ownership(user_id,host,scope_path,method,token_hash,status,created_at,verified_at) "
+                "VALUES(?,'destination.example','/a','url_descriptor','fixture','verified',1,1)",
+                (self.uid,))
+        before = self.row()
+        applied, rejected = self.edit({
+            'description': 'must not partially apply',
+            'url': 'https://destination.example/a', 'method': 'GET',
+            'resources': [{'url': 'https://destination.example/a', 'method': 'GET'},
+                          {'url': 'https://destination.example/b', 'method': 'GET'}],
+        })
+        self.assertEqual(applied, [])
+        self.assertIn(declarations.DOMAIN_AUTHORITY_ERROR, rejected)
+        after = self.row()
+        for field in ('url', 'description', 'owner_declaration', 'price_min', 'quality_score'):
+            self.assertEqual(after[field], before[field])
+        with closing(db.connect(read_only=True)) as conn:
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM listing_edits').fetchone()[0], 0)
+
+    def test_combined_move_accepts_verified_destination_domain(self):
+        with db.writer(immediate=True) as conn:
+            conn.execute(
+                "INSERT INTO domain_ownership(user_id,host,scope_path,method,token_hash,status,created_at,verified_at) "
+                "VALUES(?,'destination.example','/a','url_descriptor','fixture','verified',1,1)",
+                (self.uid,))
+            conn.execute(
+                "INSERT INTO domain_ownership(user_id,host,method,token_hash,status,created_at,verified_at) "
+                "VALUES(?,'destination.example','descriptor','fixture','verified',1,1)", (self.uid,))
+        resources = [{'url': 'https://destination.example/a', 'method': 'GET'},
+                     {'url': 'https://destination.example/b', 'method': 'GET'}]
+        applied, rejected = self.edit({'url': 'https://destination.example/a',
+                                      'method': 'GET', 'resources': resources})
+        self.assertEqual(set(applied), {'url', 'method', 'resources'})
+        self.assertFalse(rejected)
+        row = self.row()
+        self.assertEqual(row['url'], 'https://destination.example/a')
+        self.assertEqual(row['owner_declaration']['fields']['resources'], resources)
+
+    def test_validation_rechecks_domain_authority_when_url_claim_remains_valid(self):
+        claim_id = self.url_claim(keep_domain=True)
+        self.edit({'method': 'POST'}, ownership_id=claim_id)
+        expected = self.row()['owner_declaration']
+        observed = self.observe()
+        self.assertEqual(observed['status'], 'verified')
+        with db.writer(immediate=True) as conn:
+            conn.execute("UPDATE domain_ownership SET status='revoked' WHERE id=?", (self.claim,))
+        with db.writer(immediate=True) as conn:
+            with self.assertRaises(PermissionError):
+                declarations.apply_validation(conn, self.lid, self.uid, claim_id, expected, observed)
+
+    def test_url_only_api_and_web_hide_domain_fields_and_reject_verification(self):
+        self.url_claim()
+        with closing(db.connect(read_only=True)) as conn:
+            user = dict(conn.execute('SELECT * FROM users WHERE id=?', (self.uid,)).fetchone())
+        app = FastAPI()
+        app.include_router(routes.router)
+        app.include_router(auth.router)
+        with patch.object(auth, 'current_user', return_value=user), TestClient(app) as client:
+            read = client.get('/api/v1/listings/x402/owned-fixture')
+            self.assertEqual(read.status_code, 200)
+            self.assertTrue(set(declarations.FIELDS).isdisjoint(read.json()['fields']))
+            self.assertIsNone(read.json()['declaration'])
+            rejected = client.patch('/api/v1/listings/x402/owned-fixture', json={'method': 'POST'})
+            self.assertEqual(rejected.status_code, 422)
+            with patch.object(declarations, 'observe') as observer:
+                self.assertEqual(client.post('/api/v1/listings/x402/owned-fixture/verify').status_code, 403)
+                observer.assert_not_called()
+            form = client.get('/listings/x402/owned-fixture/edit')
+            self.assertEqual(form.status_code, 200)
+            self.assertEqual(form.context['interface_fields'], [])
+            self.assertIsNone(form.context['verify_url'])
+
+    def test_dual_scope_api_and_web_preserve_domain_declarations(self):
+        self.url_claim(keep_domain=True)
+        with closing(db.connect(read_only=True)) as conn:
+            user = dict(conn.execute('SELECT * FROM users WHERE id=?', (self.uid,)).fetchone())
+        app = FastAPI()
+        app.include_router(routes.router)
+        app.include_router(auth.router)
+        with patch.object(auth, 'current_user', return_value=user), TestClient(app) as client:
+            read = client.get('/api/v1/listings/x402/owned-fixture')
+            self.assertEqual(read.status_code, 200)
+            self.assertTrue(set(declarations.FIELDS).issubset(read.json()['fields']))
+            self.assertEqual(client.patch('/api/v1/listings/x402/owned-fixture', json={'method': 'POST'}).status_code, 200)
+            form = client.get('/listings/x402/owned-fixture/edit')
+            self.assertEqual(form.status_code, 200)
+            self.assertEqual(len(form.context['interface_fields']), len(declarations.FIELDS))
+            self.assertTrue(form.context['verify_url'])
 
     def test_invalid_resources_do_not_partially_apply_normal_fields(self):
         applied, rejected = self.edit({'description': 'must not apply', 'resources': [{'url': 'https://foreign.example/a', 'method': 'GET'}]})
@@ -121,17 +248,6 @@ class OwnerDeclarationTests(TemporaryDatabaseTestCase):
         self.assertIsNone(row['health'])
         for field in ('openapi_url', 'quality', 'confidence', 'currency', 'conformance'):
             self.assertIsNone(row[field], field)
-
-    def test_equivalent_primary_keeps_declaration_and_measurements(self):
-        self.edit({'method': 'POST'})
-        before = self.row()
-        applied, rejected = self.edit({'url': 'https://OWNED.EXAMPLE/v1/ping'})
-        self.assertFalse(applied)
-        self.assertFalse(rejected)
-        self.assertEqual(self.row()['url'], before['url'])
-        self.assertEqual(self.row()['owner_declaration'], before['owner_declaration'])
-        for field in ('health', 'x402_ok', 'quality_score', 'price_min', 'tx_30d'):
-            self.assertEqual(self.row()[field], before[field], field)
 
     def test_primary_resource_and_price_consistency(self):
         applied, rejected = self.edit(dict(method='POST', price_usdc=0.003,

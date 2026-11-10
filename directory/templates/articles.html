@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% from "_article_macros.html" import icon %}
+{% block language %}en{% endblock %}
+{% block title %}Blog · Agent Tools{% endblock %}
+{% block desc %}Integration, tool selection, and engineering practice for agents, MCP, and x402.{% endblock %}
+{% block og_title %}Blog · Agent Tools{% endblock %}
+{% block og_desc %}Integration, tool selection, and engineering practice for agents, MCP, and x402.{% endblock %}
+{% block twitter_title %}Blog · Agent Tools{% endblock %}
+{% block twitter_desc %}Integration, tool selection, and engineering practice for agents, MCP, and x402.{% endblock %}
+{% block canonical %}<link rel="canonical" href="{{ page_canonical }}">{% endblock %}
+{% block head_extra %}<link rel="stylesheet" href="/article-assets/articles.css"><link rel="alternate" type="application/rss+xml" title="Agent Tools Blog" href="/articles/feed.xml">{% endblock %}
+{% block content %}
+<div class="article-page">
+  <header class="article-heading"><h1>Blog</h1><div class="article-actions"><a class="article-button" href="/account/articles">{{ icon("pencil-line") }}My articles</a><a class="article-button primary" href="/articles/contribute">{{ icon("plus") }}Write an article</a><a class="article-icon-button" href="/articles/feed.xml" title="RSS" aria-label="RSS">{{ icon("rss") }}</a></div></header>
+  <form action="/articles" method="get" class="article-filter">
+    <div class="article-search">{{ icon("search") }}<input type="search" name="q" value="{{ query }}" maxlength="200" placeholder="Search articles" aria-label="Search articles"></div>
+    <label class="article-select"><span>Topic</span><select name="tag"><option value="">All topics</option>{% for tag in tags %}<option value="{{ tag }}" {% if tag == selected_tag %}selected{% endif %}>{{ tag }}</option>{% endfor %}</select></label>
+    <button class="article-button" type="submit">{{ icon("search") }}Search</button>
+  </form>
+  <div class="article-result-count">{{ result.total }} {{ 'article' if result.total == 1 else 'articles' }}</div>
+  <section class="article-list" aria-label="Article list">
+    {% for article in result["items"] %}
+    <article class="article-list-row">
+      <div class="article-list-copy">
+        <div class="article-meta">{% if article.publication_type | default('ordinary') == 'sponsored' %}<span class="article-status sponsored">Sponsored</span>{% endif %}<time>{{ article.published_at | article_date }}</time>{% for tag in article.tags %}<a href="/articles?tag={{ tag | urlencode }}">{{ tag }}</a>{% endfor %}</div>
+        <h2><a href="/articles/{{ article.slug }}">{{ article.title }}</a></h2>
+        <p>{{ article.summary }}</p><div class="article-byline">{{ article.author }}</div>
+      </div>
+      {% if article.cover_id %}<a class="article-list-cover" href="/articles/{{ article.slug }}" tabindex="-1" aria-hidden="true"><img src="/articles/media/{{ article.cover_id }}" alt="" loading="{{ 'eager' if loop.first else 'lazy' }}" fetchpriority="{{ 'high' if loop.first else 'auto' }}"></a>{% endif %}
+    </article>
+    {% else %}<div class="article-empty">{% if query or selected_tag %}No matching articles. <a href="/articles">View blog</a>{% else %}No published articles yet.{% endif %}</div>{% endfor %}
+  </section>
+  {% if pages > 1 %}<nav class="article-pagination" aria-label="Pagination">
+    {% if previous_url %}<a class="article-icon-button" href="{{ previous_url }}" title="Previous page" aria-label="Previous page">{{ icon("arrow-left") }}</a>{% else %}<span class="article-icon-button disabled">{{ icon("arrow-left") }}</span>{% endif %}
+    <span>{{ result.page }} / {{ pages }}</span>
+    {% if next_url %}<a class="article-icon-button" href="{{ next_url }}" title="Next page" aria-label="Next page">{{ icon("arrow-right") }}</a>{% else %}<span class="article-icon-button disabled">{{ icon("arrow-right") }}</span>{% endif %}
+  </nav>{% endif %}
+</div>
+{% endblock %}
