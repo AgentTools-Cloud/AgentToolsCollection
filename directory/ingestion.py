@@ -3,6 +3,7 @@ from copy import deepcopy
 import hashlib
 import json
 import logging
+import os
 import sqlite3
 import time
 from urllib.parse import urlsplit
@@ -85,6 +86,21 @@ def validate_endpoint(value):
         raise db.MetadataValidationError('invalid_endpoint')
 
 
+def _capture_claim_invite(conn, kind, source, listing_id, original):
+    if os.getenv('AGENT_TOOLS_CLAIM_INVITES_DISCOVER', '0') != '1':
+        return
+    conn.execute('SAVEPOINT claim_invite_capture')
+    try:
+        from .claim_invites import enqueue_listing
+        enqueue_listing(conn, kind, source, listing_id, original)
+    except Exception as exc:
+        conn.execute('ROLLBACK TO claim_invite_capture')
+        log.warning('claim invitation candidate skipped: kind=%s error=%s',
+                    kind, type(exc).__name__)
+    finally:
+        conn.execute('RELEASE claim_invite_capture')
+
+
 def ingest_batch(conn, kind, source, rows, upsert):
     from .wellknown_binding import SourceBindingConflict, StaleSourceBinding
     result = dict(added=0, updated=0, rejected=0, errors=[])
@@ -102,8 +118,10 @@ def ingest_batch(conn, kind, source, rows, upsert):
                        and row.get('endpoint_url') is None)
             if not catalog:
                 validate_endpoint(row.get('url') if kind == 'x402' else row.get('endpoint_url'))
-            created, _ = upsert(conn, row)
+            created, listing_id = upsert(conn, row)
             resolve_issue(conn, kind, source, original)
+            if created:
+                _capture_claim_invite(conn, kind, source, listing_id, original)
             result['added' if created else 'updated'] += 1
             if row.get('_stale_warning_count'):
                 result['warnings'] = result.get('warnings', 0) + row['_stale_warning_count']

@@ -4,11 +4,11 @@
 <div class="max-w-2xl">
 
   <a href="{{ back_url }}" class="text-sm text-slate-500 hover:text-slate-800">&larr; Back to listing</a>
-  <a href="{{ lifecycle_url }}" class="ml-4 text-sm text-blue-600 hover:underline">Manage listing</a>
+  {% if lifecycle_url %}<a href="{{ lifecycle_url }}" class="ml-4 text-sm text-blue-600 hover:underline">Manage listing</a>{% endif %}
 
   <h1 class="text-xl font-semibold mt-3 mb-1">Edit {{ listing.name }}</h1>
   <p class="text-sm text-slate-500 mb-6">
-    You control <span class="mono">{{ host }}</span>, so you may correct this
+    You control <span class="mono break-all">{{ verified_target }}</span>, so you may correct this
     listing's metadata. Measured fields — availability, grade, latency,
     conformance, on-chain demand — are not editable by anyone.
   </p>
@@ -22,7 +22,12 @@
         <span class="block font-medium mb-1">{{ f.label }}</span>
         {% if f.multiline %}
           <textarea name="{{ f.name }}" rows="4"
+                    {% if f.name == 'pricing' %}maxlength="32768" spellcheck="false"{% elif f.name == 'cost_hint' %}maxlength="2000"{% endif %}
                     class="w-full rounded border border-slate-300 px-3 py-2 text-sm">{{ f.value or '' }}</textarea>
+        {% elif f.get('choices') %}
+          <select name="{{ f.name }}" class="w-full rounded border border-slate-300 px-3 py-2 text-sm">
+            {% for choice in f.choices %}<option value="{{ choice.value }}"{% if (f.value or '') == choice.value %} selected{% endif %}>{{ choice.label }}</option>{% endfor %}
+          </select>
         {% else %}
           <input type="text" name="{{ f.name }}" value="{{ f.value or '' }}"
                  class="w-full rounded border border-slate-300 px-3 py-2 text-sm">
@@ -60,9 +65,9 @@
     <h2 class="font-semibold text-sm">Declaration Status: {{ declaration.status|capitalize }}</h2>
     {% if declaration_blocker %}<p class="text-sm text-red-600 mt-2">{{ declaration_blocker }}</p>{% endif %}
     {% if declaration.verification_scope %}<p class="text-xs text-slate-500 mt-2">{{ declaration.verification_scope }}</p>{% endif %}
-    <form method="post" action="{{ verify_url }}" class="mt-3">
+    {% if verify_url %}<form method="post" action="{{ verify_url }}" class="mt-3">
       <button class="rounded border border-blue-600 text-blue-700 px-4 py-2 text-sm font-medium">Verify saved declaration</button>
-    </form>
+    </form>{% endif %}
   </section>
   {% endif %}
 

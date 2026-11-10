@@ -136,6 +136,69 @@ class InternalNoticeTests(TemporaryDatabaseTestCase):
         self.assertNotIn('raw-secret', json.dumps(feed))
         self.assertEqual(self.query('SELECT * FROM crawl_runs'), before)
 
+    def binding_partial(self, source='mcp:wellknown', extra_error=None):
+        kind, prefix = ('a2a', 'wellknown: ') if source == 'a2a:crawl' else ('mcp', '')
+        reason = 'wellknown_new_endpoint_requires_review'
+        errors = prefix + 'source binding held: ' + reason
+        if extra_error:
+            errors += '\n' + extra_error
+        with db.writer() as conn:
+            run_id = conn.execute('INSERT INTO crawl_runs '
+                '(source,started_at,finished_at,status,errors) VALUES(?,?,?,?,?)',
+                (source, 100, 110, 'partial', errors)).lastrowid
+            conn.execute('INSERT INTO ingestion_issues '
+                '(kind,source,identity_hash,content_hash,disposition,reason,first_seen,last_seen,resolved_at) '
+                'VALUES(?,?,?,?,?,?,?,?,?)',
+                (kind, 'wellknown', 'fixture-held', 'fixture-v1', 'hold', reason, 105, 105, 120))
+        return run_id
+
+    def partial_notice(self, now=130):
+        with closing(db.connect(read_only=True)) as conn:
+            conn.execute('PRAGMA query_only=ON')
+            conn.execute('BEGIN')
+            feed = notices.export_feed(conn, now=now)
+        return next(row for row in feed['notices'] if row['category'] == 'crawl')
+
+    def test_reviewed_binding_partial_is_history_without_rewriting_run(self):
+        self.binding_partial()
+        before = self.query('SELECT * FROM crawl_runs')
+        event = self.partial_notice()
+        self.assertEqual(event['status'], 'resolved')
+        self.assertIn('仅保留历史', event['summary'])
+        self.assertEqual(self.query('SELECT * FROM crawl_runs'), before)
+        with closing(db.connect(read_only=True)) as conn:
+            conn.execute('PRAGMA query_only=ON')
+            feed = notices.export_feed(conn, now=130)
+        self.assertEqual(next(row for row in feed['notices'] if row['category'] == 'crawl')['status'], 'active')
+
+    def test_reviewed_a2a_binding_partial_is_history(self):
+        self.binding_partial(source='a2a:crawl')
+        self.assertEqual(self.partial_notice()['status'], 'resolved')
+
+    def test_binding_partial_with_missing_or_old_review_stays_active(self):
+        self.binding_partial()
+        with db.writer() as conn:
+            conn.execute('UPDATE ingestion_issues SET resolved_at=109')
+        self.assertEqual(self.partial_notice()['status'], 'active')
+        with db.writer() as conn:
+            conn.execute('DELETE FROM ingestion_issues')
+        self.assertEqual(self.partial_notice()['status'], 'active')
+
+    def test_mixed_partial_stays_active_even_after_binding_review(self):
+        self.binding_partial(extra_error='incomplete crawl: fixture timeout')
+        self.assertEqual(self.partial_notice()['status'], 'active')
+
+    def test_same_content_retry_reactivates_binding_partial(self):
+        self.binding_partial()
+        self.assertEqual(self.partial_notice()['status'], 'resolved')
+        with db.writer() as conn:
+            conn.execute('UPDATE ingestion_issues SET last_seen=145,resolved_at=NULL')
+            conn.execute('INSERT INTO crawl_runs '
+                '(source,started_at,finished_at,status,errors) VALUES(?,?,?,?,?)',
+                ('mcp:wellknown', 140, 150, 'partial',
+                 'source binding held: wellknown_new_endpoint_requires_review'))
+        self.assertEqual(self.partial_notice(now=160)['status'], 'active')
+
     def test_removed_crawl_source_is_not_reported_as_active(self):
         with db.writer() as conn:
             for source, status in (('agenstry:crawl', 'partial'),

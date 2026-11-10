@@ -543,6 +543,7 @@ def public_agent(row: dict) -> dict:
     d.pop("source", None)
     d.pop("source_id", None)
     d.pop("search_rank", None)
+    d.pop("search_priority", None)
     skills = d.get("skills")
     if isinstance(skills, list):
         d["skills"] = [

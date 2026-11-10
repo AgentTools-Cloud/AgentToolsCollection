@@ -124,6 +124,172 @@ class ResourcesTextSearch(_TempDB):
         self.assertIn("endpoint number 599", t)
 
 
+class MCPKeywordSearch(_TempDB):
+    def add_mcp(self, slug, name, **fields):
+        with db.writer() as connection:
+            db.upsert_mcp_server(connection, {
+                "slug": slug, "name": name,
+                "endpoint_url": "https://%s.example/mcp" % slug,
+                "source": "fixture", "source_id": slug, "health": "ok",
+                **fields,
+            })
+            for field in ("tools_text", "quality_score", "created_at", "updated_at"):
+                if field in fields:
+                    connection.execute("UPDATE mcp_servers SET " + field + "=? WHERE slug=?",
+                                       (fields[field], slug))
+
+    def mcp_search(self, **params):
+        app = FastAPI()
+        app.include_router(routes.router)
+        response = TestClient(app).get("/api/v1/mcp/search", params=params)
+        self.assertEqual(response.status_code, 200)
+        return response.json()
+
+    def test_keyword_default_uses_relevance_not_source_confidence(self):
+        self.add_mcp("procurement-title", "Procurement directory", confidence=0.55)
+        self.add_mcp("general-tools", "General utilities", confidence=1.0,
+                     description="Procurement is one of many utilities")
+        default = self.mcp_search(q="procurement")
+        relevance = self.mcp_search(q="procurement", sort="relevance")
+        self.assertEqual(default["servers"][0]["slug"], "procurement-title")
+        self.assertEqual([row["slug"] for row in default["servers"]],
+                         [row["slug"] for row in relevance["servers"]])
+        self.assertEqual(default["sort"], "default")
+
+    def test_complete_word_does_not_match_an_unrelated_brand_prefix(self):
+        self.add_mcp("tender-directory", "Government tenders")
+        self.add_mcp("tenderly-tools", "Tenderly blockchain tools",
+                     description="Tenderly development utilities")
+        body = self.mcp_search(q="tenders")
+        self.assertEqual([row["slug"] for row in body["servers"]],
+                         ["tender-directory"])
+        self.assertEqual(body["total_matched"], 1)
+
+    def test_title_hit_outranks_repeated_tool_text(self):
+        self.add_mcp("procurement-title", "Procurement directory",
+                     tools_text="utility " * 1000)
+        self.add_mcp("general-tools", "General utilities",
+                     tools_text="procurement " * 100)
+        for sort in ("default", "relevance"):
+            with self.subTest(sort=sort):
+                body = self.mcp_search(q="procurement", sort=sort)
+                self.assertEqual(body["servers"][0]["slug"], "procurement-title")
+
+    def test_keyword_default_is_consistent_across_search_paths(self):
+        self.add_mcp("mcp-title", "Procurement directory", confidence=0.55)
+        self.add_mcp("mcp-general", "General utilities", confidence=1.0,
+                     description="Procurement utilities")
+        with db.writer() as connection:
+            for slug, name, description, confidence in (
+                    ("service-title", "Procurement directory", "Contracts", 0.55),
+                    ("service-general", "General utilities", "Procurement utilities", 1.0)):
+                db.upsert_service(connection, {
+                    "slug": slug, "name": name, "description": description,
+                    "url": "https://%s.example/api" % slug,
+                    "source": "fixture", "source_id": slug,
+                    "health": "ok", "confidence": confidence})
+            for slug, name, description, confidence in (
+                    ("a2a-title", "Procurement directory", "Contracts", 0.55),
+                    ("a2a-general", "General utilities", "Procurement utilities", 1.0)):
+                connection.execute(
+                    "INSERT INTO a2a_agents(slug,name,description,card_url,source,source_id,"
+                    "health,confidence,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (slug, name, description, "https://%s.example/card.json" % slug,
+                     "fixture", slug, "ok", confidence, 1, 1))
+        app = FastAPI()
+        app.include_router(routes.router)
+        client = TestClient(app)
+        for path, result_key in (("/api/v1/search", "services"),
+                                 ("/api/v1/mcp/search", "servers"),
+                                 ("/api/v1/a2a/search", "agents"),
+                                 ("/api/v1/resources/search", "resources")):
+            with self.subTest(path=path):
+                default = client.get(path, params={"q": "procurement"}).json()
+                relevance = client.get(path, params={"q": "procurement", "sort": "relevance"}).json()
+                self.assertEqual([row["slug"] for row in default[result_key]],
+                                 [row["slug"] for row in relevance[result_key]])
+                self.assertTrue(default[result_key][0]["slug"].endswith("-title"))
+                self.assertFalse({field for row in default[result_key] for field in row
+                                  if field.startswith("_") or field in ("search_rank", "search_priority")})
+
+    def test_without_keyword_keeps_existing_browse_order(self):
+        self.add_mcp("procurement-title", "Procurement directory", confidence=0.55)
+        self.add_mcp("general-tools", "General utilities", confidence=1.0)
+        for query in (None, "", "   ", "?!"):
+            with self.subTest(query=query):
+                params = {} if query is None else {"q": query}
+                default = self.mcp_search(**params)
+                relevance = self.mcp_search(**params, sort="relevance")
+                self.assertEqual([row["slug"] for row in default["servers"]],
+                                 ["general-tools", "procurement-title"])
+                self.assertEqual(default["servers"], relevance["servers"])
+
+    def test_explicit_sorts_and_pages_remain_stable(self):
+        for index in range(5):
+            self.add_mcp("procurement-%d" % index, "Procurement %d" % index,
+                         confidence=0.5, quality_score=index * 10,
+                         created_at=index, updated_at=index)
+        for sort in ("default", "relevance", "quality", "newest", "name"):
+            with self.subTest(sort=sort):
+                full = self.mcp_search(q="procurement", sort=sort, limit=10)
+                first = self.mcp_search(q="procurement", sort=sort, limit=2)
+                second = self.mcp_search(q="procurement", sort=sort, limit=2, offset=2)
+                self.assertEqual(first["servers"] + second["servers"], full["servers"][:4])
+                self.assertEqual(first["total_matched"], 5)
+                self.assertEqual(second["total_matched"], 5)
+                if sort in ("quality", "newest"):
+                    self.assertEqual([row["slug"] for row in full["servers"]],
+                                     ["procurement-%d" % index for index in range(4, -1, -1)])
+                elif sort == "name":
+                    self.assertEqual([row["slug"] for row in full["servers"]],
+                                     ["procurement-%d" % index for index in range(5)])
+
+    def test_exact_name_group_is_complete_outside_page_window(self):
+        self.add_mcp("first-directory", "Procurement directory")
+        self.add_mcp("second-directory", "Procurement directory")
+        body = self.mcp_search(q="Procurement directory", limit=1)
+        self.assertEqual(body["count"], 1)
+        self.assertEqual(body["exact_name_matches"]["count"], 2)
+        self.assertTrue(body["exact_name_matches"]["complete"])
+
+    def test_duplicate_endpoints_do_not_leave_holes_in_pages(self):
+        with db.writer() as connection:
+            for index in range(5):
+                db.upsert_service(connection, {
+                    "slug": "procurement-%d" % index,
+                    "name": "Procurement tools",
+                    "url": "https://service-%d.example/api" % index,
+                    "mcp_url": "https://procurement-%d.example/mcp" % max(0, index - 2),
+                    "source": "fixture", "source_id": "procurement-%d" % index,
+                })
+        full = self.mcp_search(q="procurement", limit=10)
+        first = self.mcp_search(q="procurement", limit=2)
+        second = self.mcp_search(q="procurement", limit=2, offset=2)
+        self.assertEqual(first["count"], 2)
+        self.assertEqual(first["servers"] + second["servers"], full["servers"])
+        self.assertEqual(first["total_matched"], 3)
+
+    def test_total_matched_counts_all_unique_endpoints_before_pagination(self):
+        with db.writer() as connection:
+            for index in range(4):
+                db.upsert_service(connection, {
+                    "slug": "procurement-%d" % index,
+                    "name": "Procurement tools %d" % index,
+                    "url": "https://service-%d.example/api" % index,
+                    "mcp_url": "https://procurement-%d.example/mcp" % min(index, 2),
+                    "source": "fixture", "source_id": "procurement-%d" % index,
+                })
+        app = FastAPI()
+        app.include_router(routes.router)
+        client = TestClient(app)
+        for limit, offset in ((1, 0), (1, 1), (2, 0), (10, 0), (1, 3)):
+            with self.subTest(limit=limit, offset=offset):
+                response = client.get("/api/v1/mcp/search", params={
+                    "q": "procurement", "limit": limit, "offset": offset})
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json()["total_matched"], 3)
+
+
 class FoldKeepsText(_TempDB):
     def add(self, path, sub_id, desc):
         with db.writer() as c:

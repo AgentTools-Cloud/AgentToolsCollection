@@ -2,6 +2,7 @@
 """Regression coverage for user-controlled values in notification HTML."""
 import os
 import sys
+from unittest.mock import patch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from directory import mailer
 
@@ -20,6 +21,28 @@ checks={
     'rejection reason escaped': reason not in rejection and '&lt;a href=&quot;' in rejection,
     'fixed template markup remains': '<table role="presentation"' in approval and '<table role="presentation"' in rejection,
 }
+with patch.object(mailer, '_send', side_effect=AssertionError('preview must not send')) as sender:
+    subject, invitation_text, invitation_html = mailer.claim_invitation_message(
+        name, '<b>MCP Registry</b>', 'https://agent-tools.cloud/mcp/example',
+        'https://agent-tools.cloud/email/claim-invitations/unsubscribe#preview',
+    )
+checks.update({
+    'invitation preview never sends': sender.call_count == 0,
+    'invitation name and source escaped': name not in invitation_html and '&lt;img' in invitation_html and '&lt;b&gt;' in invitation_html,
+    'invitation is not a submission receipt': 'Thanks for submitting' not in invitation_text,
+    'invitation requires host control': 'verifying control of your host' in invitation_text,
+    'invitation has free claim and opt-out': 'Claiming is free' in invitation_text and 'Stop these invitations:' in invitation_text,
+    'invitation does not subscribe': "won't subscribe you" in invitation_text,
+})
+unsafe_refused = True
+for invalid_url in ('http://agent-tools.cloud/example', 'https://evil.example/example', 'https://user:password@agent-tools.cloud/example', 'https://agent-tools.cloud:444/example'):
+    try:
+        mailer.claim_invitation_message('Example', 'MCP Registry', invalid_url, 'https://agent-tools.cloud/email/claim-invitations/unsubscribe#preview')
+    except ValueError:
+        pass
+    else:
+        unsafe_refused = False
+checks['invitation unsafe links refused'] = unsafe_refused
 failed=0
 for label,ok in checks.items():
     failed+=not ok

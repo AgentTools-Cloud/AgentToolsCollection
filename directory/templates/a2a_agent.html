@@ -8,7 +8,6 @@
   "name": a.name,
   "description": (a.description or a.name),
   "url": "https://agent-tools.cloud/a2a/agents/" + a.slug,
-  "offers": {"@type": "Offer", "price": "0", "priceCurrency": "USD"}
 }|tojson }}</script>{% endblock %}
 {% block track %}<script>atTrackView('a2a', {{ a.slug|tojson }});</script>{% endblock %}
 {% block content %}
@@ -21,10 +20,10 @@
   <div class="min-w-0">
     <h1 class="text-3xl md:text-4xl font-extrabold tracking-tight">{{ a.name }}</h1>
 
-    <div class="mt-3 hidden" data-edit-host="{{ url_host((a.endpoint_url or a.card_url)) }}">
+    <div class="mt-3 hidden" data-edit-host="{{ url_host((a.endpoint_url or a.card_url)) }}" data-edit-kind="a2a" data-edit-slug="{{ a.slug }}">
       <a href="/listings/a2a/{{ a.slug }}/edit"
          class="inline-flex items-center gap-1.5 rounded border border-slate-300 bg-white px-3 py-1.5 text-sm hover:border-slate-400">Edit this listing</a>
-      <span class="ml-2 text-xs text-slate-500">You verified control of this domain</span>
+      <span class="ml-2 text-xs text-slate-500">Verified control of this listing</span>
     </div>
     {% if a.safety %}
     <div class="mt-3 rounded-lg px-4 py-3 text-sm {% if a.safety.verdict == "malicious" %}bg-rose-50 text-rose-800 ring-1 ring-rose-200{% else %}bg-amber-50 text-amber-800 ring-1 ring-amber-200{% endif %}">
