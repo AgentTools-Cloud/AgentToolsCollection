@@ -207,6 +207,35 @@ def article_date(timestamp: int) -> str:
     return datetime.fromtimestamp(timestamp, timezone.utc).strftime("%Y-%m-%d")
 
 
+def public_article_json(article: dict, *, full: bool = False) -> dict:
+    """The public, agent-readable shape of one published article."""
+    iso = lambda ts: datetime.fromtimestamp(ts, timezone.utc).isoformat() if ts else None
+    url = article_url(article)
+    out = {
+        "slug": article["slug"], "title": article["title"], "summary": article["summary"],
+        "author": article["author"], "tags": list(article.get("tags") or []),
+        "published_at": iso(article.get("published_at")), "updated_at": iso(article.get("updated_at")),
+        "url": url, "markdown_url": url + ".md",
+        "canonical_url": article.get("canonical_url") or url,
+        "content_hash": article.get("content_hash"),
+        "cover_url": (public_base_url() + "/articles/media/" + article["cover_id"]) if article.get("cover_id") else None,
+        "publication_type": article.get("publication_type") or "editorial",
+    }
+    if out["publication_type"] == "sponsored":
+        out["sponsor_name"] = article.get("sponsor_name")
+    if full:
+        out["markdown"] = article["markdown"]
+    return out
+
+
+def public_article_list(store: ArticleStore, *, query: str = "", tag: str = "", page: int = 1,
+                        page_size: int = 20) -> dict:
+    result = store.list_published(query=query, tag=tag, page=page, page_size=page_size)
+    return {"items": [public_article_json(a) for a in result["items"]], "total": result["total"],
+            "page": result["page"], "page_size": result["page_size"],
+            "feed": public_base_url() + "/articles/feed.xml"}
+
+
 def create_article_router(store: ArticleStore, templates: Jinja2Templates | None = None,
                           *, payments: NowPaymentsClient | None = None) -> APIRouter:
     router = APIRouter()
@@ -746,6 +775,25 @@ def create_article_router(store: ArticleStore, templates: Jinja2Templates | None
                 ElementTree.SubElement(item, name).text = value
         return Response(ElementTree.tostring(root, encoding="utf-8", xml_declaration=True),
                         media_type="application/rss+xml", headers=PUBLIC_HEADERS)
+
+    @router.get("/api/v1/blog", tags=["blog"], summary="List published Blog articles")
+    def blog_list(q: str = Query("", max_length=200, description="Search title, summary and body"),
+                  tag: str = Query("", max_length=40, description="Filter by tag"),
+                  page: int = Query(1, ge=1, le=10000, description="Page number"),
+                  page_size: int = Query(20, ge=1, le=60, description="Items per page")):
+        """Published articles, newest first, without the body. Full text: /api/v1/blog/{slug}."""
+        try:
+            out = public_article_list(store, query=q, tag=tag, page=page, page_size=page_size)
+        except ArticleError as error:
+            raise article_error(error, private=False) from None
+        out["tags"] = store.published_tags()
+        return JSONResponse(out, headers={**PUBLIC_HEADERS, "Access-Control-Allow-Origin": "*"})
+
+    @router.get("/api/v1/blog/{slug}", tags=["blog"], summary="Read one published Blog article")
+    def blog_article(slug: str):
+        """Metadata plus the full Markdown body of one published article."""
+        return JSONResponse(public_article_json(published_article(store, slug), full=True),
+                            headers={**PUBLIC_HEADERS, "Access-Control-Allow-Origin": "*"})
 
     @router.api_route("/articles/{slug}.md", methods=["GET", "HEAD"], include_in_schema=False)
     def markdown(slug: str):

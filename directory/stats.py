@@ -649,6 +649,7 @@ LINKS = {
     "snapshot_json": f"{SITE}/stats.json",
     "daily_csv": f"{SITE}/stats/daily.csv",
     "methodology": f"{SITE}/stats#method",
+    "methodology_json": f"{SITE}/api/v1/methodology",
     "license": "CC BY 4.0",
 }
 _latest_cache: dict = {"at": 0.0, "snap": None}
