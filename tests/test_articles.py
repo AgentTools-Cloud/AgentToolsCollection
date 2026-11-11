@@ -936,6 +936,27 @@ class ArticleRouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 201, response.text)
         return response.json()
 
+    def test_public_blog_json_for_agents(self):
+        article = self.create()
+        self.assertEqual(self.client.get("/api/v1/blog").json()["total"], 0)
+        self.store.publish(article["id"], 1, editor_id=7)
+        listing = self.client.get("/api/v1/blog")
+        self.assertEqual(listing.status_code, 200)
+        body = listing.json()
+        self.assertEqual(body["total"], 1)
+        item = body["items"][0]
+        self.assertEqual((item["slug"], item["title"]), ("connection-checklist", "已审核文章"))
+        self.assertNotIn("markdown", item)
+        self.assertTrue(item["markdown_url"].endswith("/articles/connection-checklist.md"))
+        self.assertEqual(body["tags"], ["MCP"])
+        self.assertEqual(self.client.get("/api/v1/blog?tag=none").json()["total"], 0)
+        full = self.client.get("/api/v1/blog/connection-checklist").json()
+        self.assertIn("检查认证与连接方式", full["markdown"])
+        self.assertEqual(self.client.get("/api/v1/blog/missing-slug").status_code, 404)
+        self.store.withdraw(article["id"], 1, editor_id=7)
+        self.assertEqual(self.client.get("/api/v1/blog/connection-checklist").status_code, 410)
+        self.assertEqual(self.client.get("/api/v1/blog").json()["total"], 0)
+
     def test_shared_article_navigation_is_english(self):
         response = self.client.get("/articles")
         self.assertEqual(response.status_code, 200)

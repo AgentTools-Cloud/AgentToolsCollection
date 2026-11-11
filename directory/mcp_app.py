@@ -549,6 +549,86 @@ async def stats(ctx: Context | None = None) -> dict[str, Any]:
 
 
 @discover_mcp.tool(annotations=_READ_ONLY)
+async def get_methodology(ctx: Context | None = None) -> dict[str, Any]:
+    """How every score and statistic on agent-tools.cloud is computed.
+
+    Returns the quality-score components and grade bands per protocol, the nine
+    readiness criteria with weights, payment-evidence grades, the probing
+    schedule and the definitions behind the daily statistics.
+    """
+    from . import methodology
+    _log_call("get_methodology", ctx=ctx)
+    return methodology.build()
+
+
+_article_store_cache: dict = {}
+
+
+def _article_store():
+    """The published-article store, or None when the Blog is disabled."""
+    if os.getenv("ARTICLES_ENABLED", "0") != "1":
+        return None
+    if "store" not in _article_store_cache:
+        from pathlib import Path
+        from .articles import ArticleStore
+        _article_store_cache["store"] = ArticleStore(os.getenv(
+            "ARTICLE_DB_PATH", str(Path(directory_db.DEFAULT_DB_PATH).with_name("articles.db"))))
+    return _article_store_cache["store"]
+
+
+@discover_mcp.tool(annotations=_READ_ONLY)
+async def list_articles(
+    query: str = "",
+    tag: str = "",
+    page: int = 1,
+    ctx: Context | None = None,
+) -> dict[str, Any]:
+    """List published Blog articles, newest first (metadata only).
+
+    Args:
+        query: Optional words to match in title, summary or body.
+        tag: Optional tag to filter by.
+        page: Page number, 20 articles per page.
+
+    Use get_article(slug) for the full Markdown body.
+    """
+    from .article_routes import public_article_list
+    from .articles import ArticleError
+    store = _article_store()
+    if store is None:
+        return {"items": [], "total": 0, "note": "The Blog is not enabled on this host."}
+    try:
+        out = public_article_list(store, query=(query or "")[:200], tag=(tag or "")[:40],
+                                  page=max(1, min(int(page or 1), 10000)))
+    except ArticleError as error:
+        return {"error": error.code}
+    _log_call("list_articles", ctx=ctx, args={"query": query, "tag": tag}, result_n=out["total"])
+    return out
+
+
+@discover_mcp.tool(annotations=_READ_ONLY)
+async def get_article(slug: str, ctx: Context | None = None) -> dict[str, Any]:
+    """Read one published Blog article: metadata plus the full Markdown body.
+
+    Args:
+        slug: The article slug, as returned by list_articles.
+    """
+    from .article_routes import public_article_json
+    from .articles import ArticleError
+    store = _article_store()
+    if store is None:
+        return {"error": "blog_disabled"}
+    try:
+        state = store.public_state(str(slug)[:100])
+    except ArticleError as error:
+        return {"error": error.code}
+    if state["status"] != "published":
+        return {"error": "withdrawn" if state["status"] == "withdrawn" else "not_found", "slug": slug}
+    _log_call("get_article", ctx=ctx, result_slug=slug)
+    return public_article_json(state["article"], full=True)
+
+
+@discover_mcp.tool(annotations=_READ_ONLY)
 async def directory_stats(
     view: str = "all",
     ctx: Context | None = None,

@@ -1008,6 +1008,15 @@ def api_stats():
     return out
 
 
+@router.get("/api/v1/methodology", tags=["directory"], summary="How every score and statistic is computed")
+def api_methodology():
+    """Quality score components and grade bands, readiness criteria and weights,
+    payment-evidence grades, probing schedule and statistics definitions."""
+    from . import methodology
+    return JSONResponse(methodology.build(), headers={"Cache-Control": "public, max-age=3600",
+                                                      "Access-Control-Allow-Origin": "*"})
+
+
 @router.get("/api/v1/stats/summary", tags=["directory"])
 def api_stats_summary(view: str = Query(default="all", pattern="^(all|mcp|x402|a2a)$",
                                         description="all, mcp, x402 or a2a")):
@@ -2069,6 +2078,8 @@ def well_known():
             "broker_recommend",
             "sponsored_paid_verification",
             "directory_stats",
+            "methodology",
+            "blog_articles",
         ],
         "endpoints": {
             "search": {
@@ -2112,12 +2123,25 @@ def well_known():
                 "returns": "indexed / reachable / protocol-verified / readiness counts, findings, "
                            "x402 prices and networks, protocol versions, access, safety, topics, growth",
             },
+            "methodology": "https://agent-tools.cloud/api/v1/methodology",
+            "listing_detail_fields": {
+                "readiness": "9-criterion readiness score + grade (display only) on every detail endpoint",
+                "popularity": "GitHub stars/last push, npm 30-day downloads, Tranco site rank "
+                              "(display only) on MCP and A2A detail endpoints when we have a signal",
+            },
+            "blog": {
+                "list": "https://agent-tools.cloud/api/v1/blog?q=&tag=&page=",
+                "article": "https://agent-tools.cloud/api/v1/blog/{slug}",
+                "markdown": "https://agent-tools.cloud/articles/{slug}.md",
+                "rss": "https://agent-tools.cloud/articles/feed.xml",
+            },
             "submit": "https://agent-tools.cloud/api/v1/submit",
             "mcp": {
                 "transport": "streamable-http",
                 "url": "https://agent-tools.cloud/mcp-discovery/",
                 "tools": ["search", "ask_services", "get", "list_categories", "stats",
-                          "directory_stats", "register"],
+                          "directory_stats", "get_methodology", "list_articles", "get_article",
+                          "register"],
             },
             "a2a": {
                 "agent_card": "https://agent-tools.cloud/.well-known/agent-card.json",

@@ -212,6 +212,14 @@ _LLMS_TXT = """# agent-tools.cloud
 - Categories and stats: /api/v1/categories, /api/v1/stats
 - Daily ecosystem statistics (CC BY 4.0): GET /api/v1/stats/summary?view=all|mcp|x402|a2a,
   full snapshot /stats.json, history /stats/daily.csv, page /stats
+- Detail endpoints also return `readiness` (9-criterion score, display only); MCP and A2A
+  details add `popularity` (GitHub stars, npm downloads, Tranco rank) when we have a signal
+- How scores and statistics are computed: GET /api/v1/methodology
+
+## Blog
+
+- List: GET /api/v1/blog?q=&tag=&page= ; one article with Markdown body: GET /api/v1/blog/{slug}
+- Plain Markdown: /articles/{slug}.md ; RSS: /articles/feed.xml
 
 Read each resource's payment requirements before calling it; headline price ranges are not per-call quotes.
 
@@ -219,7 +227,8 @@ Read each resource's payment requirements before calling it; headline price rang
 
 Endpoint: https://agent-tools.cloud/mcp-discovery/
 Tools: search, get, search_mcp_servers, get_mcp_server, search_a2a_agents,
-search_resources, ask_services, list_categories, stats, directory_stats, scan_mcp_safety, register,
+search_resources, ask_services, list_categories, stats, directory_stats, get_methodology,
+list_articles, get_article, scan_mcp_safety, register,
 prepare_paid_verification, execute_paid_verification, get_paid_verification,
 claim_service_url, verify_service_url, get_owned_listing, edit_owned_listing.
 
