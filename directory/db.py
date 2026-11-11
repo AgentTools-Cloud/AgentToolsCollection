@@ -673,6 +673,18 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
             )
         # idempotent migrations for older DBs that pre-date these columns
         c.execute(
+            """CREATE TABLE IF NOT EXISTS a2a_health_history (
+                 id INTEGER PRIMARY KEY,
+                 agent_id INTEGER NOT NULL,
+                 checked_at INTEGER NOT NULL,
+                 status TEXT NOT NULL,
+                 rpc_state TEXT,
+                 latency_ms INTEGER
+               )"""
+        )
+        c.execute("CREATE INDEX IF NOT EXISTS idx_a2a_hist_agent "
+                  "ON a2a_health_history(agent_id, checked_at)")
+        c.execute(
             """CREATE TABLE IF NOT EXISTS mcp_health_history (
                  id INTEGER PRIMARY KEY,
                  server_id INTEGER NOT NULL,
@@ -712,6 +724,10 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
             "ALTER TABLE services ADD COLUMN conformance TEXT",
             "ALTER TABLE services ADD COLUMN descriptor_checked_at INTEGER",
             "ALTER TABLE a2a_agents ADD COLUMN quality_score REAL",
+            "ALTER TABLE a2a_agents ADD COLUMN readiness_score REAL",
+            "ALTER TABLE a2a_agents ADD COLUMN readiness_grade TEXT",
+            "ALTER TABLE a2a_agents ADD COLUMN readiness_json TEXT",
+            "ALTER TABLE a2a_agents ADD COLUMN readiness_checked INTEGER",
             "ALTER TABLE mcp_servers ADD COLUMN conformance TEXT",
             "ALTER TABLE mcp_servers ADD COLUMN tool_count INTEGER",
             "ALTER TABLE mcp_servers ADD COLUMN latency_p95_ms INTEGER",
@@ -3269,6 +3285,12 @@ def a2a_row_to_dict(row) -> dict:
     _sf = _safety_mark(d.get("name"), d.get("description"), d.get("skill_names"))
     if _sf:
         d["safety"] = _sf
+    raw = d.pop("readiness_json", None)
+    if raw:
+        try:
+            d["readiness"] = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            pass
     return d
 
 

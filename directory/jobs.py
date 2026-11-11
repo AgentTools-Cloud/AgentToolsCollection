@@ -22,8 +22,11 @@ from contextlib import closing
 from pathlib import Path
 from urllib.parse import urlsplit
 
+import httpx
+
 from . import a2a as a2a_mod
-from . import crawlers, db, mailer
+from . import a2a_readiness
+from . import crawlers, db, mailer, public_http
 from . import ownership as ownership_mod
 from . import agenstry as agenstry_mod
 from . import botsrated as botsrated_mod
@@ -646,23 +649,50 @@ def cmd_health(only_unknown: bool = False, quarantined_only: bool = False) -> in
 def cmd_health_a2a(only_unknown: bool = False, quarantined_only: bool = False) -> int:
     """Liveness-probe indexed A2A agents (card / endpoint reachability)."""
     _qc = int(time.time()) - QUARANTINE_DAYS * 86400
+    cols = ("SELECT id, card_url, endpoint_url, owner_verified, last_seen, "
+            "x402_supported FROM a2a_agents ")
     if quarantined_only:
-        sql = ("SELECT id, card_url, endpoint_url FROM a2a_agents "
-               f"WHERE down_since IS NOT NULL AND down_since <= {_qc}")
+        sql = cols + f"WHERE down_since IS NOT NULL AND down_since <= {_qc}"
     else:
-        sql = ("SELECT id, card_url, endpoint_url FROM a2a_agents "
-               f"WHERE (down_since IS NULL OR down_since > {_qc})")
+        sql = cols + f"WHERE (down_since IS NULL OR down_since > {_qc})"
         if only_unknown:
             sql += " AND (health IS NULL OR health='' OR health='unknown')"
+    now = int(time.time())
     with db.connect(read_only=True) as c:
         rows = list(c.execute(sql).fetchall())
+        # 30-day probe history for the uptime criterion (current probe added below).
+        history = {
+            r["agent_id"]: (r["ok"], r["n"])
+            for r in c.execute(
+                "SELECT agent_id, SUM(status='ok') ok, COUNT(*) n FROM a2a_health_history "
+                "WHERE checked_at >= ? GROUP BY agent_id",
+                (now - a2a_readiness.UPTIME_WINDOW,))
+        }
     if not rows:
         return 0
     n_ok = n_deg = n_down = 0
-    now = int(time.time())
     updates = []
+    readiness_rows = []
+    history_rows = []
 
     n_conf = 0
+    jwks_cache: dict = {}
+    jwks_lock = threading.Lock()
+
+    def _fetch_json(url):
+        with jwks_lock:
+            if url in jwks_cache:
+                return jwks_cache[url]
+        try:
+            with public_http.client(timeout=httpx.Timeout(8.0), follow_redirects=True,
+                                    headers={"User-Agent": a2a_mod.UA}) as hc:
+                resp = hc.get(url)
+                value = resp.json() if resp.status_code == 200 else None
+        except Exception:
+            value = None
+        with jwks_lock:
+            jwks_cache[url] = value
+        return value
 
     def _probe(r):
         res = a2a_mod.probe_a2a_health(r["card_url"], r["endpoint_url"])
@@ -670,9 +700,31 @@ def cmd_health_a2a(only_unknown: bool = False, quarantined_only: bool = False) -
         last_ok = now if h == "ok" else None
         card = db._exact_endpoint(res.get("card_url") or r["card_url"] or "")
         card = card or r["card_url"]
+        parsed = res.get("card")
+        rpc = None
+        if isinstance(parsed, dict):
+            endpoint, flavour = a2a_readiness.preferred_rpc(parsed, res.get("card_url"))
+            try:
+                with public_http.client(timeout=httpx.Timeout(a2a_readiness.RPC_TIMEOUT),
+                                        follow_redirects=False,
+                                        headers={"User-Agent": a2a_mod.UA}) as hc:
+                    rpc = a2a_readiness.probe_jsonrpc(hc, endpoint, flavour)
+            except Exception as exc:  # unsafe/invalid URL counts as unreachable
+                rpc = {"state": "unreachable", "latency_ms": None,
+                       "http_status": None, "detail": type(exc).__name__}
+        ok_prev, n_prev = history.get(r["id"], (0, 0))
+        report = a2a_readiness.assess(
+            parsed, res.get("card_url") or r["card_url"], rpc=rpc,
+            uptime_ok=(ok_prev or 0) + (h == "ok"), uptime_total=(n_prev or 0) + 1,
+            owner_verified=bool(r["owner_verified"]), last_seen=r["last_seen"],
+            x402_supported=bool(r["x402_supported"]), fetch_json=_fetch_json, now=now)
+        readiness = (report["score"], report["grade"],
+                     json.dumps(report, ensure_ascii=False, separators=(",", ":")),
+                     now, r["id"])
+        hist = (r["id"], now, h, (rpc or {}).get("state"), res["latency_ms"])
         return h, res.get("conformance"), (h, now, res["latency_ms"],
                                            res.get("conformance"), last_ok,
-                                           card, r["id"])
+                                           card, r["id"]), readiness, hist
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
     workers = min(32, max(4, len(rows)))
@@ -680,10 +732,13 @@ def cmd_health_a2a(only_unknown: bool = False, quarantined_only: bool = False) -
         futs = [ex.submit(_probe, r) for r in rows]
         for fut in as_completed(futs):
             try:
-                h, conf, upd = fut.result()
+                h, conf, upd, readiness, hist = fut.result()
             except Exception:
+                log.exception("a2a health probe failed")
                 continue
             updates.append(upd)
+            readiness_rows.append(readiness)
+            history_rows.append(hist)
             n_ok += h == "ok"; n_deg += h == "degraded"; n_down += h == "down"
             n_conf += conf == "pass"
 
@@ -695,7 +750,20 @@ def cmd_health_a2a(only_unknown: bool = False, quarantined_only: bool = False) -
                 "card_url=? WHERE id=?",
                 updates,
             )
+            c.executemany(
+                "UPDATE a2a_agents SET readiness_score=?, readiness_grade=?, "
+                "readiness_json=?, readiness_checked=? WHERE id=?",
+                readiness_rows,
+            )
+            c.executemany(
+                "INSERT INTO a2a_health_history(agent_id, checked_at, status, rpc_state, latency_ms) "
+                "VALUES(?,?,?,?,?)",
+                history_rows,
+            )
+            c.execute("DELETE FROM a2a_health_history WHERE checked_at < ?",
+                      (now - 120 * 86400,))
     db.with_retry(op)
+    log.info("a2a readiness: scored=%d", len(readiness_rows))
     _maintain_down_since("a2a_agents")
     log.info("a2a health: ok=%d degraded=%d down=%d conformant=%d",
              n_ok, n_deg, n_down, n_conf)
