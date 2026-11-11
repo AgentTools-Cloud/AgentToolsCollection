@@ -3867,6 +3867,16 @@ def upsert_mcp_server(conn: sqlite3.Connection, row: dict) -> tuple:
     # x402_supported is owned by directory.reverify_x402 (real 402 probe).
     # Metadata re-crawls preserve its latest authoritative value.
     row["x402_supported"] = existing["x402_supported"]
+    # Sources disagree on a trailing slash (wellknown.network dropped it on
+    # 2026-11-11, chiark and the registry still publish it) and many servers
+    # answer only one form. When the stored form is the one our probe last
+    # found healthy, a slash-only variant must not flip it to the broken one.
+    _old_ep = existing["endpoint_url"] or ""
+    _new_ep = row.get("endpoint_url") or ""
+    if (_old_ep and _new_ep and _old_ep != _new_ep
+            and _old_ep.rstrip("/") == _new_ep.rstrip("/")
+            and existing["health"] == "ok"):
+        row["endpoint_url"] = _old_ep
     cols = [c for c in _MCP_COLS if c != "created_at"]
     if row.get("slug") is None:
         cols = [c for c in cols if c != "slug"]
