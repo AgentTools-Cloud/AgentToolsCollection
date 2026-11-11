@@ -88,6 +88,38 @@ class ApprovalEmailThrottleTests(unittest.TestCase):
         self.assertEqual(n, 2)
         self.assertEqual(st, ["approved", "approved"])
 
+    def test_resubmitted_listing_gets_no_email(self):
+        sent = []
+        self.enterContext(patch.object(jobs, "APPROVAL_EMAIL_WINDOW", 0))
+        with patch.object(jobs.mailer, "send_approval_email",
+                          side_effect=lambda *a, **k: sent.append(a) or True):
+            ids = []
+            with db.writer() as c:
+                for _ in range(2):
+                    ids.append(db.create_submission(c, {
+                        "url": "https://svc.example/v1/a", "name": "a",
+                        "contact": "op@example.com", "category": "data"}))
+            with patch.object(jobs.crawlers, "fetch_wellknown_resources", return_value={}), \
+                    patch.object(jobs.crawlers, "check_health", return_value="ok"):
+                jobs._approve(ids[0], verdict={"verified_url": "https://svc.example/v1/a"})
+                jobs._approve(ids[1], verdict={"verified_url": "https://svc.example/v1/a"})
+        self.assertEqual(len(sent), 1)
+
+    def test_suppressed_recipient_is_never_sent(self):
+        from directory import mailer
+        with db.writer() as c:
+            db.add_mail_suppression(c, "dead@example.com", "550 user unknown", "test")
+            db.add_mail_suppression(c, "@nomx.example", "no MX", "test")
+        env = {"SMTP_HOST": "smtp.invalid", "SMTP_USER": "u", "SMTP_PASS": "p"}
+        with patch.dict(os.environ, env), \
+                patch.object(mailer.smtplib, "SMTP_SSL", side_effect=AssertionError("must not connect")):
+            r1 = mailer._deliver_external("Dead@Example.com", "s", "t", "h")
+            r2 = mailer._deliver_external("anyone@nomx.example", "s", "t", "h")
+        self.assertEqual((r1["status"], r1["reason"]), ("skipped", "recipient_suppressed"))
+        self.assertEqual(r2["status"], "skipped")
+        with db.connect(read_only=True) as c:
+            self.assertIsNone(db.mail_suppressed(c, "ok@example.com"))
+
 
 if __name__ == "__main__":
     unittest.main()

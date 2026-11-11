@@ -1988,7 +1988,12 @@ def _approve(sub_id: int, note: str | None = None,
         elif pmin is not None:
             bits.append(f"${pmin}")
         verified_line = "  \u00b7  ".join(bits)
-        if _claim_approval_email(contact, url):
+        if not created:
+            # A re-submission of a URL that is already listed changes nothing
+            # the submitter needs to hear about (one operator re-submits the
+            # same paths daily).
+            log.info("approve #%d: existing listing updated; no listing email", sub_id)
+        elif _claim_approval_email(contact, url):
             mailer.send_approval_email(contact, name, service["slug"], verified_line)
         else:
             log.info("approve #%d: listing email suppressed (already sent to "
