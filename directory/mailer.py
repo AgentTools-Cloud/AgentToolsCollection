@@ -299,7 +299,7 @@ def claim_invitation_message(
         f"{readiness_line}"
         "Claiming is free and takes a few minutes: sign in with GitHub, then publish "
         "the token we give you as a small file on your site or as a DNS TXT record. "
-        "After that you can correct your listing and maintain its API details:\n"
+        "After verifying control of your host, you can correct your listing and maintain its API details:\n"
         f"{claim_url}\n"
         f"How claiming works: {docs_url}\n\n"
         "Your listing stays up whether or not you claim it.\n"
@@ -325,7 +325,7 @@ def claim_invitation_message(
   <p>We found your service in {safe_source} and added it to Agent Tools.</p>
   <p><a href="{safe_listing}" style="color:{BLUE};">View your listing</a></p>
   {readiness_html}
-  <p>Claiming is free and takes a few minutes: sign in with GitHub, then publish the token we give you as a small file on your site or as a DNS TXT record. After that you can correct your listing and maintain its API details.</p>
+  <p>Claiming is free and takes a few minutes: sign in with GitHub, then publish the token we give you as a small file on your site or as a DNS TXT record. After verifying control of your host, you can correct your listing and maintain its API details.</p>
   <p><a href="{claim_url}" style="display:inline-block;padding:10px 16px;background:{BLUE};color:#fff;border-radius:6px;text-decoration:none;">Claim your host</a></p>
   <p style="font-size:13px;"><a href="{docs_url}" style="color:{BLUE};">How claiming works</a></p>
   <p>Your listing stays up whether or not you claim it.</p>
