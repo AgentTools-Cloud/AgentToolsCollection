@@ -1188,7 +1188,7 @@ def probe_a2a_health(card_url: str | None, endpoint_url: str | None = None) -> d
                                         else "partial")
                                 return {"status": "ok", "latency_ms": dt,
                                         "http_status": sc, "conformance": conf,
-                                        "card_url": t}
+                                        "card_url": t, "card": card}
                         except (ValueError, json.JSONDecodeError):
                             pass
                     if sc < 500:
