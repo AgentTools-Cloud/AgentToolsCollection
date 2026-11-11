@@ -339,7 +339,8 @@ def well_known_x402(request: Request) -> dict[str, Any]:
     host = (request.headers.get("host") or "").split(":", 1)[0].lower() or "agent-tools.cloud"
     description = (
         "Free MCP discovery server for x402 paid services across the ecosystem. "
-        "Search 2000+ x402 endpoints, ask for recommendations, get service cards, browse categories, "
+        "Search x402 endpoints, MCP servers and A2A agents, ask for recommendations, get service cards, "
+        "read daily ecosystem statistics, "
         "and scan any MCP server for malware / prompt-injection before connecting. "
         "The paid relay previously hosted here has been retired; this host is "
         "now directory + discovery only."
@@ -355,6 +356,9 @@ def well_known_x402(request: Request) -> dict[str, Any]:
             {"path": "/api/v1/services/{slug}", "method": "GET", "kind": "rest-json", "gated": False, "category": "directory"},
             {"path": "/api/v1/categories", "method": "GET", "kind": "rest-json", "gated": False, "category": "directory"},
             {"path": "/api/v1/stats", "method": "GET", "kind": "rest-json", "gated": False, "category": "directory"},
+            {"path": "/api/v1/stats/summary", "method": "GET", "kind": "rest-json", "gated": False, "category": "directory"},
+            {"path": "/api/v1/methodology", "method": "GET", "kind": "rest-json", "gated": False, "category": "directory"},
+            {"path": "/api/v1/blog", "method": "GET", "kind": "rest-json", "gated": False, "category": "content"},
             {"path": "/.well-known/agent-tools.json", "method": "GET", "kind": "agents.json", "gated": False},
             {"path": "/healthz", "method": "GET", "kind": "info", "gated": False},
         ],
@@ -404,8 +408,12 @@ def well_known_mcp(request: Request) -> dict[str, Any]:
             {"name": "ask_services", "description": "LLM-ranked recommendation of the best x402/MCP services for an intent."},
             {"name": "get", "description": "Get full details + ready-to-paste call template for a service by slug."},
             {"name": "list_categories", "description": "List all directory categories."},
-            {"name": "stats", "description": "Directory size, healthy count, source breakdown."},
-            {"name": "search_mcp_servers", "description": "Search the standalone MCP server directory (registry / Smithery / PulseMCP)."},
+            {"name": "stats", "description": "x402 size, healthy count and chains, plus the daily cross-protocol digest."},
+            {"name": "directory_stats", "description": "Daily ecosystem statistics for all, MCP, x402 or A2A: counts, findings and key facts."},
+            {"name": "get_methodology", "description": "How quality grades, readiness scores and statistics are computed."},
+            {"name": "list_articles", "description": "List published Blog articles (metadata)."},
+            {"name": "get_article", "description": "Read one Blog article with its Markdown body."},
+            {"name": "search_mcp_servers", "description": "Search the MCP server directory."},
             {"name": "get_mcp_server", "description": "Get the full card for one MCP server by slug."},
             {"name": "search_a2a_agents", "description": "Find A2A agents you can delegate a task to."},
             {"name": "search_resources", "description": "Unified search across x402 services, MCP servers and A2A agents."},
