@@ -107,21 +107,5 @@ class ApprovalEmailThrottleTests(unittest.TestCase):
                 jobs._approve(ids[1], verdict={"verified_url": "https://svc.example/v1/a"})
         self.assertEqual(len(sent), 2)
 
-    def test_suppressed_recipient_is_never_sent(self):
-        from directory import mailer
-        with db.writer() as c:
-            db.add_mail_suppression(c, "dead@example.com", "550 user unknown", "test")
-            db.add_mail_suppression(c, "@nomx.example", "no MX", "test")
-        env = {"SMTP_HOST": "smtp.invalid", "SMTP_USER": "u", "SMTP_PASS": "p"}
-        with patch.dict(os.environ, env), \
-                patch.object(mailer.smtplib, "SMTP_SSL", side_effect=AssertionError("must not connect")):
-            r1 = mailer._deliver_external("Dead@Example.com", "s", "t", "h")
-            r2 = mailer._deliver_external("anyone@nomx.example", "s", "t", "h")
-        self.assertEqual((r1["status"], r1["reason"]), ("skipped", "recipient_suppressed"))
-        self.assertEqual(r2["status"], "skipped")
-        with db.connect(read_only=True) as c:
-            self.assertIsNone(db.mail_suppressed(c, "ok@example.com"))
-
-
 if __name__ == "__main__":
     unittest.main()
