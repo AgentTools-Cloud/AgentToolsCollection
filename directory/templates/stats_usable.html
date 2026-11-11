@@ -78,7 +78,7 @@
     <tbody>
     {% for r in u.by_protocol %}
       <tr>
-        <th scope="row" class="!text-slate-900 !font-medium !text-sm"><a href="/stats?view={{ r.kind }}" class="hover:underline">{{ r.label }}</a></th>
+        <th scope="row" class="!text-slate-900 !font-medium !text-sm"><a href="/stats/{{ r.kind }}" class="hover:underline">{{ r.label }}</a></th>
         <td class="num mono">{{ r.indexed|num }}</td>
         <td class="num mono">{{ r.reachable_pct }}%</td>
         <td class="num mono">{{ r.verified_pct }}%</td>

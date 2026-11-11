@@ -438,17 +438,38 @@ def x402_economy(conn):
 # Topic coverage
 # ---------------------------------------------------------------------------
 
+TOPIC_TOP_PER_KIND = 3
+
+
+def _distinct_names(items, n=None):
+    """First `n` items with distinct names (mirrors of one API share a name)."""
+    n = n or TOPIC_TOP_PER_KIND
+    out, seen = [], set()
+    for it in items:
+        key = (it[4] or "").strip().lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(it)
+        if len(out) >= n:
+            break
+    return out
+
+
 def topics(conn):
     counts = {t: Counter() for t in TOPICS}
+    ready = {t: Counter() for t in TOPICS}
+    scores = {t: {k: [] for k in KINDS} for t in TOPICS}
+    lat = {t: {k: [] for k in KINDS} for t in TOPICS}
+    best = {t: [] for t in TOPICS}
     sources = {
-        "x402": "SELECT name, description FROM services WHERE health='ok'",
-        "mcp": "SELECT name, description FROM mcp_servers WHERE health='ok'",
-        "a2a": "SELECT name, description FROM a2a_agents WHERE health='ok'",
+        k: f"SELECT slug, name, description, readiness_grade, readiness_score, latency_ms "
+           f"FROM {TABLE[k]} WHERE health='ok'" for k in KINDS
     }
     totals = Counter()
     skipped = Counter()
     for kind, sql in sources.items():
-        for name, desc in _q(conn, sql):
+        for slug, name, desc, grade, score, latency in _q(conn, sql):
             text = f"{name or ''} {desc or ''}".lower()
             hits = [t for t, rx in _TOPIC_RE.items() if rx.search(text)]
             # Gateway descriptions that list every category (one host had over
@@ -459,6 +480,27 @@ def topics(conn):
             totals[kind] += 1
             for t in hits:
                 counts[t][kind] += 1
+                if grade in ("A", "B"):
+                    ready[t][kind] += 1
+                if score is not None:
+                    scores[t][kind].append(score)
+                if latency is not None:
+                    lat[t][kind].append(latency)
+                if score is not None and slug:
+                    best[t].append((-float(score), latency if latency is not None else 10 ** 9,
+                                    kind, slug, name or slug, grade))
+    detail = {}
+    for t in TOPICS:
+        detail[t] = {
+            "by_kind": {k: {"reachable": counts[t].get(k, 0), "ready": ready[t].get(k, 0),
+                            "median_readiness": round(_quantile(scores[t][k], .5), 1) if scores[t][k] else None,
+                            "median_latency_ms": round(_quantile(lat[t][k], .5)) if lat[t][k] else None}
+                        for k in KINDS},
+            "top": [{"kind": k, "slug": sl, "name": nm[:80], "grade": g, "readiness": -ns,
+                     "latency_ms": (None if la == 10 ** 9 else la)}
+                    for kk in KINDS
+                    for ns, la, k, sl, nm, g in _distinct_names(b for b in sorted(best[t]) if b[2] == kk)],
+        }
     rows = []
     for t in TOPICS:
         row = {"topic": t}
@@ -479,7 +521,8 @@ def topics(conn):
                 gaps.append({"topic": r["topic"], "kind": k, "pct": r[k + "_pct"],
                              "strong_kind": best, "strong_pct": r[best + "_pct"]})
     gaps.sort(key=lambda g: -(g["strong_pct"] - g["pct"]))
-    return {"counted": dict(totals), "skipped_catalogue": dict(skipped), "rows": rows, "gaps": gaps[:10]}
+    return {"counted": dict(totals), "skipped_catalogue": dict(skipped), "rows": rows, "gaps": gaps[:10],
+            "detail": detail}
 
 
 # ---------------------------------------------------------------------------
@@ -631,6 +674,102 @@ def usable(snap):
                       "methodology": f"{SITE}/api/v1/methodology"}}
 
 
+# ---------------------------------------------------------------------------
+# Search demand, topic pages, monthly reports
+# ---------------------------------------------------------------------------
+
+def _day(ts):
+    return time.strftime("%Y-%m-%d", time.gmtime(ts))
+
+
+def search_demand(now, days=30):
+    """What people searched for over `days` (aggregate, terms with >= 5 searches)."""
+    from . import search_terms
+    search_terms.prune(now)
+    out = search_terms.summary(_day(now - (days - 1) * 86400), _day(now))
+    out["days"] = days
+    return out
+
+
+def topic_page(snap, topic):
+    """Data for /stats/topics/{topic}."""
+    if not snap or topic not in TOPICS:
+        return None
+    t = snap["topics"]
+    detail = (t.get("detail") or {}).get(topic)
+    row = next((r for r in t["rows"] if r["topic"] == topic), None)
+    if detail is None or row is None:
+        return None
+    rank = [r["topic"] for r in t["rows"]].index(topic) + 1
+    total = sum(row[k] for k in KINDS)
+    ready = sum(detail["by_kind"][k]["ready"] for k in KINDS)
+    lead = max(KINDS, key=lambda k: row[k + "_pct"])
+    answer = (f"As of {snap['as_of']}, {total:,} reachable listings mention “{topic}” "
+              f"(#{rank} of {len(TOPICS)} topics); {ready:,} of them have readiness A or B. "
+              f"It is most common among {KIND_LABEL[lead]} ({row[lead + '_pct']}% of them).")
+    gaps = [g for g in t.get("gaps") or [] if g["topic"] == topic]
+    searches = []
+    sd = snap.get("search_demand") or {}
+    if sd.get("top"):
+        rx = re.compile(r"\b" + re.escape(topic) + r"s?\b")
+        searches = [i for i in sd["top"] if rx.search(i["term"])][:10]
+    return {"topic": topic, "as_of": snap["as_of"], "answer": answer, "rank": rank,
+            "reachable": total, "ready": ready,
+            "by_kind": [{"kind": k, "label": KIND_LABEL[k], "pct": row[k + "_pct"], **detail["by_kind"][k]}
+                        for k in KINDS],
+            "top": detail["top"], "gaps": gaps, "searches": searches,
+            "links": {"page": f"{SITE}/stats/topics/{topic}", "json": f"{SITE}/stats/topics/{topic}.json"}}
+
+
+def months(conn) -> list[str]:
+    """UTC months with at least one stored snapshot, newest first."""
+    try:
+        return [r[0] for r in conn.execute(
+            "SELECT DISTINCT substr(day, 1, 7) FROM stats_snapshots ORDER BY 1 DESC")]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def monthly_report(conn, month: str, now=None):
+    """Start-of-month vs end-of-month report from stored daily snapshots."""
+    if not re.fullmatch(r"\d{4}-\d{2}", month or ""):
+        return None
+    from . import search_terms
+    rows = conn.execute("SELECT day, json FROM stats_snapshots WHERE substr(day,1,7)=? ORDER BY day",
+                        (month,)).fetchall()
+    if not rows:
+        return None
+    first_day, first = rows[0][0], json.loads(rows[0][1])
+    last_day, last = rows[-1][0], json.loads(rows[-1][1])
+    now = now or time.time()
+    y, m = int(month[:4]), int(month[5:])
+    next_month = f"{y + (m == 12):04d}-{(m % 12) + 1:02d}"
+    complete = _day(now) >= f"{next_month}-01"
+    kpis = []
+    for kind in ("all",) + KINDS:
+        for metric in ("indexed", "reachable", "verified", "ready"):
+            a = first["kpis"][kind][metric]
+            b = last["kpis"][kind][metric]
+            kpis.append({"kind": kind, "metric": metric, "start": a, "end": b, "change": b - a,
+                         "change_pct": round(100.0 * (b - a) / a, 1) if a else None})
+    new = {k: sum(c for d, c in last["growth"][k]["daily_new"] if d.startswith(month)) for k in KINDS}
+    end_of_month = f"{month}-31" if complete else last_day
+    searches = search_terms.summary(f"{month}-01", end_of_month, limit=15)
+    title = time.strftime("%B %Y", time.strptime(month, "%Y-%m"))
+    k = last["kpis"]["all"]
+    fk = first["kpis"]["all"]
+    answer = (f"{title}: the index went from {fk['indexed']:,} to {k['indexed']:,} listings "
+              f"({k['indexed'] - fk['indexed']:+,}); listings ready for agents (readiness A or B) "
+              f"went from {fk['ready']:,} to {k['ready']:,} ({k['ready'] - fk['ready']:+,}).")
+    return {"month": month, "title": title, "complete": complete, "first_day": first_day,
+            "last_day": last_day, "days_covered": len(rows), "answer": answer, "kpis": kpis,
+            "new_listings": new, "findings": headlines(last), "x402_price_quantiles": last["x402"]["price_quantiles"],
+            "protocol_versions": {"mcp": last["protocols"]["mcp"][:4], "a2a": last["protocols"]["a2a"][:4]},
+            "probe_outcomes": last.get("failures") or {}, "searches": searches,
+            "links": {"page": f"{SITE}/stats/reports/{month}", "json": f"{SITE}/stats/reports/{month}.json"},
+            "license": "CC BY 4.0"}
+
+
 def compute(conn, now: int | None = None) -> dict:
     now = int(now or time.time())
     t0 = time.monotonic()
@@ -651,6 +790,7 @@ def compute(conn, now: int | None = None) -> dict:
         "topics": topics(conn),
         "failures": failures(conn),
         "distributions": distributions(conn),
+        "search_demand": search_demand(now),
     }
     try:
         from . import popularity
@@ -797,6 +937,9 @@ LINKS = {
     "daily_csv": f"{SITE}/stats/daily.csv",
     "usable": f"{SITE}/stats/usable",
     "usable_json": f"{SITE}/stats/usable.json",
+    "protocol_pages": {k: f"{SITE}/stats/{k}" for k in KINDS},
+    "topic_json": f"{SITE}/stats/topics/{{topic}}.json",
+    "monthly_reports": f"{SITE}/stats/reports.json",
     "methodology": f"{SITE}/stats#method",
     "methodology_json": f"{SITE}/api/v1/methodology",
     "license": "CC BY 4.0",
@@ -878,6 +1021,11 @@ def summary(snap: dict | None, view: str = "all") -> dict:
             "protocol_versions": snap["protocols"]["a2a"][:3],
             "card_signatures": snap["protocols"]["a2a_signatures"],
         }
+    sd = snap.get("search_demand") or {}
+    if view == "all" and sd:
+        out["searches"] = {"days": sd.get("days"), "searches": sd.get("searches"),
+                           "top": sd.get("top", [])[:10], "unmet": sd.get("unmet", [])[:10],
+                           "min_searches": sd.get("min_searches")}
     for kind in kinds:
         if snap.get("failures", {}).get(kind):
             facts[kind]["probe_outcomes"] = snap["failures"][kind]

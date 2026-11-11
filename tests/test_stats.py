@@ -201,6 +201,86 @@ class StatsSnapshotTests(unittest.TestCase):
         self.assertIn("Declare auth", html)
 
 
+    def test_topic_page_and_monthly_report(self):
+        t = stats.topic_page(self.snap, "weather")
+        self.assertEqual(t["reachable"], 2)
+        self.assertIn("mention \u201cweather\u201d", t["answer"])
+        self.assertEqual({r["kind"] for r in t["by_kind"]}, set(stats.KINDS))
+        self.assertIsNone(stats.topic_page(self.snap, "nope"))
+        c = self.conn
+        later = json.loads(json.dumps(self.snap))
+        later["kpis"]["all"]["indexed"] += 3
+        c.execute("INSERT OR REPLACE INTO stats_snapshots(day, generated_at, json) VALUES (?,?,?)",
+                  ("2026-10-01", NOW, json.dumps(self.snap)))
+        c.execute("INSERT OR REPLACE INTO stats_snapshots(day, generated_at, json) VALUES (?,?,?)",
+                  ("2026-10-31", NOW, json.dumps(later)))
+        c.commit()
+        r = stats.monthly_report(c, "2026-10", now=time.mktime((2026, 11, 2, 0, 0, 0, 0, 0, 0)))
+        self.assertTrue(r["complete"])
+        self.assertEqual(r["days_covered"], 2)
+        self.assertEqual(r["kpis"][0]["change"], 3)
+        self.assertIn("October 2026", r["answer"])
+        self.assertIn("2026-10", stats.months(c))
+        self.assertIsNone(stats.monthly_report(c, "2025-01"))
+        self.assertIsNone(stats.monthly_report(c, "bad"))
+        env = Environment(loader=FileSystemLoader(str(ROOT / "directory/templates")), autoescape=True)
+        env.globals.update(build_version="t", current_user=lambda r: None,
+                           may_edit_listing=lambda *a: False, url_host=lambda u: u)
+        env.filters["num"] = lambda v: f"{v:,}" if isinstance(v, int) else v
+
+        class Req:
+            class url:
+                path = "/stats/x"
+        html = env.get_template("stats_report.html").render(request=Req, r=r, kind_label=stats.KIND_LABEL)
+        self.assertIn("Agent tools in October 2026", html)
+        html = env.get_template("stats_topic.html").render(request=Req, t=t, topics=list(stats.TOPICS))
+        self.assertIn("Weather agent tools", html)
+        self.assertIn("ref=topic", html)
+        html = env.get_template("stats_reports.html").render(request=Req, months=["2026-10"], current="2026-11")
+        self.assertIn("final", html)
+
+
+class SearchTermTests(unittest.TestCase):
+    def setUp(self):
+        from directory import search_terms
+        self.st = search_terms
+        with search_terms._lock:  # searches made by other tests
+            search_terms._pending.clear()
+        self.tmp = tempfile.TemporaryDirectory()
+        self._old = os.environ.get("AGENT_TOOLS_SEARCH_TERMS_DB")
+        os.environ["AGENT_TOOLS_SEARCH_TERMS_DB"] = os.path.join(self.tmp.name, "st.db")
+
+    def tearDown(self):
+        if self._old is None:
+            os.environ.pop("AGENT_TOOLS_SEARCH_TERMS_DB", None)
+        else:
+            os.environ["AGENT_TOOLS_SEARCH_TERMS_DB"] = self._old
+        self.tmp.cleanup()
+
+    def test_normalize_drops_personal_terms(self):
+        n = self.st.normalize
+        self.assertEqual(n("  Weather   API! "), "weather api")
+        for bad in ("a", "me@x.com", "https://x.io", "0xabcdef1234", "order 123456", "x" * 70, None, ""):
+            self.assertIsNone(n(bad), bad)
+
+    def test_record_flush_and_threshold(self):
+        today = time.strftime("%Y-%m-%d", time.gmtime())
+        for _ in range(5):
+            self.st.record("mcp", "Weather", 3, "web")
+        for _ in range(6):
+            self.st.record("x402", "flight booking", 0, "api")
+        self.st.record("mcp", "rare term", 0, "mcp")
+        self.st.record("mcp", "me@x.com", 0, "mcp")
+        self.st.flush()
+        s = self.st.summary(today, today)
+        self.assertEqual(s["searches"], 12)
+        self.assertEqual([i["term"] for i in s["top"]], ["flight booking", "weather"])
+        self.assertEqual([i["term"] for i in s["unmet"]], ["flight booking"])
+        self.assertEqual(s["by_channel"], {"api": 6, "mcp": 1, "web": 5})
+        self.assertNotIn("rare term", json.dumps(s))
+        self.assertEqual(self.st.prune(time.time() + 500 * 86400), 3)
+
+
 class AgentAccessTests(unittest.TestCase):
     """The digest agents get through MCP, A2A and /api/v1/stats."""
 

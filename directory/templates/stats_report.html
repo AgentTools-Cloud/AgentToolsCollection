@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% block title %}Agent tools in {{ r.title }}: monthly report · agent-tools.cloud{% endblock %}
+{% block desc %}{{ r.answer }}{% endblock %}
+{% block og_title %}Agent tools in {{ r.title }}{% endblock %}
+{% block twitter_title %}Agent tools in {{ r.title }}{% endblock %}
+{% block canonical %}<link rel="canonical" href="https://agent-tools.cloud/stats/reports/{{ r.month }}">{% endblock %}
+{% block head_extra %}
+<style>
+  .st-kicker { font: 600 11px/1 'JetBrains Mono', ui-monospace, monospace; letter-spacing: .08em; color: #64748b; text-transform: uppercase; }
+  .st-table td, .st-table th { padding: 6px 8px; vertical-align: middle; }
+  .st-table th { font-weight: 500; color: #64748b; font-size: 12px; text-align: left; }
+  .st-table td.num, .st-table th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .st-table tbody tr + tr td, .st-table tbody tr + tr th { border-top: 1px solid #f1f5f9; }
+  main { font-feature-settings: "calt" 0; }
+</style>
+<script type="application/ld+json">
+{{ {
+  "@context": "https://schema.org",
+  "@type": "Dataset",
+  "name": "Agent tools in " ~ r.title,
+  "description": r.answer,
+  "url": "https://agent-tools.cloud/stats/reports/" ~ r.month,
+  "license": "https://creativecommons.org/licenses/by/4.0/",
+  "creator": {"@type": "Organization", "name": "agent-tools.cloud", "url": "https://agent-tools.cloud"},
+  "temporalCoverage": r.first_day ~ "/" ~ r.last_day,
+  "isAccessibleForFree": true,
+  "distribution": [{"@type": "DataDownload", "encodingFormat": "application/json", "contentUrl": "https://agent-tools.cloud/stats/reports/" ~ r.month ~ ".json"}]
+} | tojson }}
+</script>
+{% endblock %}
+{% block content %}
+{% set labels = {"all": "All protocols", "x402": kind_label.x402, "mcp": kind_label.mcp, "a2a": kind_label.a2a} %}
+<nav class="text-xs text-slate-500 mono" aria-label="Breadcrumb"><a href="/stats" class="hover:text-slate-900">Stats</a> <span aria-hidden="true">/</span> <a href="/stats/reports" class="hover:text-slate-900">Reports</a> <span aria-hidden="true">/</span> {{ r.month }}</nav>
+<header class="max-w-4xl mt-4">
+  <div class="st-kicker">Monthly report · {{ 'final' if r.complete else 'month to date' }}</div>
+  <h1 class="text-3xl md:text-4xl font-extrabold tracking-tight mt-3 text-slate-900">Agent tools in {{ r.title }}</h1>
+  <p class="text-lg text-slate-700 mt-4 leading-relaxed">{{ r.answer }}</p>
+  <p class="text-xs text-slate-500 mt-3 mono flex flex-wrap gap-x-3 gap-y-1">
+    <span>Snapshots {{ r.first_day }} → {{ r.last_day }} ({{ r.days_covered }} days)</span>
+    <a href="/stats/reports/{{ r.month }}.json" class="underline decoration-dotted hover:text-slate-900">JSON</a>
+    <a href="/stats#method" class="underline decoration-dotted hover:text-slate-900">Methodology</a>
+  </p>
+  {% if not r.complete %}<p class="mt-3 text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">This month is still running; the numbers update daily and become final on the 1st of next month.</p>{% endif %}
+</header>
+
+<section class="mt-8 svc-card p-5 md:p-6" aria-labelledby="kpis">
+  <h2 id="kpis" class="text-lg font-bold text-slate-900">Start vs end of month</h2>
+  <div class="overflow-x-auto mt-3">
+  <table class="st-table w-full text-sm">
+    <thead><tr><th scope="col">Protocol</th><th scope="col">Metric</th><th scope="col" class="num">{{ r.first_day }}</th><th scope="col" class="num">{{ r.last_day }}</th><th scope="col" class="num">Change</th></tr></thead>
+    <tbody>
+    {% for k in r.kpis %}
+      <tr>
+        <th scope="row" class="!text-slate-900 !font-medium !text-sm">{{ labels[k.kind] if loop.index0 % 4 == 0 else "" }}</th>
+        <td class="text-slate-600">{{ k.metric|capitalize }}</td>
+        <td class="num mono">{{ k.start|num }}</td>
+        <td class="num mono">{{ k.end|num }}</td>
+        <td class="num mono {{ 'text-emerald-700' if k.change > 0 else ('text-red-700' if k.change < 0 else 'text-slate-400') }}">{{ "%+d"|format(k.change) }}{% if k.change_pct is not none %} ({{ "%+.1f"|format(k.change_pct) }}%){% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <p class="text-xs text-slate-500 mt-3">New listings first seen this month: {% for k, n in r.new_listings.items() %}{{ labels[k] }} {{ n|num }}{{ ", " if not loop.last }}{% endfor %}.</p>
+</section>
+
+<section class="mt-6 svc-card p-5 md:p-6" aria-labelledby="findings">
+  <h2 id="findings" class="text-lg font-bold text-slate-900">Findings at month end</h2>
+  <ul class="mt-3 space-y-2 text-sm text-slate-700 list-disc pl-5 leading-relaxed">
+    {% for key, line in r.findings.items() %}{% if line %}<li>{{ line }}</li>{% endif %}{% endfor %}
+  </ul>
+</section>
+
+<section class="mt-6 svc-card p-5 md:p-6" aria-labelledby="searches">
+  <h2 id="searches" class="text-lg font-bold text-slate-900">What people searched for</h2>
+  <p class="text-xs text-slate-500 mt-1">{{ r.searches.searches|num }} searches this month; terms shown after at least {{ r.searches.min_searches }} searches. No IP, account or session is stored.</p>
+  <div class="grid gap-6 md:grid-cols-2 mt-3">
+    <div>
+      <h3 class="text-sm font-semibold text-slate-800">Most searched</h3>
+      {% if r.searches.top %}<ol class="mt-2 text-sm space-y-1 list-decimal pl-5">{% for i in r.searches.top %}<li><span class="mono text-xs">{{ i.term }}</span> <span class="text-slate-400">· {{ i.searches|num }}</span></li>{% endfor %}</ol>
+      {% else %}<p class="text-sm text-slate-400 mt-2">Not enough searches yet.</p>{% endif %}
+    </div>
+    <div>
+      <h3 class="text-sm font-semibold text-slate-800">Mostly nothing found</h3>
+      {% if r.searches.unmet %}<ol class="mt-2 text-sm space-y-1 list-decimal pl-5">{% for i in r.searches.unmet %}<li><span class="mono text-xs">{{ i.term }}</span> <span class="text-slate-400">· {{ i.searches|num }}, {{ i.no_results_pct }}% empty</span></li>{% endfor %}</ol>
+      {% else %}<p class="text-sm text-slate-400 mt-2">None above the threshold.</p>{% endif %}
+    </div>
+  </div>
+</section>
+
+<p class="mt-8 text-xs text-slate-500">Cite as: agent-tools.cloud, “Agent tools in {{ r.title }}”, https://agent-tools.cloud/stats/reports/{{ r.month }}. Data CC BY 4.0. <a href="/stats/reports" class="underline decoration-dotted">All reports</a></p>
+{% endblock %}

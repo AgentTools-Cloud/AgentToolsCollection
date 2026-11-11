@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Monthly reports on agent tools · agent-tools.cloud{% endblock %}
+{% block desc %}Month-by-month reports on x402 APIs, MCP servers and A2A agents: growth, reachability, readiness, prices and what people searched for.{% endblock %}
+{% block og_title %}Monthly reports on agent tools{% endblock %}
+{% block twitter_title %}Monthly reports on agent tools{% endblock %}
+{% block canonical %}<link rel="canonical" href="https://agent-tools.cloud/stats/reports">{% endblock %}
+{% block content %}
+<nav class="text-xs text-slate-500 mono" aria-label="Breadcrumb"><a href="/stats" class="hover:text-slate-900">Stats</a> <span aria-hidden="true">/</span> Reports</nav>
+<header class="max-w-3xl mt-4">
+  <h1 class="text-3xl md:text-4xl font-extrabold tracking-tight text-slate-900">Monthly reports</h1>
+  <p class="text-slate-600 mt-3 leading-relaxed">Each report compares the first and last daily snapshot of a month: how the index grew, how many listings answer and are ready for agents, prices, protocol versions and the most searched terms. A month's report is final once the month has ended. <a href="/stats/reports.json" class="text-blue-700 hover:underline">JSON</a></p>
+</header>
+<ul class="mt-8 space-y-3 max-w-3xl">
+  {% for m in months %}
+  <li class="svc-card p-5 flex items-center justify-between gap-4">
+    <a href="/stats/reports/{{ m }}" class="font-semibold text-slate-900 hover:text-blue-700">{{ m }}</a>
+    <span class="text-xs mono {{ 'text-amber-700' if m >= current else 'text-emerald-700' }}">{{ 'month to date' if m >= current else 'final' }}</span>
+  </li>
+  {% else %}
+  <li class="text-slate-500">No snapshots stored yet.</li>
+  {% endfor %}
+</ul>
+{% endblock %}

@@ -12,7 +12,7 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.security import HTTPBearer
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field, HttpUrl, SecretStr
@@ -28,6 +28,7 @@ from . import resources as directory_resources
 from . import reverify_x402 as directory_reverify
 from . import mailer as directory_mailer
 from . import limits
+from . import search_terms
 from . import auth as directory_auth
 from . import ownership as directory_ownership
 from . import public_http as directory_public_http
@@ -186,6 +187,8 @@ def x402_page(
         cats = db.list_categories(c)
         s = db.stats(c)
         leaders = db.top_rated(c, "x402", 20)
+    if not request.query_params.get("ref"):  # our own links (topic pages) are not demand
+        search_terms.record("x402", q, len(services), "web")
     return TEMPLATES.TemplateResponse(request, "index.html", {
             "request": request, "services": services, "categories": cats,
             "stats": s, "q": q or "", "active_category": category,
@@ -365,9 +368,17 @@ def _kpi_trend(history, view, metric, period):
 def stats_page(request: Request,
                view: str = Query(default="all"),
                period: int = Query(default=7)):
-    from . import stats as stats_mod
     view = view if view in STATS_VIEWS else "all"
     period = period if period in STATS_PERIODS else 7
+    if view != "all":
+        # One URL per protocol: /stats/mcp, /stats/x402, /stats/a2a.
+        suffix = f"?period={period}" if period != 7 else ""
+        return RedirectResponse(f"/stats/{view}{suffix}", status_code=301)
+    return _render_stats(request, "all", period)
+
+
+def _render_stats(request: Request, view: str, period: int):
+    from . import stats as stats_mod
     snap, history = _stats_payload()
     if snap is None:
         return TEMPLATES.TemplateResponse(
@@ -382,6 +393,8 @@ def stats_page(request: Request,
         "history_days": len(history), "first_day": history[0][0] if history else None,
         "kinds": [k for k in stats_mod.KINDS if view in ("all", k)],
         "kind_label": stats_mod.KIND_LABEL,
+        "page_title": (stats_mod.KIND_LABEL[view] + " statistics") if view != "all" else "The state of agent tools",
+        "page_path": "/stats" if view == "all" else f"/stats/{view}",
     })
 
 
@@ -423,6 +436,91 @@ def stats_usable_json():
                                        "Access-Control-Allow-Origin": "*"})
 
 
+@router.get("/stats/topics", include_in_schema=False)
+def stats_topics_index():
+    return RedirectResponse("/stats#topics", status_code=302)
+
+
+@router.get("/stats/topics/{topic}.json", tags=["directory"],
+            summary="One topic across x402, MCP and A2A: supply, readiness, top listings, searches")
+def stats_topic_json(topic: str):
+    """Reachable listings mentioning the topic word per protocol, how many are
+    ready (A/B), median readiness and latency, the best listings per protocol,
+    supply gaps and matching search terms. Daily. CC BY 4.0."""
+    from . import stats as stats_mod
+    snap, _h = _stats_payload()
+    data = stats_mod.topic_page(snap, topic.lower())
+    if data is None:
+        raise HTTPException(status_code=404, detail=f"unknown topic; one of: {', '.join(stats_mod.TOPICS)}")
+    data["license"] = "CC BY 4.0"
+    return JSONResponse(data, headers={"Cache-Control": "public, max-age=600",
+                                       "Access-Control-Allow-Origin": "*"})
+
+
+@router.get("/stats/topics/{topic}", response_class=HTMLResponse, include_in_schema=False)
+def stats_topic_page(request: Request, topic: str):
+    from . import stats as stats_mod
+    snap, _h = _stats_payload()
+    data = stats_mod.topic_page(snap, topic.lower())
+    if data is None:
+        raise HTTPException(status_code=404, detail="Unknown topic")
+    return TEMPLATES.TemplateResponse(request, "stats_topic.html", {
+        "request": request, "t": data, "topics": [r["topic"] for r in snap["topics"]["rows"]]})
+
+
+def _report_or_404(month: str):
+    from . import stats as stats_mod
+    with _conn() as c:
+        try:
+            data = stats_mod.monthly_report(c, month)
+        except Exception:  # noqa: BLE001 - old snapshot shapes
+            data = None
+    if data is None:
+        raise HTTPException(status_code=404, detail="No report for that month")
+    return data
+
+
+@router.get("/stats/reports", response_class=HTMLResponse, include_in_schema=False)
+def stats_reports_page(request: Request):
+    from . import stats as stats_mod
+    with _conn() as c:
+        months = stats_mod.months(c)
+    current = time.strftime("%Y-%m", time.gmtime())
+    return TEMPLATES.TemplateResponse(request, "stats_reports.html", {
+        "request": request, "months": months, "current": current})
+
+
+@router.get("/stats/reports.json", tags=["directory"], summary="Monthly reports available")
+def stats_reports_json():
+    """Months with a report. A month is complete once it has ended; the
+    current month is shown as month-to-date."""
+    from . import stats as stats_mod
+    with _conn() as c:
+        months = stats_mod.months(c)
+    current = time.strftime("%Y-%m", time.gmtime())
+    return JSONResponse({"reports": [
+        {"month": m, "complete": m < current,
+         "page": f"https://agent-tools.cloud/stats/reports/{m}",
+         "json": f"https://agent-tools.cloud/stats/reports/{m}.json"} for m in months]},
+        headers={"Cache-Control": "public, max-age=600", "Access-Control-Allow-Origin": "*"})
+
+
+@router.get("/stats/reports/{month}.json", tags=["directory"], summary="Monthly report (start vs end of month)")
+def stats_report_json(month: str):
+    """Start-of-month vs end-of-month counts per protocol, new listings,
+    findings, x402 prices, protocol versions, probe outcomes and the most
+    searched terms (aggregate, >= 5 searches). CC BY 4.0."""
+    return JSONResponse(_report_or_404(month), headers={
+        "Cache-Control": "public, max-age=600", "Access-Control-Allow-Origin": "*"})
+
+
+@router.get("/stats/reports/{month}", response_class=HTMLResponse, include_in_schema=False)
+def stats_report_page(request: Request, month: str):
+    from . import stats as stats_mod
+    return TEMPLATES.TemplateResponse(request, "stats_report.html", {
+        "request": request, "r": _report_or_404(month), "kind_label": stats_mod.KIND_LABEL})
+
+
 @router.get("/stats/daily.csv", tags=["directory"], summary="Headline metrics for every stored day (CSV)",
             response_class=Response)
 def stats_daily_csv():
@@ -444,6 +542,13 @@ def stats_daily_csv():
     return Response(buf.getvalue(), media_type="text/csv; charset=utf-8", headers={
         "Content-Disposition": 'inline; filename="agent-tools-stats-daily.csv"',
         "Cache-Control": "public, max-age=600", "Access-Control-Allow-Origin": "*"})
+
+
+@router.get("/stats/{kind}", response_class=HTMLResponse, include_in_schema=False)
+def stats_kind_page(request: Request, kind: str, period: int = Query(default=7)):
+    if kind not in ("x402", "mcp", "a2a"):
+        raise HTTPException(status_code=404, detail="Not found")
+    return _render_stats(request, kind, period if period in STATS_PERIODS else 7)
 
 
 @router.get("/about", response_class=HTMLResponse, include_in_schema=False)
@@ -494,6 +599,8 @@ def mcp_page(
             c, q, (item.get("name") for item in servers))
         s = db.mcp_stats(c)
         leaders = db.top_rated(c, "mcp", 20)
+    if not request.query_params.get("ref"):  # our own links (topic pages) are not demand
+        search_terms.record("mcp", q, len(servers), "web")
     return TEMPLATES.TemplateResponse(request, "mcp.html", {
             "request": request, "servers": servers, "stats": s, "q": q or "",
             "active_health": health, "active_x402": bool(x402),
@@ -562,6 +669,8 @@ def a2a_page(
             c, q, (item.get("name") for item in agents))
         s = db.a2a_stats(c)
         leaders = db.top_rated(c, "a2a", 20)
+    if not request.query_params.get("ref"):  # our own links (topic pages) are not demand
+        search_terms.record("a2a", q, len(agents), "web")
     return TEMPLATES.TemplateResponse(request, "a2a.html", {
             "request": request, "agents": agents, "stats": s, "q": q or "",
             "active_health": health, "active_x402": bool(x402),
@@ -650,6 +759,8 @@ def api_search(
         db.attach_sources(c, "x402", services)
         exact_name_groups = directory_resources.exact_name_groups(
             c, q, (item.get("name") for item in services))
+    if not offset:
+        search_terms.record("x402", q, len(services), "api")
     services = [cards.public_service_row(svc) for svc in services]
     for svc in services:
         svc.pop("source", None)
@@ -803,6 +914,8 @@ def api_a2a_search(
                              sort=sort, limit=limit, offset=offset)
         exact_name_groups = directory_resources.exact_name_groups(
             c, q, (item.get("name") for item in rows))
+    if not offset:
+        search_terms.record("a2a", q, len(rows), "api")
     return {
         "query": q,
         "sort": sort,
@@ -897,6 +1010,8 @@ def api_mcp_search(
     if effective_sort != "default":
         directory_resources.sort_resources(servers, effective_sort, q)
     window = servers[offset:offset + limit]
+    if not offset:
+        search_terms.record("mcp", q, len(window), "api")
     directory_resources.strip_sort_metadata(window)
     with _conn() as c:
         exact_name_groups = directory_resources.exact_name_groups(
@@ -957,10 +1072,13 @@ def api_resources_search(
 ):
     """Unified search across x402 services, MCP servers and A2A agents."""
     with _conn() as c:
-        return directory_resources.unified_search(
+        out = directory_resources.unified_search(
             c, q=q, protocol=protocol, chain=chain, health=health,
             sort=sort, limit=limit, offset=offset,
         )
+    if not offset:
+        search_terms.record(protocol or "all", q, out.get("count") or 0, "api")
+    return out
 
 
 @router.get("/api/v1/export", tags=["directory"])
@@ -2147,6 +2265,9 @@ def well_known():
                 "daily_csv": "https://agent-tools.cloud/stats/daily.csv",
                 "page": "https://agent-tools.cloud/stats",
                 "usable": "https://agent-tools.cloud/stats/usable.json",
+                "protocol_pages": "https://agent-tools.cloud/stats/{x402|mcp|a2a}",
+                "topic": "https://agent-tools.cloud/stats/topics/{topic}.json",
+                "monthly_reports": "https://agent-tools.cloud/stats/reports.json",
                 "updated": "daily, after the 21:30 UTC probe run",
                 "license": "CC BY 4.0",
                 "returns": "indexed / reachable / protocol-verified / readiness counts, findings, "
@@ -2262,6 +2383,10 @@ def sitemap_xml(request: Request) -> Response:
         ("/categories", "0.6", "weekly"),
         ("/stats", "0.8", "daily"),
         ("/stats/usable", "0.8", "daily"),
+        ("/stats/x402", "0.7", "daily"),
+        ("/stats/mcp", "0.7", "daily"),
+        ("/stats/a2a", "0.7", "daily"),
+        ("/stats/reports", "0.6", "daily"),
         ("/about", "0.4", "monthly"),
         ("/docs/claim", "0.5", "monthly"),
         ("/terms", "0.2", "yearly"),
@@ -2291,6 +2416,16 @@ def sitemap_xml(request: Request) -> Response:
 
     for path, prio, freq in static_pages:
         parts.append(_url(base + path, priority=prio, changefreq=freq))
+    from . import stats as stats_mod
+    for topic in stats_mod.TOPICS:
+        parts.append(_url(f"{base}/stats/topics/{topic}", priority="0.5", changefreq="daily"))
+    try:
+        with _conn() as c:
+            report_months = stats_mod.months(c)
+    except sqlite3.Error:
+        report_months = []
+    for m in report_months:
+        parts.append(_url(f"{base}/stats/reports/{m}", priority="0.5", changefreq="daily"))
 
     article_store = getattr(request.app.state, "article_store", None)
     if article_store is not None:
