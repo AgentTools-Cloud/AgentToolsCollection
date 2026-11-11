@@ -430,6 +430,14 @@ CREATE INDEX IF NOT EXISTS idx_listing_sources_source
 CREATE INDEX IF NOT EXISTS idx_listing_sources_identity
     ON listing_sources(kind, source, source_id);
 
+-- One public statistics snapshot per UTC day (directory/stats.py). The /stats
+-- page only reads these, so a page view never scans the catalogue.
+CREATE TABLE IF NOT EXISTS stats_snapshots (
+  day           TEXT PRIMARY KEY,     -- YYYY-MM-DD (UTC)
+  generated_at  INTEGER NOT NULL,
+  json          TEXT NOT NULL
+);
+
 -- Active tombstones are a final ingestion guard and a public 410 archive.
 -- The snapshot supports deliberate restoration; events are append-only audit.
 CREATE TABLE IF NOT EXISTS retired_listings (
@@ -1895,6 +1903,33 @@ def list_categories(conn):
            ORDER BY n DESC"""
     ).fetchall()
     return [{"category": r["category"], "count": r["n"]} for r in rows]
+
+
+def save_stats_snapshot(conn, snap: dict) -> None:
+    day = time.strftime("%Y-%m-%d", time.gmtime(int(snap["generated_at"])))
+    conn.execute(
+        "INSERT INTO stats_snapshots(day, generated_at, json) VALUES (?,?,?) "
+        "ON CONFLICT(day) DO UPDATE SET generated_at=excluded.generated_at, json=excluded.json",
+        (day, int(snap["generated_at"]), json.dumps(snap, separators=(",", ":"))))
+
+
+def latest_stats_snapshot(conn) -> dict | None:
+    try:
+        row = conn.execute("SELECT json FROM stats_snapshots ORDER BY day DESC LIMIT 1").fetchone()
+    except sqlite3.OperationalError:
+        return None
+    return json.loads(row[0]) if row else None
+
+
+def stats_history(conn, days: int = 90) -> list[tuple[str, dict]]:
+    """[(day, kpis)] oldest first; only the small KPI block of each snapshot."""
+    try:
+        rows = conn.execute(
+            "SELECT day, json_extract(json,'$.kpis') FROM stats_snapshots "
+            "ORDER BY day DESC LIMIT ?", (int(days),)).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    return [(r[0], json.loads(r[1] or "{}")) for r in reversed(rows)]
 
 
 def stats(conn):

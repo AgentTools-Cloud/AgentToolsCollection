@@ -647,6 +647,26 @@ def cmd_health(only_unknown: bool = False, quarantined_only: bool = False) -> in
             cmd_readiness()
         except Exception as e:
             log.warning("readiness scoring failed: %r", e)
+        try:
+            cmd_stats_snapshot()
+        except Exception as e:
+            log.warning("stats snapshot failed: %r", e)
+    return 0
+
+
+def cmd_stats_snapshot() -> int:
+    """Compute today's public /stats snapshot and store it (one row per UTC day)."""
+    from . import stats as stats_mod
+    with db.connect(read_only=True) as c:
+        snap = stats_mod.compute(c)
+
+    def op():
+        with db.writer() as c:
+            c.execute("CREATE TABLE IF NOT EXISTS stats_snapshots (day TEXT PRIMARY KEY, "
+                      "generated_at INTEGER NOT NULL, json TEXT NOT NULL)")
+            db.save_stats_snapshot(c, snap)
+    db.with_retry(op)
+    log.info("stats snapshot: %s in %ss", snap["as_of"], snap["compute_seconds"])
     return 0
 
 
@@ -2191,6 +2211,7 @@ def main(argv=None) -> int:
     sub.add_parser("health-quarantined")
     sub.add_parser("health-a2a")
     sub.add_parser("readiness")
+    sub.add_parser("stats-snapshot")
     sub.add_parser("health-mcp")
     sub.add_parser("stats")
     p_retire = sub.add_parser("retire")
@@ -2286,6 +2307,8 @@ def main(argv=None) -> int:
         return cmd_health_mcp()
     if args.cmd == "readiness":
         return cmd_readiness()
+    if args.cmd == "stats-snapshot":
+        return cmd_stats_snapshot()
     if args.cmd == "stats":
         return cmd_stats()
     if args.cmd == "sync-botsrated":

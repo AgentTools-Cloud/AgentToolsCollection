@@ -38,6 +38,7 @@
   <div class="flex flex-wrap items-end justify-between gap-4 mb-4">
     <h2 class="text-2xl font-bold tracking-tight">Across the directory</h2>
     <div class="flex items-center gap-2 text-sm">
+      <a href="/stats" class="pill text-xs font-medium">View full stats →</a>
       <a href="/api/v1/stats" class="pill mono text-xs">/api/v1/stats</a>
       <a href="/.well-known/agent-tools.json" class="pill mono text-xs">/.well-known</a>
     </div>
@@ -57,12 +58,12 @@
     <div class="grid grid-cols-2 gap-4 max-w-md">
     <div class="stat-card">
       <div class="text-sm text-slate-500">Total entries</div>
-      <div class="text-3xl font-bold mt-1">{{ stats.total + mcp_stats.total + a2a_stats.total }}</div>
+      <div class="text-3xl font-bold mt-1">{{ (stats.total + mcp_stats.total + a2a_stats.total)|num }}</div>
       <div class="text-xs text-slate-400 mt-3">x402 · MCP · A2A combined</div>
     </div>
     <div class="stat-card">
       <div class="text-sm text-slate-500">Healthy</div>
-      <div class="text-3xl font-bold mt-1 text-emerald-600">{{ stats.healthy + mcp_stats.healthy + a2a_stats.healthy }}</div>
+      <div class="text-3xl font-bold mt-1 text-emerald-600">{{ (stats.healthy + mcp_stats.healthy + a2a_stats.healthy)|num }}</div>
       <div class="text-xs text-slate-400 mt-3">passed last liveness probe</div>
     </div>
   </div>
@@ -72,10 +73,10 @@
   <a href="/x402" class="svc-card p-6 group hover:border-slate-300 transition">
     <div class="flex items-center justify-between">
       <span class="text-xs font-semibold uppercase tracking-wider text-slate-400">x402 Services</span>
-      <span class="text-3xl font-bold">{{ stats.total }}</span>
+      <span class="text-3xl font-bold">{{ stats.total|num }}</span>
     </div>
     <p class="text-sm text-slate-600 mt-3">Paid HTTP APIs that settle micro-payments over the x402 protocol. Auto-verified, with payment + health metadata.</p>
-      <p class="text-xs text-slate-400 mt-2">{{ stats.healthy }} healthy · on-chain demand-checked</p>
+      <p class="text-xs text-slate-400 mt-2">{{ stats.healthy|num }} healthy · on-chain demand-checked</p>
     <div class="text-sm font-medium text-slate-900 mt-4 inline-flex items-center gap-1 group-hover:gap-2 transition-all">
       Browse services →
     </div>
@@ -84,10 +85,10 @@
   <a href="/mcp" class="svc-card p-6 group hover:border-slate-300 transition">
     <div class="flex items-center justify-between">
       <span class="text-xs font-semibold uppercase tracking-wider text-slate-400">MCP Servers</span>
-      <span class="text-3xl font-bold">{{ mcp_stats.total }}</span>
+      <span class="text-3xl font-bold">{{ mcp_stats.total|num }}</span>
     </div>
     <p class="text-sm text-slate-600 mt-3">Model Context Protocol servers continuously aggregated and probed live for remote callability.</p>
-      <p class="text-xs text-slate-400 mt-2">{{ mcp_stats.remote_callable }} remote-callable</p>
+      <p class="text-xs text-slate-400 mt-2">{{ mcp_stats.remote_callable|num }} remote-callable</p>
     <div class="text-sm font-medium text-slate-900 mt-4 inline-flex items-center gap-1 group-hover:gap-2 transition-all">
       Browse servers →
     </div>
@@ -96,10 +97,10 @@
   <a href="/a2a" class="svc-card p-6 group hover:border-slate-300 transition">
     <div class="flex items-center justify-between">
       <span class="text-xs font-semibold uppercase tracking-wider text-slate-400">A2A Agents</span>
-      <span class="text-3xl font-bold">{{ a2a_stats.total }}</span>
+      <span class="text-3xl font-bold">{{ a2a_stats.total|num }}</span>
     </div>
     <p class="text-sm text-slate-600 mt-3">Agents that publish an A2A Agent Card. Discover skills, capabilities, and endpoints straight from <span class="mono">/.well-known</span>.</p>
-      <p class="text-xs text-slate-400 mt-2">{{ a2a_stats.healthy }} healthy</p>
+      <p class="text-xs text-slate-400 mt-2">{{ a2a_stats.healthy|num }} healthy</p>
     <div class="text-sm font-medium text-slate-900 mt-4 inline-flex items-center gap-1 group-hover:gap-2 transition-all">
       Browse agents →
     </div>

@@ -73,6 +73,7 @@
         <a href="/mcp" class="h-full flex items-center border-b-2 whitespace-nowrap {% if p.startswith('/mcp') %}tab-active{% else %}tab-link{% endif %}">MCP Servers</a>
         <a href="/a2a" class="h-full flex items-center border-b-2 whitespace-nowrap {% if p.startswith('/a2a') %}tab-active{% else %}tab-link{% endif %}">A2A Agents</a>
         <a href="/categories" class="h-full flex items-center border-b-2 whitespace-nowrap {% if p == '/categories' %}tab-active{% else %}tab-link{% endif %}">Categories</a>
+        <a href="/stats" class="h-full flex items-center border-b-2 whitespace-nowrap {% if p.startswith('/stats') %}tab-active{% else %}tab-link{% endif %}">Stats</a>
         {% if articles_enabled %}<a href="/articles" class="h-full flex items-center border-b-2 whitespace-nowrap {% if p.startswith('/articles') %}tab-active{% else %}tab-link{% endif %}">Blog</a>{% endif %}
         <span class="ml-auto"></span>
         <a href="/about" class="h-full flex items-center border-b-2 whitespace-nowrap {% if p == '/about' %}tab-active{% else %}tab-link{% endif %}">About</a>
