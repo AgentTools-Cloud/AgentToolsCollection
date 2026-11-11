@@ -438,6 +438,32 @@ CREATE TABLE IF NOT EXISTS stats_snapshots (
   json          TEXT NOT NULL
 );
 
+-- External adoption signals (directory/popularity.py), keyed by the external
+-- identity and joined to listings on read. Display only.
+CREATE TABLE IF NOT EXISTS ext_github_repos (
+  repo        TEXT PRIMARY KEY,
+  full_name   TEXT,
+  stars       INTEGER,
+  forks       INTEGER,
+  pushed_at   TEXT,
+  archived    INTEGER,
+  status      TEXT NOT NULL,
+  fetched_at  INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS ext_npm_packages (
+  package       TEXT PRIMARY KEY,
+  downloads_30d INTEGER,
+  status        TEXT NOT NULL,
+  fetched_at    INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS ext_tranco (
+  domain    TEXT PRIMARY KEY,
+  rank      INTEGER NOT NULL,
+  listings  INTEGER NOT NULL,
+  list_id   TEXT NOT NULL,
+  list_date TEXT NOT NULL
+);
+
 -- Active tombstones are a final ingestion guard and a public 410 archive.
 -- The snapshot supports deliberate restoration; events are append-only audit.
 CREATE TABLE IF NOT EXISTS retired_listings (
@@ -1754,6 +1780,7 @@ def get_by_slug(conn, slug):
     out = row_to_dict(row)
     out["sources"] = listing_sources(conn, "x402", int(out["id"]))
     _attach_readiness(conn, "x402", out)
+    _attach_popularity(conn, "x402", out)
     return out
 
 
@@ -1768,6 +1795,16 @@ def _attach_readiness(conn, kind: str, out: dict) -> None:
     except Exception:  # noqa: BLE001 - a display extra must never break a page
         import logging
         logging.getLogger(__name__).exception("readiness breakdown failed for %s id=%s", kind, out.get("id"))
+
+
+def _attach_popularity(conn, kind: str, out: dict) -> None:
+    """External adoption signals (GitHub, npm, Tranco); display only."""
+    from . import popularity
+    try:
+        out["popularity"] = popularity.for_listing(conn, kind, out)
+    except Exception:  # noqa: BLE001 - a display extra must never break a page
+        import logging
+        logging.getLogger(__name__).exception("popularity failed for %s id=%s", kind, out.get("id"))
 
 
 GATEWAY_MIN_LISTINGS = 3
@@ -3558,6 +3595,7 @@ def get_a2a_by_slug(conn, slug):
         return None
     out = a2a_row_to_dict(row)
     out["sources"] = listing_sources(conn, "a2a", int(out["id"]))
+    _attach_popularity(conn, "a2a", out)
     return out
 
 
@@ -4065,6 +4103,7 @@ def get_mcp_by_slug(conn, slug):
     out = mcp_row_to_dict(row)
     out["sources"] = listing_sources(conn, "mcp", int(out["id"]))
     _attach_readiness(conn, "mcp", out)
+    _attach_popularity(conn, "mcp", out)
     return out
 
 

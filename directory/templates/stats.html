@@ -89,7 +89,7 @@
 {% if not snap %}
 <section class="max-w-2xl">
   <h1 class="text-3xl font-extrabold tracking-tight">The state of agent tools</h1>
-  <p class="text-slate-500 mt-3">The first daily snapshot has not been computed yet. Please check back after the next probe run (05:30 UTC).</p>
+  <p class="text-slate-500 mt-3">The first daily snapshot has not been computed yet. Please check back after the next probe run (21:30 UTC).</p>
 </section>
 {% else %}
 {% set q = '?view=' ~ view ~ '&period=' ~ period %}
@@ -161,6 +161,7 @@
       {% if view in ('all', 'mcp') %}<a href="#safety">08 Safety</a>{% endif %}
       <a href="#topics">09 Topics</a>
       <a href="#growth">10 Growth</a>
+      {% if snap.adoption and snap.adoption.available %}<a href="#adoption">11 Adoption</a>{% endif %}
       <a href="#method">Methodology</a>
       <a href="#cite">Cite</a>
     </nav>
@@ -405,6 +406,55 @@
     {{ card_foot('First-seen dates from listing sources.', 'growth') }}
   </section>
 
+  {# 11 Adoption #}
+  {% set ad = snap.adoption %}
+  {% if ad and ad.available %}
+  <section id="adoption">
+    {{ section_head('11', 'Adoption', headlines.adoption, 'Signals from outside our probes: GitHub stars of the source repository, npm downloads, and where the site ranks in the Tranco top-1M list. They describe attention, not quality, and do not affect search order.') }}
+    <div class="grid gap-4 mt-5 md:grid-cols-2">
+      {% if view in ('all', 'mcp') %}
+      <div class="svc-card p-5">
+        <h3 class="text-sm font-semibold text-slate-800 mb-2">GitHub stars, reachable MCP servers ({{ ad.mcp_with_github|num }} with a repo)</h3>
+        {{ bar_table(ad.star_bands, 'Stars', '#ca8a04') }}
+        {% if ad.top_repos %}
+        <h3 class="text-sm font-semibold text-slate-800 mt-5 mb-2">Most-starred repositories</h3>
+        <table class="st-table w-full text-sm">
+          <tbody>
+          {% for r in ad.top_repos %}
+            <tr><td class="min-w-0"><a href="/mcp/servers/{{ r.slug }}" class="hover:text-blue-600 block truncate">{{ r.name }}</a><div class="text-xs text-slate-400 mono truncate">{{ r.repo }}</div></td><td class="num mono">★ {{ r.stars|num }}</td></tr>
+          {% endfor %}
+          </tbody>
+        </table>
+        {% endif %}
+      </div>
+      {% endif %}
+      {% if ad.tranco %}
+      <div class="svc-card p-5">
+        <h3 class="text-sm font-semibold text-slate-800 mb-2">Site rank in Tranco top 1M{% if ad.tranco.list_date %} (list of {{ ad.tranco.list_date }}){% endif %}</h3>
+        <table class="st-table w-full text-sm">
+          <thead><tr><th scope="col">Protocol</th><th scope="col" class="num">Top 10k</th><th scope="col" class="num">10k–100k</th><th scope="col" class="num">100k–1M</th><th scope="col" class="num">Ranked</th></tr></thead>
+          <tbody>
+          {% for kind in kinds %}{% set t = ad.tranco[kind] %}{% if t %}
+            <tr><th scope="row" class="font-normal text-slate-700">{{ kind_label[kind] }}</th>
+              <td class="num mono">{{ t.bands['Top 10k']|num }}</td><td class="num mono">{{ t.bands['10k–100k']|num }}</td><td class="num mono">{{ t.bands['100k–1M']|num }}</td>
+              <td class="num mono text-slate-500">{{ (100 * t.ranked / t.reachable_with_site)|round(1) if t.reachable_with_site else 0 }}%</td></tr>
+          {% endif %}{% endfor %}
+          </tbody>
+        </table>
+        <p class="text-xs text-slate-500 mt-3">Ranked by the domain an agent calls (MCP endpoint, x402 URL, A2A interface). Domains behind more than 20 of our listings, hosting platforms and content sites such as youtube.com or github.com are left out.</p>
+        {% if ad.npm_top and view in ('all', 'mcp') %}
+        <h3 class="text-sm font-semibold text-slate-800 mt-5 mb-2">Most-downloaded npm packages (30 days)</h3>
+        <table class="st-table w-full text-sm"><tbody>
+          {% for n in ad.npm_top %}<tr><td class="mono text-xs">{{ n.package }}</td><td class="num mono">{{ n.downloads_30d|num }}</td></tr>{% endfor %}
+        </tbody></table>
+        {% endif %}
+      </div>
+      {% endif %}
+    </div>
+    {{ card_foot('GitHub and npm refreshed weekly; Tranco list refreshed daily.', 'adoption') }}
+  </section>
+  {% endif %}
+
   {# Methodology #}
   <section id="method" class="border-t border-slate-200 pt-10">
     <div class="st-kicker">Scope &amp; limits</div>
@@ -421,6 +471,7 @@
       <p id="method-safety"><strong>Safety.</strong> Pattern rules over tool metadata only; no code is executed.</p>
       <p id="method-topics"><strong>Topics.</strong> Whole-word match of a fixed word list on name and description. Listings whose text names more than five topics (gateway catalogues) are left out{% if snap.topics.skipped_catalogue %}: {% for k, n in snap.topics.skipped_catalogue.items() %}{{ n|num }} {{ kind_label[k] }}{{ ', ' if not loop.last }}{% endfor %}{% endif %}.</p>
       <p id="method-growth"><strong>Growth.</strong> Earliest first-seen date across a listing's sources.</p>
+      <p id="method-adoption"><strong>Adoption.</strong> GitHub stars and last push from the GitHub REST API for the repository a listing links as its source; npm downloads over 30 days from the npm downloads API for packages published on npm; site rank from the <a href="https://tranco-list.eu" class="text-blue-600 hover:underline" rel="noopener" target="_blank">Tranco</a> research list (registrable domain). Several listings can share one repository. These are attention signals, not measures of quality, and are not used for ranking.</p>
     </div>
   </section>
 

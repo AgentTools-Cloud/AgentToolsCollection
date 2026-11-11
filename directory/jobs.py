@@ -654,6 +654,28 @@ def cmd_health(only_unknown: bool = False, quarantined_only: bool = False) -> in
     return 0
 
 
+def cmd_popularity(which: str = "all", budget: int | None = None) -> int:
+    """Refresh external adoption signals (Tranco, npm, GitHub). Display only."""
+    from . import popularity
+    read = lambda: db.connect(read_only=True)  # noqa: E731
+    steps = ("tranco", "npm", "github") if which == "all" else (which,)
+    for step in steps:
+        try:
+            if step == "tranco":
+                res = popularity.refresh_tranco(read, db.writer)
+            elif step == "npm":
+                res = popularity.refresh_npm(read, db.writer)
+            else:
+                res = popularity.refresh_github(read, db.writer,
+                                                budget=budget or popularity.GITHUB_PER_HOUR)
+        except Exception as e:  # noqa: BLE001 - one source failing must not stop the others
+            log.exception("popularity %s failed", step)
+            res = {"error": repr(e)}
+        log.info("popularity %s: %s", step, res)
+        print(json.dumps({step: res}, sort_keys=True))
+    return 0
+
+
 def cmd_stats_snapshot() -> int:
     """Compute today's public /stats snapshot and store it (one row per UTC day)."""
     from . import stats as stats_mod
@@ -2212,6 +2234,9 @@ def main(argv=None) -> int:
     sub.add_parser("health-a2a")
     sub.add_parser("readiness")
     sub.add_parser("stats-snapshot")
+    p_pop = sub.add_parser("popularity")
+    p_pop.add_argument("which", nargs="?", default="all", choices=("all", "tranco", "npm", "github"))
+    p_pop.add_argument("--budget", type=int, default=None)
     sub.add_parser("health-mcp")
     sub.add_parser("stats")
     p_retire = sub.add_parser("retire")
@@ -2309,6 +2334,8 @@ def main(argv=None) -> int:
         return cmd_readiness()
     if args.cmd == "stats-snapshot":
         return cmd_stats_snapshot()
+    if args.cmd == "popularity":
+        return cmd_popularity(args.which, args.budget)
     if args.cmd == "stats":
         return cmd_stats()
     if args.cmd == "sync-botsrated":

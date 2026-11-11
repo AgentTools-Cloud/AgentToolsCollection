@@ -1,0 +1,13 @@
+[Unit]
+Description=agent-tools external adoption signals (Tranco, npm, GitHub)
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/mcpserver
+EnvironmentFile=/opt/mcpserver/.env
+Environment="PYTHONPATH=/opt/mcpserver"
+# GitHub: at most 3,000 repos per run at 3,000/hour (OAuth App limit is 5,000).
+ExecStart=/opt/mcpserver/.venv/bin/python -m directory.jobs popularity all --budget 3000
+TimeoutStartSec=2h
+User=root
