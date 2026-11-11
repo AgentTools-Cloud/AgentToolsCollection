@@ -212,7 +212,8 @@ _LLMS_TXT = """# agent-tools.cloud
 - Categories and stats: /api/v1/categories, /api/v1/stats
 - Daily ecosystem statistics (CC BY 4.0): GET /api/v1/stats/summary?view=all|mcp|x402|a2a,
   full snapshot /stats.json, history /stats/daily.csv, page /stats
-- How many tools work, and why not: /stats/usable.json
+- How many tools work, and why not: /stats/usable.json ; topics: /stats/topics/{topic}.json ;
+  monthly: /stats/reports.json
 - Details add `readiness` and `peer` (percentile vs same-protocol peers);
   MCP/A2A add `popularity` (GitHub, npm, Tranco)
 - How scores and statistics are computed: GET /api/v1/methodology

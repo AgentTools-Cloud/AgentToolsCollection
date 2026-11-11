@@ -1,10 +1,10 @@
 {% extends "base.html" %}
 {% from "_macros.html" import grade_badge %}
-{% block title %}The state of agent tools — live statistics · agent-tools.cloud{% endblock %}
-{% block desc %}Daily statistics on x402 APIs, MCP servers and A2A agents: how many are reachable, which protocol versions they speak, readiness grades, uptime, latency, prices, access and safety. Open JSON and CSV.{% endblock %}
-{% block og_title %}The state of agent tools — live statistics{% endblock %}
-{% block twitter_title %}The state of agent tools — live statistics{% endblock %}
-{% block canonical %}<link rel="canonical" href="https://agent-tools.cloud/stats">{% endblock %}
+{% block title %}{{ page_title|default('The state of agent tools') }} — live statistics · agent-tools.cloud{% endblock %}
+{% block desc %}{% if view and view != 'all' and kind_label %}Daily statistics on {{ kind_label[view] }}: how many are reachable, protocol versions, readiness grades, uptime, latency, access and topics. Open JSON and CSV.{% else %}Daily statistics on x402 APIs, MCP servers and A2A agents: how many are reachable, which protocol versions they speak, readiness grades, uptime, latency, prices, access and safety. Open JSON and CSV.{% endif %}{% endblock %}
+{% block og_title %}{{ page_title|default('The state of agent tools') }} — live statistics{% endblock %}
+{% block twitter_title %}{{ page_title|default('The state of agent tools') }} — live statistics{% endblock %}
+{% block canonical %}<link rel="canonical" href="https://agent-tools.cloud{{ page_path|default('/stats') }}">{% endblock %}
 {% block head_extra %}
 <style>
   .st-kicker { font: 600 11px/1 'JetBrains Mono', ui-monospace, monospace; letter-spacing: .08em; color: #64748b; text-transform: uppercase; }
@@ -95,8 +95,12 @@
 {% set q = '?view=' ~ view ~ '&period=' ~ period %}
 <header class="max-w-4xl">
   <div class="st-kicker flex items-center gap-2"><span class="inline-block w-2 h-2 rounded-full bg-emerald-500" aria-hidden="true"></span>Live · updated daily</div>
-  <h1 class="text-3xl md:text-4xl font-extrabold tracking-tight mt-3 text-slate-900">The state of agent tools</h1>
+  <h1 class="text-3xl md:text-4xl font-extrabold tracking-tight mt-3 text-slate-900">{{ page_title|default("The state of agent tools") }}</h1>
+  {% if view != 'all' %}
+  <p class="text-slate-600 mt-3 leading-relaxed">What our own probes see across {{ snap.kpis[view].indexed|num }} {{ kind_label[view] }}: how many answer, which protocol versions they speak, how ready they are for an agent to call, and what they cover. <a href="/stats" class="text-blue-700 hover:underline">All protocols</a></p>
+  {% else %}
   <p class="text-slate-600 mt-3 leading-relaxed">What our own probes see across {{ snap.kpis.all.indexed|num }} listings (x402 APIs, MCP servers and A2A agents): how many answer, which protocol versions they speak, how ready they are for an agent to call, and what they charge.</p>
+  {% endif %}
   <p class="text-xs text-slate-500 mt-3 mono flex flex-wrap gap-x-3 gap-y-1">
     <span>As of {{ snap.as_of }}</span>
     <a href="#method" class="underline decoration-dotted hover:text-slate-900">Methodology</a>
@@ -110,12 +114,12 @@
 <nav class="mt-6 flex flex-wrap items-center gap-3" aria-label="Stats view">
   <div class="st-toggle inline-flex gap-1 bg-white border border-slate-200 rounded-xl p-1">
     {% for v, label in [('all','All'),('x402','x402'),('mcp','MCP'),('a2a','A2A')] %}
-      <a href="/stats?view={{ v }}&period={{ period }}" aria-current="{{ 'true' if v == view else 'false' }}">{{ label }}</a>
+      <a href="/stats{{ ('/' ~ v) if v != 'all' }}{{ ('?period=' ~ period) if period != 7 }}" aria-current="{{ 'true' if v == view else 'false' }}">{{ label }}</a>
     {% endfor %}
   </div>
   <div class="st-toggle inline-flex gap-1 bg-white border border-slate-200 rounded-xl p-1">
     {% for p in [7, 30, 90] %}
-      <a href="/stats?view={{ view }}&period={{ p }}" aria-current="{{ 'true' if p == period else 'false' }}">{{ p }}d</a>
+      <a href="{{ page_path|default("/stats") }}?period={{ p }}" aria-current="{{ 'true' if p == period else 'false' }}">{{ p }}d</a>
     {% endfor %}
   </div>
 </nav>
@@ -163,6 +167,8 @@
       <a href="#topics">09 Topics</a>
       <a href="#growth">10 Growth</a>
       {% if snap.adoption and snap.adoption.available %}<a href="#adoption">11 Adoption</a>{% endif %}
+      {% if view == 'all' %}<a href="#searches">12 Searches</a>{% endif %}
+      <a href="/stats/reports">Monthly reports</a>
       <a href="#method">Methodology</a>
       <a href="#cite">Cite</a>
     </nav>
@@ -364,7 +370,7 @@
         <thead><tr><th scope="col">Topic</th>{% for kind in kinds %}<th scope="col" class="num">{{ kind_label[kind] }}</th>{% endfor %}</tr></thead>
         <tbody>
         {% for r in snap.topics.rows[:20] %}
-          <tr><th scope="row" class="font-normal text-slate-700 mono text-xs">{{ r.topic }}</th>
+          <tr><th scope="row" class="font-normal text-slate-700 mono text-xs"><a href="/stats/topics/{{ r.topic }}" class="hover:text-blue-700 underline decoration-dotted">{{ r.topic }}</a></th>
           {% for kind in kinds %}{% set p = r[kind ~ '_pct'] %}
             <td class="num mono text-xs" style="background:rgba(37,99,235,{{ [p / 25, 0.9]|min|round(2) }});color:{{ '#fff' if p >= 16 else '#0f172a' }}">{{ p }}%</td>
           {% endfor %}</tr>
@@ -457,6 +463,32 @@
   {% endif %}
 
   {# Methodology #}
+  {% if view == 'all' %}
+  {% set sd = snap.search_demand or {} %}
+  <section id="searches">
+    {{ section_head('12', 'Searches', ('People searched ' ~ (sd.searches|num) ~ ' times over the last ' ~ (sd.days or 30) ~ ' days.') if sd.searches else 'Search counting started on 11 November 2026; the first terms appear once each has been searched at least five times.', 'What visitors, API clients and agents type into our search, counted in aggregate. A term is shown only after at least ' ~ (sd.min_searches or 5) ~ ' searches; no IP, account or session is stored with it.') }}
+    <div class="grid gap-4 mt-5 md:grid-cols-2">
+      <div class="svc-card p-5">
+        <h3 class="text-sm font-semibold text-slate-800">Most searched</h3>
+        {% if sd.top %}
+        <table class="st-table w-full text-sm mt-2"><thead><tr><th scope="col">Term</th><th scope="col" class="num">Searches</th><th scope="col" class="num">No results</th></tr></thead><tbody>
+        {% for i in sd.top[:15] %}<tr><td class="mono text-xs">{{ i.term }}</td><td class="num mono">{{ i.searches|num }}</td><td class="num mono text-slate-500">{{ i.no_results_pct }}%</td></tr>{% endfor %}
+        </tbody></table>
+        {% else %}<p class="text-sm text-slate-400 mt-2">Not enough searches yet.</p>{% endif %}
+      </div>
+      <div class="svc-card p-5">
+        <h3 class="text-sm font-semibold text-slate-800">Searched, but mostly nothing found</h3>
+        <p class="text-xs text-slate-500 mt-1">Demand we cannot serve yet: half or more of these searches returned no listing.</p>
+        {% if sd.unmet %}
+        <table class="st-table w-full text-sm mt-2"><thead><tr><th scope="col">Term</th><th scope="col" class="num">Searches</th><th scope="col" class="num">No results</th></tr></thead><tbody>
+        {% for i in sd.unmet[:15] %}<tr><td class="mono text-xs">{{ i.term }}</td><td class="num mono">{{ i.searches|num }}</td><td class="num mono text-slate-500">{{ i.no_results_pct }}%</td></tr>{% endfor %}
+        </tbody></table>
+        {% else %}<p class="text-sm text-slate-400 mt-2">None above the threshold yet.</p>{% endif %}
+      </div>
+    </div>
+  </section>
+  {% endif %}
+
   <section id="method" class="border-t border-slate-200 pt-10">
     <div class="st-kicker">Scope &amp; limits</div>
     <h2 class="text-xl font-bold tracking-tight mt-2">Methodology</h2>

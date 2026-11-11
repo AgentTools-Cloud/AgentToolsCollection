@@ -314,9 +314,17 @@ def _open():
     return directory_db.connect(DB_PATH, read_only=True)
 
 
+_SEARCH_TOOL_KIND = {"search": "x402", "search_mcp_servers": "mcp",
+                     "search_a2a_agents": "a2a", "search_resources": None}
+
+
 def _log_call(tool, ctx: Context | None = None, args=None,
               result_n=None, result_slug=None):
     """Best-effort usage log. Never raises."""
+    if tool in _SEARCH_TOOL_KIND and args:
+        from . import search_terms
+        kind = _SEARCH_TOOL_KIND[tool] or (args.get("protocol") or "all")
+        search_terms.record(kind, args.get("intent"), result_n or 0, "mcp")
     try:
         client_name = _client_name_from_ctx(ctx)
         client_ip = _current_client_ip.get()

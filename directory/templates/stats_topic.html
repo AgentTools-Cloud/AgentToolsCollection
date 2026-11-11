@@ -1,0 +1,108 @@
+{% extends "base.html" %}
+{% block title %}{{ t.topic|capitalize }} agent tools: x402, MCP and A2A statistics · agent-tools.cloud{% endblock %}
+{% block desc %}{{ t.answer }}{% endblock %}
+{% block og_title %}{{ t.topic|capitalize }} agent tools — statistics{% endblock %}
+{% block twitter_title %}{{ t.topic|capitalize }} agent tools — statistics{% endblock %}
+{% block canonical %}<link rel="canonical" href="https://agent-tools.cloud/stats/topics/{{ t.topic }}">{% endblock %}
+{% block head_extra %}
+<style>
+  .st-kicker { font: 600 11px/1 'JetBrains Mono', ui-monospace, monospace; letter-spacing: .08em; color: #64748b; text-transform: uppercase; }
+  .st-table td, .st-table th { padding: 6px 8px; vertical-align: middle; }
+  .st-table th { font-weight: 500; color: #64748b; font-size: 12px; text-align: left; }
+  .st-table td.num, .st-table th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .st-table tbody tr + tr td, .st-table tbody tr + tr th { border-top: 1px solid #f1f5f9; }
+  main { font-feature-settings: "calt" 0; }
+</style>
+<script type="application/ld+json">
+{{ {
+  "@context": "https://schema.org",
+  "@type": "Dataset",
+  "name": t.topic|capitalize ~ " agent tools across x402, MCP and A2A",
+  "description": t.answer,
+  "url": "https://agent-tools.cloud/stats/topics/" ~ t.topic,
+  "license": "https://creativecommons.org/licenses/by/4.0/",
+  "creator": {"@type": "Organization", "name": "agent-tools.cloud", "url": "https://agent-tools.cloud"},
+  "dateModified": t.as_of[:10],
+  "isAccessibleForFree": true,
+  "distribution": [{"@type": "DataDownload", "encodingFormat": "application/json", "contentUrl": "https://agent-tools.cloud/stats/topics/" ~ t.topic ~ ".json"}]
+} | tojson }}
+</script>
+{% endblock %}
+
+{% block content %}
+<nav class="text-xs text-slate-500 mono" aria-label="Breadcrumb"><a href="/stats" class="hover:text-slate-900">Stats</a> <span aria-hidden="true">/</span> <a href="/stats#topics" class="hover:text-slate-900">Topics</a> <span aria-hidden="true">/</span> {{ t.topic }}</nav>
+<header class="max-w-4xl mt-4">
+  <div class="st-kicker">Topic · #{{ t.rank }} by supply</div>
+  <h1 class="text-3xl md:text-4xl font-extrabold tracking-tight mt-3 text-slate-900">{{ t.topic|capitalize }} agent tools</h1>
+  <p class="text-lg text-slate-700 mt-4 leading-relaxed">{{ t.answer }}</p>
+  <p class="text-xs text-slate-500 mt-3 mono flex flex-wrap gap-x-3 gap-y-1">
+    <span>As of {{ t.as_of }}</span>
+    <a href="/stats/topics/{{ t.topic }}.json" class="underline decoration-dotted hover:text-slate-900">JSON</a>
+    <a href="/stats#method-topics" class="underline decoration-dotted hover:text-slate-900">How topics are matched</a>
+  </p>
+</header>
+
+<section class="mt-8 svc-card p-5 md:p-6" aria-labelledby="by-protocol">
+  <h2 id="by-protocol" class="text-lg font-bold text-slate-900">By protocol</h2>
+  <div class="overflow-x-auto mt-3">
+  <table class="st-table w-full text-sm">
+    <thead><tr><th scope="col">Protocol</th><th scope="col" class="num">Reachable listings</th><th scope="col" class="num">Share of protocol</th><th scope="col" class="num">Ready (A/B)</th><th scope="col" class="num">Median readiness</th><th scope="col" class="num">Median latency</th><th scope="col"><span class="sr-only">Browse</span></th></tr></thead>
+    <tbody>
+    {% for r in t.by_kind %}
+      <tr>
+        <th scope="row" class="!text-slate-900 !font-medium !text-sm">{{ r.label }}</th>
+        <td class="num mono">{{ r.reachable|num }}</td>
+        <td class="num mono">{{ r.pct }}%</td>
+        <td class="num mono">{{ r.ready|num }}</td>
+        <td class="num mono">{{ r.median_readiness if r.median_readiness is not none else "—" }}</td>
+        <td class="num mono">{{ (r.median_latency_ms|string ~ " ms") if r.median_latency_ms is not none else "—" }}</td>
+        <td class="text-right whitespace-nowrap"><a class="text-blue-700 hover:underline text-xs" href="/{{ r.kind }}?q={{ t.topic|urlencode }}&health=ok&ref=topic">Browse →</a></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% if t.gaps %}
+  <ul class="mt-4 text-sm text-slate-600 space-y-1">
+    {% for g in t.gaps %}<li><strong>Gap:</strong> {{ g.strong_pct }}% of {{ (t.by_kind|selectattr("kind","equalto",g.strong_kind)|first).label }} mention {{ t.topic }}, but only {{ g.pct }}% of {{ (t.by_kind|selectattr("kind","equalto",g.kind)|first).label }}.</li>{% endfor %}
+  </ul>
+  {% endif %}
+</section>
+
+<section class="mt-6 svc-card p-5 md:p-6" aria-labelledby="top">
+  <h2 id="top" class="text-lg font-bold text-slate-900">Highest readiness, per protocol</h2>
+  <p class="text-xs text-slate-500 mt-1">Up to three reachable listings per protocol, by readiness score, then latency. Readiness is display only and not an endorsement.</p>
+  {% if t.top %}
+  <table class="st-table w-full text-sm mt-3">
+    <thead><tr><th scope="col">Listing</th><th scope="col">Protocol</th><th scope="col" class="num">Readiness</th><th scope="col" class="num">Latency</th></tr></thead>
+    <tbody>
+    {% for i in t.top %}
+      <tr>
+        <td><a class="text-blue-700 hover:underline" href="{{ {'x402': '/services/', 'mcp': '/mcp/servers/', 'a2a': '/a2a/agents/'}[i.kind] }}{{ i.slug }}">{{ i.name }}</a></td>
+        <td class="text-slate-500 text-xs">{{ (t.by_kind|selectattr("kind","equalto",i.kind)|first).label }}</td>
+        <td class="num mono">{{ i.grade or "" }} {{ "%.0f"|format(i.readiness) }}</td>
+        <td class="num mono">{{ (i.latency_ms|string ~ " ms") if i.latency_ms is not none else "—" }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p class="text-sm text-slate-400 mt-2">No scored listings yet.</p>{% endif %}
+</section>
+
+<section class="mt-6 svc-card p-5 md:p-6" aria-labelledby="searches">
+  <h2 id="searches" class="text-lg font-bold text-slate-900">What people search for</h2>
+  <p class="text-xs text-slate-500 mt-1">Search terms containing “{{ t.topic }}” over the last 30 days, counted in aggregate; shown only after five searches.</p>
+  {% if t.searches %}
+  <table class="st-table w-full text-sm mt-3">
+    <thead><tr><th scope="col">Term</th><th scope="col" class="num">Searches</th><th scope="col" class="num">No results</th></tr></thead>
+    <tbody>{% for i in t.searches %}<tr><td class="mono text-xs">{{ i.term }}</td><td class="num mono">{{ i.searches|num }}</td><td class="num mono text-slate-500">{{ i.no_results_pct }}%</td></tr>{% endfor %}</tbody>
+  </table>
+  {% else %}<p class="text-sm text-slate-400 mt-2">Not enough searches yet.</p>{% endif %}
+</section>
+
+<nav class="mt-8 text-sm" aria-label="Other topics">
+  <h2 class="st-kicker">Other topics</h2>
+  <p class="mt-3 flex flex-wrap gap-2">{% for o in topics if o != t.topic %}<a href="/stats/topics/{{ o }}" class="px-2 py-1 rounded-md bg-white border border-slate-200 text-slate-700 hover:border-slate-400 mono text-xs">{{ o }}</a>{% endfor %}</p>
+</nav>
+<p class="mt-6 text-xs text-slate-500">Keyword match on name and description of reachable listings; gateway catalogues that name more than five topics are left out. Cite as: agent-tools.cloud, “{{ t.topic|capitalize }} agent tools”, {{ t.as_of[:10] }}. Data CC BY 4.0.</p>
+{% endblock %}
