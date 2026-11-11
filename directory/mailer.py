@@ -260,8 +260,13 @@ def claim_invitation_message(
     source_name: str,
     listing_url: str,
     unsubscribe_url: str,
+    readiness: dict | None = None,
 ) -> tuple[str, str, str]:
-    """Render an English invitation without consulting SMTP or sending mail."""
+    """Render an English invitation without consulting SMTP or sending mail.
+
+    `readiness` ({"grade", "score"}) adds one line pointing at the listing's
+    readiness breakdown; omitted when the listing has not been scored.
+    """
     name = " ".join(str(service_name).split())[:160]
     source = " ".join(str(source_name).split())[:160]
     if not name or not source:
@@ -274,13 +279,29 @@ def claim_invitation_message(
             raise ValueError("invitation_links_must_use_our_site")
     subject = f"{name} is listed on Agent Tools"
     claim_url = SITE + "/account"
+    docs_url = SITE + "/docs/claim"
+    grade = str((readiness or {}).get("grade") or "").strip()[:2]
+    score = (readiness or {}).get("score")
+    readiness_line = readiness_html = ""
+    if grade and isinstance(score, (int, float)):
+        readiness_line = (
+            f"Its readiness grade is {grade} ({score:.0f}/100). The listing page shows "
+            "each check and what is missing:\n"
+            f"{listing_url}#readiness\n\n")
+        readiness_html = (
+            f'<p>Its readiness grade is <b>{html.escape(grade)}</b> ({score:.0f}/100). '
+            f'<a href="{html.escape(listing_url, quote=True)}#readiness" style="color:{BLUE};">'
+            "See each check and what is missing</a>.</p>")
     text = (
         "Hi,\n\n"
         f'We found "{name}" in {source} and added it to Agent Tools:\n'
         f"{listing_url}\n\n"
-        "Claiming is free. After verifying control of your host, you can correct "
-        "your listing and maintain its API details:\n"
-        f"{claim_url}\n\n"
+        f"{readiness_line}"
+        "Claiming is free and takes a few minutes: sign in with GitHub, then publish "
+        "the token we give you as a small file on your site or as a DNS TXT record. "
+        "After that you can correct your listing and maintain its API details:\n"
+        f"{claim_url}\n"
+        f"How claiming works: {docs_url}\n\n"
         "Your listing stays up whether or not you claim it.\n"
         "This is a one-time listing notification. We won't subscribe you to a mailing list.\n"
         f"Stop these invitations: {unsubscribe_url}\n\n"
@@ -303,8 +324,10 @@ def claim_invitation_message(
   <h1 style="margin:0 0 16px;font-size:22px;line-height:1.3;">{safe_name} is listed</h1>
   <p>We found your service in {safe_source} and added it to Agent Tools.</p>
   <p><a href="{safe_listing}" style="color:{BLUE};">View your listing</a></p>
-  <p>Claiming is free. After verifying control of your host, you can correct your listing and maintain its API details.</p>
+  {readiness_html}
+  <p>Claiming is free and takes a few minutes: sign in with GitHub, then publish the token we give you as a small file on your site or as a DNS TXT record. After that you can correct your listing and maintain its API details.</p>
   <p><a href="{claim_url}" style="display:inline-block;padding:10px 16px;background:{BLUE};color:#fff;border-radius:6px;text-decoration:none;">Claim your host</a></p>
+  <p style="font-size:13px;"><a href="{docs_url}" style="color:{BLUE};">How claiming works</a></p>
   <p>Your listing stays up whether or not you claim it.</p>
   <p style="font-size:13px;color:{SLATE};">This is a one-time listing notification. We won't subscribe you to a mailing list.
   <a href="{safe_unsubscribe}" style="color:{SLATE};">Stop these invitations</a>.</p>
@@ -318,7 +341,8 @@ def claim_invitation_group_message(listings: list[dict], unsubscribe_url: str) -
   if not listings:
     raise ValueError("claim_invitation_listings_required")
   first = listings[0]
-  single = claim_invitation_message(first["name"], first["source_name"], first["listing_url"], unsubscribe_url)
+  single = claim_invitation_message(first["name"], first["source_name"], first["listing_url"], unsubscribe_url,
+                                    first.get("readiness"))
   if len(listings) == 1:
     return single
   entries = []
