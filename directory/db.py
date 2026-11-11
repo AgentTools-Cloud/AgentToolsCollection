@@ -684,16 +684,6 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
         )
         c.execute("CREATE INDEX IF NOT EXISTS idx_a2a_hist_agent "
                   "ON a2a_health_history(agent_id, checked_at)")
-        # Addresses / domains the mail provider could not deliver to. Every
-        # external send checks this first; a failed recipient is never retried.
-        c.execute(
-            """CREATE TABLE IF NOT EXISTS mail_suppressions (
-                 target TEXT PRIMARY KEY,      -- lower-case address or '@domain'
-                 reason TEXT NOT NULL,
-                 source TEXT NOT NULL,
-                 created_at INTEGER NOT NULL
-               )"""
-        )
         c.execute(
             """CREATE TABLE IF NOT EXISTS mcp_health_history (
                  id INTEGER PRIMARY KEY,
@@ -1757,28 +1747,6 @@ def get_by_slug(conn, slug):
     out["sources"] = listing_sources(conn, "x402", int(out["id"]))
     _attach_readiness(conn, "x402", out)
     return out
-
-
-def mail_suppressed(conn, address: str) -> str | None:
-    """Reason the address (or its whole domain) must not be mailed, else None."""
-    addr = (address or "").strip().lower()
-    if "@" not in addr:
-        return None
-    row = conn.execute(
-        "SELECT reason FROM mail_suppressions WHERE target IN (?, ?) LIMIT 1",
-        (addr, "@" + addr.rsplit("@", 1)[1])).fetchone()
-    return row[0] if row else None
-
-
-def add_mail_suppression(conn, target: str, reason: str, source: str,
-                         now: int | None = None) -> bool:
-    target = (target or "").strip().lower()
-    if not target or "@" not in target:
-        return False
-    cur = conn.execute(
-        "INSERT OR IGNORE INTO mail_suppressions(target, reason, source, created_at) "
-        "VALUES (?,?,?,?)", (target, reason[:200], source[:80], int(now or time.time())))
-    return cur.rowcount > 0
 
 
 def _attach_readiness(conn, kind: str, out: dict) -> None:
