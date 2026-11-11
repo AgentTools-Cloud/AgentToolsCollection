@@ -210,6 +210,8 @@ _LLMS_TXT = """# agent-tools.cloud
 - x402 card: GET /api/v1/services/{slug}
 - Recommendations: GET /api/v1/ask?q=...
 - Categories and stats: /api/v1/categories, /api/v1/stats
+- Daily ecosystem statistics (CC BY 4.0): GET /api/v1/stats/summary?view=all|mcp|x402|a2a,
+  full snapshot /stats.json, history /stats/daily.csv, page /stats
 
 Read each resource's payment requirements before calling it; headline price ranges are not per-call quotes.
 
@@ -217,7 +219,7 @@ Read each resource's payment requirements before calling it; headline price rang
 
 Endpoint: https://agent-tools.cloud/mcp-discovery/
 Tools: search, get, search_mcp_servers, get_mcp_server, search_a2a_agents,
-search_resources, ask_services, list_categories, stats, scan_mcp_safety, register,
+search_resources, ask_services, list_categories, stats, directory_stats, scan_mcp_safety, register,
 prepare_paid_verification, execute_paid_verification, get_paid_verification,
 claim_service_url, verify_service_url, get_owned_listing, edit_owned_listing.
 

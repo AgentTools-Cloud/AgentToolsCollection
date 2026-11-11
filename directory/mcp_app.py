@@ -535,10 +535,38 @@ async def list_categories(ctx: Context | None = None) -> dict[str, Any]:
 
 @discover_mcp.tool(annotations=_READ_ONLY)
 async def stats(ctx: Context | None = None) -> dict[str, Any]:
-    """High-level stats about the directory: total services, healthy count, sources."""
+    """High-level stats about the directory: x402 total, healthy count and chains,
+    plus `snapshot`, the daily digest across x402, MCP and A2A (see directory_stats)."""
+    from . import stats as directory_stats_mod
     with _open() as conn:
         out = directory_db.stats(conn)
+    try:
+        out["snapshot"] = directory_stats_mod.summary(directory_stats_mod.latest(_open))
+    except Exception:
+        out["snapshot"] = {"available": False}
     _log_call("stats", ctx=ctx, result_n=out.get("total"))
+    return out
+
+
+@discover_mcp.tool(annotations=_READ_ONLY)
+async def directory_stats(
+    view: str = "all",
+    ctx: Context | None = None,
+) -> dict[str, Any]:
+    """Daily statistics on the agent-tool ecosystem as seen by our probes.
+
+    Args:
+        view: "all", "mcp", "x402" or "a2a" to scope the figures to one protocol.
+
+    Returns counts (indexed, reachable, protocol-verified, readiness A/B), one
+    finding sentence per topic, key facts (x402 prices and networks, MCP and A2A
+    protocol versions, MCP auth, A2A card signatures), the snapshot time, and
+    links to the full JSON snapshot, the daily CSV and the methodology.
+    """
+    from . import stats as directory_stats_mod
+    out = directory_stats_mod.summary(directory_stats_mod.latest(_open), view)
+    _log_call("directory_stats", ctx=ctx, args={"view": view},
+              result_n=(out.get("kpis") or {}).get(out.get("view"), {}).get("indexed"))
     return out
 
 

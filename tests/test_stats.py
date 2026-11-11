@@ -147,5 +147,47 @@ class StatsSnapshotTests(unittest.TestCase):
         self.assertIn("has not been computed yet", html)
 
 
+class AgentAccessTests(unittest.TestCase):
+    """The digest agents get through MCP, A2A and /api/v1/stats."""
+
+    @classmethod
+    def setUpClass(cls):
+        StatsSnapshotTests.setUpClass()
+        cls.snap = StatsSnapshotTests.snap
+
+    @classmethod
+    def tearDownClass(cls):
+        StatsSnapshotTests.tearDownClass()
+
+    def test_summary_scopes_and_is_small(self):
+        s = stats.summary(self.snap)
+        self.assertTrue(s["available"])
+        self.assertEqual(s["kpis"]["all"]["indexed"], 7)
+        self.assertEqual(set(s["facts"]), {"x402", "mcp", "a2a"})
+        self.assertLess(len(json.dumps(s)), 8000)
+        m = stats.summary(self.snap, "mcp")
+        self.assertEqual(list(m["kpis"]), ["mcp"])
+        self.assertEqual(set(m["facts"]), {"mcp"})
+        self.assertEqual(stats.summary(self.snap, "bogus")["view"], "all")
+        self.assertFalse(stats.summary(None)["available"])
+
+    def test_a2a_stats_intent(self):
+        from directory import a2a
+        self.assertEqual(a2a._stats_request({}, "How many MCP servers are reachable?"), "mcp")
+        self.assertEqual(a2a._stats_request({}, "what is the state of agent tools today"), "all")
+        self.assertEqual(a2a._stats_request(
+            {"parts": [{"kind": "data", "data": {"skill": "directory_stats", "view": "x402"}}]}, ""), "x402")
+        self.assertIsNone(a2a._stats_request({}, "find a statistics API for sports data"))
+        stats._latest_cache.update(at=time.time(), snap=self.snap)
+        try:
+            out = a2a._answer({"parts": [{"kind": "text", "text": "directory stats for x402"}]})
+        finally:
+            stats._latest_cache.update(at=0.0, snap=None)
+        self.assertIn("3 indexed", out["text"])
+        self.assertEqual(out["data"]["view"], "x402")
+        skills = [s["id"] for s in a2a.own_agent_card()["skills"]]
+        self.assertIn("directory_stats", skills)
+
+
 if __name__ == "__main__":
     unittest.main()

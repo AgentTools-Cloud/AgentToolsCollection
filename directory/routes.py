@@ -385,8 +385,11 @@ def stats_page(request: Request,
     })
 
 
-@router.get("/stats.json", include_in_schema=False)
+@router.get("/stats.json", tags=["directory"], summary="Full daily statistics snapshot")
 def stats_json():
+    """Everything behind /stats: funnel, sources, protocol versions, readiness,
+    uptime and latency, x402 prices/networks/payment evidence, access, safety,
+    topic coverage and growth. Recomputed once a day. CC BY 4.0."""
     snap, _h = _stats_payload()
     if snap is None:
         raise HTTPException(status_code=503, detail="statistics not computed yet")
@@ -394,7 +397,8 @@ def stats_json():
                                        "Access-Control-Allow-Origin": "*"})
 
 
-@router.get("/stats/daily.csv", include_in_schema=False)
+@router.get("/stats/daily.csv", tags=["directory"], summary="Headline metrics for every stored day (CSV)",
+            response_class=Response)
 def stats_daily_csv():
     """Every stored day's headline metrics, long format: day,kind,metric,value."""
     import csv
@@ -994,8 +998,23 @@ def api_broker_recommend(
 
 @router.get("/api/v1/stats", tags=["directory"])
 def api_stats():
+    """x402 totals and chains (legacy fields) plus `snapshot`, the daily digest
+    across x402, MCP and A2A. The full snapshot is at /stats.json."""
+    from . import stats as stats_mod
     with _conn() as c:
-        return db.stats(c)
+        out = db.stats(c)
+    snap, _h = _stats_payload()
+    out["snapshot"] = stats_mod.summary(snap)
+    return out
+
+
+@router.get("/api/v1/stats/summary", tags=["directory"])
+def api_stats_summary(view: str = Query(default="all", pattern="^(all|mcp|x402|a2a)$",
+                                        description="all, mcp, x402 or a2a")):
+    """Daily digest: counts, findings and key facts for one protocol or all."""
+    from . import stats as stats_mod
+    snap, _h = _stats_payload()
+    return stats_mod.summary(snap, view)
 
 
 class SubmissionPayload(BaseModel):
@@ -2049,6 +2068,7 @@ def well_known():
             "unified_resource_search",
             "broker_recommend",
             "sponsored_paid_verification",
+            "directory_stats",
         ],
         "endpoints": {
             "search": {
@@ -2082,11 +2102,22 @@ def well_known():
             },
             "categories": "https://agent-tools.cloud/api/v1/categories",
             "stats": "https://agent-tools.cloud/api/v1/stats",
+            "directory_stats": {
+                "summary": "https://agent-tools.cloud/api/v1/stats/summary?view={all|mcp|x402|a2a}",
+                "snapshot": "https://agent-tools.cloud/stats.json",
+                "daily_csv": "https://agent-tools.cloud/stats/daily.csv",
+                "page": "https://agent-tools.cloud/stats",
+                "updated": "daily, after the 05:30 UTC probe run",
+                "license": "CC BY 4.0",
+                "returns": "indexed / reachable / protocol-verified / readiness counts, findings, "
+                           "x402 prices and networks, protocol versions, access, safety, topics, growth",
+            },
             "submit": "https://agent-tools.cloud/api/v1/submit",
             "mcp": {
                 "transport": "streamable-http",
                 "url": "https://agent-tools.cloud/mcp-discovery/",
-                "tools": ["search", "ask_services", "get", "list_categories", "stats", "register"],
+                "tools": ["search", "ask_services", "get", "list_categories", "stats",
+                          "directory_stats", "register"],
             },
             "a2a": {
                 "agent_card": "https://agent-tools.cloud/.well-known/agent-card.json",
