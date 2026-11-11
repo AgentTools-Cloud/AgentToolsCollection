@@ -207,6 +207,10 @@ def article_date(timestamp: int) -> str:
     return datetime.fromtimestamp(timestamp, timezone.utc).strftime("%Y-%m-%d")
 
 
+BLOG_RIGHTS = ("Copyright of the author. Quote short excerpts with a link; do not republish in full "
+               "without permission. See https://agent-tools.cloud/terms#data")
+
+
 def public_article_json(article: dict, *, full: bool = False) -> dict:
     """The public, agent-readable shape of one published article."""
     iso = lambda ts: datetime.fromtimestamp(ts, timezone.utc).isoformat() if ts else None
@@ -225,6 +229,7 @@ def public_article_json(article: dict, *, full: bool = False) -> dict:
         out["sponsor_name"] = article.get("sponsor_name")
     if full:
         out["markdown"] = article["markdown"]
+        out["rights"] = BLOG_RIGHTS
     return out
 
 
@@ -233,7 +238,8 @@ def public_article_list(store: ArticleStore, *, query: str = "", tag: str = "", 
     result = store.list_published(query=query, tag=tag, page=page, page_size=page_size)
     return {"items": [public_article_json(a) for a in result["items"]], "total": result["total"],
             "page": result["page"], "page_size": result["page_size"],
-            "feed": public_base_url() + "/articles/feed.xml"}
+            "feed": public_base_url() + "/articles/feed.xml",
+            "rights": BLOG_RIGHTS}
 
 
 def create_article_router(store: ArticleStore, templates: Jinja2Templates | None = None,

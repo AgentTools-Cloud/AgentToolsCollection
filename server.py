@@ -221,6 +221,13 @@ _LLMS_TXT = """# agent-tools.cloud
 - List: GET /api/v1/blog?q=&tag=&page= ; one article with Markdown body: GET /api/v1/blog/{slug}
 - Plain Markdown: /articles/{slug}.md ; RSS: /articles/feed.xml
 
+## Data use
+
+- Statistics: CC BY 4.0, link to https://agent-tools.cloud/stats
+- Listing data: free to use, including commercially; credit agent-tools.cloud with a link
+- Blog articles: copyright of the author; quote excerpts with a link, do not republish in full
+- Full terms: https://agent-tools.cloud/terms#data
+
 Read each resource's payment requirements before calling it; headline price ranges are not per-call quotes.
 
 ## HTTP MCP

@@ -34,9 +34,11 @@
     <p class="mt-3">Submit each service once, by its main endpoint. We read the other paid endpoints it advertises (for example in <span class="mono">/.well-known/x402</span>) and list them under that one entry, so there is no need to submit them separately. Submissions are limited per client, and that limit is part of the service: do not rotate IP addresses, accounts, keys or contact addresses to get past it, and do not split one origin into many separate submissions. We may merge such entries into one, reject further submissions for that origin or contact, and stop sending confirmation emails for them.</p>
   </div>
 
-  <div>
+  <div id="data" class="scroll-mt-20">
     <h2 class="text-lg font-semibold text-slate-800 mb-2">6. Scores, statistics and data</h2>
     <p>Quality grades, readiness scores, adoption signals and the statistics on <a class="text-blue-600 hover:underline" href="/stats">/stats</a> are our own measurements at the time shown, made from one vantage point with the method published at <a class="text-blue-600 hover:underline" href="/about#grading">/about</a> and <a class="text-blue-600 hover:underline mono" href="/api/v1/methodology">/api/v1/methodology</a>. They are not endorsements, rankings of business quality or guarantees about any service. The daily statistics (<span class="mono">/stats</span>, <span class="mono">/stats.json</span>, <span class="mono">/stats/daily.csv</span>) may be reused under <a class="text-blue-600 hover:underline" href="https://creativecommons.org/licenses/by/4.0/" rel="license noopener" target="_blank">CC BY 4.0</a> with a link to agent-tools.cloud/stats.</p>
+    <p class="mt-3"><b>Listing data.</b> Listing metadata comes partly from public registries, other directories and the services themselves, so we do not put it under an open licence. You may use it freely through our website, API, MCP and A2A endpoints and exports, including in commercial products, provided you credit &ldquo;agent-tools.cloud&rdquo; with a link and keep the request rate reasonable (section 4). Rights in third-party descriptions, names and logos stay with their owners.</p>
+    <p class="mt-3"><b>Blog articles.</b> Articles are the copyright of their authors (Agent Tools for our own posts). You may quote short excerpts with a link to the article; please do not republish an article in full without permission. Summaries and indexing by search engines and AI agents are welcome.</p>
   </div>
 
   <div>

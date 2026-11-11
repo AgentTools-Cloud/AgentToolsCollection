@@ -2126,6 +2126,13 @@ def well_known():
                            "x402 prices and networks, protocol versions, access, safety, topics, growth",
             },
             "methodology": "https://agent-tools.cloud/api/v1/methodology",
+            "data_use": {
+                "statistics": "CC BY 4.0, link to https://agent-tools.cloud/stats",
+                "listings": "free to use incl. commercially, credit agent-tools.cloud with a link; "
+                            "third-party content stays with its owners",
+                "blog": "copyright of the author; quote excerpts with a link, no full republication",
+                "terms": "https://agent-tools.cloud/terms#data",
+            },
             "listing_detail_fields": {
                 "readiness": "9-criterion readiness score + grade (display only) on every detail endpoint",
                 "popularity": "GitHub stars/last push, npm 30-day downloads, Tranco site rank "

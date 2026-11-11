@@ -952,6 +952,8 @@ class ArticleRouteTests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/v1/blog?tag=none").json()["total"], 0)
         full = self.client.get("/api/v1/blog/connection-checklist").json()
         self.assertIn("检查认证与连接方式", full["markdown"])
+        self.assertIn("terms#data", full["rights"])
+        self.assertIn("terms#data", body["rights"])
         self.assertEqual(self.client.get("/api/v1/blog/missing-slug").status_code, 404)
         self.store.withdraw(article["id"], 1, editor_id=7)
         self.assertEqual(self.client.get("/api/v1/blog/connection-checklist").status_code, 410)
