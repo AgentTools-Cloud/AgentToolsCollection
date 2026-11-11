@@ -1,0 +1,180 @@
+{% extends "base.html" %}
+{% block title %}How many agent tools actually work? · agent-tools.cloud{% endblock %}
+{% block desc %}{% if u.available %}{{ u.answer }} Per-protocol breakdown for x402 APIs, MCP servers and A2A agents, and why the rest fail.{% else %}How many x402 APIs, MCP servers and A2A agents answer a real probe, measured daily.{% endif %}{% endblock %}
+{% block og_title %}How many agent tools actually work?{% endblock %}
+{% block twitter_title %}How many agent tools actually work?{% endblock %}
+{% block canonical %}<link rel="canonical" href="https://agent-tools.cloud/stats/usable">{% endblock %}
+{% block head_extra %}
+<style>
+  .st-kicker { font: 600 11px/1 'JetBrains Mono', ui-monospace, monospace; letter-spacing: .08em; color: #64748b; text-transform: uppercase; }
+  .st-bar { height: 10px; border-radius: 3px; min-width: 2px; }
+  .st-track { background: #f1f5f9; border-radius: 3px; }
+  .st-table td, .st-table th { padding: 6px 8px; vertical-align: middle; }
+  .st-table th { font-weight: 500; color: #64748b; font-size: 12px; text-align: left; }
+  .st-table td.num, .st-table th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .st-table tbody tr + tr td { border-top: 1px solid #f1f5f9; }
+  main { font-feature-settings: "calt" 0; }
+</style>
+{% if u.available %}
+{% set mcp = u.by_protocol | selectattr("kind", "equalto", "mcp") | first %}
+{% set x = u.by_protocol | selectattr("kind", "equalto", "x402") | first %}
+{% set a = u.by_protocol | selectattr("kind", "equalto", "a2a") | first %}
+<script type="application/ld+json">
+{{ {
+  "@context": "https://schema.org",
+  "@graph": [
+    {"@type": "Dataset",
+     "name": "How many agent tools actually work",
+     "description": u.answer,
+     "url": "https://agent-tools.cloud/stats/usable",
+     "license": "https://creativecommons.org/licenses/by/4.0/",
+     "creator": {"@type": "Organization", "name": "agent-tools.cloud", "url": "https://agent-tools.cloud"},
+     "dateModified": u.as_of[:10],
+     "isAccessibleForFree": true,
+     "distribution": [{"@type": "DataDownload", "encodingFormat": "application/json", "contentUrl": "https://agent-tools.cloud/stats/usable.json"}]},
+    {"@type": "FAQPage",
+     "mainEntity": [
+       {"@type": "Question", "name": "How many agent tools actually work?",
+        "acceptedAnswer": {"@type": "Answer", "text": u.answer}},
+       {"@type": "Question", "name": "How many MCP servers work?",
+        "acceptedAnswer": {"@type": "Answer", "text": (mcp.reachable|num) ~ " of " ~ (mcp.indexed|num) ~ " indexed MCP servers (" ~ mcp.reachable_pct ~ "%) answered our latest probe; " ~ (mcp.verified|num) ~ " (" ~ mcp.verified_pct ~ "%) completed a full initialize and tools/list handshake. As of " ~ u.as_of ~ "."}},
+       {"@type": "Question", "name": "How many x402 APIs work?",
+        "acceptedAnswer": {"@type": "Answer", "text": (x.reachable|num) ~ " of " ~ (x.indexed|num) ~ " indexed x402 APIs (" ~ x.reachable_pct ~ "%) answered our latest probe; " ~ (x.verified|num) ~ " (" ~ x.verified_pct ~ "%) returned a valid 402 payment challenge. As of " ~ u.as_of ~ "."}},
+       {"@type": "Question", "name": "What counts as working?",
+        "acceptedAnswer": {"@type": "Answer", "text": "Reachable means the endpoint answered our latest daily probe. Verified means a valid 402 challenge (x402), a full initialize + tools/list (MCP) or a JSON-RPC reply (A2A). Ready means readiness grade A or B. We never pay or call a paid tool."}}
+     ]}
+  ]
+} | tojson }}
+</script>
+{% endif %}
+{% endblock %}
+
+{% block content %}
+<nav class="text-xs text-slate-500 mono" aria-label="Breadcrumb"><a href="/stats" class="hover:text-slate-900">Stats</a> <span aria-hidden="true">/</span> Usable</nav>
+{% if not u.available %}
+<section class="max-w-2xl mt-4">
+  <h1 class="text-3xl font-extrabold tracking-tight">How many agent tools actually work?</h1>
+  <p class="text-slate-500 mt-3">The first daily snapshot has not been computed yet. Please check back after the next probe run (21:30 UTC).</p>
+</section>
+{% else %}
+<header class="max-w-4xl mt-4">
+  <div class="st-kicker">Question · measured daily</div>
+  <h1 class="text-3xl md:text-4xl font-extrabold tracking-tight mt-3 text-slate-900">How many agent tools actually work?</h1>
+  <p class="text-lg text-slate-700 mt-4 leading-relaxed">{{ u.answer }}</p>
+  <p class="text-xs text-slate-500 mt-3 mono flex flex-wrap gap-x-3 gap-y-1">
+    <span>As of {{ u.as_of }}</span>
+    <a href="#method" class="underline decoration-dotted hover:text-slate-900">How we measure</a>
+    <a href="/stats/usable.json" class="underline decoration-dotted hover:text-slate-900">JSON</a>
+    <a href="/stats" class="underline decoration-dotted hover:text-slate-900">All statistics</a>
+  </p>
+</header>
+
+<section class="mt-8 bg-white border border-slate-200 rounded-2xl p-5 md:p-6" aria-labelledby="by-protocol">
+  <div class="st-kicker">01 · by protocol</div>
+  <h2 id="by-protocol" class="text-xl md:text-2xl font-bold tracking-tight mt-2 text-slate-900">Answering is common. Passing a full check is not.</h2>
+  <div class="overflow-x-auto mt-4">
+  <table class="st-table w-full text-sm">
+    <thead><tr><th scope="col">Protocol</th><th scope="col" class="num">Indexed</th><th scope="col" class="num">Reachable</th><th scope="col" class="num">Verified</th><th scope="col" class="num">Ready (A/B)</th><th scope="col" class="num">Median latency</th><th scope="col" class="num">100% uptime, 30 days</th></tr></thead>
+    <tbody>
+    {% for r in u.by_protocol %}
+      <tr>
+        <th scope="row" class="!text-slate-900 !font-medium !text-sm"><a href="/stats?view={{ r.kind }}" class="hover:underline">{{ r.label }}</a></th>
+        <td class="num mono">{{ r.indexed|num }}</td>
+        <td class="num mono">{{ r.reachable_pct }}%</td>
+        <td class="num mono">{{ r.verified_pct }}%</td>
+        <td class="num mono">{{ r.ready_pct }}%</td>
+        <td class="num mono">{{ (r.median_latency_ms|string ~ " ms") if r.median_latency_ms is not none else "—" }}</td>
+        <td class="num mono">{{ (r.uptime_100_pct|string ~ "%") if r.uptime_100_pct is not none else "—" }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <p class="text-xs text-slate-400 mt-3">Shares are of all indexed listings of that protocol. Uptime counts listings with at least a week of daily probes.</p>
+</section>
+
+<section class="mt-6 bg-white border border-slate-200 rounded-2xl p-5 md:p-6" aria-labelledby="why-not">
+  <div class="st-kicker">02 · why the rest fail</div>
+  <h2 id="why-not" class="text-xl md:text-2xl font-bold tracking-tight mt-2 text-slate-900">How each listing's latest probe ended</h2>
+  <p class="text-sm text-slate-500 mt-2 max-w-3xl leading-relaxed">One outcome per listing, from the HTTP status of our latest probe. A listing that asks for credentials is up, but an agent needs a key before it can use it.</p>
+  <div class="grid lg:grid-cols-3 gap-6 mt-5">
+  {% for r in u.by_protocol %}
+    {% set rows = u.why_not.get(r.kind) or [] %}
+    <div>
+      <h3 class="font-semibold text-slate-900 text-sm">{{ r.label }}</h3>
+      <table class="st-table w-full text-sm mt-2">
+        <thead><tr><th scope="col">Outcome</th><th scope="col" class="num">Listings</th><th scope="col" class="num">%</th></tr></thead>
+        <tbody>
+        {% for o in rows %}
+          <tr>
+            <td class="text-slate-700">{{ o.label }}
+              <div class="st-track mt-1"><div class="st-bar" style="width:{{ [o.pct, 0.4]|max }}%;background:{{ '#059669' if loop.first else ('#d97706' if 'credentials' in o.label else '#94a3b8') }}"></div></div></td>
+            <td class="num mono">{{ o.count|num }}</td>
+            <td class="num mono text-slate-500">{{ o.pct }}%</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% endfor %}
+  </div>
+</section>
+
+{% if snap %}
+<section class="mt-6 bg-white border border-slate-200 rounded-2xl p-5 md:p-6" aria-labelledby="uptime">
+  <div class="st-kicker">03 · over 30 days</div>
+  <h2 id="uptime" class="text-xl md:text-2xl font-bold tracking-tight mt-2 text-slate-900">Is it still up tomorrow?</h2>
+  <p class="text-sm text-slate-500 mt-2 max-w-3xl leading-relaxed">Share of daily probes answered over the last 30 days, for listings we have probed for at least a week.</p>
+  <div class="grid lg:grid-cols-3 gap-6 mt-5">
+  {% for kind in ("x402", "mcp", "a2a") %}
+    {% set rel = snap.reliability[kind] %}
+    <div>
+      <h3 class="font-semibold text-slate-900 text-sm">{{ (u.by_protocol | selectattr("kind", "equalto", kind) | first).label }} <span class="text-slate-400 font-normal">· {{ rel.tracked|num }} tracked</span></h3>
+      {% if rel.tracked %}
+      <table class="st-table w-full text-sm mt-2">
+        <thead><tr><th scope="col">Uptime</th><th scope="col" class="num">Listings</th><th scope="col" class="num">%</th></tr></thead>
+        <tbody>
+        {% for b in rel.uptime %}
+          <tr><td class="text-slate-700">{{ b.label }}<div class="st-track mt-1"><div class="st-bar" style="width:{{ [b.pct, 0.4]|max }}%;background:#2563eb"></div></div></td>
+              <td class="num mono">{{ b.count|num }}</td><td class="num mono text-slate-500">{{ b.pct }}%</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      {% else %}<p class="text-sm text-slate-400 mt-2">Not enough history yet.</p>{% endif %}
+    </div>
+  {% endfor %}
+  </div>
+</section>
+{% endif %}
+
+<section class="mt-6 grid lg:grid-cols-2 gap-6">
+  <div class="bg-white border border-slate-200 rounded-2xl p-5 md:p-6" aria-labelledby="meaning">
+    <div class="st-kicker">04 · what this means</div>
+    <h2 id="meaning" class="text-xl font-bold tracking-tight mt-2 text-slate-900">If you build agents</h2>
+    <ul class="mt-3 space-y-2 text-sm text-slate-700 list-disc pl-5 leading-relaxed">
+      <li>Check before you call. Every listing on this site carries its latest probe result, and the <a href="/about#api" class="text-blue-700 hover:underline">API</a> and MCP server can filter to <code>health=ok</code>.</li>
+      <li>Prefer readiness A or B. Only {{ u.by_protocol | sum(attribute="ready") | num }} listings reach it; they declare auth, schemas and pricing an agent can read.</li>
+      <li>"Up" is not "usable": many MCP servers answer with 401/403 and need a key first. Their listing says which auth they declare.</li>
+      <li>Paid x402 endpoints should answer 402 with a valid challenge. A 200, 404 or 5xx at the paid path means the listing is stale or misconfigured.</li>
+    </ul>
+  </div>
+  <div class="bg-white border border-slate-200 rounded-2xl p-5 md:p-6" aria-labelledby="owners">
+    <div class="st-kicker">04 · what this means</div>
+    <h2 id="owners" class="text-xl font-bold tracking-tight mt-2 text-slate-900">If you run a listing</h2>
+    <ul class="mt-3 space-y-2 text-sm text-slate-700 list-disc pl-5 leading-relaxed">
+      <li>Your listing page shows where your service stands against reachable peers of the same protocol, and the criteria that cost the most points.</li>
+      <li>Claim it to fix the description, add auth and pricing details, and get re-checked: <a href="/submit" class="text-blue-700 hover:underline">List your service</a>.</li>
+    </ul>
+  </div>
+</section>
+
+<section id="method" class="mt-6 bg-slate-50 border border-slate-200 rounded-2xl p-5 md:p-6 text-sm text-slate-600 leading-relaxed">
+  <h2 class="font-semibold text-slate-900">How we measure</h2>
+  <dl class="mt-3 grid sm:grid-cols-3 gap-4">
+    {% for k, v in u.definitions.items() %}<div><dt class="font-medium text-slate-900 capitalize">{{ k }}</dt><dd class="mt-1">{{ v }}</dd></div>{% endfor %}
+  </dl>
+  <p class="mt-4">Every listing is probed once a day from our servers. We never pay an x402 endpoint or call a paid tool; x402 checks stop at the 402 challenge. Full method: <a href="/stats#method" class="text-blue-700 hover:underline">/stats#method</a> and <a href="/api/v1/methodology" class="text-blue-700 hover:underline">/api/v1/methodology</a>.</p>
+  <p class="mt-2">Cite as: agent-tools.cloud, "How many agent tools actually work?", {{ u.as_of[:10] }}, https://agent-tools.cloud/stats/usable. Data CC BY 4.0.</p>
+</section>
+{% endif %}
+{% endblock %}
