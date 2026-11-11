@@ -148,8 +148,22 @@ def _home_payload():
 def home(request: Request):
     article_store = getattr(request.app.state, "article_store", None)
     latest_articles = article_store.list_published(page_size=3)["items"] if article_store is not None else []
+    # The daily /stats snapshot feeds the hero panel and the findings; the page
+    # falls back to the live counters when no snapshot exists yet.
+    try:
+        snap, _history = _stats_payload()
+    except Exception:
+        snap = None
+    headlines = None
+    if snap:
+        from . import stats as stats_mod
+        try:
+            headlines = stats_mod.headlines(snap)
+        except Exception:
+            headlines = None
     return TEMPLATES.TemplateResponse(
-        request, "home.html", {"request": request, "latest_articles": latest_articles, **_home_payload()})
+        request, "home.html", {"request": request, "latest_articles": latest_articles,
+                               "snap": snap, "headlines": headlines, **_home_payload()})
 
 
 @router.get("/x402", response_class=HTMLResponse, include_in_schema=False)

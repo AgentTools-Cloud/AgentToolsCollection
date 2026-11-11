@@ -1,214 +1,263 @@
 {% extends "base.html" %}
-{% from "_macros.html" import leaderboard, grade_badge %}
+{% from "_macros.html" import leaderboard %}
 {% block title %}agent-tools.cloud — Search x402 APIs, MCP servers, and A2A agents{% endblock %}
 {% block desc %}agent-tools.cloud is an open discovery directory for x402 paid APIs, remotely callable MCP servers, and A2A agents, with health checks and safety signals for agentic workflows.{% endblock %}
 {% block og_title %}agent-tools.cloud — x402, MCP, and A2A discovery directory{% endblock %}
 {% block og_desc %}Search live x402 services, MCP servers, and A2A agents with health, access, and quality metadata.{% endblock %}
 {% block twitter_title %}agent-tools.cloud — x402, MCP, and A2A discovery directory{% endblock %}
 {% block twitter_desc %}Search live x402 services, MCP servers, and A2A agents with health, access, and quality metadata.{% endblock %}
+{% block head_extra %}
+<style>
+  main { font-feature-settings: "calt" 0; }   /* keep "x402" from turning into "×402" */
+  .hm-kicker { font: 600 11px/1 'JetBrains Mono', ui-monospace, monospace; letter-spacing: .08em; text-transform: uppercase; color: #64748b; }
+  .hm-seg { display: inline-flex; gap: 2px; padding: 3px; background: #f1f5f9; border-radius: 10px; }
+  .hm-seg label { cursor: pointer; }
+  .hm-seg input { position: absolute; opacity: 0; pointer-events: none; }
+  .hm-seg span { display: block; padding: 5px 12px; border-radius: 8px; font-size: 13px; color: #475569; }
+  .hm-seg input:checked + span { background: #fff; color: #0f172a; font-weight: 600; box-shadow: 0 1px 2px rgba(15,23,42,.08); }
+  .hm-seg input:focus-visible + span { outline: 2px solid #2563eb; outline-offset: 1px; }
+  .hm-chip { display: inline-flex; align-items: center; padding: 4px 10px; border-radius: 999px; border: 1px solid #e2e8f0; background: #fff; font-size: 12px; color: #475569; }
+  .hm-chip:hover { border-color: #94a3b8; color: #0f172a; }
+  .hm-bar { height: 8px; border-radius: 4px; background: #2563eb; }
+  .hm-track { background: #f1f5f9; border-radius: 4px; }
+  .hm-proto { position: relative; overflow: hidden; }
+  .hm-proto::before { content: ""; position: absolute; inset: 0 0 auto 0; height: 3px; background: var(--accent); }
+  .tnum { font-variant-numeric: tabular-nums; }
+</style>
+{% endblock %}
 {% block content %}
+{% set k = snap.kpis if snap else none %}
+{% set f = snap.funnel if snap else none %}
 
-<section class="py-6 md:py-10">
-  <div class="flex flex-wrap items-start justify-between gap-4">
-    <div class="max-w-2xl">
-      <h1 class="text-4xl md:text-5xl font-extrabold tracking-tight leading-[1.1]">
-        The discovery layer for the agent economy
-      </h1>
-      <p class="text-slate-600 mt-4 text-lg">
-        One open, agent-readable directory for <span class="font-semibold text-slate-900">x402 paid APIs</span>,
-        <span class="font-semibold text-slate-900">MCP servers</span>, and
-        <span class="font-semibold text-slate-900">A2A agents</span> — searchable by humans and callable by agents.
-      </p>
+{# ---------- Hero ---------- #}
+<section class="grid lg:grid-cols-[minmax(0,7fr)_minmax(0,5fr)] gap-10 items-start pt-2 md:pt-6">
+  <div>
+    <div class="hm-kicker flex items-center gap-2">
+      <span class="inline-block w-2 h-2 rounded-full bg-emerald-500" aria-hidden="true"></span>
+      Open index · probed daily
     </div>
-    <a href="/submit" class="btn-primary shrink-0">
-      <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12h14"/></svg>
-      List your service
+    <h1 class="text-4xl md:text-[52px] font-extrabold tracking-tight leading-[1.05] mt-4 text-slate-900">
+      The discovery layer for the agent economy
+    </h1>
+    <p class="text-slate-600 mt-5 text-lg leading-relaxed max-w-xl">
+      One open, agent-readable directory of <span class="font-semibold text-slate-900">x402 paid APIs</span>,
+      <span class="font-semibold text-slate-900">MCP servers</span> and
+      <span class="font-semibold text-slate-900">A2A agents</span> — each one probed, graded and safety-scanned
+      before an agent calls it.
+    </p>
+
+    <form id="hm-search" action="/mcp" method="get" class="mt-8 max-w-2xl" role="search">
+      <div class="hm-seg" role="radiogroup" aria-label="Search in">
+        {% for v, label, ph in [
+            ('/mcp', 'MCP servers', 'github, browser, postgres, notion…'),
+            ('/x402', 'x402 APIs', 'weather, dexscreener, social data, payments…'),
+            ('/a2a', 'A2A agents', 'travel, research, coding, customer support…')] %}
+        <label><input type="radio" name="_in" value="{{ v }}" data-ph="{{ ph }}" {{ 'checked' if loop.first }}><span>{{ label }}</span></label>
+        {% endfor %}
+      </div>
+      <div class="search-shell mt-2.5 shadow-sm">
+        <svg class="w-5 h-5 text-slate-400 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+        <input id="hm-q" name="q" aria-label="Search the directory" placeholder="Search MCP servers — github, browser, postgres, notion…"
+               class="flex-1 min-w-0 bg-transparent outline-none text-base placeholder:text-slate-400">
+        <button type="submit" class="btn-primary !py-2 !px-4">Search</button>
+      </div>
+      <div class="flex flex-wrap items-center gap-2 mt-3 text-xs text-slate-500">
+        <span>Popular:</span>
+        <a class="hm-chip" href="/mcp?q=github">github</a>
+        <a class="hm-chip" href="/mcp?q=browser">browser</a>
+        <a class="hm-chip" href="/x402?q=weather">weather</a>
+        <a class="hm-chip" href="/x402?q=payments">payments</a>
+        <a class="hm-chip" href="/a2a?q=travel">travel</a>
+      </div>
+    </form>
+
+    <div class="flex flex-wrap items-center gap-4 mt-8 text-sm">
+      <a href="/submit" class="btn-primary">
+        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+        List your service
+      </a>
+      <a href="/docs/claim" class="font-medium text-slate-700 hover:text-blue-600">Already listed? Claim it →</a>
+    </div>
+  </div>
+
+  {# Live snapshot #}
+  <aside class="svc-card p-6" aria-labelledby="hm-today">
+    <div class="flex items-center justify-between">
+      <h2 id="hm-today" class="hm-kicker">Today's index</h2>
+      <a href="/stats" class="text-xs font-medium text-blue-600 hover:underline">Full stats →</a>
+    </div>
+    {% if k %}
+    {% set rows = [
+        ('Indexed', k.all.indexed, 'every listing any source shows us'),
+        ('Reachable', k.all.reachable, 'answered the last probe'),
+        ('Protocol verified', k.all.verified, '402 challenge · MCP handshake · A2A JSON-RPC'),
+        ('Ready to call', k.all.ready, 'readiness grade A or B')] %}
+    <ol class="mt-5 space-y-4">
+      {% for label, n, hint in rows %}
+      <li>
+        <div class="flex items-baseline justify-between gap-3">
+          <span class="text-sm text-slate-700">{{ label }}</span>
+          <span class="text-xl font-bold text-slate-900 tnum">{{ n|num }}</span>
+        </div>
+        <div class="hm-track mt-1.5"><div class="hm-bar" style="width:{{ [100 * n / k.all.indexed, 1]|max|round(1) }}%;{% if loop.first %}background:#94a3b8{% endif %}"></div></div>
+        <div class="text-[11px] text-slate-400 mt-1">{% if not loop.first %}{{ (100 * n / k.all.indexed)|round(1) }}% · {% endif %}{{ hint }}</div>
+      </li>
+      {% endfor %}
+    </ol>
+    <p class="text-[11px] text-slate-400 mt-5 mono">As of {{ snap.as_of }}</p>
+    {% else %}
+    <dl class="grid grid-cols-2 gap-4 mt-5">
+      <div><dt class="text-sm text-slate-500">Indexed</dt><dd class="text-2xl font-bold tnum">{{ (stats.total + mcp_stats.total + a2a_stats.total)|num }}</dd></div>
+      <div><dt class="text-sm text-slate-500">Reachable</dt><dd class="text-2xl font-bold tnum text-emerald-600">{{ (stats.healthy + mcp_stats.healthy + a2a_stats.healthy)|num }}</dd></div>
+    </dl>
+    {% endif %}
+  </aside>
+</section>
+
+{# ---------- Three protocols ---------- #}
+<section class="mt-16" aria-labelledby="hm-protocols">
+  <div class="hm-kicker">01 · Browse</div>
+  <h2 id="hm-protocols" class="text-2xl font-bold tracking-tight mt-2 text-slate-900">Three protocols, one index</h2>
+  <div class="grid grid-cols-1 md:grid-cols-3 gap-5 mt-6">
+    {% set cards = [
+        ('mcp', '/mcp', 'MCP servers', '#2563eb', 'Tools and data sources an LLM client connects to over the Model Context Protocol. We run initialize and tools/list against every remote endpoint.', mcp_stats.total, '/api/v1/mcp/search'),
+        ('x402', '/x402', 'x402 APIs', '#7c3aed', 'HTTP APIs an agent pays per call in stablecoins, with no signup. We read each 402 challenge for price, network and pay-to address.', stats.total, '/api/v1/search'),
+        ('a2a', '/a2a', 'A2A agents', '#0d9488', 'Agents that publish an Agent Card and take tasks over JSON-RPC. We fetch the card, check its signature and call the declared interface.', a2a_stats.total, '/api/v1/a2a/search')] %}
+    {% for kind, href, label, accent, text, fallback_total, api in cards %}
+    <a href="{{ href }}" class="svc-card hm-proto p-6 group flex flex-col" style="--accent:{{ accent }}">
+      <div class="flex items-baseline justify-between gap-3">
+        <h3 class="text-base font-semibold text-slate-900">{{ label }}</h3>
+        <span class="text-3xl font-bold tnum text-slate-900">{{ (k[kind].indexed if k else fallback_total)|num }}</span>
+      </div>
+      <p class="text-sm text-slate-600 mt-3 leading-relaxed flex-1">{{ text }}</p>
+      {% if f %}
+      <dl class="grid grid-cols-2 gap-3 mt-5 pt-4 border-t border-slate-100 text-xs">
+        <div><dt class="text-slate-500">Reachable</dt><dd class="text-sm font-semibold text-slate-900 mt-0.5 tnum">{{ f[kind][2].pct_total }}%</dd></div>
+        <div><dt class="text-slate-500">{{ {'mcp': 'Full handshake', 'x402': 'Valid 402', 'a2a': 'Answers JSON-RPC'}[kind] }}</dt><dd class="text-sm font-semibold text-slate-900 mt-0.5 tnum">{{ f[kind][3].pct_total }}%</dd></div>
+      </dl>
+      {% endif %}
+      <div class="flex items-center justify-between mt-5 text-sm">
+        <span class="font-medium text-slate-900 inline-flex items-center gap-1 group-hover:gap-2 transition-all" style="color:{{ accent }}">Browse {{ label }} →</span>
+        <span class="mono text-[11px] text-slate-400 hidden sm:inline">{{ api }}</span>
+      </div>
     </a>
-  </div>
-
-  <form action="/x402" method="get" class="search-shell mt-8 max-w-3xl">
-    <svg class="w-5 h-5 text-slate-400 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
-    <input name="q" placeholder="Search x402 services — weather, dexscreener, social data, payments…"
-           class="flex-1 bg-transparent outline-none text-base placeholder:text-slate-400">
-    <button type="submit" class="text-sm text-slate-500 hover:text-slate-900 hidden md:inline">↵ Search</button>
-  </form>
-</section>
-
-<section class="mt-8">
-  <div class="flex flex-wrap items-end justify-between gap-4 mb-4">
-    <h2 class="text-2xl font-bold tracking-tight">Across the directory</h2>
-    <div class="flex items-center gap-2 text-sm">
-      <a href="/stats" class="pill text-xs font-medium">View full stats →</a>
-      <a href="/api/v1/stats" class="pill mono text-xs">/api/v1/stats</a>
-      <a href="/.well-known/agent-tools.json" class="pill mono text-xs">/.well-known</a>
-    </div>
-  </div>
-  <p class="text-sm text-slate-500 max-w-3xl mb-5 leading-relaxed">
-    Aggregated from public sources — <span class="text-slate-700">x402scan</span>,
-    <span class="text-slate-700">awesome-x402</span>,
-    <span class="text-slate-700">Coinbase CDP Bazaar</span>,
-    the <span class="text-slate-700">official MCP Registry</span>,
-    <span class="text-slate-700">Smithery</span>,
-    <span class="text-slate-700">awesome-a2a</span> — plus our own crawling and provider
-    self-submissions. Everything is <span class="text-slate-700">de-duplicated across sources</span>,
-    <span class="text-slate-700">liveness-probed</span> (health, JSON-RPC handshake, on-chain
-    payment demand), <span class="text-slate-700">statically safety-scanned for malware &amp; prompt-injection patterns</span>
-    and filtered before listing, so the counts below are verified, not raw.
-  </p>
-    <div class="grid grid-cols-2 gap-4 max-w-md">
-    <div class="stat-card">
-      <div class="text-sm text-slate-500">Total entries</div>
-      <div class="text-3xl font-bold mt-1">{{ (stats.total + mcp_stats.total + a2a_stats.total)|num }}</div>
-      <div class="text-xs text-slate-400 mt-3">x402 · MCP · A2A combined</div>
-    </div>
-    <div class="stat-card">
-      <div class="text-sm text-slate-500">Healthy</div>
-      <div class="text-3xl font-bold mt-1 text-emerald-600">{{ (stats.healthy + mcp_stats.healthy + a2a_stats.healthy)|num }}</div>
-      <div class="text-xs text-slate-400 mt-3">passed last liveness probe</div>
-    </div>
+    {% endfor %}
   </div>
 </section>
 
-<section class="grid grid-cols-1 md:grid-cols-3 gap-5 mt-8">
-  <a href="/x402" class="svc-card p-6 group hover:border-slate-300 transition">
-    <div class="flex items-center justify-between">
-      <span class="text-xs font-semibold uppercase tracking-wider text-slate-400">x402 Services</span>
-      <span class="text-3xl font-bold">{{ stats.total|num }}</span>
-    </div>
-    <p class="text-sm text-slate-600 mt-3">Paid HTTP APIs that settle micro-payments over the x402 protocol. Auto-verified, with payment + health metadata.</p>
-      <p class="text-xs text-slate-400 mt-2">{{ stats.healthy|num }} healthy · on-chain demand-checked</p>
-    <div class="text-sm font-medium text-slate-900 mt-4 inline-flex items-center gap-1 group-hover:gap-2 transition-all">
-      Browse services →
-    </div>
-  </a>
-
-  <a href="/mcp" class="svc-card p-6 group hover:border-slate-300 transition">
-    <div class="flex items-center justify-between">
-      <span class="text-xs font-semibold uppercase tracking-wider text-slate-400">MCP Servers</span>
-      <span class="text-3xl font-bold">{{ mcp_stats.total|num }}</span>
-    </div>
-    <p class="text-sm text-slate-600 mt-3">Model Context Protocol servers continuously aggregated and probed live for remote callability.</p>
-      <p class="text-xs text-slate-400 mt-2">{{ mcp_stats.remote_callable|num }} remote-callable</p>
-    <div class="text-sm font-medium text-slate-900 mt-4 inline-flex items-center gap-1 group-hover:gap-2 transition-all">
-      Browse servers →
-    </div>
-  </a>
-
-  <a href="/a2a" class="svc-card p-6 group hover:border-slate-300 transition">
-    <div class="flex items-center justify-between">
-      <span class="text-xs font-semibold uppercase tracking-wider text-slate-400">A2A Agents</span>
-      <span class="text-3xl font-bold">{{ a2a_stats.total|num }}</span>
-    </div>
-    <p class="text-sm text-slate-600 mt-3">Agents that publish an A2A Agent Card. Discover skills, capabilities, and endpoints straight from <span class="mono">/.well-known</span>.</p>
-      <p class="text-xs text-slate-400 mt-2">{{ a2a_stats.healthy|num }} healthy</p>
-    <div class="text-sm font-medium text-slate-900 mt-4 inline-flex items-center gap-1 group-hover:gap-2 transition-all">
-      Browse agents →
-    </div>
-  </a>
-</section>
-
-<section class="mt-12">
-  <div class="flex flex-wrap items-end justify-between gap-4 mb-4">
+{# ---------- Findings from today's snapshot ---------- #}
+{% if snap and headlines %}
+<section class="mt-16" aria-labelledby="hm-findings">
+  <div class="flex flex-wrap items-end justify-between gap-3">
     <div>
-      <h2 class="text-2xl font-bold tracking-tight">Directory health &amp; quality, at a glance</h2>
-      <p class="text-sm text-slate-500 mt-1">A synthesized read on what's actually usable right now — refreshed continuously (scores recomputed on the daily liveness probe; leaderboards ranked live on each request).</p>
+      <div class="hm-kicker">02 · What the data says</div>
+      <h2 id="hm-findings" class="text-2xl font-bold tracking-tight mt-2 text-slate-900">From today's probes</h2>
     </div>
+    <a href="/stats" class="text-sm font-medium text-blue-600 hover:underline">The state of agent tools →</a>
   </div>
-
-  {% set tot = stats.total + mcp_stats.total + a2a_stats.total %}
-  {% set hea = stats.healthy + mcp_stats.healthy + a2a_stats.healthy %}
-  {% set hpct = (100 * hea / tot)|round|int if tot else 0 %}
-  {% set fresh = mcp_stats.new_7d + a2a_stats.new_7d %}
-  {% set agent_native = stats.total + mcp_stats.access_x402 + a2a_stats.access_x402 %}
-  <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
-    <div class="stat-card">
-      <div class="text-sm text-slate-500">Verified live</div>
-      <div class="text-3xl font-bold mt-1 text-emerald-600">{{ hpct }}%</div>
-      <div class="text-xs text-slate-400 mt-2">{{ hea }} of {{ tot }} passed the last liveness probe</div>
-    </div>
-    <div class="stat-card">
-      <div class="text-sm text-slate-500">Top-graded (A / B+)</div>
-      <div class="text-3xl font-bold mt-1">{{ grade_mix.mcp.a_plus + grade_mix.a2a.a_plus + grade_mix.x402.a_plus }}</div>
-      <div class="text-xs text-slate-400 mt-2">high availability + conformance + trust signals</div>
-    </div>
-    <div class="stat-card">
-      <div class="text-sm text-slate-500">Agent-payable (x402)</div>
-      <div class="text-3xl font-bold mt-1">{{ stats.total + mcp_stats.access_x402 + a2a_stats.access_x402 }}</div>
-      <div class="text-xs text-slate-400 mt-2">settle per-call on-chain, no human signup</div>
-    </div>
-    <div class="stat-card">
-      <div class="text-sm text-slate-500">New this week</div>
-      <div class="text-3xl font-bold mt-1">+{{ fresh }}</div>
-      <div class="text-xs text-slate-400 mt-2">freshly discovered MCP + A2A endpoints</div>
-    </div>
+  <div class="grid grid-cols-1 md:grid-cols-3 gap-5 mt-6">
+    {% for key, kicker, anchor in [('funnel', 'Reachability', 'funnel'), ('x402', 'Prices', 'x402'), ('access', 'Access', 'access')] %}
+    <a href="/stats#{{ anchor }}" class="svc-card p-6 block group">
+      <div class="hm-kicker">{{ kicker }}</div>
+      <p class="text-[15px] font-semibold text-slate-900 leading-snug mt-3">{{ headlines[key] }}</p>
+      <span class="text-xs text-slate-500 mt-4 inline-block group-hover:text-blue-600">See the breakdown →</span>
+    </a>
+    {% endfor %}
   </div>
-
-  <div class="svc-card p-5 md:p-6 bg-slate-50/60 mb-8 text-sm text-slate-600 leading-relaxed">
-    <span class="font-semibold text-slate-900">The read:</span>
-    Of <span class="font-semibold text-slate-800">{{ tot }}</span> indexed entries,
-    <span class="font-semibold text-emerald-700">{{ hpct }}%</span> answered their last liveness probe.
-    Quality skews high on the <span class="font-semibold text-slate-800">MCP</span> side
-    ({{ grade_mix.mcp.share }}% of healthy servers grade A/B+, conformance-verified via a real
-    <span class="mono">tools/list</span> handshake), and on <span class="font-semibold text-slate-800">A2A</span>
-    ({{ grade_mix.a2a.share }}% A/B+). The <span class="font-semibold text-slate-800">x402</span> side is
-    graded on on-chain demand, so high grades are rarer and mean real paying traffic — the few A-grade
-    services are the ones agents are actually paying. Roughly
-    <span class="font-semibold text-slate-800">{{ mcp_stats.access_open }}</span> MCP servers are callable
-    with no credentials at all; <span class="font-semibold text-slate-800">{{ mcp_stats.access_key }}</span>
-    need a human to provision a key first. Scores recompute daily; rankings are live.
-  </div>
-
-  <div class="grid grid-cols-1 lg:grid-cols-3 gap-5">
-    <div>
-      <div class="flex items-center justify-between mb-2">
-        <h3 class="text-sm font-semibold text-slate-700">Top MCP servers</h3>
-        <a href="/mcp" class="text-xs text-blue-600 hover:underline">View all →</a>
-      </div>
-      {{ leaderboard(top_mcp, "mcp", compact=true) }}
-    </div>
-    <div>
-      <div class="flex items-center justify-between mb-2">
-        <h3 class="text-sm font-semibold text-slate-700">Top A2A agents</h3>
-        <a href="/a2a" class="text-xs text-blue-600 hover:underline">View all →</a>
-      </div>
-      {{ leaderboard(top_a2a, "a2a", compact=true) }}
-    </div>
-    <div>
-      <div class="flex items-center justify-between mb-2">
-        <h3 class="text-sm font-semibold text-slate-700">Top x402 services</h3>
-        <a href="/x402" class="text-xs text-blue-600 hover:underline">View all →</a>
-      </div>
-      {{ leaderboard(top_x402, "x402", compact=true) }}
-    </div>
-  </div>
-</section>
-
-{% if articles_enabled and latest_articles %}
-<section class="mt-12 border-t border-slate-200 pt-8">
-  <div class="flex items-center justify-between gap-4"><h2 class="text-xl font-bold">Latest from the Blog</h2><a href="/articles" class="text-sm text-blue-600">View blog</a></div>
-  {% for article in latest_articles %}<article class="py-5 border-b border-slate-200"><div class="text-xs text-slate-500">{{ article.author }} · {{ article.published_at | article_date }}</div><h3 class="text-lg font-semibold mt-2"><a href="/articles/{{ article.slug }}" class="hover:text-blue-600 break-words">{{ article.title }}</a></h3><p class="text-sm text-slate-600 mt-2 leading-relaxed break-words">{{ article.summary }}</p></article>{% endfor %}
 </section>
 {% endif %}
 
-<section class="mt-12 svc-card p-6 md:p-8 bg-slate-50/60">
-  <div class="flex flex-wrap items-start justify-between gap-6">
-    <div class="max-w-xl">
-      <h2 class="text-xl font-bold tracking-tight">Built for agents, not just humans</h2>
-      <p class="text-sm text-slate-600 mt-2">
-        Every page has a JSON counterpart. Ask for LLM-ranked recommendations, search by intent,
-        or pull a single card — no scraping required. You can even scan any MCP server for
-        malware &amp; prompt-injection before connecting, via the <span class="mono">scan_mcp_safety</span>
-        tool at <span class="mono">/mcp-discovery</span> or our A2A agent at <span class="mono">/a2a</span>.
-      </p>
+{# ---------- Leaderboards ---------- #}
+<section class="mt-16" aria-labelledby="hm-top">
+  <div class="hm-kicker">{{ '03' if snap else '02' }} · Top rated</div>
+  <h2 id="hm-top" class="text-2xl font-bold tracking-tight mt-2 text-slate-900">Highest quality right now</h2>
+  <p class="text-sm text-slate-500 mt-2 max-w-2xl">Ranked by quality score: availability, protocol conformance and trust signals. Scores recompute after every daily probe.</p>
+  <div class="grid grid-cols-1 lg:grid-cols-3 gap-5 mt-6">
+    {% for rows, kind, label, href in [(top_mcp, 'mcp', 'MCP servers', '/mcp'), (top_x402, 'x402', 'x402 APIs', '/x402'), (top_a2a, 'a2a', 'A2A agents', '/a2a')] %}
+    <div>
+      <div class="flex items-center justify-between mb-2">
+        <h3 class="text-sm font-semibold text-slate-700">{{ label }}</h3>
+        <a href="{{ href }}?sort=quality" class="text-xs text-blue-600 hover:underline">View all →</a>
+      </div>
+      {{ leaderboard(rows, kind, compact=true) }}
     </div>
-    <div class="flex flex-wrap gap-2 text-xs">
-      <a href="/about" class="pill mono">POST /api/v1/ask</a>
-      <a href="/api/v1/search" class="pill mono">/api/v1/search</a>
-      <a href="/api/v1/mcp/search" class="pill mono">/api/v1/mcp/search</a>
-      <a href="/api/v1/a2a/search" class="pill mono">/api/v1/a2a/search</a>
-      <a href="/openapi.json" class="pill mono">openapi.json</a>
-    </div>
+    {% endfor %}
   </div>
 </section>
 
+{# ---------- Blog ---------- #}
+{% if articles_enabled and latest_articles %}
+<section class="mt-16" aria-labelledby="hm-blog">
+  <div class="flex items-end justify-between gap-4">
+    <div>
+      <div class="hm-kicker">From the blog</div>
+      <h2 id="hm-blog" class="text-2xl font-bold tracking-tight mt-2 text-slate-900">Latest writing</h2>
+    </div>
+    <a href="/articles" class="text-sm font-medium text-blue-600 hover:underline">All articles →</a>
+  </div>
+  <div class="grid grid-cols-1 md:grid-cols-3 gap-5 mt-6">
+    {% for article in latest_articles %}
+    <article class="svc-card p-6 flex flex-col">
+      <div class="text-xs text-slate-500">{{ article.author }} · {{ article.published_at | article_date }}</div>
+      <h3 class="text-base font-semibold mt-2 leading-snug"><a href="/articles/{{ article.slug }}" class="hover:text-blue-600 break-words">{{ article.title }}</a></h3>
+      <p class="text-sm text-slate-600 mt-2 leading-relaxed break-words line-clamp-3">{{ article.summary }}</p>
+    </article>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+
+{# ---------- For agents ---------- #}
+<section class="mt-16 rounded-2xl bg-slate-900 text-slate-200 p-6 md:p-10 grid lg:grid-cols-2 gap-8 items-center" aria-labelledby="hm-agents">
+  <div>
+    <div class="hm-kicker !text-slate-400">For agents</div>
+    <h2 id="hm-agents" class="text-2xl font-bold tracking-tight mt-2 text-white">Every page has a machine-readable twin</h2>
+    <p class="text-sm text-slate-300 mt-3 leading-relaxed max-w-lg">
+      Search by intent, ask for ranked recommendations, or pull a single card as JSON — no scraping, no key.
+      Connect our MCP server or A2A agent directly, and run <span class="mono text-slate-100">scan_mcp_safety</span>
+      on any MCP server before you trust it.
+    </p>
+    <div class="flex flex-wrap gap-3 mt-5 text-sm">
+      <a href="/openapi.json" class="inline-flex items-center rounded-lg bg-white text-slate-900 font-semibold px-4 py-2 hover:bg-slate-100">OpenAPI spec</a>
+      <a href="/mcp-discovery/" class="inline-flex items-center rounded-lg border border-slate-600 px-4 py-2 hover:border-slate-400">MCP endpoint</a>
+    </div>
+  </div>
+  <pre class="mono text-[12.5px] leading-6 bg-slate-950/60 border border-slate-800 rounded-xl p-5 overflow-x-auto"><span class="text-slate-500"># search MCP servers by intent</span>
+<span class="text-emerald-400">GET</span>  /api/v1/mcp/search?q=postgres
+<span class="text-slate-500"># paid weather APIs that settle on Base</span>
+<span class="text-emerald-400">GET</span>  /api/v1/search?q=weather&amp;chain=base
+<span class="text-slate-500"># ranked recommendation for a task</span>
+<span class="text-sky-400">POST</span> /api/v1/ask
+<span class="text-slate-500"># discovery for crawlers and agents</span>
+<span class="text-emerald-400">GET</span>  /.well-known/agent-tools.json
+<span class="text-emerald-400">GET</span>  /stats.json</pre>
+</section>
+
+{# ---------- Sources ---------- #}
+<section class="mt-12 text-sm text-slate-500 leading-relaxed max-w-4xl">
+  <span class="font-semibold text-slate-700">Where the listings come from.</span>
+  The official MCP Registry, Smithery, x402scan, Coinbase CDP Bazaar, awesome-x402, awesome-a2a, Agenstry,
+  our own crawling of <span class="mono">/.well-known</span> files, and provider submissions. Listings are de-duplicated
+  across sources, probed every day and statically scanned for malware and prompt-injection patterns.
+  <a href="/about" class="text-blue-600 hover:underline">How it works</a>
+</section>
+
+<script>
+(function () {
+  var form = document.getElementById('hm-search');
+  if (!form) return;
+  var q = document.getElementById('hm-q');
+  var names = {'/mcp': 'MCP servers', '/x402': 'x402 APIs', '/a2a': 'A2A agents'};
+  form.addEventListener('change', function (e) {
+    if (e.target.name !== '_in') return;
+    form.action = e.target.value;
+    q.placeholder = 'Search ' + names[e.target.value] + ' — ' + e.target.getAttribute('data-ph');
+    q.focus();
+  });
+  // The radio only picks the target page; keep it out of the query string.
+  form.addEventListener('submit', function () {
+    form.querySelectorAll('input[name=_in]').forEach(function (r) { r.disabled = true; });
+  });
+})();
+</script>
 {% endblock %}
