@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_macros.html" import readiness_section %}
 {% block title %}{{ m.name }} — MCP server — agent-tools.cloud{% endblock %}
 {% block desc %}{{ (m.description or m.name)|truncate(140) }}{% endblock %}
 {% block head_extra %}{% set schema = {
@@ -87,6 +88,9 @@
   </div>
 </section>
 
+{{ readiness_section(m.readiness, "MCP readiness", quality,
+                     "availability, conformance, p95 speed and descriptor") }}
+
 {% if m.sources %}
 <section class="svc-card p-6 mb-6">
   <h2 class="text-base font-semibold mb-1">Listed in</h2>
@@ -94,13 +98,13 @@
   <div class="flex flex-wrap gap-2">
     {% for s in m.sources %}
       {% if s.source_url %}
-      <a href="{{ s.source_url }}" target="_blank" rel="noopener"
+      <a href="{{ s.source_url }}" target="_blank" rel="noopener" title="first seen {{ s.first_seen|ymd }}"
          class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-slate-200 bg-slate-50 hover:bg-slate-100 text-sm mono text-slate-700">
-        {{ s.source }}
+        {{ s.source }}{% if s.first_seen %} <span class="text-xs text-slate-400">since {{ s.first_seen|ymd }}</span>{% endif %}
         <span class="text-slate-400">&#8599;</span>
       </a>
       {% else %}
-      <span class="inline-flex items-center px-3 py-1.5 rounded-full border border-slate-200 bg-slate-50 text-sm mono text-slate-700">{{ s.source }}</span>
+      <span class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-slate-200 bg-slate-50 text-sm mono text-slate-700">{{ s.source }}{% if s.first_seen %} <span class="text-xs text-slate-400">since {{ s.first_seen|ymd }}</span>{% endif %}</span>
       {% endif %}
     {% endfor %}
   </div>

@@ -25,7 +25,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from . import a2a as a2a_mod
-from . import a2a_readiness
+from . import a2a_readiness, listing_readiness
 from . import crawlers, db, mailer, public_http
 from . import ownership as ownership_mod
 from . import agenstry as agenstry_mod
@@ -643,6 +643,60 @@ def cmd_health(only_unknown: bool = False, quarantined_only: bool = False) -> in
             cmd_health_mcp()
         except Exception as e:
             log.warning("mcp health failed: %r", e)
+        try:
+            cmd_readiness()
+        except Exception as e:
+            log.warning("readiness scoring failed: %r", e)
+    return 0
+
+
+def cmd_readiness(kinds=("mcp", "x402")) -> int:
+    """Store MCP / x402 readiness score + grade from what the probes recorded.
+
+    No network: reads the probe columns, 30-day probe history and listing
+    sources. Display only; search order keeps using quality_score.
+    """
+    now = int(time.time())
+    specs = {
+        "mcp": ("mcp_servers", listing_readiness.history_mcp, listing_readiness.assess_mcp,
+                "id, health, http_status, conformance, latency_ms, latency_p95_ms, "
+                "protocol_version, tools_json, tool_count, source_code_url, package_name, "
+                "homepage_url, owner_verified, last_seen, x402_supported, pricing, "
+                "auth_method, health_checked"),
+        "x402": ("services", listing_readiness.history_x402, listing_readiness.assess_x402,
+                 "id, health, http_status, x402_ok, latency_ms, payment, resource_count, "
+                 "resource_samples, well_known_url, openapi_url, descriptor_checked_at, "
+                 "owner_verified, owner_declaration, last_seen, health_checked"),
+    }
+    for kind in kinds:
+        table, history_fn, assess_fn, cols = specs[kind]
+        out = []
+        with db.connect(read_only=True) as c:
+            hist = history_fn(c, now=now)
+            sources = listing_readiness.sources_by_listing(c, kind)
+            for row in c.execute(f"SELECT {cols} FROM {table}"):
+                r = dict(row)
+                h = hist.get(r["id"]) or (0, 0, None)
+                kw = {"uptime_ok": h[0], "uptime_total": h[1],
+                      "sources": sources.get(r["id"], ()), "now": now}
+                if kind == "x402":
+                    kw["last_402_at"] = h[2] if len(h) > 2 else None
+                try:
+                    rep = assess_fn(r, **kw)
+                except Exception:
+                    log.exception("%s readiness failed for id=%s", kind, r["id"])
+                    continue
+                out.append((rep["score"], rep["grade"], now, r["id"]))
+        for start in range(0, len(out), 2000):
+            chunk = out[start:start + 2000]
+
+            def op(chunk=chunk):
+                with db.writer() as c:
+                    c.executemany(
+                        f"UPDATE {table} SET readiness_score=?, readiness_grade=?, "
+                        "readiness_checked=? WHERE id=?", chunk)
+            db.with_retry(op)
+        log.info("%s readiness: scored=%d", kind, len(out))
     return 0
 
 
@@ -665,9 +719,11 @@ def cmd_health_a2a(only_unknown: bool = False, quarantined_only: bool = False) -
             r["agent_id"]: (r["ok"], r["n"])
             for r in c.execute(
                 "SELECT agent_id, SUM(status='ok') ok, COUNT(*) n FROM a2a_health_history "
-                "WHERE checked_at >= ? GROUP BY agent_id",
+                f"WHERE checked_at >= ? AND {listing_readiness.REFUSED_SQL} "
+                "GROUP BY agent_id",
                 (now - a2a_readiness.UPTIME_WINDOW,))
         }
+        a2a_sources = listing_readiness.sources_by_listing(c, "a2a")
     if not rows:
         return 0
     n_ok = n_deg = n_down = 0
@@ -713,15 +769,19 @@ def cmd_health_a2a(only_unknown: bool = False, quarantined_only: bool = False) -
                 rpc = {"state": "unreachable", "latency_ms": None,
                        "http_status": None, "detail": type(exc).__name__}
         ok_prev, n_prev = history.get(r["id"], (0, 0))
+        counted = not listing_readiness.is_refused(h, res.get("http_status"))
         report = a2a_readiness.assess(
             parsed, res.get("card_url") or r["card_url"], rpc=rpc,
-            uptime_ok=(ok_prev or 0) + (h == "ok"), uptime_total=(n_prev or 0) + 1,
+            uptime_ok=(ok_prev or 0) + (counted and h == "ok"),
+            uptime_total=(n_prev or 0) + counted,
             owner_verified=bool(r["owner_verified"]), last_seen=r["last_seen"],
-            x402_supported=bool(r["x402_supported"]), fetch_json=_fetch_json, now=now)
+            x402_supported=bool(r["x402_supported"]), fetch_json=_fetch_json, now=now,
+            sources=a2a_sources.get(r["id"], ()))
         readiness = (report["score"], report["grade"],
                      json.dumps(report, ensure_ascii=False, separators=(",", ":")),
                      now, r["id"])
-        hist = (r["id"], now, h, (rpc or {}).get("state"), res["latency_ms"])
+        hist = (r["id"], now, h, (rpc or {}).get("state"), res["latency_ms"],
+                res.get("http_status"))
         return h, res.get("conformance"), (h, now, res["latency_ms"],
                                            res.get("conformance"), last_ok,
                                            card, r["id"]), readiness, hist
@@ -756,8 +816,8 @@ def cmd_health_a2a(only_unknown: bool = False, quarantined_only: bool = False) -
                 readiness_rows,
             )
             c.executemany(
-                "INSERT INTO a2a_health_history(agent_id, checked_at, status, rpc_state, latency_ms) "
-                "VALUES(?,?,?,?,?)",
+                "INSERT INTO a2a_health_history(agent_id, checked_at, status, rpc_state, "
+                "latency_ms, http_status) VALUES(?,?,?,?,?,?)",
                 history_rows,
             )
             c.execute("DELETE FROM a2a_health_history WHERE checked_at < ?",
@@ -885,7 +945,7 @@ def cmd_health_mcp(only_unknown: bool = False, quarantined_only: bool = False) -
                conf, res.get("tool_count"), tools_json, tools_text,
                scan.verdict, scan.score, safety_reasons,
                res.get("protocol_version"), last_ok, r["id"])
-        return r["id"], h, conf, res["latency_ms"], scan, upd
+        return r["id"], h, conf, (res["latency_ms"], res["http_status"]), scan, upd
 
     # Concurrent probes (network-I/O bound). 16 workers keeps this VPS — which
     # is shared with other sites — responsive; sqlite writes stay single-thread.
@@ -896,9 +956,9 @@ def cmd_health_mcp(only_unknown: bool = False, quarantined_only: bool = False) -
         updates = []
         hist = []
         with ThreadPoolExecutor(max_workers=workers) as ex:
-            for sid, h, conf, lat, scan, upd in ex.map(_probe, batch):
+            for sid, h, conf, (lat, sc), scan, upd in ex.map(_probe, batch):
                 updates.append(upd)
-                hist.append((sid, now, h, lat))
+                hist.append((sid, now, h, lat, sc))
                 n_ok += h == "ok"; n_deg += h == "degraded"; n_down += h == "down"
                 n_conf += conf == "pass"
                 if scan.verdict != "clean":
@@ -920,8 +980,8 @@ def cmd_health_mcp(only_unknown: bool = False, quarantined_only: bool = False) -
                     updates,
                 )
                 c.executemany(
-                    "INSERT INTO mcp_health_history(server_id, checked_at, status, latency_ms) "
-                    "VALUES(?,?,?,?)",
+                    "INSERT INTO mcp_health_history(server_id, checked_at, status, latency_ms, "
+                    "http_status) VALUES(?,?,?,?,?)",
                     hist,
                 )
         db.with_retry(op)
@@ -2130,6 +2190,7 @@ def main(argv=None) -> int:
     sub.add_parser("health")
     sub.add_parser("health-quarantined")
     sub.add_parser("health-a2a")
+    sub.add_parser("readiness")
     sub.add_parser("health-mcp")
     sub.add_parser("stats")
     p_retire = sub.add_parser("retire")
@@ -2223,6 +2284,8 @@ def main(argv=None) -> int:
         return cmd_health_a2a()
     if args.cmd == "health-mcp":
         return cmd_health_mcp()
+    if args.cmd == "readiness":
+        return cmd_readiness()
     if args.cmd == "stats":
         return cmd_stats()
     if args.cmd == "sync-botsrated":

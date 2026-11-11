@@ -44,6 +44,8 @@ TEMPLATES.env.globals["current_user"] = _current_user
 from .auth import may_edit_listing as _may_edit_listing
 TEMPLATES.env.globals["may_edit_listing"] = _may_edit_listing
 TEMPLATES.env.globals["url_host"] = lambda u: db._host_and_path(u or "")[0]
+TEMPLATES.env.filters["ymd"] = lambda ts: (
+    time.strftime("%Y-%m-%d", time.gmtime(int(ts))) if ts else "")
 
 router = APIRouter()
 
@@ -387,8 +389,9 @@ def mcp_detail(request: Request, slug: str):
         if retired is not None:
             return retired
         raise HTTPException(404, "mcp server not found")
-    return TEMPLATES.TemplateResponse(request, "mcp_server.html", {"request": request, "m": m},
-                                     headers=_owned_detail_headers(m))
+    return TEMPLATES.TemplateResponse(request, "mcp_server.html", {
+        "request": request, "m": m, "quality": db.rate_row("mcp", m)},
+        headers=_owned_detail_headers(m))
 
 
 @router.get("/_partials/mcp", response_class=HTMLResponse, include_in_schema=False)
@@ -449,8 +452,9 @@ def a2a_detail(request: Request, slug: str):
         if retired is not None:
             return retired
         raise HTTPException(404, "a2a agent not found")
-    return TEMPLATES.TemplateResponse(request, "a2a_agent.html", {"request": request, "a": a},
-                                     headers=_owned_detail_headers(a))
+    return TEMPLATES.TemplateResponse(request, "a2a_agent.html", {
+        "request": request, "a": a, "quality": db.rate_row("a2a", a)},
+        headers=_owned_detail_headers(a))
 
 
 @router.get("/_partials/a2a", response_class=HTMLResponse, include_in_schema=False)
@@ -552,6 +556,8 @@ def api_service(slug: str):
         raise HTTPException(404, "service not found")
     from . import paid_verify
     card = cards.build_service_card(svc)
+    # Display-only conformance breakdown; search order uses the quality grade.
+    card["readiness"] = svc.get("readiness")
     with _conn() as c:
         card["paid_verification"] = paid_verify.public_summary(c, int(svc["id"]))
     return card

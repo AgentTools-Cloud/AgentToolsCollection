@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_macros.html" import readiness_section %}
 {% block title %}{{ svc.name_zh or svc.name }} — agent-tools.cloud{% endblock %}
 {% block desc %}{{ (svc.description_zh or svc.description or svc.name)|truncate(140) }}{% endblock %}
 {% block head_extra %}<script type="application/ld+json">{{ {
@@ -176,9 +177,13 @@
     {% if rating.health_checked %}Endpoint last checked {{ rating.health_checked }}.{% endif %}
     {% if rating.payto_checked %} On-chain activity last read {{ rating.payto_checked }}.{% endif %}
     Availability and on-chain demand are both re-probed daily; the grade
-    updates automatically on the next pass.
+    updates automatically on the next pass. This grade sets search order and
+    leaderboards; the readiness score below is shown for reference only.
   </div>
 </section>
+
+{{ readiness_section(svc.readiness, "x402 readiness", (rating.score, rating.grade),
+                     "availability, payability and on-chain demand") }}
 
 {% if svc.resource_samples and svc.resource_samples|length > 1 %}
 <section class="svc-card p-6 mb-6">
@@ -248,13 +253,13 @@
   <div class="flex flex-wrap gap-2">
     {% for s in svc.sources %}
       {% if s.source_url %}
-      <a href="{{ s.source_url }}" target="_blank" rel="noopener"
+      <a href="{{ s.source_url }}" target="_blank" rel="noopener" title="first seen {{ s.first_seen|ymd }}"
          class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-slate-200 bg-slate-50 hover:bg-slate-100 text-sm mono text-slate-700">
-        {{ s.source }}
+        {{ s.source }}{% if s.first_seen %} <span class="text-xs text-slate-400">since {{ s.first_seen|ymd }}</span>{% endif %}
         <span class="text-slate-400">&#8599;</span>
       </a>
       {% else %}
-      <span class="inline-flex items-center px-3 py-1.5 rounded-full border border-slate-200 bg-slate-50 text-sm mono text-slate-700">{{ s.source }}</span>
+      <span class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-slate-200 bg-slate-50 text-sm mono text-slate-700">{{ s.source }}{% if s.first_seen %} <span class="text-xs text-slate-400">since {{ s.first_seen|ymd }}</span>{% endif %}</span>
       {% endif %}
     {% endfor %}
   </div>
