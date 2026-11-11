@@ -88,7 +88,9 @@ class ApprovalEmailThrottleTests(unittest.TestCase):
         self.assertEqual(n, 2)
         self.assertEqual(st, ["approved", "approved"])
 
-    def test_resubmitted_listing_gets_no_email(self):
+    def test_resubmitted_listing_is_emailed_again(self):
+        # Re-submitting an already-listed URL is mailed like any approval
+        # (subject only to the per-contact window, disabled here).
         sent = []
         self.enterContext(patch.object(jobs, "APPROVAL_EMAIL_WINDOW", 0))
         with patch.object(jobs.mailer, "send_approval_email",
@@ -103,7 +105,7 @@ class ApprovalEmailThrottleTests(unittest.TestCase):
                     patch.object(jobs.crawlers, "check_health", return_value="ok"):
                 jobs._approve(ids[0], verdict={"verified_url": "https://svc.example/v1/a"})
                 jobs._approve(ids[1], verdict={"verified_url": "https://svc.example/v1/a"})
-        self.assertEqual(len(sent), 1)
+        self.assertEqual(len(sent), 2)
 
     def test_suppressed_recipient_is_never_sent(self):
         from directory import mailer
