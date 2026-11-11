@@ -1780,6 +1780,7 @@ def get_by_slug(conn, slug):
     out = row_to_dict(row)
     out["sources"] = listing_sources(conn, "x402", int(out["id"]))
     _attach_readiness(conn, "x402", out)
+    _attach_peer(conn, "x402", out)
     _attach_popularity(conn, "x402", out)
     return out
 
@@ -1795,6 +1796,20 @@ def _attach_readiness(conn, kind: str, out: dict) -> None:
     except Exception:  # noqa: BLE001 - a display extra must never break a page
         import logging
         logging.getLogger(__name__).exception("readiness breakdown failed for %s id=%s", kind, out.get("id"))
+
+
+def _attach_peer(conn, kind: str, out: dict) -> None:
+    """Where this listing stands among reachable peers of the same protocol,
+    from the latest daily statistics snapshot. Display only."""
+    from . import stats
+    try:
+        peer = stats.peer_position(stats.latest_on(conn), kind,
+                                   out.get("readiness"), out.get("latency_ms"))
+        if peer:
+            out["peer"] = peer
+    except Exception:  # noqa: BLE001 - a display extra must never break a page
+        import logging
+        logging.getLogger(__name__).exception("peer position failed for %s id=%s", kind, out.get("id"))
 
 
 def _attach_popularity(conn, kind: str, out: dict) -> None:
@@ -3595,6 +3610,7 @@ def get_a2a_by_slug(conn, slug):
         return None
     out = a2a_row_to_dict(row)
     out["sources"] = listing_sources(conn, "a2a", int(out["id"]))
+    _attach_peer(conn, "a2a", out)
     _attach_popularity(conn, "a2a", out)
     return out
 
@@ -4103,6 +4119,7 @@ def get_mcp_by_slug(conn, slug):
     out = mcp_row_to_dict(row)
     out["sources"] = listing_sources(conn, "mcp", int(out["id"]))
     _attach_readiness(conn, "mcp", out)
+    _attach_peer(conn, "mcp", out)
     _attach_popularity(conn, "mcp", out)
     return out
 

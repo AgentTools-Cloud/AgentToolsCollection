@@ -486,6 +486,151 @@ def topics(conn):
 # Assembly
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Why listings do not work, and where one listing stands among its peers
+# ---------------------------------------------------------------------------
+
+FAILURE_ORDER = ("answered", "auth_required", "not_found", "server_error", "client_error",
+                 "no_response", "not_probed", "no_endpoint")
+FAILURE_LABELS = {
+    "answered": "Answered the probe",
+    "auth_required": "Answered, but asks for credentials (401/403)",
+    "not_found": "Endpoint not found (404)",
+    "server_error": "Server error (5xx)",
+    "client_error": "Other client error (4xx)",
+    "no_response": "No response (timeout, DNS or TLS failure)",
+    "not_probed": "Not probed yet",
+    "no_endpoint": "No callable endpoint",
+}
+_STATUS_BUCKET_SQL = """CASE
+    WHEN health IS NULL THEN 'no_endpoint'
+    WHEN health = 'unknown' THEN 'not_probed'
+    WHEN http_status IN (401, 403, 407) THEN 'auth_required'
+    WHEN http_status = 404 THEN 'not_found'
+    WHEN http_status >= 500 THEN 'server_error'
+    WHEN http_status >= 400 AND http_status != 402 THEN 'client_error'
+    WHEN http_status IS NULL AND health NOT IN ('ok', 'degraded') THEN 'no_response'
+    ELSE 'answered' END"""
+
+
+def failures(conn):
+    """How each listing's latest probe ended, by HTTP outcome."""
+    out = {}
+    for kind in ("x402", "mcp"):
+        counts = dict(_q(conn, f"SELECT {_STATUS_BUCKET_SQL}, COUNT(*) FROM {TABLE[kind]} GROUP BY 1"))
+        out[kind] = _rows([(FAILURE_LABELS[k], int(counts.get(k, 0))) for k in FAILURE_ORDER
+                           if k == "answered" or counts.get(k)])
+    # A2A rows keep no HTTP status: the card either parsed or did not.
+    counts = dict(_q(conn, "SELECT COALESCE(health, 'none'), COUNT(*) FROM a2a_agents GROUP BY 1"))
+    out["a2a"] = _rows([(label, int(counts.get(k, 0))) for k, label in (
+        ("ok", "Agent Card fetched and valid"),
+        ("degraded", "Card fetched, with errors"),
+        ("down", "Card not fetched (no response or error)"),
+        ("unknown", "Not probed yet"),
+        ("none", "No card URL")) if k == "ok" or counts.get(k)])
+    return out
+
+
+QUANTILE_STEPS = tuple(range(0, 101, 5))
+
+
+def distributions(conn):
+    """Readiness score and latency at every 5th percentile, reachable listings only."""
+    out = {}
+    for kind in KINDS:
+        scores = [r[0] for r in _q(conn, f"SELECT readiness_score FROM {TABLE[kind]} "
+                                        "WHERE health='ok' AND readiness_score IS NOT NULL")]
+        lat = [r[0] for r in _q(conn, f"SELECT latency_ms FROM {TABLE[kind]} "
+                                     "WHERE health='ok' AND latency_ms IS NOT NULL")]
+        out[kind] = {
+            "readiness_n": len(scores),
+            "readiness": [round(_quantile(scores, p / 100), 1) for p in QUANTILE_STEPS] if scores else [],
+            "latency_n": len(lat),
+            "latency_ms": [round(_quantile(lat, p / 100)) for p in QUANTILE_STEPS] if lat else [],
+        }
+    return out
+
+
+def _share_below(qs, value):
+    """Approximate share (0-100) of peers below `value`, from 5% quantiles."""
+    if not qs or value is None:
+        return None
+    if value <= qs[0]:
+        return 0.0
+    if value >= qs[-1]:
+        return 100.0
+    for i in range(1, len(qs)):
+        lo, hi = qs[i - 1], qs[i]
+        if value <= hi:
+            frac = 0.5 if hi == lo else (value - lo) / (hi - lo)
+            return round(QUANTILE_STEPS[i - 1] + frac * (QUANTILE_STEPS[i] - QUANTILE_STEPS[i - 1]), 1)
+    return 100.0
+
+
+def peer_position(snap, kind, readiness=None, latency_ms=None):
+    """Where one listing stands among reachable listings of the same protocol.
+
+    `readiness` is the listing's readiness report (score + criteria). Returns
+    None when there is no snapshot. Biggest gaps are the criteria that lost the
+    most points, with the detail that says how to close them.
+    """
+    if not snap or kind not in KINDS:
+        return None
+    dist = (snap.get("distributions") or {}).get(kind)
+    if not dist:
+        return None
+    out = {"kind": kind, "peer_group": f"reachable {KIND_LABEL[kind]}", "as_of": snap["as_of"],
+           "peers": dist["readiness_n"]}
+    score = (readiness or {}).get("score")
+    if score is not None and dist["readiness"]:
+        out["readiness"] = {"score": score, "peer_median": dist["readiness"][10],
+                            "better_than_pct": _share_below(dist["readiness"], float(score))}
+    if latency_ms is not None and dist["latency_ms"]:
+        out["latency"] = {"ms": int(latency_ms), "peer_median_ms": dist["latency_ms"][10],
+                          "faster_than_pct": round(100 - (_share_below(dist["latency_ms"], float(latency_ms)) or 0), 1)}
+    gaps = []
+    for c in (readiness or {}).get("criteria") or []:
+        if not c.get("applicable", True):
+            continue
+        lost = float(c.get("max_points") or 0) - float(c.get("points") or 0)
+        if lost >= 0.5:
+            gaps.append({"key": c.get("key"), "label": c.get("label"), "points_lost": round(lost, 1),
+                         "detail": c.get("detail")})
+    out["biggest_gaps"] = sorted(gaps, key=lambda g: -g["points_lost"])[:3]
+    return out
+
+
+def usable(snap):
+    """The data behind /stats/usable: how many listings actually work, and why not."""
+    if not snap:
+        return {"available": False}
+    k = snap["kpis"]["all"]
+    pct = lambda a, b: round(100 * a / b, 1) if b else 0.0
+    answer = (f"As of {snap['as_of']}, {k['reachable']:,} of the {k['indexed']:,} agent tools we index "
+              f"({pct(k['reachable'], k['indexed'])}%) answered our latest probe, {k['verified']:,} "
+              f"({pct(k['verified'], k['indexed'])}%) passed a full protocol check, and {k['ready']:,} "
+              f"({pct(k['ready'], k['indexed'])}%) are ready for an agent to call.")
+    rows = []
+    for kind in KINDS:
+        kk = snap["kpis"][kind]
+        rel = snap["reliability"][kind]
+        perfect = next((r["pct"] for r in rel["uptime"] if r["label"] == "100%"), None)
+        rows.append({"kind": kind, "label": KIND_LABEL[kind], **kk,
+                     "reachable_pct": pct(kk["reachable"], kk["indexed"]),
+                     "verified_pct": pct(kk["verified"], kk["indexed"]),
+                     "ready_pct": pct(kk["ready"], kk["indexed"]),
+                     "median_latency_ms": rel["latency"]["p50"], "p95_latency_ms": rel["latency"]["p95"],
+                     "uptime_tracked": rel["tracked"], "uptime_100_pct": perfect if rel["tracked"] else None})
+    return {"available": True, "question": "How many agent tools actually work?", "answer": answer,
+            "as_of": snap["as_of"], "by_protocol": rows, "why_not": snap.get("failures") or {},
+            "definitions": {"reachable": "answered our latest daily probe",
+                            "verified": "valid 402 challenge (x402), full initialize + tools/list (MCP), "
+                                        "JSON-RPC reply (A2A)",
+                            "ready": "readiness grade A or B"},
+            "links": {"page": f"{SITE}/stats/usable", "json": f"{SITE}/stats/usable.json",
+                      "methodology": f"{SITE}/api/v1/methodology"}}
+
+
 def compute(conn, now: int | None = None) -> dict:
     now = int(now or time.time())
     t0 = time.monotonic()
@@ -504,6 +649,8 @@ def compute(conn, now: int | None = None) -> dict:
         "sources": sources(conn),
         "growth": growth(conn, now),
         "topics": topics(conn),
+        "failures": failures(conn),
+        "distributions": distributions(conn),
     }
     try:
         from . import popularity
@@ -648,6 +795,8 @@ LINKS = {
     "page": f"{SITE}/stats",
     "snapshot_json": f"{SITE}/stats.json",
     "daily_csv": f"{SITE}/stats/daily.csv",
+    "usable": f"{SITE}/stats/usable",
+    "usable_json": f"{SITE}/stats/usable.json",
     "methodology": f"{SITE}/stats#method",
     "methodology_json": f"{SITE}/api/v1/methodology",
     "license": "CC BY 4.0",
@@ -667,6 +816,17 @@ def latest(conn_factory, ttl: float = 600.0) -> dict | None:
         return _latest_cache["snap"]
     with closing(conn_factory()) as c:
         snap = db.latest_stats_snapshot(c)
+    _latest_cache.update(at=now, snap=snap)
+    return snap
+
+
+def latest_on(conn, ttl: float = 600.0) -> dict | None:
+    """Like `latest`, but reads through an open connection and leaves it open."""
+    from . import db
+    now = time.time()
+    if _latest_cache["snap"] is not None and now - _latest_cache["at"] < ttl:
+        return _latest_cache["snap"]
+    snap = db.latest_stats_snapshot(conn)
     _latest_cache.update(at=now, snap=snap)
     return snap
 
@@ -718,5 +878,8 @@ def summary(snap: dict | None, view: str = "all") -> dict:
             "protocol_versions": snap["protocols"]["a2a"][:3],
             "card_signatures": snap["protocols"]["a2a_signatures"],
         }
+    for kind in kinds:
+        if snap.get("failures", {}).get(kind):
+            facts[kind]["probe_outcomes"] = snap["failures"][kind]
     out["facts"] = facts
     return out

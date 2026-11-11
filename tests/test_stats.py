@@ -147,6 +147,60 @@ class StatsSnapshotTests(unittest.TestCase):
         self.assertIn("has not been computed yet", html)
 
 
+    def test_failures_and_usable_page(self):
+        x = {r["label"]: r["count"] for r in self.snap["failures"]["x402"]}
+        self.assertEqual(x[stats.FAILURE_LABELS["answered"]], 2)
+        self.assertEqual(x[stats.FAILURE_LABELS["not_probed"]], 1)
+        self.assertEqual(self.snap["failures"]["a2a"][0]["count"], 2)
+        u = stats.usable(self.snap)
+        self.assertTrue(u["available"])
+        self.assertIn("of the 7 agent tools we index", u["answer"])
+        self.assertEqual([r["kind"] for r in u["by_protocol"]], list(stats.KINDS))
+        self.assertFalse(stats.usable(None)["available"])
+        env = Environment(loader=FileSystemLoader(str(ROOT / "directory/templates")), autoescape=True)
+        env.globals.update(build_version="t", current_user=lambda r: None,
+                           may_edit_listing=lambda *a: False, url_host=lambda u: u)
+        env.filters["num"] = lambda v: f"{v:,}" if isinstance(v, int) else v
+
+        class Req:
+            class url:
+                path = "/stats/usable"
+        tpl = env.get_template("stats_usable.html")
+        html = tpl.render(request=Req, u=u, snap=self.snap)
+        self.assertIn("How many agent tools actually work?", html)
+        self.assertIn('"FAQPage"', html)
+        self.assertIn("Not probed yet", html)
+        self.assertIn("has not been computed yet",
+                      tpl.render(request=Req, u=stats.usable(None), snap=None))
+
+    def test_peer_position(self):
+        snap = {"as_of": "2026-11-11 06:00 UTC", "distributions": {"mcp": {
+            "readiness_n": 21, "readiness": list(range(0, 101, 5)),
+            "latency_n": 21, "latency_ms": [i * 100 for i in range(21)]}}}
+        r = {"score": 72.5, "criteria": [
+            {"key": "a", "label": "Auth", "points": 0, "max_points": 10, "detail": "Declare auth"},
+            {"key": "b", "label": "Schema", "points": 8, "max_points": 10},
+            {"key": "c", "label": "Card", "points": 0, "max_points": 5, "applicable": False},
+            {"key": "d", "label": "Docs", "points": 5, "max_points": 5}]}
+        p = stats.peer_position(snap, "mcp", r, 500)
+        self.assertEqual(p["readiness"]["better_than_pct"], 72.5)
+        self.assertEqual(p["readiness"]["peer_median"], 50)
+        self.assertEqual(p["latency"]["faster_than_pct"], 75.0)
+        self.assertEqual([g["key"] for g in p["biggest_gaps"]], ["a", "b"])
+        self.assertIsNone(stats.peer_position(None, "mcp", r, 1))
+        self.assertIsNone(stats.peer_position(snap, "x402", r, 1))
+        self.assertEqual(stats._share_below([5] * 21, 5), 0.0)
+        self.assertEqual(stats._share_below([5] * 21, 9), 100.0)
+        d = self.snap["distributions"]["mcp"]
+        self.assertEqual((d["latency_n"], len(d["latency_ms"])), (2, 21))
+        env = Environment(loader=FileSystemLoader(str(ROOT / "directory/templates")), autoescape=True)
+        env.filters["num"] = lambda v: f"{v:,}" if isinstance(v, int) else v
+        html = env.from_string('{% from "_macros.html" import peer_section %}{{ peer_section(p) }}').render(p=p)
+        self.assertIn("Higher than 72%", html)
+        self.assertIn("Faster than 75%", html)
+        self.assertIn("Declare auth", html)
+
+
 class AgentAccessTests(unittest.TestCase):
     """The digest agents get through MCP, A2A and /api/v1/stats."""
 

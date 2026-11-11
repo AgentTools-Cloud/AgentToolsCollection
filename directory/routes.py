@@ -397,6 +397,32 @@ def stats_json():
                                        "Access-Control-Allow-Origin": "*"})
 
 
+@router.get("/stats/usable", response_class=HTMLResponse, include_in_schema=False)
+def stats_usable_page(request: Request):
+    from . import stats as stats_mod
+    snap, _h = _stats_payload()
+    data = stats_mod.usable(snap)
+    return TEMPLATES.TemplateResponse(request, "stats_usable.html", {
+        "request": request, "u": data, "snap": snap,
+    }, status_code=200 if data["available"] else 503)
+
+
+@router.get("/stats/usable.json", tags=["directory"],
+            summary="How many agent tools actually work, and why the rest do not")
+def stats_usable_json():
+    """One-sentence answer, per-protocol reachable/verified/ready shares, median
+    latency, 30-day uptime and the outcome of every listing's latest probe
+    (answered, asks for credentials, 404, 5xx, no response). Daily. CC BY 4.0."""
+    from . import stats as stats_mod
+    snap, _h = _stats_payload()
+    data = stats_mod.usable(snap)
+    if not data["available"]:
+        raise HTTPException(status_code=503, detail="statistics not computed yet")
+    data["license"] = "CC BY 4.0"
+    return JSONResponse(data, headers={"Cache-Control": "public, max-age=600",
+                                       "Access-Control-Allow-Origin": "*"})
+
+
 @router.get("/stats/daily.csv", tags=["directory"], summary="Headline metrics for every stored day (CSV)",
             response_class=Response)
 def stats_daily_csv():
@@ -2120,6 +2146,7 @@ def well_known():
                 "snapshot": "https://agent-tools.cloud/stats.json",
                 "daily_csv": "https://agent-tools.cloud/stats/daily.csv",
                 "page": "https://agent-tools.cloud/stats",
+                "usable": "https://agent-tools.cloud/stats/usable.json",
                 "updated": "daily, after the 21:30 UTC probe run",
                 "license": "CC BY 4.0",
                 "returns": "indexed / reachable / protocol-verified / readiness counts, findings, "
@@ -2137,6 +2164,8 @@ def well_known():
                 "readiness": "9-criterion readiness score + grade (display only) on every detail endpoint",
                 "popularity": "GitHub stars/last push, npm 30-day downloads, Tranco site rank "
                               "(display only) on MCP and A2A detail endpoints when we have a signal",
+                "peer": "readiness percentile and median, latency percentile vs reachable listings of "
+                        "the same protocol, and the three criteria that cost the most points",
             },
             "blog": {
                 "list": "https://agent-tools.cloud/api/v1/blog?q=&tag=&page=",
@@ -2232,6 +2261,7 @@ def sitemap_xml(request: Request) -> Response:
         ("/x402", "0.9", "daily"),
         ("/categories", "0.6", "weekly"),
         ("/stats", "0.8", "daily"),
+        ("/stats/usable", "0.8", "daily"),
         ("/about", "0.4", "monthly"),
         ("/docs/claim", "0.5", "monthly"),
         ("/terms", "0.2", "yearly"),

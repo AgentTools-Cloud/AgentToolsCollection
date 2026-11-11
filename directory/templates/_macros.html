@@ -76,6 +76,49 @@
 {%- endmacro %}
 
 
+{#- Position among reachable listings of the same protocol (daily snapshot). Display only. -#}
+{% macro peer_section(p) -%}
+{% if p and (p.readiness or p.latency) %}
+<section class="svc-card p-6 mb-6" id="peers">
+  <h2 class="text-base font-semibold mb-1">Compared with peers</h2>
+  <p class="text-xs text-slate-500 mb-4">Against {{ p.peers|num }} {{ p.peer_group }} in our daily snapshot ({{ p.as_of }}). Display only; it does not change search order.</p>
+  <dl class="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
+    {% if p.readiness %}
+    <div>
+      <dt class="text-xs text-slate-500">Readiness</dt>
+      <dd class="mt-1"><span class="font-semibold text-slate-900">Higher than {{ "%.0f"|format(p.readiness.better_than_pct) }}%</span>
+        <span class="text-slate-500">of peers</span></dd>
+      <dd class="text-xs text-slate-500 mt-0.5">This listing {{ "%.0f"|format(p.readiness.score) }} · peer median {{ "%.0f"|format(p.readiness.peer_median) }}</dd>
+      <dd class="mt-2 h-1.5 rounded bg-slate-100" aria-hidden="true"><div class="h-1.5 rounded bg-blue-600" style="width:{{ [p.readiness.better_than_pct, 1]|max }}%"></div></dd>
+    </div>
+    {% endif %}
+    {% if p.latency %}
+    <div>
+      <dt class="text-xs text-slate-500">Latency</dt>
+      <dd class="mt-1"><span class="font-semibold text-slate-900">Faster than {{ "%.0f"|format(p.latency.faster_than_pct) }}%</span>
+        <span class="text-slate-500">of peers</span></dd>
+      <dd class="text-xs text-slate-500 mt-0.5">This listing {{ p.latency.ms|num }} ms · peer median {{ p.latency.peer_median_ms|num }} ms</dd>
+      <dd class="mt-2 h-1.5 rounded bg-slate-100" aria-hidden="true"><div class="h-1.5 rounded bg-emerald-600" style="width:{{ [p.latency.faster_than_pct, 1]|max }}%"></div></dd>
+    </div>
+    {% endif %}
+  </dl>
+  {% if p.biggest_gaps %}
+  <div class="mt-5 pt-4 border-t border-slate-100">
+    <h3 class="text-xs font-semibold text-slate-700 uppercase tracking-wide">Where it loses the most points</h3>
+    <ul class="mt-2 space-y-1.5 text-sm">
+      {% for g in p.biggest_gaps %}
+      <li><span class="font-medium text-slate-900">{{ g.label }}</span> <span class="mono text-xs text-red-700">−{{ "%g"|format(g.points_lost) }}</span>
+        {% if g.detail %}<span class="text-slate-600"> — {{ g.detail }}</span>{% endif %}</li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+  <p class="text-xs text-slate-400 mt-4"><a href="/stats/usable" class="hover:text-slate-700 underline decoration-dotted">How many agent tools actually work</a> · <a href="/stats" class="hover:text-slate-700 underline decoration-dotted">All statistics</a></p>
+</section>
+{% endif %}
+{%- endmacro %}
+
+
 {#- External adoption signals (GitHub / npm / Tranco). Display only. -#}
 {% macro popularity_section(p) -%}
 {% if p %}
