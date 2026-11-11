@@ -317,6 +317,91 @@ def submit_page(request: Request, type: str | None = Query(default=None)):
     return TEMPLATES.TemplateResponse(request, "submit.html", {"request": request, "active_type": active})
 
 
+TEMPLATES.env.filters["num"] = lambda v: (
+    f"{v:,}" if isinstance(v, int) else (f"{v:,.1f}" if isinstance(v, float) else (v if v is not None else "–")))
+
+_stats_cache: dict = {"at": 0.0, "snap": None, "history": []}
+_stats_lock = threading.Lock()
+STATS_VIEWS = ("all", "x402", "mcp", "a2a")
+STATS_PERIODS = (7, 30, 90)
+
+
+def _stats_payload() -> tuple[dict | None, list]:
+    """Latest stored snapshot + KPI history, cached in-process for 10 minutes."""
+    now = time.time()
+    with _stats_lock:
+        if _stats_cache["snap"] is not None and now - _stats_cache["at"] < 600:
+            return _stats_cache["snap"], _stats_cache["history"]
+        with _conn() as c:
+            snap = db.latest_stats_snapshot(c)
+            history = db.stats_history(c, 90)
+        _stats_cache.update(at=now, snap=snap, history=history)
+        return snap, history
+
+
+def _kpi_trend(history, view, metric, period):
+    """(sparkline points, change vs `period` days ago) from stored snapshots."""
+    series = [kp.get(view, {}).get(metric) for _d, kp in history[-period - 1:]]
+    series = [v for v in series if isinstance(v, (int, float))]
+    delta = series[-1] - series[0] if len(series) >= 2 else None
+    return series, delta
+
+
+@router.get("/stats", response_class=HTMLResponse, include_in_schema=False)
+def stats_page(request: Request,
+               view: str = Query(default="all"),
+               period: int = Query(default=7)):
+    from . import stats as stats_mod
+    view = view if view in STATS_VIEWS else "all"
+    period = period if period in STATS_PERIODS else 7
+    snap, history = _stats_payload()
+    if snap is None:
+        return TEMPLATES.TemplateResponse(
+            request, "stats.html", {"request": request, "snap": None}, status_code=503)
+    kpis = {}
+    for metric in ("indexed", "reachable", "verified", "ready"):
+        series, delta = _kpi_trend(history, view, metric, period)
+        kpis[metric] = {"value": snap["kpis"][view][metric], "series": series, "delta": delta}
+    return TEMPLATES.TemplateResponse(request, "stats.html", {
+        "request": request, "snap": snap, "view": view, "period": period,
+        "kpis": kpis, "headlines": stats_mod.headlines(snap, view),
+        "history_days": len(history), "first_day": history[0][0] if history else None,
+        "kinds": [k for k in stats_mod.KINDS if view in ("all", k)],
+        "kind_label": stats_mod.KIND_LABEL,
+    })
+
+
+@router.get("/stats.json", include_in_schema=False)
+def stats_json():
+    snap, _h = _stats_payload()
+    if snap is None:
+        raise HTTPException(status_code=503, detail="statistics not computed yet")
+    return JSONResponse(snap, headers={"Cache-Control": "public, max-age=600",
+                                       "Access-Control-Allow-Origin": "*"})
+
+
+@router.get("/stats/daily.csv", include_in_schema=False)
+def stats_daily_csv():
+    """Every stored day's headline metrics, long format: day,kind,metric,value."""
+    import csv
+    import io
+    from . import stats as stats_mod
+    with _conn() as c:
+        try:
+            rows = c.execute("SELECT day, json FROM stats_snapshots ORDER BY day").fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+    buf = io.StringIO()
+    w = csv.writer(buf, lineterminator="\n")
+    w.writerow(("day", "kind", "metric", "value"))
+    for day, raw in rows:
+        for kind, metric, value in stats_mod.flatten(json.loads(raw)):
+            w.writerow((day, kind, metric, value))
+    return Response(buf.getvalue(), media_type="text/csv; charset=utf-8", headers={
+        "Content-Disposition": 'inline; filename="agent-tools-stats-daily.csv"',
+        "Cache-Control": "public, max-age=600", "Access-Control-Allow-Origin": "*"})
+
+
 @router.get("/about", response_class=HTMLResponse, include_in_schema=False)
 def about_page(request: Request):
     return TEMPLATES.TemplateResponse(request, "about.html", {"request": request})
@@ -2068,6 +2153,7 @@ def sitemap_xml(request: Request) -> Response:
         ("/a2a", "0.9", "daily"),
         ("/x402", "0.9", "daily"),
         ("/categories", "0.6", "weekly"),
+        ("/stats", "0.8", "daily"),
         ("/about", "0.4", "monthly"),
         ("/docs/claim", "0.5", "monthly"),
         ("/terms", "0.2", "yearly"),
