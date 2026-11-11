@@ -2059,9 +2059,11 @@ def well_known():
         },
         "version": "0.5",
         "description": (
-            "Free directory and MCP discovery layer for x402 paid APIs. "
-            "The previously hosted paid Qwen relay and vertical paid endpoints "
-            "were retired on 2026-05-25; this host is discovery-only."
+            "Free, agent-readable directory of x402 paid APIs, MCP servers and A2A "
+            "agents, probed daily, graded and safety-scanned; plus daily ecosystem "
+            "statistics, scoring methodology and a Blog, all available as JSON and MCP "
+            "tools. The paid relay hosted here until 2026-05-25 is retired; this host "
+            "is discovery-only."
         ),
         "paid_relay": False,
         "capabilities": [

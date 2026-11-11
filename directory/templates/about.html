@@ -30,7 +30,14 @@
     <h2 class="text-lg font-semibold mb-2">Agent-friendly discovery</h2>
     <p class="text-sm">Agents can use <code class="mono bg-slate-100 px-1 rounded">POST /api/v1/ask</code> for intent-level recommendations, <code class="mono bg-slate-100 px-1 rounded">GET /api/v1/search</code> for faceted search, and <code class="mono bg-slate-100 px-1 rounded">GET /api/v1/services/{slug}</code> for a full service card.</p>
     <p class="text-sm mt-2">Discovery entry-points: <a class="text-blue-600 hover:underline mono" href="/.well-known/agent-tools.json">/.well-known/agent-tools.json</a> · <a class="text-blue-600 hover:underline mono" href="/.well-known/mcp.json">/.well-known/mcp.json</a></p>
-    <p class="text-sm mt-2">Full reference: <a class="text-blue-600 hover:underline mono" href="/openapi.json">/openapi.json</a> (OpenAPI 3) · MCP server at <a class="text-blue-600 hover:underline mono" href="/mcp-discovery/">/mcp-discovery/</a> · daily statistics at <a class="text-blue-600 hover:underline mono" href="/stats.json">/stats.json</a>. No key needed for read endpoints.</p>
+    <p class="text-sm mt-2">Full reference: <a class="text-blue-600 hover:underline mono" href="/openapi.json">/openapi.json</a> (OpenAPI 3) · MCP server at <a class="text-blue-600 hover:underline mono" href="/mcp-discovery/">/mcp-discovery/</a> · A2A agent at <a class="text-blue-600 hover:underline mono" href="/.well-known/agent-card.json">/a2a</a> · <a class="text-blue-600 hover:underline mono" href="/llms.txt">/llms.txt</a>. No key needed for read endpoints.</p>
+    <p class="text-sm mt-2">Everything on this site is readable by agents, not only the listings:
+      daily statistics at <a class="text-blue-600 hover:underline mono" href="/api/v1/stats/summary">/api/v1/stats/summary</a>
+      (MCP tool <span class="mono">directory_stats</span>), how every score is computed at
+      <a class="text-blue-600 hover:underline mono" href="/api/v1/methodology">/api/v1/methodology</a>
+      (<span class="mono">get_methodology</span>), and the Blog at
+      <a class="text-blue-600 hover:underline mono" href="/api/v1/blog">/api/v1/blog</a>
+      (<span class="mono">list_articles</span>, <span class="mono">get_article</span>).</p>
   </div>
   <div>
     <h2 class="text-lg font-semibold mb-2">Safety scanning</h2>
@@ -236,6 +243,26 @@
       It is shown for reference and <b>never changes search order</b>. A fast endpoint
       with an unsigned, out-of-date card can rank high and read D; a complete, signed
       card on a slow host can read B and rank lower.</p>
+  </div>
+
+  <div id="adoption" class="scroll-mt-20">
+    <h2 class="text-lg font-semibold mb-2">Adoption signals</h2>
+    <p class="text-sm">Detail pages also show outside signs of use, when we can tie them to the
+      listing: GitHub stars, forks and last push for the source repository, npm downloads over
+      the last 30 days for a published package, and the Tranco rank of the listing's own
+      website. Shared platforms (GitHub, gateways, hosting domains) are never credited to a
+      single listing. Repositories refresh weekly, packages and ranks daily. These signals are
+      <b>display only</b>: they change neither the quality grade nor the readiness score.
+      They are in each detail API response as <span class="mono">popularity</span>.</p>
+  </div>
+
+  <div id="statistics" class="scroll-mt-20">
+    <h2 class="text-lg font-semibold mb-2">Statistics and data</h2>
+    <p class="text-sm"><a class="text-blue-600 hover:underline" href="/stats">The state of agent tools</a>
+      is rebuilt every day from these probes: reachability, protocol versions, readiness, uptime,
+      prices, access, safety, topics and growth across all three protocols. It is free to reuse
+      under CC BY 4.0 as <a class="text-blue-600 hover:underline mono" href="/stats.json">/stats.json</a>
+      and <a class="text-blue-600 hover:underline mono" href="/stats/daily.csv">/stats/daily.csv</a>.</p>
   </div>
 
   <div id="claim">

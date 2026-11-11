@@ -2,8 +2,11 @@
 
 [![smithery badge](https://smithery.ai/badge/kangletian/agent-tools-x402-directory)](https://smithery.ai/servers/kangletian/agent-tools-x402-directory)
 
-The server that powers [agent-tools.cloud](https://agent-tools.cloud) — an open
-directory of **x402 paid services** with a free MCP discovery endpoint.
+The server that powers [agent-tools.cloud](https://agent-tools.cloud) — an open,
+agent-readable directory of **x402 paid APIs, MCP servers and A2A agents**, probed
+daily, graded and safety-scanned, with a free MCP discovery endpoint and an A2A agent.
+Everything on the site (listings, daily statistics, scoring methodology, Blog) is
+available as JSON and through MCP tools.
 Also listed on [Smithery](https://smithery.ai/servers/kangletian/agent-tools-x402-directory).
 
 > **Note (2026-05-25):** the previously hosted paid Qwen3.6 relay and the paid
@@ -20,11 +23,16 @@ Also listed on [Smithery](https://smithery.ai/servers/kangletian/agent-tools-x40
 | `POST /api/v1/ask` | free, rate-limited | LLM-ranked recommendations grounded in directory candidates |
 | `GET /api/v1/services/{slug}` | free | Service card with payment, call and quality metadata |
 | `GET /api/v1/categories`, `/api/v1/stats` | free | Directory facets and aggregate stats |
+| `GET /stats`, `/stats.json`, `/stats/daily.csv` | free | Daily ecosystem statistics page, full snapshot and history (CC BY 4.0) |
+| `GET /api/v1/stats/summary?view=all\|mcp\|x402\|a2a` | free | Compact daily digest for agents |
+| `GET /api/v1/methodology` | free | How quality grades, readiness scores and statistics are computed |
+| `GET /api/v1/blog`, `/api/v1/blog/{slug}` | free | Published Blog articles (list; full Markdown) |
+| `GET /llms.txt` | free | Plain-text guide for LLM agents |
 | `POST /api/v1/submit` | free, rate-limited | Pending service submission with dedupe |
 | `POST /api/v1/keys` | free | Mint an API key (no signup) for account-scoped actions |
 | `POST /api/v1/services/{slug}/paid-verifications` | API key | Sponsored paid verification: quote, then `/api/v1/paid-verifications/{id}/execute` |
 | `POST /mcp-discovery/` | free | **MCP streamable-http** discovery server |
-| `POST /a2a` | free | **A2A JSON-RPC** agent (`message/send`): directory search + MCP safety scan |
+| `POST /a2a` | free | **A2A JSON-RPC** agent (0.3 `message/send` and 1.0 `SendMessage`): directory search, MCP safety scan, daily statistics |
 | `GET /healthz` | free | Liveness |
 | `GET /v1/models` | free | Upstream model listing (read-only) |
 | `GET /.well-known/agent-tools.json` | free | Agent discovery manifest |
@@ -43,6 +51,10 @@ ask_services(intent, top_k=5, category=None, max_price_usd=None, use_llm=True)
 get(slug)
 list_categories()
 stats()
+directory_stats(view="all")
+get_methodology()
+list_articles(query="", tag="", page=1)
+get_article(slug)
 search_mcp_servers(intent, top_k=5, chain=None, require_healthy=False)
 get_mcp_server(slug)
 search_a2a_agents(intent, top_k=5, x402_only=False)
@@ -52,6 +64,10 @@ register(url, name=None, description=None, mcp_url=None, category=None)
 prepare_paid_verification(slug, payer, api_key=None)
 execute_paid_verification(id, signature, api_key=None)
 get_paid_verification(id, api_key=None)
+claim_service_url(url, method=None)
+verify_service_url(claim_id, token)
+get_owned_listing(kind, slug)
+edit_owned_listing(kind, slug, fields)
 ```
 
 `*_paid_verification` (remote server only, not in the `agent-tools-mcp`
