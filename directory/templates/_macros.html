@@ -15,6 +15,67 @@
 {%- endmacro %}
 
 
+{#- Readiness breakdown (A2A / MCP / x402). Display only: search order uses
+     the quality grade, passed in as `quality` = (score, grade). -#}
+{% macro readiness_section(r, title, quality=None, quality_basis="availability, conformance and speed") -%}
+{% if r and r.criteria %}
+<section class="svc-card p-6 mb-6" id="readiness">
+  <div class="flex items-baseline justify-between gap-4 mb-1">
+    <h2 class="text-base font-semibold">{{ title }}</h2>
+    <div class="font-semibold mono">{{ r.grade }} · {{ "%.0f"|format(r.score) }}/100</div>
+  </div>
+  <p class="text-xs text-slate-500 mb-4">
+    Readiness is how fully this listing follows its protocol and how it behaved
+    in our probes over 30 days. It is shown for reference and does not move it
+    in search.
+    {% if quality %}Search order and leaderboards use the separate quality grade
+    (here {{ quality[1] }}, {{ "%.1f"|format(quality[0]) }}/100), which weighs {{ quality_basis }}.{% endif %}
+    <a class="text-blue-600 hover:underline" href="/about#readiness">How the two differ</a>
+  </p>
+  <table class="w-full text-sm">
+    <tbody>
+    {% for c in r.criteria %}
+      <tr class="border-t border-slate-100 align-top">
+        <td class="py-2 pr-3 font-medium whitespace-nowrap">{{ c.label }}</td>
+        <td class="py-2 pr-3 mono whitespace-nowrap">
+          {%- if c.applicable is sameas false -%}<span class="text-slate-400">n/a</span>
+          {%- else -%}{{ "%g"|format(c.points) }}/{{ c.max_points }}{%- endif -%}
+        </td>
+        <td class="py-2 text-slate-600">{{ c.detail }}
+          {% if c.findings %}
+          <ul class="text-xs text-slate-500 mt-1 list-disc pl-4">
+            {% for f in c.findings %}<li>{{ f }}</li>{% endfor %}
+          </ul>
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <div class="text-xs text-slate-500 mt-3 space-y-1">
+    {% if r.applicable_max and r.applicable_max < 100 %}
+    <div>Applicable criteria total {{ "%g"|format(r.applicable_max) }} points, scaled to 100.</div>
+    {% endif %}
+    {% if r.responsiveness and r.responsiveness.latency_ms is not none %}
+    <div>Responsiveness: <span class="font-medium">{{ r.responsiveness.label }}</span>
+      ({{ r.responsiveness.latency_ms }} ms; bands ≤2.5 s, ≤5 s, ≤8 s, slower; penalty only).</div>
+    {% endif %}
+    {% if r.payment_evidence %}
+    <div>Payment evidence: <span class="mono font-medium">{{ r.payment_evidence.grade }}</span>
+      — {{ r.payment_evidence.detail }}
+      {% if r.payment_evidence.evidence|length > 1 %}Also:
+        {% for e in r.payment_evidence.evidence[1:] %}<span class="mono">{{ e.grade }}</span>{% if not loop.last %}, {% endif %}{% endfor %}.
+      {% endif %}
+      Qualifies the payment claim; adds no points.</div>
+    {% endif %}
+    {% if r.checked_at %}<div>Measured {{ r.checked_at|ymd }}{% if r.age_days and r.age_days > 30 %} ({{ r.age_days }} days ago){% endif %}.</div>{% endif %}
+    <div>{{ r.methodology }}</div>
+  </div>
+</section>
+{% endif %}
+{%- endmacro %}
+
+
 {#- Letter-grade badge (A / B+ / B / C+ / C / D / E), colour-coded. -#}
 {% macro grade_badge(grade) -%}
   {%- set g = grade or 'E' -%}

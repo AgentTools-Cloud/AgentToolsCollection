@@ -56,8 +56,9 @@ METHODOLOGY = (
     "methodology v1.1. Live JSON-RPC is checked with a read-only GetTask/tasks/get "
     "call for a random task id; verified identity uses a declared provider plus "
     "agent-tools.cloud domain-control claims (company registries not yet checked); "
-    "uptime is final after five probes in 30 days. Grades: A>=90, B>=75, C>=60, "
-    "D>=40, F<40. This score does not change directory ranking."
+    "uptime is final after five probes in 30 days and leaves out probes the host "
+    "refused (429, or a 403 that kept us out). Grades: A>=90, B>=75, C>=60, "
+    "D>=40, F<40. Display only: search order uses the quality grade."
 )
 
 
@@ -140,7 +141,9 @@ def score_valid_card(card: Any) -> dict:
     if not findings:
         return _crit("valid_card", 10, "pass", "Parseable Agent Card with the required fields.")
     pts = 10 - min(3, len(findings))
-    return _crit("valid_card", pts, "partial", "Findings: " + "; ".join(findings[:6]) + ".")
+    c = _crit("valid_card", pts, "partial", f"{len(findings)} finding(s); one point each, at most three.")
+    c["findings"] = findings
+    return c
 
 
 def score_protocol_version(card: Any) -> dict:
@@ -465,10 +468,18 @@ def score_uptime(ok: int, total: int) -> dict:
 # Assembly
 # --------------------------------------------------------------------------
 
+def _card_declares_payment(card: Any) -> bool:
+    if not isinstance(card, dict):
+        return False
+    blob = json.dumps(card.get("capabilities") or {}).lower()
+    return any(f in blob for f in ("x402", "ap2", "mpp", "payment"))
+
+
 def assess(card: Any, card_url: str | None, *, rpc: dict | None, uptime_ok: int,
            uptime_total: int, owner_verified: bool, last_seen: int | None,
            x402_supported: bool, fetch_json: Callable[[str], Any] | None = None,
-           now: int | None = None) -> dict:
+           now: int | None = None, sources=()) -> dict:
+    from . import listing_readiness as L
     now = int(now or time.time())
     criteria = [
         score_valid_card(card),
@@ -482,6 +493,15 @@ def assess(card: Any, card_url: str | None, *, rpc: dict | None, uptime_ok: int,
         score_security(card),
     ]
     score = round(sum(c["points"] for c in criteria), 1)
-    return {"version": VERSION, "score": score, "grade": grade(score),
-            "max_score": 100, "checked_at": now, "criteria": criteria,
-            "methodology": METHODOLOGY}
+    rpc_status = (rpc or {}).get("http_status")
+    declared = _card_declares_payment(card)
+    evidence = None
+    if x402_supported or declared or rpc_status == 402:
+        evidence = L.payment_evidence(challenge=rpc_status == 402, declared=declared,
+                                      sources=L.source_names(sources))
+    latency = (rpc or {}).get("latency_ms")
+    return {"version": VERSION, "kind": "a2a", "score": score, "grade": grade(score),
+            "max_score": 100, "applicable_max": 100, "checked_at": now,
+            "criteria": criteria, "methodology": METHODOLOGY,
+            "responsiveness": L.responsiveness(latency),
+            "payment_evidence": evidence}

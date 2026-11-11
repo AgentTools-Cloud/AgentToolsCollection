@@ -728,6 +728,18 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
             "ALTER TABLE a2a_agents ADD COLUMN readiness_grade TEXT",
             "ALTER TABLE a2a_agents ADD COLUMN readiness_json TEXT",
             "ALTER TABLE a2a_agents ADD COLUMN readiness_checked INTEGER",
+            # Probe status code in the history, so uptime can leave out the
+            # probes a host refused (429, or a 403 we were not let through).
+            "ALTER TABLE a2a_health_history ADD COLUMN http_status INTEGER",
+            "ALTER TABLE mcp_health_history ADD COLUMN http_status INTEGER",
+            # MCP / x402 readiness: score + grade only; the breakdown is
+            # recomputed from the row and its probe history on the detail page.
+            "ALTER TABLE mcp_servers ADD COLUMN readiness_score REAL",
+            "ALTER TABLE mcp_servers ADD COLUMN readiness_grade TEXT",
+            "ALTER TABLE mcp_servers ADD COLUMN readiness_checked INTEGER",
+            "ALTER TABLE services ADD COLUMN readiness_score REAL",
+            "ALTER TABLE services ADD COLUMN readiness_grade TEXT",
+            "ALTER TABLE services ADD COLUMN readiness_checked INTEGER",
             "ALTER TABLE mcp_servers ADD COLUMN conformance TEXT",
             "ALTER TABLE mcp_servers ADD COLUMN tool_count INTEGER",
             "ALTER TABLE mcp_servers ADD COLUMN latency_p95_ms INTEGER",
@@ -1733,7 +1745,21 @@ def get_by_slug(conn, slug):
         return None
     out = row_to_dict(row)
     out["sources"] = listing_sources(conn, "x402", int(out["id"]))
+    _attach_readiness(conn, "x402", out)
     return out
+
+
+def _attach_readiness(conn, kind: str, out: dict) -> None:
+    """Full readiness breakdown for one MCP/x402 listing, recomputed from the
+    row and its probe history (only score + grade are stored)."""
+    from . import listing_readiness
+    try:
+        fn = (listing_readiness.for_mcp_row if kind == "mcp"
+              else listing_readiness.for_x402_row)
+        out["readiness"] = fn(conn, out)
+    except Exception:  # noqa: BLE001 - a display extra must never break a page
+        import logging
+        logging.getLogger(__name__).exception("readiness breakdown failed for %s id=%s", kind, out.get("id"))
 
 
 GATEWAY_MIN_LISTINGS = 3
@@ -3288,7 +3314,8 @@ def a2a_row_to_dict(row) -> dict:
     raw = d.pop("readiness_json", None)
     if raw:
         try:
-            d["readiness"] = json.loads(raw)
+            from . import listing_readiness
+            d["readiness"] = listing_readiness.apply_age_decay(json.loads(raw))
         except (TypeError, json.JSONDecodeError):
             pass
     return d
@@ -3992,6 +4019,7 @@ def get_mcp_by_slug(conn, slug):
         return None
     out = mcp_row_to_dict(row)
     out["sources"] = listing_sources(conn, "mcp", int(out["id"]))
+    _attach_readiness(conn, "mcp", out)
     return out
 
 

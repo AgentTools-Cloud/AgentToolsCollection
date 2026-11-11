@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_macros.html" import readiness_section %}
 {% block title %}{{ a.name }} — A2A agent — agent-tools.cloud{% endblock %}
 {% block desc %}{{ (a.description or a.name)|truncate(140) }}{% endblock %}
 {% block head_extra %}<script type="application/ld+json">{{ {
@@ -77,27 +78,8 @@
   </div>
 </section>
 
-{% if a.readiness and a.readiness.criteria %}
-<section class="svc-card p-6 mb-6" id="readiness">
-  <div class="flex items-baseline justify-between gap-4 mb-1">
-    <h2 class="text-base font-semibold">A2A readiness</h2>
-    <div class="font-semibold mono">{{ a.readiness.grade }} · {{ "%.0f"|format(a.readiness.score) }}/100</div>
-  </div>
-  <p class="text-xs text-slate-500 mb-4">Nine criteria measured by our daily probes. Independent of the directory rating and search order.</p>
-  <table class="w-full text-sm">
-    <tbody>
-    {% for c in a.readiness.criteria %}
-      <tr class="border-t border-slate-100 align-top">
-        <td class="py-2 pr-3 font-medium whitespace-nowrap">{{ c.label }}</td>
-        <td class="py-2 pr-3 mono whitespace-nowrap">{{ "%g"|format(c.points) }}/{{ c.max_points }}</td>
-        <td class="py-2 text-slate-600">{{ c.detail }}</td>
-      </tr>
-    {% endfor %}
-    </tbody>
-  </table>
-  <p class="text-xs text-slate-500 mt-3">{{ a.readiness.methodology }}</p>
-</section>
-{% endif %}
+{{ readiness_section(a.readiness, "A2A readiness", quality,
+                     "availability, conformance, card completeness and speed") }}
 
 {% if a.skills %}
 <section class="svc-card p-6 mb-6">
@@ -151,13 +133,13 @@
   <div class="flex flex-wrap gap-2">
     {% for s in a.sources %}
       {% if s.source_url %}
-      <a href="{{ s.source_url }}" target="_blank" rel="noopener"
+      <a href="{{ s.source_url }}" target="_blank" rel="noopener" title="first seen {{ s.first_seen|ymd }}"
          class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-slate-200 bg-slate-50 hover:bg-slate-100 text-sm mono text-slate-700">
-        {{ s.source }}
+        {{ s.source }}{% if s.first_seen %} <span class="text-xs text-slate-400">since {{ s.first_seen|ymd }}</span>{% endif %}
         <span class="text-slate-400">&#8599;</span>
       </a>
       {% else %}
-      <span class="inline-flex items-center px-3 py-1.5 rounded-full border border-slate-200 bg-slate-50 text-sm mono text-slate-700">{{ s.source }}</span>
+      <span class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-slate-200 bg-slate-50 text-sm mono text-slate-700">{{ s.source }}{% if s.first_seen %} <span class="text-xs text-slate-400">since {{ s.first_seen|ymd }}</span>{% endif %}</span>
       {% endif %}
     {% endfor %}
   </div>

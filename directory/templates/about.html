@@ -185,6 +185,58 @@
       fixes both that and the payability component.</p>
   </div>
 
+  <div id="readiness">
+    <h2 class="text-lg font-semibold mb-2">Readiness score</h2>
+    <p class="text-sm">Each detail page also shows a <b>readiness</b> score: nine
+      criteria on how fully a listing follows its protocol and how it behaved in our
+      probes over 30 days. The criteria follow the public
+      <a class="text-blue-600 hover:underline" href="https://agenstry.com/methodology">Agenstry
+      conformance methodology</a> so operators see the same levers on both sites; how
+      each one is measured is ours. Grades are fixed thresholds: A&nbsp;&ge;&nbsp;90,
+      B&nbsp;&ge;&nbsp;75, C&nbsp;&ge;&nbsp;60, D&nbsp;&ge;&nbsp;40, F below.</p>
+    <table class="text-sm w-full mt-3">
+      <thead class="text-xs text-slate-500 text-left"><tr class="border-b border-slate-200">
+        <th class="py-1.5 pr-3 font-medium">Criterion</th><th class="py-1.5 pr-3 font-medium">Pts</th>
+        <th class="py-1.5 pr-3 font-medium">A2A</th><th class="py-1.5 pr-3 font-medium">MCP</th>
+        <th class="py-1.5 font-medium">x402</th></tr></thead>
+      <tbody class="align-top">
+        <tr class="border-b border-slate-100"><td class="py-1.5 pr-3 font-medium">Valid descriptor</td><td class="py-1.5 pr-3 mono">10</td>
+          <td class="py-1.5 pr-3">Agent Card fields; &minus;1 per finding, at most &minus;3</td><td class="py-1.5 pr-3">initialize + tools/list</td><td class="py-1.5">payTo, mainnet network, price</td></tr>
+        <tr class="border-b border-slate-100"><td class="py-1.5 pr-3 font-medium">Live endpoint</td><td class="py-1.5 pr-3 mono">25</td>
+          <td class="py-1.5 pr-3" colspan="3">Read-only probe (A2A <span class="mono">GetTask</span>, MCP <span class="mono">initialize</span>, x402 HTTP 402). Live 25, auth-gated or rate-limited 15, wrong shape 5. Slow responses lose 1&ndash;3 (&gt;2.5&nbsp;s, &gt;5&nbsp;s, &gt;8&nbsp;s). A result older than 30 days decays to 40% by 120 days.</td></tr>
+        <tr class="border-b border-slate-100"><td class="py-1.5 pr-3 font-medium">Protocol version</td><td class="py-1.5 pr-3 mono">10</td>
+          <td class="py-1.5 pr-3">1.x with supportedInterfaces[] 10, 0.x 5</td><td class="py-1.5 pr-3">current revision 10, one behind 8, two 6</td><td class="py-1.5">v2 10, v1 5, not observed n/a</td></tr>
+        <tr class="border-b border-slate-100"><td class="py-1.5 pr-3 font-medium">Signature</td><td class="py-1.5 pr-3 mono">10</td>
+          <td class="py-1.5 pr-3">JWS verified against the provider's JWKS</td><td class="py-1.5 pr-3 text-slate-400">n/a</td><td class="py-1.5 text-slate-400">n/a</td></tr>
+        <tr class="border-b border-slate-100"><td class="py-1.5 pr-3 font-medium">Uptime</td><td class="py-1.5 pr-3 mono">15</td>
+          <td class="py-1.5 pr-3" colspan="3">Share of our probes that succeeded over 30 days; final after 5 probes. Probes the host refused (HTTP 429, or a 403 that did not let us in) count on neither side.</td></tr>
+        <tr class="border-b border-slate-100"><td class="py-1.5 pr-3 font-medium">Skills / tools / resources</td><td class="py-1.5 pr-3 mono">10</td>
+          <td class="py-1.5 pr-3" colspan="3">&ge;3 full, 1&ndash;2 half; capped at 8 when entries lack descriptions (or, on A2A 1.x, tags).</td></tr>
+        <tr class="border-b border-slate-100"><td class="py-1.5 pr-3 font-medium">Identity</td><td class="py-1.5 pr-3 mono">10</td>
+          <td class="py-1.5 pr-3" colspan="3">Publisher declared 5; plus a verified claim here 8; MCP Registry namespace proof 7. Company registries are not checked yet, so 8 is the ceiling.</td></tr>
+        <tr class="border-b border-slate-100"><td class="py-1.5 pr-3 font-medium">Freshness</td><td class="py-1.5 pr-3 mono">5</td>
+          <td class="py-1.5 pr-3" colspan="3">Seen in a source within 7 days 4, within 30 days 2; +1 for a payment flag (x402, AP2, MPP&hellip;).</td></tr>
+        <tr><td class="py-1.5 pr-3 font-medium">Security declaration</td><td class="py-1.5 pr-3 mono">5</td>
+          <td class="py-1.5 pr-3" colspan="2">mTLS 5, OAuth with PKCE 4, any scheme or an explicit &ldquo;public&rdquo; 2</td><td class="py-1.5 text-slate-400">n/a (payment is the access control)</td></tr>
+      </tbody>
+    </table>
+    <p class="text-sm mt-2">Criteria marked n/a are left out and the remaining points are
+      scaled to 100. Each page also states the latency band and, for paid listings, the
+      <b>payment evidence</b> &mdash; how we learned it accepts payment, strongest first:
+      <span class="mono">x402_challenge</span>, <span class="mono">x402_manifest</span>,
+      <span class="mono">agent_card</span>, <span class="mono">bazaar_feed</span>,
+      <span class="mono">catalog_listing</span>. Evidence adds no points.</p>
+    <h3 class="text-sm font-semibold mt-4 mb-1">Readiness vs. the quality grade</h3>
+    <p class="text-sm">The quality grade above answers &ldquo;is this usable right now, and
+      how does it compare with its peers&rdquo;: availability, speed and, for x402, on-chain
+      demand, cut at percentiles of each kind. It sets search order and leaderboards.
+      Readiness answers &ldquo;how completely does this follow the standard&rdquo;: signing,
+      protocol version, declarations and a 30-day track record, on fixed thresholds.
+      It is shown for reference and <b>never changes search order</b>. A fast endpoint
+      with an unsigned, out-of-date card can rank high and read D; a complete, signed
+      card on a slow host can read B and rank lower.</p>
+  </div>
+
   <div id="claim">
     <h2 class="text-lg font-semibold mb-2">Claiming a listing you operate</h2>
     <p class="text-sm">Almost everything here was crawled, so most listings describe
