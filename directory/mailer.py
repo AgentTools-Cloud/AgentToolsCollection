@@ -62,6 +62,19 @@ def _record_external_result(subject: str, state: str, event_id: str, *, purpose:
         log.warning('external mail result notice failed: %s', type(exc).__name__)
 
 
+def _suppression_reason(to_email: str) -> str | None:
+    """A recipient the provider already failed to deliver to is never mailed
+    again. If the list cannot be read, no suppression is known and the send
+    goes ahead (a DB hiccup must not silently drop mail)."""
+    try:
+        from . import db
+        with db.connect(read_only=True) as conn:
+            return db.mail_suppressed(conn, to_email)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("mail suppression lookup failed: %s", type(exc).__name__)
+        return None
+
+
 def _send(to_email: str, subject: str, text: str, html: str) -> bool:
     if str(to_email).strip().lower() in {ADMIN_EMAIL.lower(), 'admin@agent-tools.cloud'}:
         from . import notices
@@ -92,6 +105,12 @@ def _deliver_external(to_email: str, subject: str, text: str, markup: str,
     reason = None
     stage = "configuration"
     message_id = message_id or make_msgid(domain="mail.agent-tools.cloud")
+    suppressed = _suppression_reason(to_email)
+    if suppressed:
+        log.info("external email skipped: recipient on the suppression list (%s)", suppressed)
+        _record_external_result(subject, "skipped", event_id, purpose=purpose)
+        return {"status": "skipped", "reason": "recipient_suppressed", "event_id": event_id,
+                "message_id": message_id}
     try:
         conf = _conf()
         if conf is None:
