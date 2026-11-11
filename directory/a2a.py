@@ -31,7 +31,7 @@ log = logging.getLogger("directory.a2a")
 SITE = "https://agent-tools.cloud"
 PROTOCOL_VERSION = "0.3.0"  # legacy top-level field kept for 0.3 clients
 SUPPORTED_A2A_VERSIONS = ("1.0", "0.3")  # preference order, Major.Minor
-AGENT_VERSION = "0.6.0"
+AGENT_VERSION = "0.7.0"
 
 UA = "agent-tools.cloud-a2a/0.1 (+https://agent-tools.cloud)"
 TIMEOUT = httpx.Timeout(connect=10.0, read=20.0, write=10.0, pool=10.0)
@@ -162,6 +162,23 @@ def own_agent_card(base_url: str = SITE) -> dict:
                 "examples": [
                     "is https://example.com/mcp safe to connect to?",
                     "scan https://foo.bar/mcp for malware",
+                ],
+            },
+            {
+                "id": "directory_stats",
+                "name": "Agent tool ecosystem statistics",
+                "description": (
+                    "Daily statistics from our probes: how many x402 APIs, MCP "
+                    "servers and A2A agents are indexed, reachable, protocol-verified "
+                    "and ready to call, with findings on prices, protocol versions "
+                    "and access. Send a data part {\"skill\": \"directory_stats\", "
+                    "\"view\": \"all|mcp|x402|a2a\"} or ask in plain text."
+                ),
+                "tags": ["stats", "statistics", "ecosystem", "mcp", "x402", "a2a"],
+                "examples": [
+                    "how many MCP servers are reachable right now?",
+                    "directory stats for x402",
+                    "what is the state of agent tools today?",
                 ],
             },
         ],
@@ -356,6 +373,53 @@ def _handle_v1(req_id, method, params: dict) -> dict:
     return _jsonrpc_error(req_id, -32601, f"Method not found: {method}")
 
 
+# Statistics intent: explicit data part, or plain-text questions about the
+# size/state of the ecosystem. Kept narrow so "find a statistics API" still
+# goes to search.
+_STATS_INTENT_RE = re.compile(
+    r"\b(how many|directory stats|directory statistics|stats for|statistics for|"
+    r"state of (?:the )?(?:agent tools|ecosystem|directory)|ecosystem (?:size|stats|statistics)|"
+    r"what share|what percentage)\b", re.I)
+_STATS_VIEW_RE = {"mcp": re.compile(r"\bmcp\b", re.I), "x402": re.compile(r"\bx402\b", re.I),
+                  "a2a": re.compile(r"\ba2a\b", re.I)}
+
+
+def _stats_request(message: dict, text: str) -> str | None:
+    """Return the requested view (all/mcp/x402/a2a) for a stats request, else None."""
+    for p in (message.get("parts") or []):
+        if isinstance(p, dict) and isinstance(p.get("data"), dict):
+            d = p["data"]
+            skill = str(d.get("skill") or d.get("id") or d.get("intent") or "").lower()
+            if skill in ("directory_stats", "stats", "statistics"):
+                view = str(d.get("view") or "all").lower()
+                return view if view in ("all", "mcp", "x402", "a2a") else "all"
+    if text and _STATS_INTENT_RE.search(text):
+        hits = [k for k, rx in _STATS_VIEW_RE.items() if rx.search(text)]
+        return hits[0] if len(hits) == 1 else "all"
+    return None
+
+
+def _stats_answer(view: str) -> dict:
+    from . import stats as stats_mod
+    try:
+        out = stats_mod.summary(stats_mod.latest(lambda: db.connect(read_only=True)), view)
+    except Exception:
+        log.exception("a2a message/send: stats summary failed")
+        return {"text": "Statistics are unavailable right now.", "data": {"error": "stats_failed"}}
+    if not out.get("available"):
+        return {"text": out.get("note") or "No statistics yet.", "data": out}
+    k = out["kpis"][out["view"]]
+    scope = "x402 APIs, MCP servers and A2A agents" if view == "all" else stats_mod.KIND_LABEL[view]
+    lines = [f"As of {out['as_of']}, across {scope}: {k['indexed']:,} indexed, "
+             f"{k['reachable']:,} reachable, {k['verified']:,} protocol-verified, "
+             f"{k['ready']:,} graded A or B for readiness."]
+    for key in ("funnel", "x402", "protocols", "access"):
+        if out["findings"].get(key) and (view == "all" or key != "x402" or view == "x402"):
+            lines.append(out["findings"][key])
+    lines.append(f"Full data: {stats_mod.LINKS['snapshot_json']} (CC BY 4.0).")
+    return {"text": " ".join(lines), "data": out}
+
+
 def _answer(message: dict) -> dict:
     """Version-neutral core: returns {text, data} or {error: (code, message)}."""
     text = _extract_text(message)
@@ -381,6 +445,10 @@ def _answer(message: dict) -> dict:
         else:
             summary = f"Could not scan: {verdict.get('message') or verdict.get('error')}"
         return {"text": summary, "data": verdict}
+
+    stats_view = _stats_request(message, text)
+    if stats_view is not None:
+        return _stats_answer(stats_view)
 
     if not text:
         return {"error": (-32602, "params.message must contain a text part")}

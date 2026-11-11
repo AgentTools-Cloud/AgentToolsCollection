@@ -617,3 +617,82 @@ def _kind_headlines(snap, kind):
         h["access"] = (f"{next((r['pct'] for r in snap['access']['a2a'] if r['label'] == 'Not declared'), 0)}% of "
                        "reachable A2A agents declare no security scheme.")
     return h
+
+
+# ---------------------------------------------------------------------------
+# Agent-facing summary (MCP tool, A2A skill, /api/v1/stats)
+# ---------------------------------------------------------------------------
+
+SITE = "https://agent-tools.cloud"
+VIEWS = ("all",) + KINDS
+LINKS = {
+    "page": f"{SITE}/stats",
+    "snapshot_json": f"{SITE}/stats.json",
+    "daily_csv": f"{SITE}/stats/daily.csv",
+    "methodology": f"{SITE}/stats#method",
+    "license": "CC BY 4.0",
+}
+_latest_cache: dict = {"at": 0.0, "snap": None}
+
+
+def latest(conn_factory, ttl: float = 600.0) -> dict | None:
+    """The newest stored snapshot, cached in-process for `ttl` seconds.
+
+    `conn_factory` returns a read-only connection; it is only called on a miss.
+    """
+    from contextlib import closing
+    from . import db
+    now = time.time()
+    if _latest_cache["snap"] is not None and now - _latest_cache["at"] < ttl:
+        return _latest_cache["snap"]
+    with closing(conn_factory()) as c:
+        snap = db.latest_stats_snapshot(c)
+    _latest_cache.update(at=now, snap=snap)
+    return snap
+
+
+def summary(snap: dict | None, view: str = "all") -> dict:
+    """Compact, agent-readable digest of one snapshot (a few hundred bytes)."""
+    view = view if view in VIEWS else "all"
+    if not snap:
+        return {"available": False, "view": view, "links": LINKS,
+                "note": "The first daily snapshot has not been computed yet."}
+    kinds = KINDS if view == "all" else (view,)
+    out = {
+        "available": True,
+        "view": view,
+        "as_of": snap["as_of"],
+        "generated_at": snap["generated_at"],
+        "kpis": {k: snap["kpis"][k] for k in (("all",) + KINDS if view == "all" else (view,))},
+        "definitions": {
+            "indexed": "listings any source shows us",
+            "reachable": "answered our latest daily probe",
+            "verified": "valid 402 challenge (x402), full initialize + tools/list (MCP), "
+                        "JSON-RPC reply (A2A)",
+            "ready": "readiness grade A or B",
+        },
+        "findings": headlines(snap, view),
+        "links": LINKS,
+    }
+    facts: dict = {}
+    if "x402" in kinds:
+        x = snap["x402"]
+        facts["x402"] = {
+            "cheapest_call_usd_quantiles": x["price_quantiles"],
+            "share_cheapest_call_le_1_cent_pct": x["share_le_1c"],
+            "top_networks": x["chains"][:3],
+        }
+    if "mcp" in kinds:
+        facts["mcp"] = {
+            "protocol_versions": snap["protocols"]["mcp"][:3],
+            "auth_not_declared_pct": next(
+                (r["pct"] for r in snap["access"]["mcp"] if r["label"] == "Not declared"), None),
+            "latency_ms": snap["reliability"]["mcp"]["latency"],
+        }
+    if "a2a" in kinds:
+        facts["a2a"] = {
+            "protocol_versions": snap["protocols"]["a2a"][:3],
+            "card_signatures": snap["protocols"]["a2a_signatures"],
+        }
+    out["facts"] = facts
+    return out
