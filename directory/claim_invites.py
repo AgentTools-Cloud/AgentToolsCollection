@@ -504,9 +504,13 @@ def preview(connection: sqlite3.Connection, invitation_id: int) -> dict | None:
         if current is None or current[0]["publisher"] != invitation["publisher"]:
             return None
         candidate, listing = current
-        listings.append({"kind": candidate["kind"], "listing_id": listing["id"], "host": candidate["host"],
-                         "name": listing["name"], "source_name": SOURCE_LABELS[candidate["source"]],
-                         "listing_url": mailer.SITE + VIEW_PATHS[candidate["kind"]] + quote(str(listing["slug"]), safe="")})
+        entry = {"kind": candidate["kind"], "listing_id": listing["id"], "host": candidate["host"],
+                 "name": listing["name"], "source_name": SOURCE_LABELS[candidate["source"]],
+                 "listing_url": mailer.SITE + VIEW_PATHS[candidate["kind"]] + quote(str(listing["slug"]), safe="")}
+        if listing.get("readiness_grade") and listing.get("readiness_score") is not None:
+            entry["readiness"] = {"grade": listing["readiness_grade"],
+                                  "score": round(float(listing["readiness_score"]))}
+        listings.append(entry)
     if not listings:
         return None
     token = unsubscribe_token(connection, invitation_id) or "UNSUBSCRIBE_TOKEN"
