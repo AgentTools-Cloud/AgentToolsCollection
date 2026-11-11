@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import re
 import time
 import uuid
@@ -268,6 +269,9 @@ def canonical_card(card: dict) -> bytes:
 def _sdk_canonical(card: dict) -> bytes | None:
     """Canonical payload exactly as the official a2a-sdk signer builds it
     (proto field presence + RFC 8785). None when the SDK is unavailable."""
+    # The SDK logs a spec-compliance warning per card; the valid_card
+    # criterion already reports those findings, so keep the job log quiet.
+    logging.getLogger("a2a.utils.proto_utils").setLevel(logging.ERROR)
     try:
         from google.protobuf.json_format import ParseDict
         from a2a.types import AgentCard
