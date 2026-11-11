@@ -26,10 +26,11 @@
     <h2 class="text-lg font-semibold mb-2">What is x402?</h2>
     <p class="text-sm">x402 is Coinbase's HTTP 402 micropayment protocol. AI agents can discover a service, inspect its payment requirements, and then call the external API with an x402 payment flow. We index public x402 endpoints; agent-tools.cloud itself is discovery-only.</p>
   </div>
-  <div>
+  <div id="api" class="scroll-mt-20">
     <h2 class="text-lg font-semibold mb-2">Agent-friendly discovery</h2>
     <p class="text-sm">Agents can use <code class="mono bg-slate-100 px-1 rounded">POST /api/v1/ask</code> for intent-level recommendations, <code class="mono bg-slate-100 px-1 rounded">GET /api/v1/search</code> for faceted search, and <code class="mono bg-slate-100 px-1 rounded">GET /api/v1/services/{slug}</code> for a full service card.</p>
     <p class="text-sm mt-2">Discovery entry-points: <a class="text-blue-600 hover:underline mono" href="/.well-known/agent-tools.json">/.well-known/agent-tools.json</a> · <a class="text-blue-600 hover:underline mono" href="/.well-known/mcp.json">/.well-known/mcp.json</a></p>
+    <p class="text-sm mt-2">Full reference: <a class="text-blue-600 hover:underline mono" href="/openapi.json">/openapi.json</a> (OpenAPI 3) · MCP server at <a class="text-blue-600 hover:underline mono" href="/mcp-discovery/">/mcp-discovery/</a> · daily statistics at <a class="text-blue-600 hover:underline mono" href="/stats.json">/stats.json</a>. No key needed for read endpoints.</p>
   </div>
   <div>
     <h2 class="text-lg font-semibold mb-2">Safety scanning</h2>
