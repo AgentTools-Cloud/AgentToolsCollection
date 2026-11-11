@@ -44,6 +44,17 @@
     .tab-active { color:#0f172a; font-weight:600; border-bottom-color:#0f172a; }
     .tab-link { border-bottom-color:transparent; }
     .tab-link:hover { color:#0f172a; }
+    html { scroll-padding-top: 72px; }
+    .site-header { position: sticky; top: 0; z-index: 40; background: rgba(255,255,255,.88); backdrop-filter: saturate(180%) blur(10px); -webkit-backdrop-filter: saturate(180%) blur(10px); }
+    .site-header a:focus-visible, .site-header summary:focus-visible, .skip-link:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; border-radius: 6px; }
+    .nav-cta { display:inline-flex; align-items:center; gap:6px; background:#2563eb; color:#fff; font-weight:600; font-size:13px; padding:7px 12px; border-radius:9px; white-space:nowrap; }
+    .nav-cta:hover { background:#1d4ed8; }
+    .skip-link { position:absolute; left:12px; top:-48px; z-index:50; background:#0f172a; color:#fff; padding:8px 12px; border-radius:8px; font-size:13px; }
+    .skip-link:focus { top:8px; }
+    .mnav summary { list-style:none; cursor:pointer; }
+    .mnav summary::-webkit-details-marker { display:none; }
+    .mnav[open] .mnav-open { display:none; }
+    .mnav:not([open]) .mnav-close { display:none; }
     .stat-card { background:#fff; border:1px solid #e2e8f0; border-radius:14px; padding:20px 22px; }
     .svc-card { background:#fff; border:1px solid #e2e8f0; border-radius:14px; transition: border-color .15s ease, box-shadow .15s ease; }
     .svc-card:hover { border-color:#2563eb; box-shadow: 0 4px 18px -6px rgba(37,99,235,.18); }
@@ -57,7 +68,15 @@
   {% block head_extra %}{% endblock %}
 </head>
 <body class="bg-slate-50 text-slate-900 min-h-screen flex flex-col">
-  <header class="border-b border-slate-200 bg-white">
+  <a href="#main" class="skip-link">Skip to content</a>
+  {% set p = request.url.path %}
+  {% set nav_items = [
+      ('/mcp', 'MCP Servers', p.startswith('/mcp') and not p.startswith('/mcp-discovery')),
+      ('/x402', 'x402 APIs', p.startswith('/x402') or p.startswith('/services')),
+      ('/a2a', 'A2A Agents', p.startswith('/a2a')),
+      ('/stats', 'Stats', p.startswith('/stats')),
+  ] + ([('/articles', 'Blog', p.startswith('/articles'))] if articles_enabled else []) %}
+  <header class="site-header border-b border-slate-200">
     <div class="max-w-6xl mx-auto px-5 h-14 flex items-center gap-6">
       <a href="/" class="flex items-center gap-2 shrink-0" aria-label="Agent Tools home" title="Home">
         <svg viewBox="0 0 32 32" class="w-7 h-7" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -66,27 +85,48 @@
         </svg>
         <span class="text-[15px] font-semibold tracking-tight">Agent Tools</span>
       </a>
-      <nav class="flex items-center gap-5 text-sm text-slate-500 overflow-x-auto h-full flex-1 min-w-0">
-        {% set p = request.url.path %}
-        <a href="/stats" class="h-full flex items-center border-b-2 whitespace-nowrap {% if p.startswith('/stats') %}tab-active{% else %}tab-link{% endif %}">Stats</a>
-        <a href="/x402" class="h-full flex items-center border-b-2 whitespace-nowrap {% if p.startswith('/x402') or p.startswith('/services') %}tab-active{% else %}tab-link{% endif %}">x402 Services</a>
-        <a href="/mcp" class="h-full flex items-center border-b-2 whitespace-nowrap {% if p.startswith('/mcp') %}tab-active{% else %}tab-link{% endif %}">MCP Servers</a>
-        <a href="/a2a" class="h-full flex items-center border-b-2 whitespace-nowrap {% if p.startswith('/a2a') %}tab-active{% else %}tab-link{% endif %}">A2A Agents</a>
-        <a href="/categories" class="h-full flex items-center border-b-2 whitespace-nowrap {% if p == '/categories' %}tab-active{% else %}tab-link{% endif %}">Categories</a>
-        {% if articles_enabled %}<a href="/articles" class="h-full flex items-center border-b-2 whitespace-nowrap {% if p.startswith('/articles') %}tab-active{% else %}tab-link{% endif %}">Blog</a>{% endif %}
+      {# Desktop: directories first (most used), content next; secondary links and the one CTA on the right. #}
+      <nav aria-label="Main" class="hidden lg:flex items-center gap-5 text-sm text-slate-500 h-full flex-1 min-w-0">
+        {% for href, label, active in nav_items %}
+        <a href="{{ href }}" class="h-full flex items-center border-b-2 whitespace-nowrap {{ 'tab-active' if active else 'tab-link' }}"{% if active %} aria-current="page"{% endif %}>{{ label }}</a>
+        {% endfor %}
         <span class="ml-auto"></span>
-        <a href="/openapi.json" class="h-full flex items-center border-b-2 whitespace-nowrap tab-link">API</a>
+        <a href="/about#api" class="h-full flex items-center border-b-2 whitespace-nowrap tab-link">API Docs</a>
         <a href="/auth/github/login" id="atc-signin" rel="nofollow"
            class="h-full flex items-center border-b-2 whitespace-nowrap tab-link"
            title="Sign in to claim and edit your own listings">Sign in</a>
         <a href="/account" id="atc-account"
-           class="hidden h-full items-center gap-1.5 border-b-2 whitespace-nowrap tab-link"
+           class="hidden h-full items-center gap-1.5 border-b-2 whitespace-nowrap {{ 'tab-active' if p.startswith('/account') else 'tab-link' }}"
            title="Your account"><img id="atc-avatar" alt="" class="hidden w-5 h-5 rounded-full"><span id="atc-login"></span></a>
+        <a href="/submit" class="nav-cta">
+          <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.75" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+          List your service
+        </a>
       </nav>
+
+      {# Below 1024px: CTA + a no-JS disclosure menu. #}
+      <div class="lg:hidden ml-auto flex items-center gap-2">
+        <a href="/submit" class="nav-cta">List</a>
+        <details class="mnav relative">
+          <summary class="w-11 h-11 -mr-2 flex items-center justify-center rounded-lg text-slate-700 hover:bg-slate-100" aria-label="Menu">
+            <svg class="mnav-open w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+            <svg class="mnav-close w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+          </summary>
+          <nav aria-label="Main" class="absolute right-0 top-12 w-60 bg-white border border-slate-200 rounded-xl shadow-lg py-2 text-[15px]">
+            {% for href, label, active in nav_items %}
+            <a href="{{ href }}" class="flex items-center min-h-[44px] px-4 {{ 'font-semibold text-slate-900 bg-slate-50' if active else 'text-slate-700 hover:bg-slate-50' }}"{% if active %} aria-current="page"{% endif %}>{{ label }}</a>
+            {% endfor %}
+            <div class="my-2 border-t border-slate-100"></div>
+            <a href="/about#api" class="flex items-center min-h-[44px] px-4 text-slate-700 hover:bg-slate-50">API Docs</a>
+            <a href="/auth/github/login" rel="nofollow" data-signin class="flex items-center min-h-[44px] px-4 text-slate-700 hover:bg-slate-50">Sign in</a>
+            <a href="/account" data-account class="hidden items-center min-h-[44px] px-4 text-slate-700 hover:bg-slate-50">Your account</a>
+          </nav>
+        </details>
+      </div>
     </div>
   </header>
 
-  <main class="flex-1 max-w-6xl w-full mx-auto px-5 py-10">
+  <main id="main" class="flex-1 max-w-6xl w-full mx-auto px-5 py-10">
     {% block content %}{% endblock %}
   </main>
 
@@ -99,9 +139,11 @@
       <div>
         <div class="font-semibold text-slate-700 mb-2">Directory</div>
         <ul class="space-y-1.5 text-slate-500">
-          <li><a href="/x402" class="hover:text-blue-600">x402 Services</a></li>
           <li><a href="/mcp" class="hover:text-blue-600">MCP Servers</a></li>
+          <li><a href="/x402" class="hover:text-blue-600">x402 APIs</a></li>
           <li><a href="/a2a" class="hover:text-blue-600">A2A Agents</a></li>
+          <li><a href="/categories" class="hover:text-blue-600">Categories</a></li>
+          <li><a href="/stats" class="hover:text-blue-600">Stats</a></li>
           {% if articles_enabled %}<li><a href="/articles" class="hover:text-blue-600">Blog</a></li><li><a href="/articles/feed.xml" class="hover:text-blue-600">RSS</a></li>{% endif %}
         </ul>
       </div>
@@ -169,6 +211,8 @@
         acct.classList.remove("hidden");
         acct.classList.add("flex");
         document.getElementById("atc-signin").classList.add("hidden");
+        document.querySelectorAll("[data-signin]").forEach(function (a) { a.classList.add("hidden"); });
+        document.querySelectorAll("[data-account]").forEach(function (a) { a.classList.remove("hidden"); a.classList.add("flex"); });
       }
       if (box && me.signed_in && me.can_edit_listing) {
         box.classList.remove("hidden");

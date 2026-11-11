@@ -21,7 +21,6 @@
   .tnum { font-variant-numeric: tabular-nums; }
   /* Inter's contextual alternates draw "x" between digits as "×" ("06 x402"). */
   main { font-feature-settings: "calt" 0; }
-  html { scroll-padding-top: 16px; }
   @media (prefers-reduced-motion: no-preference) { html { scroll-behavior: smooth; } }
 </style>
 {% if snap %}
@@ -150,7 +149,7 @@
 
 <div class="lg:grid lg:grid-cols-[180px_minmax(0,1fr)] lg:gap-10 mt-12">
   <aside class="hidden lg:block">
-    <nav class="st-toc sticky top-6" aria-label="Sections">
+    <nav class="st-toc sticky top-20" aria-label="Sections">
       <div class="st-kicker mb-3">On this page</div>
       <a href="#funnel">01 Funnel</a>
       <a href="#sources">02 Sources</a>

@@ -939,7 +939,8 @@ class ArticleRouteTests(unittest.TestCase):
     def test_shared_article_navigation_is_english(self):
         response = self.client.get("/articles")
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.text.count(">Blog</a>"), 2)
+        # Desktop nav, the narrow-screen menu and the footer.
+        self.assertEqual(response.text.count(">Blog</a>"), 3)
         self.assertIn("<h1>Blog</h1>", response.text)
         self.assertIn("Blog · Agent Tools", response.text)
         self.assertNotIn(">Articles</a>", response.text)
