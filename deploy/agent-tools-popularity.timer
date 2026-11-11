@@ -1,0 +1,10 @@
+[Unit]
+Description=agent-tools external adoption signals (daily at 02:00)
+
+[Timer]
+OnCalendar=*-*-* 02:00:00
+Persistent=true
+Unit=agent-tools-popularity.service
+
+[Install]
+WantedBy=timers.target

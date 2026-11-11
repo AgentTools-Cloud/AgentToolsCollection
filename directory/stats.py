@@ -505,6 +505,11 @@ def compute(conn, now: int | None = None) -> dict:
         "growth": growth(conn, now),
         "topics": topics(conn),
     }
+    try:
+        from . import popularity
+        snap["adoption"] = popularity.adoption_stats(conn)
+    except Exception:  # noqa: BLE001 - optional section
+        snap["adoption"] = {"available": False}
     kpis = {}
     for kind in KINDS:
         steps = f[kind]
@@ -580,10 +585,24 @@ def headlines(snap: dict, kind: str = "all") -> dict:
                    if gaps else "No topic is common in one protocol and rare in another."),
         "growth": (f"{snap['growth']['mcp']['new_7d'] + snap['growth']['x402']['new_7d'] + snap['growth']['a2a']['new_7d']:,} "
                    "listings were first seen in the last 7 days."),
+        "adoption": _adoption_headline(snap.get("adoption") or {}),
     }
     if kind in KINDS:
         out.update(_kind_headlines(snap, kind))
     return out
+
+
+def _adoption_headline(a: dict) -> str:
+    if not a.get("available") or not a.get("mcp_with_github"):
+        return "Adoption signals are still being collected."
+    linked = a.get("mcp_with_repo_link") or 0
+    if linked and a["mcp_with_github"] < 0.9 * linked:
+        return (f"GitHub data collected so far for {a['mcp_with_github']:,} of {linked:,} reachable "
+                "MCP servers that link a repository; figures fill in over the coming days.")
+    big = sum(b["count"] for b in a["star_bands"] if b["label"] in ("1k–9.9k", "10k+"))
+    zero = next((b["pct"] for b in a["star_bands"] if b["label"] == "0"), 0)
+    return (f"{big:,} reachable MCP servers come from a repo with 1,000+ GitHub stars; "
+            f"{zero}% come from a repo with none.")
 
 
 VERIFIED_PHRASE = {"x402": "return a valid 402 challenge", "mcp": "complete a full handshake",
@@ -689,6 +708,10 @@ def summary(snap: dict | None, view: str = "all") -> dict:
                 (r["pct"] for r in snap["access"]["mcp"] if r["label"] == "Not declared"), None),
             "latency_ms": snap["reliability"]["mcp"]["latency"],
         }
+        ad = snap.get("adoption") or {}
+        if ad.get("available"):
+            facts["mcp"]["github_star_bands"] = ad["star_bands"]
+            facts["mcp"]["top_github_repos"] = ad["top_repos"][:5]
     if "a2a" in kinds:
         facts["a2a"] = {
             "protocol_versions": snap["protocols"]["a2a"][:3],

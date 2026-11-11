@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_macros.html" import readiness_section %}
+{% from "_macros.html" import readiness_section, popularity_section %}
 {% block title %}{{ svc.name_zh or svc.name }} — agent-tools.cloud{% endblock %}
 {% block desc %}{{ (svc.description_zh or svc.description or svc.name)|truncate(140) }}{% endblock %}
 {% block head_extra %}<script type="application/ld+json">{{ {
@@ -184,6 +184,7 @@
 
 {{ readiness_section(svc.readiness, "x402 readiness", (rating.score, rating.grade),
                      "availability, payability and on-chain demand") }}
+{{ popularity_section(svc.popularity) }}
 
 {% if svc.resource_samples and svc.resource_samples|length > 1 %}
 <section class="svc-card p-6 mb-6">

@@ -2107,7 +2107,7 @@ def well_known():
                 "snapshot": "https://agent-tools.cloud/stats.json",
                 "daily_csv": "https://agent-tools.cloud/stats/daily.csv",
                 "page": "https://agent-tools.cloud/stats",
-                "updated": "daily, after the 05:30 UTC probe run",
+                "updated": "daily, after the 21:30 UTC probe run",
                 "license": "CC BY 4.0",
                 "returns": "indexed / reachable / protocol-verified / readiness counts, findings, "
                            "x402 prices and networks, protocol versions, access, safety, topics, growth",

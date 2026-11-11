@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_macros.html" import readiness_section %}
+{% from "_macros.html" import readiness_section, popularity_section %}
 {% block title %}{{ m.name }} — MCP server — agent-tools.cloud{% endblock %}
 {% block desc %}{{ (m.description or m.name)|truncate(140) }}{% endblock %}
 {% block head_extra %}{% set schema = {
@@ -90,6 +90,7 @@
 
 {{ readiness_section(m.readiness, "MCP readiness", quality,
                      "availability, conformance, p95 speed and descriptor") }}
+{{ popularity_section(m.popularity) }}
 
 {% if m.sources %}
 <section class="svc-card p-6 mb-6">

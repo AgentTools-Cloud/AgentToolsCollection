@@ -76,6 +76,43 @@
 {%- endmacro %}
 
 
+{#- External adoption signals (GitHub / npm / Tranco). Display only. -#}
+{% macro popularity_section(p) -%}
+{% if p %}
+<section class="svc-card p-6 mb-6" id="adoption">
+  <h2 class="text-base font-semibold mb-1">Adoption signals</h2>
+  <p class="text-xs text-slate-500 mb-4">Public signals from outside this directory, shown for context. They do not change search order or grades.</p>
+  <dl class="grid grid-cols-1 sm:grid-cols-3 gap-4 text-sm">
+    {% if p.github %}
+    <div>
+      <dt class="text-xs text-slate-500">GitHub</dt>
+      <dd class="mt-1"><a href="{{ p.github.url }}" class="font-semibold text-slate-900 hover:text-blue-600" rel="nofollow noopener" target="_blank">★ {{ p.github.stars|num }}</a>
+        <span class="text-slate-500">· {{ p.github.forks|num }} forks</span></dd>
+      <dd class="text-xs text-slate-500 mt-0.5">{% if p.github.archived %}Archived · {% endif %}last push {{ (p.github.pushed_at or '')[:10] or 'unknown' }}</dd>
+    </div>
+    {% endif %}
+    {% if p.npm %}
+    <div>
+      <dt class="text-xs text-slate-500">npm</dt>
+      <dd class="mt-1"><a href="{{ p.npm.url }}" class="font-semibold text-slate-900 hover:text-blue-600" rel="nofollow noopener" target="_blank">{{ p.npm.downloads_30d|num }}</a>
+        <span class="text-slate-500">downloads / 30 days</span></dd>
+      <dd class="text-xs text-slate-500 mt-0.5 mono">{{ p.npm.package }}</dd>
+    </div>
+    {% endif %}
+    {% if p.tranco %}
+    <div>
+      <dt class="text-xs text-slate-500">Site rank (Tranco)</dt>
+      <dd class="mt-1"><span class="font-semibold text-slate-900">#{{ p.tranco.rank|num }}</span>
+        <span class="text-slate-500">of the top 1M</span></dd>
+      <dd class="text-xs text-slate-500 mt-0.5"><span class="mono">{{ p.tranco.domain }}</span> · list of {{ p.tranco.list_date }}</dd>
+    </div>
+    {% endif %}
+  </dl>
+</section>
+{% endif %}
+{%- endmacro %}
+
+
 {#- Letter-grade badge (A / B+ / B / C+ / C / D / E), colour-coded. -#}
 {% macro grade_badge(grade) -%}
   {%- set g = grade or 'E' -%}
