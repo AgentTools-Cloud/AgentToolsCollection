@@ -417,9 +417,21 @@ def well_known_agent_card(request: Request) -> dict[str, Any]:
     """A2A Agent Card for agent-tools.cloud itself."""
     from directory import a2a as directory_a2a
 
+    from directory import card_signing
+
     host = (request.headers.get("host") or "agent-tools.cloud").split(":", 1)[0].lower()
     scheme = "https" if request.url.scheme == "https" else "http"
-    return directory_a2a.own_agent_card(f"{scheme}://{host}")
+    base = f"{scheme}://{host}"
+    return card_signing.sign_card(directory_a2a.own_agent_card(base), base)
+
+
+@app.get("/.well-known/jwks.json", tags=["discovery"])
+def well_known_jwks() -> JSONResponse:
+    """Public key(s) that verify the Agent Card signatures (no private material)."""
+    from directory import card_signing
+
+    return JSONResponse(card_signing.public_jwks(),
+                        headers={"Cache-Control": "public, max-age=3600"})
 
 
 @app.post("/a2a", tags=["a2a"])
