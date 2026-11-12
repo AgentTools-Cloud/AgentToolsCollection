@@ -1251,10 +1251,12 @@ def cmd_onchain(limit=None, stale_days=3, refresh_all=False, rate=1.2) -> int:
                     # payto_* keeps the raw on-chain provenance; tx_30d is the field
                     # every consumer reads (scoring, ranking, match_reason, API,
                     # MCP tools). Without folding the measurement in, the on-chain
-                    # job produced data nothing ever looked at.
+                    # job produced data nothing ever looked at. Overwrite, never
+                    # MAX: a 30-day window that only ratchets up stops being
+                    # a 30-day window.
                     c.execute(
                         "UPDATE services SET payto_tx_30d=?, payto_payers_30d=?, "
-                        "payto_checked=?, tx_30d=MAX(COALESCE(tx_30d,0), ?) "
+                        "payto_checked=?, tx_30d=? "
                         "WHERE id=?",
                         (tx, payers, now, tx, sid),
                     )

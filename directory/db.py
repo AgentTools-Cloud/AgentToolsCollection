@@ -774,6 +774,7 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
             "ALTER TABLE services ADD COLUMN readiness_score REAL",
             "ALTER TABLE services ADD COLUMN readiness_grade TEXT",
             "ALTER TABLE services ADD COLUMN readiness_checked INTEGER",
+            "ALTER TABLE services ADD COLUMN payto_shared INTEGER",
             "ALTER TABLE mcp_servers ADD COLUMN conformance TEXT",
             "ALTER TABLE mcp_servers ADD COLUMN tool_count INTEGER",
             "ALTER TABLE mcp_servers ADD COLUMN latency_p95_ms INTEGER",
@@ -4265,14 +4266,15 @@ def mcp_quality_score(row, p95_ms=None):
 # All three are availability-first and reuse signals we already probe/compute,
 # mirroring the chiark-style quality model. No new crawl.
 # ---------------------------------------------------------------------------
-# Cut at percentiles of each type's live distribution: A ~5%, B+ ~15%, B ~35%,
+# Cut at percentiles of each type's live distribution (x402 and A2A re-cut on
+# 2026-11-12 to keep each grade's share when the scorers gained new blocks): A ~5%, B+ ~15%, B ~35%,
 # C+ ~50%, C ~70%, D ~80%. Bands are per-type because the three scorers measure
 # different things -- one shared ladder left MCP unable to reach A at all while
 # 62% of A2A agents sat there. "A" means top of its own kind.
 _GRADE_BANDS_BY_KIND = {
-    "x402": ((88, "A"), (80, "B+"), (62, "B"), (53, "C+"), (43, "C"), (12, "D")),
+    "x402": ((70, "A"), (65, "B+"), (55, "B"), (46, "C+"), (36, "C"), (9, "D")),
     "mcp": ((95, "A"), (88, "B+"), (72, "B"), (56, "C+"), (40, "C"), (20, "D")),
-    "a2a": ((98, "A"), (96, "B+"), (92, "B"), (85, "C+"), (66, "C"), (60, "D")),
+    "a2a": ((92, "A"), (90, "B+"), (85, "B"), (80, "C+"), (61, "C"), (55, "D")),
 }
 _GRADE_BANDS = _GRADE_BANDS_BY_KIND["x402"]
 
@@ -4319,27 +4321,35 @@ def _a2a_perf(latency_ms) -> float:
     continuous term the top three quarters of the catalogue all tie."""
     if latency_ms is None:
         return 0.0
-    if latency_ms <= 150:
+    if latency_ms <= 50:
         return 20.0
     if latency_ms >= 1500:
         return 0.0
-    return 20.0 * (1500 - latency_ms) / (1500 - 150)
+    return 20.0 * (1500 - latency_ms) / (1500 - 50)
 
 
 def _score_a2a(row) -> float:
     d = row if isinstance(row, dict) else dict(row)
-    avail = 35 if d.get("health") == "ok" else (
-        14 if d.get("health") == "degraded" else 0)
-    conf = 25 if d.get("conformance") == "pass" else (
-        10 if d.get("conformance") == "partial" else 0)
-    card = sum(w for _l, w, ok in _a2a_card_parts(d) if ok) * (20.0 / 30.0)
-    score = avail + conf + card + _a2a_perf(d.get("latency_ms"))
-    return round(_with_owner_bonus(score, d), 1)
+    reachable = d.get("health") in ("ok", "degraded")
+    avail = 30 if d.get("health") == "ok" else (
+        12 if d.get("health") == "degraded" else 0)
+    conf = 20 if d.get("conformance") == "pass" else (
+        8 if d.get("conformance") == "partial" else 0)
+    card = sum(w for _l, w, ok in _a2a_card_parts(d) if ok) * (15.0 / 30.0)
+    # Readiness is the one continuous signal most agents do not max out, so
+    # it is what separates the agents that pass every checklist item.
+    ready = 15.0 * _x402_ready(d) if reachable else 0.0
+    score = avail + conf + card + _a2a_perf(d.get("latency_ms")) + ready
+    # The owner bonus is folded in rather than added on top, so a claimed
+    # agent that was already perfect does not tie with every other one at 100.
+    if d.get("owner_verified"):
+        score = score * (100.0 - _OWNER_BONUS) / 100.0 + _OWNER_BONUS
+    return round(score, 1)
 
 
 # A dead endpoint cannot be recommended today whatever it earned before, so
 # its grade is held to the top of the D band.
-_DOWN_SCORE_CAP = 39.9
+# Read from the bands (top of D) so the cap follows when they are re-cut.
 
 # A claimed listing has someone accountable for it, which is worth a nudge but
 # not a promotion: most of the catalogue was crawled and its operators have
@@ -4370,10 +4380,21 @@ def _band_ceiling(kind: str, grade: str) -> float:
 
 
 
-# availability / payability / demand. Demand outweighs payability now that
-# on-chain coverage is real: metadata completeness is table stakes, paying
-# customers are the scarce signal.
-_W_AVAIL, _W_PAY, _W_DEMAND = 40.0, 20.0, 40.0
+# availability / payability / demand / performance / readiness / trust.
+# Demand is still the largest block -- paying customers are the scarce signal --
+# but with only the first three, every healthy service past the demand caps
+# tied at 100. The extra blocks are measured on every healthy service, so the
+# top of the table spreads out without loosening the demand caps.
+_W_AVAIL, _W_PAY, _W_DEMAND = 20.0, 15.0, 35.0
+_W_PERF, _W_READY, _W_TRUST = 10.0, 15.0, 5.0
+
+# Latency of the last probe: full marks at or under the first, none at the
+# second, linear between.
+_X402_FAST_MS, _X402_SLOW_MS = 200, 2000
+
+# Transfers per distinct payer above which receipts look like one buyer's loop
+# rather than a market; the discount bottoms out at half.
+_CONCENTRATION_RATIO = 20.0
 
 
 # Chain ids whose tokens carry no value; declaring one is not a settlement
@@ -4478,30 +4499,82 @@ def _payability(row) -> float:
     return sum(w for _l, w, ok in _payability_parts(row) if ok) / 30.0
 
 
+def _demand_counts(row) -> tuple:
+    """(payers, transfers) of the latest 30-day window, split across every
+    listing that shares the payTo, so ten listings on one wallet do not each
+    claim the wallet's whole demand."""
+    if row.get("payto_checked"):
+        tx = row.get("payto_tx_30d")
+        if tx is None:
+            tx = row.get("tx_30d")
+    else:
+        tx = row.get("tx_30d") or row.get("payto_tx_30d")
+    payers = row.get("payto_payers_30d") or 0
+    n = max(1, int(row.get("payto_shared") or 1))
+    return payers / n, (tx or 0) / n
+
+
+def _concentration(payers: float, tx: float) -> float:
+    """1.0, falling to 0.5 as transfers per payer climb past the ratio."""
+    import math
+    if payers <= 0 or tx <= 0:
+        return 1.0
+    ratio = tx / payers
+    if ratio <= _CONCENTRATION_RATIO:
+        return 1.0
+    return max(0.5, 1.0 - 0.25 * math.log10(ratio / _CONCENTRATION_RATIO))
+
+
 def _demand(row) -> float:
     """0..1 from on-chain USDC receipts, weighted 2:1 toward distinct payers.
 
     Payer count is the harder number to fake, which is why the design note
-    ranks it above raw transfer count.
+    ranks it above raw transfer count. Caps stay at 1000 payers / 10k
+    transfers; a shared wallet is split and a single-buyer loop discounted.
     """
     import math
-    tx = row.get("tx_30d") or row.get("payto_tx_30d") or 0
-    payers = row.get("payto_payers_30d") or 0
+    payers, tx = _demand_counts(row)
     f = 0.0
     if payers > 0:
         f += (2 / 3) * min(1.0, math.log10(payers + 1) / 3.0)
     if tx > 0:
         f += (1 / 3) * min(1.0, math.log10(tx + 1) / 4.0)
-    return f
+    return f * _concentration(payers, tx)
+
+
+def _x402_perf(row) -> float:
+    """0..1 from the last probe latency; only a reachable endpoint earns it."""
+    lat = row.get("latency_ms")
+    if row.get("health") not in ("ok", "degraded") or lat is None:
+        return 0.0
+    if lat <= _X402_FAST_MS:
+        return 1.0
+    if lat >= _X402_SLOW_MS:
+        return 0.0
+    return (_X402_SLOW_MS - lat) / (_X402_SLOW_MS - _X402_FAST_MS)
+
+
+def _x402_ready(row) -> float:
+    """0..1 readiness score; scored only while the endpoint is reachable, so a
+    dead listing does not climb on paperwork."""
+    if row.get("health") not in ("ok", "degraded"):
+        return 0.0
+    r = row.get("readiness_score")
+    try:
+        return max(0.0, min(1.0, float(r) / 100.0)) if r is not None else 0.0
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _score_x402(row) -> float:
     d = row if isinstance(row, dict) else dict(row)
     avail = {"ok": 1.0, "degraded": 0.45, "unknown": 0.22}.get(d.get("health"), 0.0)
-    score = _with_owner_bonus(
-        _W_AVAIL * avail + _W_PAY * _payability(d) + _W_DEMAND * _demand(d), d)
+    score = (_W_AVAIL * avail + _W_PAY * _payability(d)
+             + _W_DEMAND * _demand(d) + _W_PERF * _x402_perf(d)
+             + _W_READY * _x402_ready(d)
+             + (_W_TRUST if d.get("owner_verified") else 0.0))
     if d.get("health") == "down":
-        score = min(score, _DOWN_SCORE_CAP)
+        score = min(score, _band_ceiling("x402", "D"))
     return round(score, 1)
 
 
@@ -4525,10 +4598,20 @@ def score_breakdown(row) -> dict:
     # none of the five payability signals has been measured.
     pay_unmeasured = d.get("x402_ok") is None and not d.get("payment")
     payers = d.get("payto_payers_30d")
-    tx = d.get("tx_30d") or d.get("payto_tx_30d")
+    tx = (d.get("payto_tx_30d") if d.get("payto_checked")
+          and d.get("payto_tx_30d") is not None
+          else d.get("tx_30d") or d.get("payto_tx_30d"))
     if d.get("payto_checked"):
         demand_note = (f"{payers or 0} distinct payers, {tx or 0} USDC transfers "
                        "in the last 30 days")
+        shared = int(d.get("payto_shared") or 1)
+        if shared > 1:
+            demand_note += (f"; the wallet is shared by {shared} listings, "
+                            f"so each is credited 1/{shared}")
+        sp, st = _demand_counts(d)
+        if _concentration(sp, st) < 1.0:
+            demand_note += ("; discounted because most transfers come from "
+                            "few payers")
     elif any(ok for lbl, _w, ok in pay_parts if lbl == "Payment address on record"):
         demand_note = "Payment address on record, not yet queried on-chain"
     elif not _payto_of(d):
@@ -4563,8 +4646,20 @@ def score_breakdown(row) -> dict:
             {"name": "Demand", "max": _W_DEMAND,
              "points": round(_W_DEMAND * _demand(d), 1), "note": demand_note,
              "unmeasured": not d.get("payto_checked")},
-            {"name": "Owner verified", "max": _OWNER_BONUS, "bonus": True,
-             "points": _OWNER_BONUS if d.get("owner_verified") else 0.0,
+            {"name": "Performance", "max": _W_PERF,
+             "points": round(_W_PERF * _x402_perf(d), 1),
+             "note": (f"Last probe answered in {d.get('latency_ms')} ms "
+                      f"(full marks at {_X402_FAST_MS} ms or less)"
+                      if d.get("health") in ("ok", "degraded")
+                      and d.get("latency_ms") is not None
+                      else "No latency from a reachable probe yet")},
+            {"name": "Readiness", "max": _W_READY,
+             "points": round(_W_READY * _x402_ready(d), 1),
+             "note": (f"Agent readiness {round(float(d['readiness_score']))}/100"
+                      if d.get("readiness_score") is not None
+                      else "Not assessed yet")},
+            {"name": "Owner verified", "max": _W_TRUST,
+             "points": _W_TRUST if d.get("owner_verified") else 0.0,
              "note": ("Operator proved control of this domain"
                       if d.get("owner_verified")
                       else "Nobody has claimed this listing yet")},
@@ -4638,15 +4733,40 @@ def record_service_paytos(conn: sqlite3.Connection, observed: dict,
     return rowsn
 
 
+# A payTo last seen this long ago no longer counts as shared.
+_PAYTO_SHARED_WINDOW = 30 * 86400
+
+
+def update_payto_shared(conn, now: int | None = None) -> int:
+    """services.payto_shared = how many listings advertise the same wallet
+    (largest over the listing's own wallets), from the last 30 days."""
+    since = int(now or time.time()) - _PAYTO_SHARED_WINDOW
+    rows = conn.execute(
+        "SELECT p.service_id sid, MAX(c.n) n FROM service_paytos p JOIN ("
+        " SELECT chain, lower(address) a, COUNT(DISTINCT service_id) n"
+        " FROM service_paytos WHERE last_seen>=? GROUP BY chain, lower(address)"
+        ") c ON c.chain=p.chain AND c.a=lower(p.address) "
+        "WHERE p.last_seen>=? GROUP BY p.service_id", (since, since)).fetchall()
+    conn.execute("UPDATE services SET payto_shared=NULL "
+                 "WHERE payto_shared IS NOT NULL")
+    ups = [(int(r["n"]), r["sid"]) for r in rows if (r["n"] or 0) > 1]
+    for i in range(0, len(ups), 1000):
+        conn.executemany("UPDATE services SET payto_shared=? WHERE id=?",
+                         ups[i:i + 1000])
+    return len(ups)
+
+
 def rescore_services(conn) -> int:
     """Recompute and store services.quality_score.
 
     The homepage counter and the leaderboard read this column instead of
     re-deriving the formula in SQL, which is how the two used to drift apart.
     """
+    update_payto_shared(conn)
     rows = conn.execute(
         "SELECT id, health, x402_ok, well_known_url, payment, tx_30d, "
-        "payto_tx_30d, payto_payers_30d, owner_verified FROM services").fetchall()
+        "payto_tx_30d, payto_payers_30d, payto_checked, payto_shared, "
+        "latency_ms, readiness_score, owner_verified FROM services").fetchall()
     updates = [(_score_x402(dict(r)), r["id"]) for r in rows]
     for start in range(0, len(updates), 1000):
         conn.executemany("UPDATE services SET quality_score=? WHERE id=?",

@@ -87,7 +87,7 @@ METHODOLOGY = {
         "history. Signed descriptor and security declaration are n/a for x402 "
         "(payment is the access control), as is an x402 version we have not "
         "observed; the remaining points are scaled to 100. Grades: A>=90, B>=75, "
-        "C>=60, D>=40, F<40. Display only: search order uses the quality grade."
+        "C>=60, D>=40, F<40. It also feeds 15 points of the x402 quality grade."
     ),
 }
 
