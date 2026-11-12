@@ -172,7 +172,10 @@ def own_agent_card(base_url: str = SITE) -> dict:
                     "servers and A2A agents are indexed, reachable, protocol-verified "
                     "and ready to call, with findings on prices, protocol versions "
                     "and access. Send a data part {\"skill\": \"directory_stats\", "
-                    "\"view\": \"all|mcp|x402|a2a\"} or ask in plain text."
+                    "\"view\": \"all|mcp|x402|a2a\"}, add \"topic\" (e.g. \"payment\") "
+                    "or \"month\" (\"YYYY-MM\") for a topic or monthly report, or ask in "
+                    "plain text. Lists are shortened here; complete lists need an account "
+                    "key over HTTP or MCP (full=1, see /.well-known/agent-tools.json)."
                 ),
                 "tags": ["stats", "statistics", "ecosystem", "mcp", "x402", "a2a"],
                 "examples": [
@@ -391,6 +394,10 @@ def _stats_request(message: dict, text: str) -> str | None:
             d = p["data"]
             skill = str(d.get("skill") or d.get("id") or d.get("intent") or "").lower()
             if skill in ("directory_stats", "stats", "statistics"):
+                if d.get("topic"):
+                    return "topic:" + str(d["topic"]).strip().lower()[:40]
+                if d.get("month"):
+                    return "month:" + str(d["month"]).strip()[:7]
                 view = str(d.get("view") or "all").lower()
                 return view if view in ("all", "mcp", "x402", "a2a") else "all"
     if text and _STATS_INTENT_RE.search(text):
@@ -401,6 +408,22 @@ def _stats_request(message: dict, text: str) -> str | None:
 
 def _stats_answer(view: str) -> dict:
     from . import stats as stats_mod
+    if view.startswith(("topic:", "month:")):
+        kind, _, arg = view.partition(":")
+        try:
+            if kind == "topic":
+                out = stats_mod.topic_page(stats_mod.latest(lambda: db.connect(read_only=True)), arg)
+            else:
+                with db.connect(read_only=True) as c:
+                    out = stats_mod.monthly_report(c, arg)
+        except Exception:
+            log.exception("a2a message/send: stats %s failed", kind)
+            out = None
+        if out is None:
+            return {"text": f"No {kind} '{arg}'. Topics: {', '.join(stats_mod.TOPICS)}; "
+                            "reports: https://agent-tools.cloud/stats/reports.json",
+                    "data": {"error": f"unknown_{kind}"}}
+        return {"text": out["answer"], "data": out}
     try:
         out = stats_mod.summary(stats_mod.latest(lambda: db.connect(read_only=True)), view)
     except Exception:
