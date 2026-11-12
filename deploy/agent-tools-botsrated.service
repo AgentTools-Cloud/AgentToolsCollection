@@ -9,3 +9,6 @@ EnvironmentFile=/opt/mcpserver/.env
 Environment="PYTHONPATH=/opt/mcpserver"
 ExecStart=/opt/mcpserver/.venv/bin/python -m directory.jobs sync-botsrated --limit 1000 --stale-hours 24
 User=root
+# Hourly timer: a run that is still going after 50 minutes is stuck, and a
+# oneshot in "activating" blocks every later trigger.
+TimeoutStartSec=50min
