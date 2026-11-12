@@ -651,6 +651,10 @@ def cmd_health(only_unknown: bool = False, quarantined_only: bool = False) -> in
             cmd_stats_snapshot()
         except Exception as e:
             log.warning("stats snapshot failed: %r", e)
+        try:
+            cmd_history_rollup()
+        except Exception as e:
+            log.warning("history rollup failed: %r", e)
     return 0
 
 
@@ -689,6 +693,21 @@ def cmd_stats_snapshot() -> int:
             db.save_stats_snapshot(c, snap)
     db.with_retry(op)
     log.info("stats snapshot: %s in %ss", snap["as_of"], snap["compute_seconds"])
+    return 0
+
+
+def cmd_history_rollup(backfill: bool = False) -> int:
+    """Keep one row per listing per UTC day indefinitely (data/history.db).
+
+    The raw probe tables are pruned after 30-120 days; this keeps the daily
+    totals, readiness, quality, x402 on-chain counts and adoption signals.
+    `backfill` also rolls up every day still in the raw tables.
+    """
+    from . import history
+    with db.connect(read_only=True) as c:
+        if backfill:
+            log.info("history backfill: %s", history.backfill(c))
+        log.info("history rollup: %s", history.rollup(c))
     return 0
 
 
@@ -2234,6 +2253,8 @@ def main(argv=None) -> int:
     sub.add_parser("health-a2a")
     sub.add_parser("readiness")
     sub.add_parser("stats-snapshot")
+    p_hist = sub.add_parser("history-rollup")
+    p_hist.add_argument("--backfill", action="store_true")
     p_pop = sub.add_parser("popularity")
     p_pop.add_argument("which", nargs="?", default="all", choices=("all", "tranco", "npm", "github"))
     p_pop.add_argument("--budget", type=int, default=None)
@@ -2334,6 +2355,8 @@ def main(argv=None) -> int:
         return cmd_readiness()
     if args.cmd == "stats-snapshot":
         return cmd_stats_snapshot()
+    if args.cmd == "history-rollup":
+        return cmd_history_rollup(args.backfill)
     if args.cmd == "popularity":
         return cmd_popularity(args.which, args.budget)
     if args.cmd == "stats":
