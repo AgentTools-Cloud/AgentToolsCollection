@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from directory import botsrated, capkey, db
+from test_ingestion_pipeline import TemporaryDatabaseTestCase
 
 
 class CapkeyTests(unittest.TestCase):
@@ -280,3 +281,75 @@ class BotsRatedTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BotsRatedRateLimitTests(unittest.TestCase):
+    def client(self, responses):
+        import httpx
+        seq = iter(responses)
+        return httpx.Client(transport=httpx.MockTransport(lambda req: next(seq)))
+
+    def test_long_retry_after_stops_without_waiting(self):
+        import httpx
+        with patch.object(botsrated.time, "sleep") as sleep:
+            with self.assertRaises(botsrated.RateLimited) as ctx:
+                botsrated._get(self.client([httpx.Response(429, headers={"retry-after": "48080"})]),
+                               "https://botsrated.example/x")
+        self.assertEqual(ctx.exception.retry_after, 48080)
+        sleep.assert_not_called()
+
+    def test_short_retry_after_is_retried_then_succeeds(self):
+        import httpx
+        with patch.object(botsrated.time, "sleep") as sleep:
+            r = botsrated._get(self.client([httpx.Response(429, headers={"retry-after": "5"}),
+                                            httpx.Response(200, json={})]),
+                               "https://botsrated.example/x")
+        self.assertEqual(r.status_code, 200)
+        sleep.assert_called_once_with(5)
+
+    def test_persistent_short_429_raises_after_last_attempt(self):
+        import httpx
+        with patch.object(botsrated.time, "sleep"):
+            with self.assertRaises(botsrated.RateLimited):
+                botsrated._get(self.client([httpx.Response(429)] * 4),
+                               "https://botsrated.example/x")
+
+
+
+class BotsRatedPauseTests(TemporaryDatabaseTestCase):
+    def setUp(self):
+        super().setUp()
+        self.enterContext(patch.object(botsrated.db, "init_db"))
+
+    def test_sync_skips_while_paused(self):
+        with db.writer() as conn:
+            db.set_meta(conn, botsrated.PAUSE_META_KEY, str(int(botsrated.time.time()) + 600))
+        with patch.object(botsrated, "fetch_covered_hosts") as hosts:
+            result = botsrated.sync_botsrated_quality(limit=5)
+        hosts.assert_not_called()
+        self.assertEqual(result["skipped"], "rate_limited")
+
+    def test_rate_limit_mid_run_pauses_and_keeps_fetched(self):
+        import httpx
+        with db.writer() as conn:
+            for host in ("a.example", "b.example"):
+                db.upsert_service(conn, dict(slug=host, name=host, url=f"https://{host}/x",
+                                             source="fixture", source_id=host, health="ok"))
+        payload = {"found": True, "valid_402": True, "served_at": "2026-11-12T00:00:00Z"}
+        calls = {"n": 0}
+
+        def fake_get(client, url, params=None):
+            calls["n"] += 1
+            if calls["n"] > 1:
+                raise botsrated.RateLimited(3600)
+            return httpx.Response(200, json=payload, request=httpx.Request("GET", url))
+
+        with patch.object(botsrated, "fetch_covered_hosts", return_value={"a.example", "b.example"}), \
+                patch.object(botsrated, "_get", side_effect=fake_get), \
+                patch.object(botsrated.time, "sleep"):
+            result = botsrated.sync_botsrated_quality(limit=5)
+        self.assertEqual(result["attempted_groups"], 1)
+        self.assertEqual(result["updated"], 1)
+        self.assertGreater(result["paused_until"], int(botsrated.time.time()) + 3000)
+        rows = self.query("SELECT value FROM meta WHERE key=?", (botsrated.PAUSE_META_KEY,))
+        self.assertEqual(int(rows[0]["value"]), result["paused_until"])

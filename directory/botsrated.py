@@ -21,6 +21,23 @@ SITEMAP_INDEX = BASE + "/sitemap.xml"
 PRELIGHT = BASE + "/v1/preflight"
 MAX_HOSTS_PER_RUN = 1000
 REQUEST_GAP_SECONDS = 0.3
+# Wait in-process only for short Retry-After values. BotsRated answers a spent
+# daily quota with Retry-After of ~13 h; capping that at 120 s and retrying
+# turned one hourly run into a 10-hour loop of 429s that blocked the timer.
+MAX_INLINE_WAIT_SECONDS = 120
+DEFAULT_PAUSE_SECONDS = 3600
+PAUSE_META_KEY = "botsrated_paused_until"
+
+
+class RateLimited(Exception):
+    def __init__(self, retry_after: int):
+        super().__init__(f"rate limited for {retry_after}s")
+        self.retry_after = retry_after
+
+
+def _retry_after(response: httpx.Response) -> int | None:
+    value = (response.headers.get("retry-after") or "").strip()
+    return int(value) if value.isdigit() else None
 
 
 def _parse_time(value) -> int | None:
@@ -37,10 +54,16 @@ def _get(client: httpx.Client, url: str, *, params: dict | None = None) -> httpx
     for attempt in range(4):
         try:
             response = client.get(url, params=params)
-            if response.status_code == 429 or response.status_code >= 500:
-                delay = response.headers.get("retry-after")
-                time.sleep(min(float(delay), 120.0) if delay and delay.isdigit()
-                           else 3.0 * (attempt + 1))
+            if response.status_code == 429:
+                wait = _retry_after(response)
+                if wait is not None and wait > MAX_INLINE_WAIT_SECONDS:
+                    raise RateLimited(wait)
+                if attempt == 3:
+                    raise RateLimited(wait or DEFAULT_PAUSE_SECONDS)
+                time.sleep(wait if wait is not None else 3.0 * (attempt + 1))
+                continue
+            if response.status_code >= 500:
+                time.sleep(3.0 * (attempt + 1))
                 continue
             return response
         except httpx.TransportError as exc:
@@ -151,8 +174,28 @@ def _interleave(queues: dict[str, list[tuple]], limit: int) -> list[tuple]:
 def sync_botsrated_quality(*, limit: int = MAX_HOSTS_PER_RUN,
                             stale_hours: int = 24) -> dict:
     db.init_db()
-    covered = fetch_covered_hosts()
     now = int(time.time())
+    with db.connect(read_only=True) as conn:
+        paused = int(db.get_meta(conn, PAUSE_META_KEY, "0") or 0)
+    if paused > now:
+        result = {"skipped": "rate_limited", "paused_until": paused}
+        log.info("botsrated quality sync: %s", result)
+        return result
+
+    def pause(seconds: int) -> int:
+        until = int(time.time()) + max(60, int(seconds))
+        def op():
+            with db.writer(immediate=True) as conn:
+                db.set_meta(conn, PAUSE_META_KEY, str(until))
+        db.with_retry(op)
+        return until
+
+    try:
+        covered = fetch_covered_hosts()
+    except RateLimited as exc:
+        result = {"skipped": "rate_limited", "paused_until": pause(exc.retry_after)}
+        log.warning("botsrated quality sync: %s", result)
+        return result
     cutoff = now - max(1, stale_hours) * 3600
     with db.connect(read_only=True) as conn:
         groups: dict[tuple[str, str], list[tuple[int, int, str]]] = {}
@@ -204,10 +247,20 @@ def sync_botsrated_quality(*, limit: int = MAX_HOSTS_PER_RUN,
 
     updates: list[tuple[str, int, dict]] = []
     errors = 0
+    attempted = 0
+    paused_until = None
     headers = {"User-Agent": UA, "Accept": "application/json"}
     with httpx.Client(timeout=TIMEOUT, follow_redirects=True, headers=headers) as client:
         for candidate in candidates:
-            item, summaries, error = fetch(client, candidate)
+            try:
+                item, summaries, error = fetch(client, candidate)
+            except RateLimited as exc:
+                # Stop the whole run; keep what was already fetched.
+                paused_until = pause(exc.retry_after)
+                log.warning("botsrated: rate limited after %d groups; paused until %d",
+                            attempted, paused_until)
+                break
+            attempted += 1
             if error:
                 errors += 1
             else:
@@ -227,10 +280,14 @@ def sync_botsrated_quality(*, limit: int = MAX_HOSTS_PER_RUN,
                 )
     if updates:
         db.with_retry(write)
-    candidate_rows = sum(len(item[3]) for item in candidates)
+    done = candidates[:attempted]
+    candidate_rows = sum(len(item[3]) for item in done)
     result = {"covered_hosts": len(covered), "candidate_groups": len(candidates),
+              "attempted_groups": attempted,
               "candidate_rows": candidate_rows, "updated": len(updates),
-              "not_found_or_unmatched": candidate_rows - len(updates) - errors,
+              "not_found_or_unmatched": max(0, candidate_rows - len(updates) - errors),
               "errors": errors}
+    if paused_until:
+        result["paused_until"] = paused_until
     log.info("botsrated quality sync: %s", result)
     return result
