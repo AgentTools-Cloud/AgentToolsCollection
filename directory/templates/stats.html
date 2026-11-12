@@ -28,9 +28,9 @@
 {{ {
   "@context": "https://schema.org",
   "@type": "Dataset",
-  "name": "The state of agent tools",
-  "description": "Daily counts over the agent-tools.cloud index of x402 APIs, MCP servers and A2A agents: reachability, protocol versions, readiness grades, uptime, latency, prices, access and safety.",
-  "url": "https://agent-tools.cloud/stats",
+  "name": page_title|default("The state of agent tools"),
+  "description": ("Daily counts over the agent-tools.cloud index of " ~ (kind_label[view] if (view and view != 'all') else "x402 APIs, MCP servers and A2A agents") ~ ": reachability, protocol versions, readiness grades, uptime, latency, prices, access and safety."),
+  "url": "https://agent-tools.cloud" ~ page_path|default("/stats"),
   "license": "https://creativecommons.org/licenses/by/4.0/",
   "creator": {"@type": "Organization", "name": "agent-tools.cloud", "url": "https://agent-tools.cloud"},
   "dateModified": snap.as_of[:10],
