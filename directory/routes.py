@@ -2271,7 +2271,8 @@ def well_known():
                 "updated": "daily, after the 21:30 UTC probe run",
                 "license": "CC BY 4.0",
                 "returns": "indexed / reachable / protocol-verified / readiness counts, findings, "
-                           "x402 prices and networks, protocol versions, access, safety, topics, growth",
+                           "x402 prices and networks, protocol versions, access, safety, topics, growth, "
+                           "probe outcomes, search demand (terms with >= 5 searches)",
             },
             "methodology": "https://agent-tools.cloud/api/v1/methodology",
             "data_use": {
@@ -2424,7 +2425,10 @@ def sitemap_xml(request: Request) -> Response:
             report_months = stats_mod.months(c)
     except sqlite3.Error:
         report_months = []
+    current_month = time.strftime("%Y-%m", time.gmtime())
     for m in report_months:
+        if m >= current_month:  # month to date is noindex until it ends
+            continue
         parts.append(_url(f"{base}/stats/reports/{m}", priority="0.5", changefreq="daily"))
 
     article_store = getattr(request.app.state, "article_store", None)

@@ -125,7 +125,7 @@
 </nav>
 
 {# KPI cards #}
-<section class="grid grid-cols-2 lg:grid-cols-4 gap-4 mt-6" aria-label="Headline numbers">
+<section class="grid grid-cols-2 lg:grid-cols-4 gap-4 mt-6 [&>*]:min-w-0" aria-label="Headline numbers">
   {% for key, label, hint in [
       ('indexed', 'Indexed', 'Listings in our index'),
       ('reachable', 'Reachable', 'Answered the last probe'),
@@ -179,7 +179,7 @@
   {# 01 Funnel #}
   <section id="funnel">
     {{ section_head('01', 'Funnel', headlines.funnel, 'Each step keeps only the listings that passed the one before. Indexed is everything any source lists; the last step is our readiness grade A or B.') }}
-    <div class="grid gap-4 mt-5 {{ 'md:grid-cols-3' if kinds|length > 1 }}">
+    <div class="grid grid-cols-1 gap-4 mt-5 {{ 'md:grid-cols-3' if kinds|length > 1 }}">
       {% for kind in kinds %}
       <div class="svc-card p-5">
         <h3 class="text-sm font-semibold text-slate-800">{{ kind_label[kind] }}</h3>
@@ -201,7 +201,7 @@
   {# 02 Sources #}
   <section id="sources">
     {{ section_head('02', 'Sources', headlines.sources, 'Which directories and registries list what we index, and how many of their listings answered our last probe. A listing found by several sources is counted once in the index.') }}
-    <div class="grid gap-4 mt-5 {{ 'md:grid-cols-2' if kinds|length > 1 }}">
+    <div class="grid grid-cols-1 gap-4 mt-5 {{ 'md:grid-cols-2' if kinds|length > 1 }}">
       {% for kind in kinds %}
       {% set src = snap.sources[kind] %}
       <div class="svc-card p-5">
@@ -224,7 +224,7 @@
   {# 03 Protocols #}
   <section id="protocols">
     {{ section_head('03', 'Protocols', headlines.protocols, 'The protocol revision each reachable listing reports: the MCP version returned by initialize, the A2A version declared in the Agent Card, and the x402 version seen in the 402 challenge.') }}
-    <div class="grid gap-4 mt-5 md:grid-cols-2">
+    <div class="grid grid-cols-1 gap-4 mt-5 md:grid-cols-2">
       {% if view in ('all', 'mcp') %}
       <div class="svc-card p-5"><h3 class="text-sm font-semibold text-slate-800 mb-2">MCP protocol version</h3>{{ bar_table(snap.protocols.mcp, 'Revision') }}</div>
       {% endif %}
@@ -280,7 +280,7 @@
   {# 05 Reliability #}
   <section id="reliability">
     {{ section_head('05', 'Reliability', headlines.reliability, '30-day uptime counts only listings with at least five probes; probes a host refused (HTTP 429, or a 403 we were not let through) are left out. Latency is the last successful probe from our server.') }}
-    <div class="grid gap-4 mt-5 {{ 'md:grid-cols-3' if kinds|length > 1 }}">
+    <div class="grid grid-cols-1 gap-4 mt-5 {{ 'md:grid-cols-3' if kinds|length > 1 }}">
       {% for kind in kinds %}
       {% set rel = snap.reliability[kind] %}
       <div class="svc-card p-5">
@@ -303,7 +303,7 @@
   {% set x = snap.x402 %}
   <section id="x402">
     {{ section_head('06', 'x402 economy', headlines.x402, 'Prices are the cheapest call each reachable API advertises in its payment terms, in USD. They are list prices, not revenue. Payment evidence says how we know a listing takes payment at all.') }}
-    <div class="grid gap-4 mt-5 md:grid-cols-2">
+    <div class="grid grid-cols-1 gap-4 mt-5 md:grid-cols-2">
       <div class="svc-card p-5">
         <h3 class="text-sm font-semibold text-slate-800">Cheapest call per API ({{ x.priced|num }} priced)</h3>
         <dl class="grid grid-cols-5 gap-2 mt-3 text-center">
@@ -328,7 +328,7 @@
   {% if view != 'x402' %}
   <section id="access">
     {{ section_head('07', 'Access', headlines.access, 'How a caller is expected to authenticate, as declared by the listing. MCP servers that accept x402 are counted as pay-per-call even when they also take a key.') }}
-    <div class="grid gap-4 mt-5 md:grid-cols-2">
+    <div class="grid grid-cols-1 gap-4 mt-5 md:grid-cols-2">
       {% if view in ('all', 'mcp') %}<div class="svc-card p-5"><h3 class="text-sm font-semibold text-slate-800 mb-2">MCP servers</h3>{{ bar_table(snap.access.mcp, 'Declared access', '#0f766e') }}</div>{% endif %}
       {% if view in ('all', 'a2a') %}<div class="svc-card p-5"><h3 class="text-sm font-semibold text-slate-800 mb-2">A2A agents (Agent Card security)</h3>{{ bar_table(snap.access.a2a, 'Declared scheme', '#0f766e') }}</div>{% endif %}
     </div>
@@ -392,7 +392,7 @@
   {# 10 Growth #}
   <section id="growth">
     {{ section_head('10', 'Growth', headlines.growth, 'Listings by the day any source first showed them to us, over the last ' ~ period ~ ' days. Our crawlers started at different dates, so early spikes partly reflect when a source was added.') }}
-    <div class="grid gap-4 mt-5 {{ 'md:grid-cols-3' if kinds|length > 1 }}">
+    <div class="grid grid-cols-1 gap-4 mt-5 {{ 'md:grid-cols-3' if kinds|length > 1 }}">
       {% for kind in kinds %}
       {% set g = snap.growth[kind] %}
       {% set series = g.daily_new[-period:] %}
@@ -418,17 +418,17 @@
   {% if ad and ad.available %}
   <section id="adoption">
     {{ section_head('11', 'Adoption', headlines.adoption, 'Signals from outside our probes: GitHub stars of the source repository, npm downloads, and where the site ranks in the Tranco top-1M list. They describe attention, not quality, and do not affect search order.') }}
-    <div class="grid gap-4 mt-5 md:grid-cols-2">
+    <div class="grid grid-cols-1 gap-4 mt-5 md:grid-cols-2">
       {% if view in ('all', 'mcp') %}
       <div class="svc-card p-5">
         <h3 class="text-sm font-semibold text-slate-800 mb-2">GitHub stars, reachable MCP servers ({{ ad.mcp_with_github|num }} with a repo)</h3>
         {{ bar_table(ad.star_bands, 'Stars', '#ca8a04') }}
         {% if ad.top_repos %}
         <h3 class="text-sm font-semibold text-slate-800 mt-5 mb-2">Most-starred repositories</h3>
-        <table class="st-table w-full text-sm">
+        <table class="st-table w-full text-sm table-fixed">
           <tbody>
           {% for r in ad.top_repos %}
-            <tr><td class="min-w-0"><a href="/mcp/servers/{{ r.slug }}" class="hover:text-blue-600 block truncate">{{ r.name }}</a><div class="text-xs text-slate-400 mono truncate">{{ r.repo }}</div></td><td class="num mono">★ {{ r.stars|num }}</td></tr>
+            <tr><td class="min-w-0"><a href="/mcp/servers/{{ r.slug }}" class="hover:text-blue-600 block truncate">{{ r.name }}</a><div class="text-xs text-slate-400 mono truncate">{{ r.repo }}</div></td><td class="num mono w-24">★ {{ r.stars|num }}</td></tr>
           {% endfor %}
           </tbody>
         </table>
@@ -467,7 +467,7 @@
   {% set sd = snap.search_demand or {} %}
   <section id="searches">
     {{ section_head('12', 'Searches', ('People searched ' ~ (sd.searches|num) ~ ' times over the last ' ~ (sd.days or 30) ~ ' days.') if sd.searches else 'Search counting started on 11 November 2026; the first terms appear once each has been searched at least five times.', 'What visitors, API clients and agents type into our search, counted in aggregate. A term is shown only after at least ' ~ (sd.min_searches or 5) ~ ' searches; no IP, account or session is stored with it.') }}
-    <div class="grid gap-4 mt-5 md:grid-cols-2">
+    <div class="grid grid-cols-1 gap-4 mt-5 md:grid-cols-2">
       <div class="svc-card p-5">
         <h3 class="text-sm font-semibold text-slate-800">Most searched</h3>
         {% if sd.top %}

@@ -648,8 +648,11 @@ async def directory_stats(
 
     Returns counts (indexed, reachable, protocol-verified, readiness A/B), one
     finding sentence per topic, key facts (x402 prices and networks, MCP and A2A
-    protocol versions, MCP auth, A2A card signatures), the snapshot time, and
-    links to the full JSON snapshot, the daily CSV and the methodology.
+    protocol versions, MCP auth, A2A card signatures, how every listing's
+    latest probe ended), the most searched terms (view "all"), the snapshot
+    time, and links to the full JSON snapshot, the daily CSV, the methodology,
+    the "how many work" page, per-protocol and per-topic pages and the monthly
+    reports.
     """
     from . import stats as directory_stats_mod
     out = directory_stats_mod.summary(directory_stats_mod.latest(_open), view)

@@ -62,7 +62,6 @@
   <h1 class="text-3xl md:text-4xl font-extrabold tracking-tight mt-3 text-slate-900">How many agent tools actually work?</h1>
   <p class="text-lg text-slate-700 mt-4 leading-relaxed">{{ u.answer }}</p>
   <p class="text-xs text-slate-500 mt-3 mono flex flex-wrap gap-x-3 gap-y-1">
-    <span>As of {{ u.as_of }}</span>
     <a href="#method" class="underline decoration-dotted hover:text-slate-900">How we measure</a>
     <a href="/stats/usable.json" class="underline decoration-dotted hover:text-slate-900">JSON</a>
     <a href="/stats" class="underline decoration-dotted hover:text-slate-900">All statistics</a>
@@ -93,28 +92,44 @@
   <p class="text-xs text-slate-400 mt-3">Shares are of all indexed listings of that protocol. Uptime counts listings with at least a week of daily probes.</p>
 </section>
 
+{% macro oc(label) -%}
+{%- set l = label|lower -%}
+{%- if 'without an error' in l or 'fetched and valid' in l -%}#059669
+{%- elif 'credentials' in l -%}#f59e0b
+{%- elif 'with errors' in l -%}#fcd34d
+{%- elif '404' in l -%}#94a3b8
+{%- elif '5xx' in l -%}#ef4444
+{%- elif 'client error' in l -%}#fca5a5
+{%- elif 'no response' in l or 'not fetched' in l -%}#475569
+{%- elif 'not probed' in l -%}#e2e8f0
+{%- else -%}#cbd5e1{%- endif -%}
+{%- endmacro %}
+{% macro stacked(rows, colour) -%}
+<div class="flex h-4 rounded-md overflow-hidden bg-slate-100" role="img" aria-label="{% for o in rows %}{{ o.label }} {{ o.pct }}%{{ ', ' if not loop.last }}{% endfor %}">
+  {% for o in rows %}{% if o.pct > 0 %}<div style="width:{{ o.pct }}%;background:{{ colour(o.label) }}" title="{{ o.label }}: {{ o.count|num }} ({{ o.pct }}%)"></div>{% endif %}{% endfor %}
+</div>
+<ul class="mt-3 grid grid-cols-1 md:grid-cols-2 gap-x-10 gap-y-1.5 text-sm max-w-4xl">
+  {% for o in rows %}
+  <li class="flex items-baseline gap-2 min-w-0">
+    <span class="inline-block w-2.5 h-2.5 rounded-sm shrink-0 translate-y-[1px]" style="background:{{ colour(o.label) }}" aria-hidden="true"></span>
+    <span class="text-slate-700 min-w-0">{{ o.label }}</span>
+    <span class="ml-auto mono text-slate-900 whitespace-nowrap">{{ o.count|num }}</span>
+    <span class="mono text-slate-400 w-14 text-right whitespace-nowrap">{{ o.pct }}%</span>
+  </li>
+  {% endfor %}
+</ul>
+{%- endmacro %}
+{% macro blue(label) %}{% set l = label %}{{ {'100%': '#1d4ed8', '95–99%': '#3b82f6', '80–94%': '#93c5fd', '50–79%': '#fbbf24', '<50%': '#ef4444'}.get(l, '#cbd5e1') }}{% endmacro %}
+
 <section class="mt-6 bg-white border border-slate-200 rounded-2xl p-5 md:p-6" aria-labelledby="why-not">
   <div class="st-kicker">02 · why the rest fail</div>
   <h2 id="why-not" class="text-xl md:text-2xl font-bold tracking-tight mt-2 text-slate-900">How each listing's latest probe ended</h2>
   <p class="text-sm text-slate-500 mt-2 max-w-3xl leading-relaxed">One outcome per listing, from the HTTP status of our latest probe. A listing that asks for credentials is up, but an agent needs a key before it can use it.</p>
-  <div class="grid lg:grid-cols-3 gap-6 mt-5">
+  <div class="mt-6 space-y-8">
   {% for r in u.by_protocol %}
-    {% set rows = u.why_not.get(r.kind) or [] %}
     <div>
-      <h3 class="font-semibold text-slate-900 text-sm">{{ r.label }}</h3>
-      <table class="st-table w-full text-sm mt-2">
-        <thead><tr><th scope="col">Outcome</th><th scope="col" class="num">Listings</th><th scope="col" class="num">%</th></tr></thead>
-        <tbody>
-        {% for o in rows %}
-          <tr>
-            <td class="text-slate-700">{{ o.label }}
-              <div class="st-track mt-1"><div class="st-bar" style="width:{{ [o.pct, 0.4]|max }}%;background:{{ '#059669' if loop.first else ('#d97706' if 'credentials' in o.label else '#94a3b8') }}"></div></div></td>
-            <td class="num mono">{{ o.count|num }}</td>
-            <td class="num mono text-slate-500">{{ o.pct }}%</td>
-          </tr>
-        {% endfor %}
-        </tbody>
-      </table>
+      <h3 class="font-semibold text-slate-900 text-sm mb-2">{{ r.label }} <span class="text-slate-400 font-normal">· {{ r.indexed|num }} listings</span></h3>
+      {{ stacked(u.why_not.get(r.kind) or [], oc) }}
     </div>
   {% endfor %}
   </div>
@@ -125,36 +140,28 @@
   <div class="st-kicker">03 · over 30 days</div>
   <h2 id="uptime" class="text-xl md:text-2xl font-bold tracking-tight mt-2 text-slate-900">Is it still up tomorrow?</h2>
   <p class="text-sm text-slate-500 mt-2 max-w-3xl leading-relaxed">Share of daily probes answered over the last 30 days, for listings we have probed for at least a week.</p>
-  <div class="grid lg:grid-cols-3 gap-6 mt-5">
+  <div class="mt-6 space-y-8">
   {% for kind in ("x402", "mcp", "a2a") %}
     {% set rel = snap.reliability[kind] %}
     <div>
-      <h3 class="font-semibold text-slate-900 text-sm">{{ (u.by_protocol | selectattr("kind", "equalto", kind) | first).label }} <span class="text-slate-400 font-normal">· {{ rel.tracked|num }} tracked</span></h3>
-      {% if rel.tracked %}
-      <table class="st-table w-full text-sm mt-2">
-        <thead><tr><th scope="col">Uptime</th><th scope="col" class="num">Listings</th><th scope="col" class="num">%</th></tr></thead>
-        <tbody>
-        {% for b in rel.uptime %}
-          <tr><td class="text-slate-700">{{ b.label }}<div class="st-track mt-1"><div class="st-bar" style="width:{{ [b.pct, 0.4]|max }}%;background:#2563eb"></div></div></td>
-              <td class="num mono">{{ b.count|num }}</td><td class="num mono text-slate-500">{{ b.pct }}%</td></tr>
-        {% endfor %}
-        </tbody>
-      </table>
-      {% else %}<p class="text-sm text-slate-400 mt-2">Not enough history yet.</p>{% endif %}
+      <h3 class="font-semibold text-slate-900 text-sm mb-2">{{ (u.by_protocol | selectattr("kind", "equalto", kind) | first).label }} <span class="text-slate-400 font-normal">· {{ rel.tracked|num }} tracked</span></h3>
+      {% if rel.tracked %}{{ stacked(rel.uptime, blue) }}
+      {% else %}<p class="text-sm text-slate-400">Probed for less than a week so far; uptime appears once a week of history exists.</p>{% endif %}
     </div>
   {% endfor %}
   </div>
 </section>
 {% endif %}
 
-<section class="mt-6 grid lg:grid-cols-2 gap-6">
+<section class="mt-6 grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
   <div class="bg-white border border-slate-200 rounded-2xl p-5 md:p-6" aria-labelledby="meaning">
     <div class="st-kicker">04 · what this means</div>
     <h2 id="meaning" class="text-xl font-bold tracking-tight mt-2 text-slate-900">If you build agents</h2>
     <ul class="mt-3 space-y-2 text-sm text-slate-700 list-disc pl-5 leading-relaxed">
       <li>Check before you call. Every listing on this site carries its latest probe result, and the <a href="/about#api" class="text-blue-700 hover:underline">API</a> and MCP server can filter to <code>health=ok</code>.</li>
       <li>Prefer readiness A or B. Only {{ u.by_protocol | sum(attribute="ready") | num }} listings reach it; they declare auth, schemas and pricing an agent can read.</li>
-      <li>"Up" is not "usable": many MCP servers answer with 401/403 and need a key first. Their listing says which auth they declare.</li>
+      {% set auth = namespace(row=none) %}{% for o in u.why_not.get('mcp') or [] %}{% if 'credentials' in o.label %}{% set auth.row = o %}{% endif %}{% endfor %}
+      <li>"Up" is not "usable": {% if auth.row %}{{ auth.row.pct }}% of MCP servers ({{ auth.row.count|num }}){% else %}many MCP servers{% endif %} answer with 401/403 and need a key first. Their listing says which auth they declare.</li>
       <li>Paid x402 endpoints should answer 402 with a valid challenge. A 200, 404 or 5xx at the paid path means the listing is stale or misconfigured.</li>
     </ul>
   </div>

@@ -260,7 +260,11 @@ class SearchTermTests(unittest.TestCase):
     def test_normalize_drops_personal_terms(self):
         n = self.st.normalize
         self.assertEqual(n("  Weather   API! "), "weather api")
-        for bad in ("a", "me@x.com", "https://x.io", "0xabcdef1234", "order 123456", "x" * 70, None, ""):
+        for ok in ("key-value store", "claude-3-5-sonnet", "github.com", "c++", "x402 payment"):
+            self.assertEqual(n(ok), ok)
+        for bad in ("a", "me@x.com", "https://x.io", "0xabcdef1234", "order 123456", "x" * 70, None, "",
+                    "example.com/path", "10.0.0.1", "138-1234-5678", "415.555.0101", "sk-abc123def",
+                    "ghp_ab12cd34", "a1b2c3d4e5f6g7h8i9j0k1l2m3"):
             self.assertIsNone(n(bad), bad)
 
     def test_record_flush_and_threshold(self):
