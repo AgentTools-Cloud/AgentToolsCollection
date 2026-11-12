@@ -18,10 +18,13 @@
   .st-toggle a[aria-current="true"] { background: #0f172a; color: #fff; }
   .st-toc a { display: block; padding: 4px 0 4px 10px; border-left: 2px solid #e2e8f0; color: #64748b; font-size: 13px; }
   .st-toc a:hover { color: #0f172a; border-left-color: #0f172a; }
-  .st-explore a { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 999px;
-    background: #fff; border: 1px solid #e2e8f0; font-size: 13px; font-weight: 500; color: #334155; }
-  .st-explore a:hover { border-color: #2563eb; color: #1d4ed8; }
-  .st-explore a span { color: #2563eb; font-size: 12px; }
+  .st-deep { display:flex; flex-direction:column; background:#fff; border:1px solid #e2e8f0; border-radius:14px;
+    padding:18px 20px; transition:border-color .15s, box-shadow .15s; }
+  .st-deep:hover { border-color:#93c5fd; box-shadow:0 1px 8px rgba(37,99,235,.08); }
+  .st-deep .go { margin-top:auto; padding-top:14px; font-size:13px; font-weight:500; color:#1d4ed8; }
+  .st-chip { display:inline-block; padding:2px 8px; border-radius:6px; background:#f1f5f9; color:#334155;
+    font:500 12px/1.6 'JetBrains Mono', ui-monospace, monospace; }
+  .st-chip:hover { background:#dbeafe; color:#1d4ed8; }
   .tnum { font-variant-numeric: tabular-nums; }
   /* Inter's contextual alternates draw "x" between digits as "×" ("06 x402"). */
   main { font-feature-settings: "calt" 0; }
@@ -112,12 +115,6 @@
     <a href="/stats/daily.csv" class="underline decoration-dotted hover:text-slate-900">CSV</a>
     <a href="#cite" class="underline decoration-dotted hover:text-slate-900">Cite</a>
   </p>
-  <nav class="st-explore mt-5 flex flex-wrap gap-2" aria-label="Explore the data">
-    <a href="/stats/usable">Do they actually work? <span aria-hidden="true">→</span></a>
-    <a href="#topics">Topics <span aria-hidden="true">→</span></a>
-    <a href="/stats/reports">Monthly reports <span aria-hidden="true">→</span></a>
-    {% if view == 'all' %}<a href="#searches">What people search for <span aria-hidden="true">→</span></a>{% endif %}
-  </nav>
 </header>
 
 <nav class="mt-6 flex flex-wrap items-center gap-3" aria-label="Stats view">
@@ -160,6 +157,41 @@
     {% endif %}
   </div>
   {% endfor %}
+</section>
+
+{# Go deeper: the other stats pages #}
+{% set kk = snap.kpis[view if view != 'all' else 'all'] %}
+{% set sd = snap.search_demand or {} %}
+{% set month = snap.as_of[:7] %}
+<section class="mt-8" aria-labelledby="deeper">
+  <h2 id="deeper" class="st-kicker">Go deeper</h2>
+  <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mt-3 [&>*]:min-w-0">
+    <a class="st-deep" href="/stats/usable">
+      <span class="st-kicker">Question</span>
+      <span class="font-semibold text-slate-900 mt-2">Do they actually work?</span>
+      <span class="text-sm text-slate-600 mt-1">{{ (100 * kk.reachable / kk.indexed)|round(0)|int if kk.indexed else 0 }}% answer our probe; {{ (100 * kk.ready / kk.indexed)|round(0)|int if kk.indexed else 0 }}% are ready for an agent. Why the rest fail.</span>
+      <span class="go">Read the answer →</span>
+    </a>
+    <div class="st-deep">
+      <span class="st-kicker">{{ snap.topics.rows|length }} topics</span>
+      <a href="#topics" class="font-semibold text-slate-900 mt-2 hover:text-blue-700">What they cover</a>
+      <span class="text-sm text-slate-600 mt-1">Supply, readiness and the best listings per topic.</span>
+      <span class="mt-3 flex flex-wrap gap-1.5">{% for r in snap.topics.rows[:5] %}<a class="st-chip" href="/stats/topics/{{ r.topic }}">{{ r.topic }}</a>{% endfor %}</span>
+      <a class="go" href="#topics">All topics →</a>
+    </div>
+    <a class="st-deep" href="/stats/reports/{{ month }}">
+      <span class="st-kicker">Monthly report</span>
+      <span class="font-semibold text-slate-900 mt-2">{{ month_title|default(month) }}</span>
+      <span class="text-sm text-slate-600 mt-1">How the index, reachability and readiness changed this month. Final on the 1st.</span>
+      <span class="go">Open the report →</span>
+    </a>
+    <a class="st-deep" href="{{ '#searches' if view == 'all' else '/stats#searches' }}">
+      <span class="st-kicker">Demand</span>
+      <span class="font-semibold text-slate-900 mt-2">What people search for</span>
+      <span class="text-sm text-slate-600 mt-1">{% if sd.searches %}{{ sd.searches|num }} searches in {{ sd.days or 30 }} days{% if sd.top %}; most searched: <span class="mono">{{ sd.top[0].term }}</span>{% endif %}.{% else %}Counting since 11 Nov 2026; a term appears after five searches.{% endif %}</span>
+      <span class="go">See searches →</span>
+    </a>
+  </div>
 </section>
 
 <div class="lg:grid lg:grid-cols-[180px_minmax(0,1fr)] lg:gap-10 mt-12">
