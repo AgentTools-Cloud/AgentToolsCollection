@@ -45,7 +45,7 @@ class McpToolMetadataTests(unittest.TestCase):
     def test_stats_tools_present(self):
         tools = _tools()
         self.assertIn("directory_stats", tools)
-        self.assertEqual(set(tools["directory_stats"].inputSchema["properties"]), {"view"})
+        self.assertEqual(set(tools["directory_stats"].inputSchema["properties"]), {"view", "topic", "month"})
 
 
 if __name__ == "__main__":

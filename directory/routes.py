@@ -398,16 +398,54 @@ def _render_stats(request: Request, view: str, period: int):
     })
 
 
+FULL_DOC = ("Add full=1 with an account (browser sign-in, or Authorization: Bearer <key>; "
+            "a key is free from POST /api/v1/keys) for the complete lists.")
+_PUBLIC_JSON = {"Cache-Control": "public, max-age=600", "Access-Control-Allow-Origin": "*"}
+_PRIVATE_JSON = {"Cache-Control": "private, no-store", "Vary": "Authorization, Cookie"}
+
+
+def _full_access(request: Request, full: bool) -> bool:
+    """True when the caller asked for full=1 and has an account; 401 otherwise."""
+    if not full:
+        return False
+    if directory_auth.current_user(request) is None:
+        raise HTTPException(status_code=401, detail={
+            "error": "account_required",
+            "message": "full=1 needs an account. Without it the public lists are returned.",
+            "browser": "https://agent-tools.cloud/auth/github/login",
+            "get_a_key": {"method": "POST", "url": "https://agent-tools.cloud/api/v1/keys"},
+            "send": "Authorization: Bearer <key>"})
+    return True
+
+
 @router.get("/stats.json", tags=["directory"], summary="Full daily statistics snapshot")
-def stats_json():
+def stats_json(request: Request, full: bool = Query(default=False, description=FULL_DOC)):
     """Everything behind /stats: funnel, sources, protocol versions, readiness,
     uptime and latency, x402 prices/networks/payment evidence, access, safety,
-    topic coverage and growth. Recomputed once a day. CC BY 4.0."""
+    topic coverage, growth and search demand. Recomputed once a day. CC BY 4.0.
+    Without an account the topic and search lists are shortened."""
+    from . import stats as stats_mod
+    is_full = _full_access(request, full)
     snap, _h = _stats_payload()
     if snap is None:
         raise HTTPException(status_code=503, detail="statistics not computed yet")
-    return JSONResponse(snap, headers={"Cache-Control": "public, max-age=600",
-                                       "Access-Control-Allow-Origin": "*"})
+    if is_full:
+        return JSONResponse(snap, headers=_PRIVATE_JSON)
+    return JSONResponse(stats_mod.public_snapshot(snap), headers=_PUBLIC_JSON)
+
+
+@router.get("/stats/searches.json", tags=["directory"],
+            summary="What people search for (aggregate; terms with >= 5 searches)")
+def stats_searches_json(request: Request, full: bool = Query(default=False, description=FULL_DOC)):
+    """Most searched terms and terms that mostly found nothing over the last 30
+    days, across web, API and MCP searches. No visitor data is kept with the
+    counts. Public: first 10 of each list; with an account: up to 100."""
+    from . import stats as stats_mod
+    is_full = _full_access(request, full)
+    snap, _h = _stats_payload()
+    data = stats_mod.searches_view(snap, full=is_full)
+    data["license"] = "CC BY 4.0"
+    return JSONResponse(data, headers=_PRIVATE_JSON if is_full else _PUBLIC_JSON)
 
 
 @router.get("/stats/usable", response_class=HTMLResponse, include_in_schema=False)
@@ -443,18 +481,20 @@ def stats_topics_index():
 
 @router.get("/stats/topics/{topic}.json", tags=["directory"],
             summary="One topic across x402, MCP and A2A: supply, readiness, top listings, searches")
-def stats_topic_json(topic: str):
+def stats_topic_json(request: Request, topic: str,
+                     full: bool = Query(default=False, description=FULL_DOC)):
     """Reachable listings mentioning the topic word per protocol, how many are
-    ready (A/B), median readiness and latency, the best listings per protocol,
-    supply gaps and matching search terms. Daily. CC BY 4.0."""
+    ready (A/B), median readiness and latency, the best listings per protocol
+    (3 public, 10 with an account), supply gaps and matching search terms.
+    Daily. CC BY 4.0."""
     from . import stats as stats_mod
+    is_full = _full_access(request, full)
     snap, _h = _stats_payload()
-    data = stats_mod.topic_page(snap, topic.lower())
+    data = stats_mod.topic_page(snap, topic.lower(), full=is_full)
     if data is None:
         raise HTTPException(status_code=404, detail=f"unknown topic; one of: {', '.join(stats_mod.TOPICS)}")
     data["license"] = "CC BY 4.0"
-    return JSONResponse(data, headers={"Cache-Control": "public, max-age=600",
-                                       "Access-Control-Allow-Origin": "*"})
+    return JSONResponse(data, headers=_PRIVATE_JSON if is_full else _PUBLIC_JSON)
 
 
 @router.get("/stats/topics/{topic}", response_class=HTMLResponse, include_in_schema=False)
@@ -523,14 +563,18 @@ def stats_report_page(request: Request, month: str):
 
 @router.get("/stats/daily.csv", tags=["directory"], summary="Headline metrics for every stored day (CSV)",
             response_class=Response)
-def stats_daily_csv():
-    """Every stored day's headline metrics, long format: day,kind,metric,value."""
+def stats_daily_csv(request: Request, full: bool = Query(default=False, description=FULL_DOC)):
+    """Headline metrics per day, long format: day,kind,metric,value. Public:
+    the last 90 days; with an account and full=1: every stored day."""
     import csv
     import io
     from . import stats as stats_mod
+    is_full = _full_access(request, full)
+    since = "0000" if is_full else time.strftime("%Y-%m-%d", time.gmtime(time.time() - 89 * 86400))
     with _conn() as c:
         try:
-            rows = c.execute("SELECT day, json FROM stats_snapshots ORDER BY day").fetchall()
+            rows = c.execute("SELECT day, json FROM stats_snapshots WHERE day >= ? ORDER BY day",
+                             (since,)).fetchall()
         except sqlite3.OperationalError:
             rows = []
     buf = io.StringIO()
@@ -541,7 +585,7 @@ def stats_daily_csv():
             w.writerow((day, kind, metric, value))
     return Response(buf.getvalue(), media_type="text/csv; charset=utf-8", headers={
         "Content-Disposition": 'inline; filename="agent-tools-stats-daily.csv"',
-        "Cache-Control": "public, max-age=600", "Access-Control-Allow-Origin": "*"})
+        **(_PRIVATE_JSON if is_full else _PUBLIC_JSON)})
 
 
 @router.get("/stats/{kind}", response_class=HTMLResponse, include_in_schema=False)
@@ -1162,12 +1206,16 @@ def api_methodology():
 
 
 @router.get("/api/v1/stats/summary", tags=["directory"])
-def api_stats_summary(view: str = Query(default="all", pattern="^(all|mcp|x402|a2a)$",
-                                        description="all, mcp, x402 or a2a")):
+def api_stats_summary(request: Request,
+                      view: str = Query(default="all", pattern="^(all|mcp|x402|a2a)$",
+                                        description="all, mcp, x402 or a2a"),
+                      full: bool = Query(default=False, description=FULL_DOC)):
     """Daily digest: counts, findings and key facts for one protocol or all."""
     from . import stats as stats_mod
+    is_full = _full_access(request, full)
     snap, _h = _stats_payload()
-    return stats_mod.summary(snap, view)
+    out = stats_mod.summary(snap, view, full=is_full)
+    return JSONResponse(out, headers=_PRIVATE_JSON if is_full else {"Access-Control-Allow-Origin": "*"})
 
 
 class SubmissionPayload(BaseModel):
@@ -2268,6 +2316,11 @@ def well_known():
                 "protocol_pages": "https://agent-tools.cloud/stats/{x402|mcp|a2a}",
                 "topic": "https://agent-tools.cloud/stats/topics/{topic}.json",
                 "monthly_reports": "https://agent-tools.cloud/stats/reports.json",
+                "searches": "https://agent-tools.cloud/stats/searches.json",
+                "full_access": "public responses shorten topic lists (3 per protocol) and search lists "
+                               "(10); add full=1 with Authorization: Bearer <key> (free: POST /api/v1/keys) "
+                               "for 10 per protocol, up to 100 terms and all history; MCP directory_stats "
+                               "returns the full lists when the MCP request carries a key",
                 "updated": "daily, after the 21:30 UTC probe run",
                 "license": "CC BY 4.0",
                 "returns": "indexed / reachable / protocol-verified / readiness counts, findings, "

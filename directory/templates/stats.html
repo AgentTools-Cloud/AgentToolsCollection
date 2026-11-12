@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_macros.html" import grade_badge %}
+{% from "_macros.html" import grade_badge, account_teaser %}
 {% block title %}{{ page_title|default('The state of agent tools') }} — live statistics · agent-tools.cloud{% endblock %}
 {% block desc %}{% if view and view != 'all' and kind_label %}Daily statistics on {{ kind_label[view] }}: how many are reachable, protocol versions, readiness grades, uptime, latency, access and topics. Open JSON and CSV.{% else %}Daily statistics on x402 APIs, MCP servers and A2A agents: how many are reachable, which protocol versions they speak, readiness grades, uptime, latency, prices, access and safety. Open JSON and CSV.{% endif %}{% endblock %}
 {% block og_title %}{{ page_title|default('The state of agent tools') }} — live statistics{% endblock %}
@@ -471,8 +471,8 @@
       <div class="svc-card p-5">
         <h3 class="text-sm font-semibold text-slate-800">Most searched</h3>
         {% if sd.top %}
-        <table class="st-table w-full text-sm mt-2"><thead><tr><th scope="col">Term</th><th scope="col" class="num">Searches</th><th scope="col" class="num">No results</th></tr></thead><tbody>
-        {% for i in sd.top[:15] %}<tr><td class="mono text-xs">{{ i.term }}</td><td class="num mono">{{ i.searches|num }}</td><td class="num mono text-slate-500">{{ i.no_results_pct }}%</td></tr>{% endfor %}
+        <table class="st-table w-full text-sm mt-2"><thead><tr><th scope="col">Term</th><th scope="col" class="num">Searches</th><th scope="col" class="num">No results</th></tr></thead><tbody id="searches-top">
+        {% for i in sd.top[:10] %}<tr><td class="mono text-xs">{{ i.term }}</td><td class="num mono">{{ i.searches|num }}</td><td class="num mono text-slate-500">{{ i.no_results_pct }}%</td></tr>{% endfor %}
         </tbody></table>
         {% else %}<p class="text-sm text-slate-400 mt-2">Not enough searches yet.</p>{% endif %}
       </div>
@@ -480,12 +480,30 @@
         <h3 class="text-sm font-semibold text-slate-800">Searched, but mostly nothing found</h3>
         <p class="text-xs text-slate-500 mt-1">Demand we cannot serve yet: half or more of these searches returned no listing.</p>
         {% if sd.unmet %}
-        <table class="st-table w-full text-sm mt-2"><thead><tr><th scope="col">Term</th><th scope="col" class="num">Searches</th><th scope="col" class="num">No results</th></tr></thead><tbody>
-        {% for i in sd.unmet[:15] %}<tr><td class="mono text-xs">{{ i.term }}</td><td class="num mono">{{ i.searches|num }}</td><td class="num mono text-slate-500">{{ i.no_results_pct }}%</td></tr>{% endfor %}
+        <table class="st-table w-full text-sm mt-2"><thead><tr><th scope="col">Term</th><th scope="col" class="num">Searches</th><th scope="col" class="num">No results</th></tr></thead><tbody id="searches-unmet">
+        {% for i in sd.unmet[:10] %}<tr><td class="mono text-xs">{{ i.term }}</td><td class="num mono">{{ i.searches|num }}</td><td class="num mono text-slate-500">{{ i.no_results_pct }}%</td></tr>{% endfor %}
         </tbody></table>
         {% else %}<p class="text-sm text-slate-400 mt-2">None above the threshold yet.</p>{% endif %}
       </div>
     </div>
+    {% if (sd.top or [])|length > 10 or (sd.unmet or [])|length > 10 %}
+    {{ account_teaser("up to 100 terms in each list", "/stats#searches", "/stats/searches.json?full=1") }}
+    <script>
+    window.atcRenderFull = function (data) {
+      function fill(id, rows) {
+        var tb = document.getElementById(id); if (!tb || !rows) return;
+        tb.textContent = "";
+        rows.forEach(function (i) {
+          var tr = document.createElement("tr");
+          [[i.term, "mono text-xs"], [i.searches.toLocaleString("en-US"), "num mono"], [i.no_results_pct + "%", "num mono text-slate-500"]]
+            .forEach(function (c) { var td = document.createElement("td"); td.className = c[1]; td.textContent = c[0]; tr.appendChild(td); });
+          tb.appendChild(tr);
+        });
+      }
+      fill("searches-top", data.top); fill("searches-unmet", data.unmet);
+    };
+    </script>
+    {% endif %}
   </section>
   {% endif %}
 

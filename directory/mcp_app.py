@@ -639,12 +639,17 @@ async def get_article(slug: str, ctx: Context | None = None) -> dict[str, Any]:
 @discover_mcp.tool(annotations=_READ_ONLY)
 async def directory_stats(
     view: str = "all",
+    topic: str | None = None,
+    month: str | None = None,
     ctx: Context | None = None,
 ) -> dict[str, Any]:
     """Daily statistics on the agent-tool ecosystem as seen by our probes.
 
     Args:
         view: "all", "mcp", "x402" or "a2a" to scope the figures to one protocol.
+        topic: Optional topic word (e.g. "payment", "weather") to get that topic
+            instead: supply per protocol, readiness, best listings, searches.
+        month: Optional "YYYY-MM" to get that monthly report instead.
 
     Returns counts (indexed, reachable, protocol-verified, readiness A/B), one
     finding sentence per topic, key facts (x402 prices and networks, MCP and A2A
@@ -652,13 +657,43 @@ async def directory_stats(
     latest probe ended), the most searched terms (view "all"), the snapshot
     time, and links to the full JSON snapshot, the daily CSV, the methodology,
     the "how many work" page, per-protocol and per-topic pages and the monthly
-    reports.
+    reports. With an account API key in the Authorization: Bearer header the
+    topic and search lists are complete (10 listings per protocol, up to 100
+    terms); without one they are shortened.
     """
     from . import stats as directory_stats_mod
-    out = directory_stats_mod.summary(directory_stats_mod.latest(_open), view)
-    _log_call("directory_stats", ctx=ctx, args={"view": view},
-              result_n=(out.get("kpis") or {}).get(out.get("view"), {}).get("indexed"))
+    full = _has_account()
+    snap = directory_stats_mod.latest(_open)
+    if topic:
+        out = directory_stats_mod.topic_page(snap, topic.strip().lower(), full=full) or {
+            "error": "unknown_topic", "topics": list(directory_stats_mod.TOPICS)}
+    elif month:
+        with _open() as conn:
+            try:
+                out = directory_stats_mod.monthly_report(conn, month.strip())
+            except Exception:  # noqa: BLE001
+                out = None
+        out = out or {"error": "no_report", "reports": "https://agent-tools.cloud/stats/reports.json"}
+    else:
+        out = directory_stats_mod.summary(snap, view, full=full)
+    _log_call("directory_stats", ctx=ctx, args={"view": view, "topic": topic, "month": month},
+              result_n=None if (topic or month) else
+              (out.get("kpis") or {}).get(out.get("view"), {}).get("indexed"))
     return out
+
+
+def _has_account() -> bool:
+    """Whether the current MCP request carries a valid account API key."""
+    authorization = _current_authorization.get() or ""
+    if not authorization.lower().startswith("bearer "):
+        return False
+    from . import auth as directory_auth
+    request = Request({"type": "http", "method": "GET", "path": "/", "query_string": b"",
+                       "headers": [(b"authorization", authorization.encode("latin-1"))]})
+    try:
+        return directory_auth.current_user(request) is not None
+    except Exception:  # noqa: BLE001
+        return False
 
 
 @discover_mcp.tool(annotations=_READ_ONLY)

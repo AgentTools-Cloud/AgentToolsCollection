@@ -240,6 +240,52 @@ class StatsSnapshotTests(unittest.TestCase):
         self.assertIn("final", html)
 
 
+class AccountTierTests(unittest.TestCase):
+    """Without an account lists are shortened; with one they are complete."""
+
+    @classmethod
+    def setUpClass(cls):
+        StatsSnapshotTests.setUpClass()
+
+    @classmethod
+    def tearDownClass(cls):
+        StatsSnapshotTests.tearDownClass()
+
+    def _snap(self):
+        top = [{"kind": k, "slug": f"{k}{i}", "name": f"{k} {i}", "grade": "A", "readiness": 90 - i,
+                "latency_ms": 100} for k in stats.KINDS for i in range(8)]
+        terms = [{"term": f"t{i}", "searches": 50 - i, "no_results_pct": 60.0} for i in range(30)]
+        return {"as_of": "2026-11-12 06:00 UTC",
+                "topics": {"rows": [{"topic": "weather", "x402": 5, "mcp": 5, "a2a": 5,
+                                     "x402_pct": 1.0, "mcp_pct": 1.0, "a2a_pct": 1.0}],
+                           "gaps": [], "detail": {"weather": {
+                               "by_kind": {k: {"reachable": 5, "ready": 2, "median_readiness": 80,
+                                               "median_latency_ms": 100} for k in stats.KINDS},
+                               "top": top}}},
+                "search_demand": {"days": 30, "searches": 900, "min_searches": 5,
+                                  "top": terms, "unmet": terms[:12]}}
+
+    def test_public_and_full(self):
+        snap = self._snap()
+        pub = stats.public_snapshot(snap)
+        self.assertEqual(len(pub["topics"]["detail"]["weather"]["top"]), 9)
+        self.assertEqual(len(snap["topics"]["detail"]["weather"]["top"]), 24)  # original untouched
+        self.assertEqual(len(pub["search_demand"]["top"]), 10)
+        self.assertEqual(pub["search_demand"]["more_with_account"], 20 + 2)
+        self.assertIn("sign_in", pub["search_demand"])
+        full = stats.searches_view(snap, full=True)
+        self.assertEqual((len(full["top"]), full["more_with_account"]), (30, 0))
+        t = stats.topic_page(snap, "weather")
+        self.assertEqual((len(t["top"]), t["full"]), (9, False))
+        self.assertGreater(t["more_with_account"], 0)
+        tf = stats.topic_page(snap, "weather", full=True)
+        self.assertEqual((len(tf["top"]), tf["more_with_account"]), (24, 0))
+        s = stats.summary({**StatsSnapshotTests.snap, "search_demand": snap["search_demand"]})
+        self.assertEqual(len(s["searches"]["top"]), 10)
+        s = stats.summary({**StatsSnapshotTests.snap, "search_demand": snap["search_demand"]}, full=True)
+        self.assertEqual(len(s["searches"]["top"]), 30)
+
+
 class SearchTermTests(unittest.TestCase):
     def setUp(self):
         from directory import search_terms

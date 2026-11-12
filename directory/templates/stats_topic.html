@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_macros.html" import account_teaser %}
 {% block title %}{{ t.topic|capitalize }} agent tools: x402, MCP and A2A statistics · agent-tools.cloud{% endblock %}
 {% block desc %}{{ t.answer }}{% endblock %}
 {% block og_title %}{{ t.topic|capitalize }} agent tools — statistics{% endblock %}
@@ -70,12 +71,12 @@
 
 <section class="mt-6 svc-card p-5 md:p-6" aria-labelledby="top">
   <h2 id="top" class="text-lg font-bold text-slate-900">Highest readiness, per protocol</h2>
-  <p class="text-xs text-slate-500 mt-1">Up to three reachable listings per protocol, by readiness score, then latency. Readiness is display only and not an endorsement.</p>
+  <p class="text-xs text-slate-500 mt-1"><span data-top-scope>Up to three</span> reachable listings per protocol, by readiness score, then latency. Readiness is display only and not an endorsement.</p>
   {% if t.top %}
   <div class="overflow-x-auto mt-3">
   <table class="st-table w-full text-sm">
     <thead><tr><th scope="col">Listing</th><th scope="col">Protocol</th><th scope="col" class="num">Readiness</th><th scope="col" class="num">Latency</th></tr></thead>
-    <tbody>
+    <tbody id="topic-top">
     {% for i in t.top %}
       <tr>
         <td><a class="text-blue-700 hover:underline" href="{{ {'x402': '/services/', 'mcp': '/mcp/servers/', 'a2a': '/a2a/agents/'}[i.kind] }}{{ i.slug }}">{{ i.name }}</a></td>
@@ -88,6 +89,7 @@
   </table>
   </div>
   {% else %}<p class="text-sm text-slate-400 mt-2">No scored listings yet.</p>{% endif %}
+  {{ account_teaser("the top 10 per protocol and every matching search", "/stats/topics/" ~ t.topic, "/stats/topics/" ~ t.topic ~ ".json?full=1") }}
 </section>
 
 <section class="mt-6 svc-card p-5 md:p-6" aria-labelledby="searches">
@@ -96,10 +98,45 @@
   {% if t.searches %}
   <table class="st-table w-full text-sm mt-3">
     <thead><tr><th scope="col">Term</th><th scope="col" class="num">Searches</th><th scope="col" class="num">No results</th></tr></thead>
-    <tbody>{% for i in t.searches %}<tr><td class="mono text-xs">{{ i.term }}</td><td class="num mono">{{ i.searches|num }}</td><td class="num mono text-slate-500">{{ i.no_results_pct }}%</td></tr>{% endfor %}</tbody>
+    <tbody id="topic-searches">{% for i in t.searches %}<tr><td class="mono text-xs">{{ i.term }}</td><td class="num mono">{{ i.searches|num }}</td><td class="num mono text-slate-500">{{ i.no_results_pct }}%</td></tr>{% endfor %}</tbody>
   </table>
   {% else %}<p class="text-sm text-slate-400 mt-2">Not enough searches yet.</p>{% endif %}
 </section>
+
+<script>
+window.atcRenderFull = function (data) {
+  var hrefs = {x402: "/services/", mcp: "/mcp/servers/", a2a: "/a2a/agents/"};
+  var labels = {};
+  (data.by_kind || []).forEach(function (b) { labels[b.kind] = b.label; });
+  function cell(text, cls) { var td = document.createElement("td"); if (cls) td.className = cls; td.textContent = text; return td; }
+  var top = document.getElementById("topic-top");
+  if (top && data.top) {
+    top.textContent = "";
+    data.top.forEach(function (i) {
+      var tr = document.createElement("tr");
+      var td = document.createElement("td"); var a = document.createElement("a");
+      a.href = hrefs[i.kind] + encodeURIComponent(i.slug); a.textContent = i.name; a.className = "text-blue-700 hover:underline";
+      td.appendChild(a); tr.appendChild(td);
+      tr.appendChild(cell(labels[i.kind] || i.kind, "text-slate-500 text-xs"));
+      tr.appendChild(cell((i.grade || "") + " " + Math.round(i.readiness), "num mono"));
+      tr.appendChild(cell(i.latency_ms == null ? "\u2014" : i.latency_ms + " ms", "num mono"));
+      top.appendChild(tr);
+    });
+    var scope = document.querySelector("[data-top-scope]"); if (scope) scope.textContent = "Up to ten";
+  }
+  var se = document.getElementById("topic-searches");
+  if (se && data.searches) {
+    se.textContent = "";
+    data.searches.forEach(function (i) {
+      var tr = document.createElement("tr");
+      tr.appendChild(cell(i.term, "mono text-xs"));
+      tr.appendChild(cell(i.searches.toLocaleString("en-US"), "num mono"));
+      tr.appendChild(cell(i.no_results_pct + "%", "num mono text-slate-500"));
+      se.appendChild(tr);
+    });
+  }
+};
+</script>
 
 <nav class="mt-8 text-sm" aria-label="Other topics">
   <h2 class="st-kicker">Other topics</h2>

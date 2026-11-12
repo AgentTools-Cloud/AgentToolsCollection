@@ -438,7 +438,13 @@ def x402_economy(conn):
 # Topic coverage
 # ---------------------------------------------------------------------------
 
-TOPIC_TOP_PER_KIND = 3
+TOPIC_TOP_PER_KIND = 10   # stored; signed-in callers see all of them
+PUBLIC_TOP_PER_KIND = 3   # shown without an account
+PUBLIC_SEARCH_TERMS = 10  # search terms shown without an account
+FULL_SEARCH_TERMS = 100
+SIGN_IN = {"browser": "https://agent-tools.cloud/auth/github/login",
+           "agent": {"get_a_key": {"method": "POST", "url": "https://agent-tools.cloud/api/v1/keys"},
+                     "send": "Authorization: Bearer <key>"}}
 
 
 def _distinct_names(items, n=None):
@@ -709,12 +715,52 @@ def search_demand(now, days=30):
     """What people searched for over `days` (aggregate, terms with >= 5 searches)."""
     from . import search_terms
     search_terms.prune(now)
-    out = search_terms.summary(_day(now - (days - 1) * 86400), _day(now))
+    out = search_terms.summary(_day(now - (days - 1) * 86400), _day(now), limit=FULL_SEARCH_TERMS)
     out["days"] = days
     return out
 
 
-def topic_page(snap, topic):
+def _trim_top(top, n):
+    out, seen = [], Counter()
+    for i in top:
+        if seen[i["kind"]] < n:
+            seen[i["kind"]] += 1
+            out.append(i)
+    return out
+
+
+def searches_view(snap, full=False):
+    """Search demand; without an account only the first ten terms of each list."""
+    sd = dict((snap or {}).get("search_demand") or {})
+    if not sd:
+        return {"available": False}
+    n = FULL_SEARCH_TERMS if full else PUBLIC_SEARCH_TERMS
+    total_top, total_unmet = len(sd.get("top") or []), len(sd.get("unmet") or [])
+    sd["top"] = (sd.get("top") or [])[:n]
+    sd["unmet"] = (sd.get("unmet") or [])[:n]
+    sd["full"] = full
+    sd["more_with_account"] = 0 if full else max(0, total_top - n) + max(0, total_unmet - n)
+    if not full:
+        sd["sign_in"] = SIGN_IN
+    return sd
+
+
+def public_snapshot(snap):
+    """The snapshot as served without an account: shorter top lists."""
+    if not snap:
+        return snap
+    out = dict(snap)
+    t = dict(out.get("topics") or {})
+    if t.get("detail"):
+        t["detail"] = {k: {**v, "top": _trim_top(v.get("top") or [], PUBLIC_TOP_PER_KIND)}
+                       for k, v in t["detail"].items()}
+        out["topics"] = t
+    if out.get("search_demand"):
+        out["search_demand"] = searches_view(out, full=False)
+    return out
+
+
+def topic_page(snap, topic, full=False):
     """Data for /stats/topics/{topic}."""
     if not snap or topic not in TOPICS:
         return None
@@ -735,13 +781,19 @@ def topic_page(snap, topic):
     sd = snap.get("search_demand") or {}
     if sd.get("top"):
         rx = re.compile(r"\b" + re.escape(topic) + r"s?\b")
-        searches = [i for i in sd["top"] if rx.search(i["term"])][:10]
+        searches = [i for i in sd["top"] if rx.search(i["term"])]
     return {"topic": topic, "as_of": snap["as_of"], "answer": answer, "rank": rank,
             "reachable": total, "ready": ready,
             "by_kind": [{"kind": k, "label": KIND_LABEL[k], "pct": row[k + "_pct"], **detail["by_kind"][k]}
                         for k in KINDS],
-            "top": detail["top"], "gaps": gaps, "searches": searches,
-            "links": {"page": f"{SITE}/stats/topics/{topic}", "json": f"{SITE}/stats/topics/{topic}.json"}}
+            "top": detail["top"] if full else _trim_top(detail["top"], PUBLIC_TOP_PER_KIND),
+            "gaps": gaps, "searches": searches if full else searches[:PUBLIC_SEARCH_TERMS],
+            "full": full,
+            "more_with_account": 0 if full else (len(detail["top"]) - len(_trim_top(detail["top"], PUBLIC_TOP_PER_KIND))
+                                                 + max(0, len(searches) - PUBLIC_SEARCH_TERMS)),
+            **({} if full else {"sign_in": SIGN_IN}),
+            "links": {"page": f"{SITE}/stats/topics/{topic}", "json": f"{SITE}/stats/topics/{topic}.json",
+                      "full_json": f"{SITE}/stats/topics/{topic}.json?full=1"}}
 
 
 def months(conn) -> list[str]:
@@ -1001,7 +1053,7 @@ def latest_on(conn, ttl: float = 600.0) -> dict | None:
     return snap
 
 
-def summary(snap: dict | None, view: str = "all") -> dict:
+def summary(snap: dict | None, view: str = "all", full: bool = False) -> dict:
     """Compact, agent-readable digest of one snapshot (a few hundred bytes)."""
     view = view if view in VIEWS else "all"
     if not snap:
@@ -1048,11 +1100,10 @@ def summary(snap: dict | None, view: str = "all") -> dict:
             "protocol_versions": snap["protocols"]["a2a"][:3],
             "card_signatures": snap["protocols"]["a2a_signatures"],
         }
-    sd = snap.get("search_demand") or {}
-    if view == "all" and sd:
-        out["searches"] = {"days": sd.get("days"), "searches": sd.get("searches"),
-                           "top": sd.get("top", [])[:10], "unmet": sd.get("unmet", [])[:10],
-                           "min_searches": sd.get("min_searches")}
+    sd = searches_view(snap, full=full)
+    if view == "all" and sd.get("available", True) and "top" in sd:
+        out["searches"] = {k: sd.get(k) for k in ("days", "searches", "top", "unmet", "min_searches",
+                                                    "full", "more_with_account", "sign_in") if k in sd}
     for kind in kinds:
         if snap.get("failures", {}).get(kind):
             facts[kind]["probe_outcomes"] = snap["failures"][kind]
