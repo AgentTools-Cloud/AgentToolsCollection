@@ -264,7 +264,8 @@ class SearchTermTests(unittest.TestCase):
             self.assertEqual(n(ok), ok)
         for bad in ("a", "me@x.com", "https://x.io", "0xabcdef1234", "order 123456", "x" * 70, None, "",
                     "example.com/path", "10.0.0.1", "138-1234-5678", "415.555.0101", "sk-abc123def",
-                    "ghp_ab12cd34", "a1b2c3d4e5f6g7h8i9j0k1l2m3"):
+                    "ghp_ab12cd34", "a1b2c3d4e5f6g7h8i9j0k1l2m3",
+                    "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0", "me\uff20x.com", "+86 13812345678"):
             self.assertIsNone(n(bad), bad)
 
     def test_record_flush_and_threshold(self):

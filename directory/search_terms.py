@@ -19,6 +19,7 @@ import re
 import sqlite3
 import threading
 import time
+import unicodedata
 from collections import Counter
 
 log = logging.getLogger(__name__)
@@ -47,6 +48,7 @@ _DROP = re.compile(
     r"@|https?:|://|www\.|/|\\"                      # e-mail, URL, path
     r"|0x[0-9a-f]{6,}|\d{4,}|[a-z0-9]{25,}"            # address, long number, opaque id
     r"|\b\d{1,3}(?:\.\d{1,3}){3}\b"                    # IPv4
+    r"|\beyj[a-z0-9_-]{8,}"                             # JWT
     r"|\d{3}[-. ]\d{3,4}[-. ]\d{3,4}"                  # phone number
     r"|\b(?:sk|pk|rk|ak|key|tok|token|ghp|gho|ghs|xox[a-z]?)[-_](?=[a-z0-9_-]*\d)[a-z0-9_-]{4,}"  # API key
     r"|\b(?=[a-z_-]*\d)(?=[\d_-]*[a-z])[a-z0-9_-]{24,}\b"  # long mixed token
@@ -71,7 +73,7 @@ def normalize(q: str | None) -> str | None:
     """Lower-cased, trimmed term, or None when it should not be counted."""
     if not q:
         return None
-    t = _SPACE.sub(" ", str(q).strip().lower())
+    t = _SPACE.sub(" ", unicodedata.normalize("NFKC", str(q)).strip().lower())
     t = _EDGE.sub("", t)
     if len(t) < 2 or len(t) > 60 or len(t.split()) > 6:
         return None
@@ -82,6 +84,7 @@ def normalize(q: str | None) -> str | None:
 
 def record(kind: str, q: str | None, results: int, channel: str) -> None:
     """Count one search. Never raises."""
+    global _last_flush
     try:
         term = normalize(q)
         if term is None or channel not in CHANNELS:
@@ -94,6 +97,8 @@ def record(kind: str, q: str | None, results: int, channel: str) -> None:
                 _pending[(day, kind, channel, term, "zero")] += 1
             due = (len(_pending) >= FLUSH_PENDING
                    or time.monotonic() - _last_flush >= FLUSH_SECONDS)
+            if due:  # one flush thread per window, not one per request
+                _last_flush = time.monotonic()
         if due:
             # Off the request thread (and the event loop for MCP tools).
             threading.Thread(target=flush, name="search-terms-flush", daemon=True).start()
