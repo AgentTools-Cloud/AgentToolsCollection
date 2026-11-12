@@ -248,6 +248,46 @@ class IncrementalWriteTests(TemporaryDatabaseTestCase):
         etherscan.assert_not_called()
         self.assertEqual(statistics(), before)
 
+    def _stale_without_readable_payto(self, payment):
+        import json
+        sid = self.ids["on-base"]
+        with db.writer() as conn:
+            conn.execute("UPDATE services SET payto_checked=? WHERE id=?",
+                         (int(crawlers.time.time()), self.ids["on-polygon"]))
+            conn.execute(
+                "UPDATE services SET payment=?, payto_checked=1, payto_tx_30d=40, "
+                "payto_payers_30d=8, tx_30d=40 WHERE id=?",
+                (json.dumps(payment) if payment is not None else None, sid))
+        return sid
+
+    def _demand(self, sid):
+        with closing(db.connect(read_only=True)) as conn:
+            return tuple(conn.execute(
+                "SELECT payto_checked, payto_tx_30d, payto_payers_30d, tx_30d "
+                "FROM services WHERE id=?", (sid,)).fetchone())
+
+    def test_demand_cleared_when_no_readable_payto_is_left(self):
+        for payment in ({"accepts": [{"network": "eip155:84532", "pay_to": "0x" + "2" * 40}]},
+                        None):
+            sid = self._stale_without_readable_payto(payment)
+            with patch.object(jobs.time, "sleep"), patch.object(jobs, "cmd_rescore"):
+                jobs.cmd_onchain()
+            self.assertEqual(self._demand(sid), (None, None, None, None), payment)
+
+    def test_recent_wallet_history_keeps_being_measured(self):
+        sid = self._stale_without_readable_payto(
+            {"accepts": [{"network": "eip155:84532", "pay_to": "0x" + "2" * 40}]})
+        with db.writer() as conn:
+            db.record_service_paytos(conn, {sid: [("base", "0x" + "3" * 40)]},
+                                     int(crawlers.time.time()) - 5 * 86400)
+        with patch.object(jobs.crawlers, "BULK_LOG_CHAINS", {"base": None}), \
+                patch.object(jobs.crawlers, "fetch_chain_activity_bulk",
+                             return_value=({"0x" + "3" * 40: {"tx": 2, "payers": 1,
+                                                              "payer_ids": ["p"]}}, True)), \
+                patch.object(jobs.time, "sleep"), patch.object(jobs, "cmd_rescore"):
+            jobs.cmd_onchain()
+        self.assertEqual(self._demand(sid)[1:], (2, 1, 2))
+
 
 class HyperEvmBulkTests(unittest.TestCase):
     def test_response_too_big_splits_without_retry_backoff(self):

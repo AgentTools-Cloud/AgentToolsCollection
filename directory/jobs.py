@@ -1163,7 +1163,8 @@ def cmd_onchain(limit=None, stale_days=3, refresh_all=False, rate=1.2) -> int:
     with db.connect(read_only=True) as c:
         rows = list(c.execute(
             "SELECT id, url, payment, call_info, payto_checked FROM services "
-            "WHERE payment IS NOT NULL AND payment != ''"
+            "WHERE (payment IS NOT NULL AND payment != '') "
+            "OR payto_checked IS NOT NULL"
         ).fetchall())
 
     snapshots = {row["id"]: row for row in rows}
@@ -1194,14 +1195,24 @@ def cmd_onchain(limit=None, stale_days=3, refresh_all=False, rate=1.2) -> int:
     service_keys = {}
     key_services = {}
     observed = {}
+    # Measured once, then the descriptor dropped every wallet we can read (or
+    # moved it to a testnet / unsupported chain) and the last address aged out
+    # of the window: nothing will ever refresh those numbers, so a 30-day
+    # figure from two months ago would be scored as today's demand.
+    orphaned = []
     for r in rows:
         if not refresh_all and r["payto_checked"] and r["payto_checked"] > stale_cutoff:
             continue
-        keys = _paytos_for_row(r["payment"])
+        current = _paytos_for_row(r["payment"])
+        if current:
+            observed[r["id"]] = current
+        # A wallet seen within the window still counts even when today's
+        # descriptor no longer lists it -- rotation is not lost demand.
+        keys = sorted({*current, *history.get(r["id"], ())})
         if not keys:
+            if r["payto_checked"]:
+                orphaned.append(r["id"])
             continue
-        observed[r["id"]] = keys
-        keys = sorted({*keys, *history.get(r["id"], ())})
         service_keys[r["id"]] = keys
         for k in keys:
             key_services.setdefault(k, []).append(r["id"])
@@ -1214,6 +1225,21 @@ def cmd_onchain(limit=None, stale_days=3, refresh_all=False, rate=1.2) -> int:
                 db.record_service_paytos(c, current_observed, now)
         db.with_retry(op_hist)
 
+    if orphaned:
+        def op_orphan():
+            n = 0
+            with db.writer(immediate=True) as c:
+                for sid in orphaned:
+                    if not snapshot_matches(c, sid):
+                        continue
+                    c.execute(
+                        "UPDATE services SET payto_tx_30d=NULL, payto_payers_30d=NULL, "
+                        "payto_checked=NULL, tx_30d=NULL WHERE id=?", (sid,))
+                    n += 1
+            return n
+        log.info("onchain: cleared demand on %d services with no readable payTo left",
+                 db.with_retry(op_orphan))
+
     work = list(key_services)
     if limit:
         work = work[:limit]
@@ -1223,6 +1249,8 @@ def cmd_onchain(limit=None, stale_days=3, refresh_all=False, rate=1.2) -> int:
                         if all(k in allowed for k in ks)}
     if not work:
         log.info("onchain: no payTo addresses to refresh")
+        if orphaned:
+            cmd_rescore()
         return 0
     by_chain = {}
     for ch, _pt in work:
