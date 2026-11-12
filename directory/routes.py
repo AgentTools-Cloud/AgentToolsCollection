@@ -403,6 +403,7 @@ def _render_stats(request: Request, view: str, period: int):
         "kind_label": stats_mod.KIND_LABEL,
         "page_title": (stats_mod.KIND_LABEL[view] + " statistics") if view != "all" else "The state of agent tools",
         "page_path": "/stats" if view == "all" else f"/stats/{view}",
+        "month_title": time.strftime("%B %Y", time.strptime(snap["as_of"][:7], "%Y-%m")),
     })
 
 
