@@ -76,6 +76,34 @@
 {%- endmacro %}
 
 
+{#- "Sign in to see more": public HTML stays the same for everyone (it is
+    CDN-cached); signed-in visitors get the full lists from the JSON twin with
+    full=1, rendered by the page's window.atcRenderFull(data). -#}
+{% macro account_teaser(what, next_path, full_url) -%}
+<div class="mt-4 rounded-lg border border-dashed border-slate-300 bg-slate-50 px-4 py-3 text-sm text-slate-600" data-account-teaser data-full-url="{{ full_url }}">
+  <p data-when-out><a href="/auth/github/login?next={{ next_path|urlencode }}" rel="nofollow" class="font-medium text-blue-700 hover:underline">Sign in</a> to see {{ what }}.
+    <span class="text-xs text-slate-500">Agents: get a free key with <code>POST /api/v1/keys</code>, send it as <code>Authorization: Bearer</code> and add <code>?full=1</code> to <a href="{{ full_url.split('?')[0] }}" class="underline decoration-dotted">the JSON</a>.</span></p>
+  <p data-when-in class="hidden">Signed in: showing {{ what }}.</p>
+</div>
+<script>
+(function () {
+  var box = document.currentScript.previousElementSibling;
+  fetch("/api/v1/me", { credentials: "same-origin" }).then(function (r) { return r.json(); }).then(function (me) {
+    if (!me.signed_in) return;
+    return fetch(box.getAttribute("data-full-url"), { credentials: "same-origin" })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (data) {
+        if (!data || typeof window.atcRenderFull !== "function") return;
+        window.atcRenderFull(data);
+        box.querySelector("[data-when-out]").classList.add("hidden");
+        box.querySelector("[data-when-in]").classList.remove("hidden");
+      });
+  }).catch(function () {});
+})();
+</script>
+{%- endmacro %}
+
+
 {#- Position among reachable listings of the same protocol (daily snapshot). Display only. -#}
 {% macro peer_section(p) -%}
 {% if p and (p.readiness or p.latency) %}
