@@ -4,6 +4,7 @@
 {% block og_title %}Agent tools in {{ r.title }}{% endblock %}
 {% block twitter_title %}Agent tools in {{ r.title }}{% endblock %}
 {% block canonical %}<link rel="canonical" href="https://agent-tools.cloud/stats/reports/{{ r.month }}">{% endblock %}
+{% block robots %}<meta name="robots" content="{{ 'index,follow' if r.complete else 'noindex,follow' }}">{% endblock %}
 {% block head_extra %}
 <style>
   .st-kicker { font: 600 11px/1 'JetBrains Mono', ui-monospace, monospace; letter-spacing: .08em; color: #64748b; text-transform: uppercase; }
@@ -36,7 +37,7 @@
   <h1 class="text-3xl md:text-4xl font-extrabold tracking-tight mt-3 text-slate-900">Agent tools in {{ r.title }}</h1>
   <p class="text-lg text-slate-700 mt-4 leading-relaxed">{{ r.answer }}</p>
   <p class="text-xs text-slate-500 mt-3 mono flex flex-wrap gap-x-3 gap-y-1">
-    <span>Snapshots {{ r.first_day }} → {{ r.last_day }} ({{ r.days_covered }} days)</span>
+    <span>Snapshots {{ r.first_day }} → {{ r.last_day }} ({{ r.days_covered }} day{{ "s" if r.days_covered != 1 }})</span>
     <a href="/stats/reports/{{ r.month }}.json" class="underline decoration-dotted hover:text-slate-900">JSON</a>
     <a href="/stats#method" class="underline decoration-dotted hover:text-slate-900">Methodology</a>
   </p>
@@ -44,18 +45,19 @@
 </header>
 
 <section class="mt-8 svc-card p-5 md:p-6" aria-labelledby="kpis">
-  <h2 id="kpis" class="text-lg font-bold text-slate-900">Start vs end of month</h2>
+  <h2 id="kpis" class="text-lg font-bold text-slate-900">{{ 'Start vs end of month' if r.days_covered > 1 else 'Where the month starts' }}</h2>
+  <p class="text-xs text-slate-500 mt-1">{% if r.days_covered > 1 %}Value on {{ r.last_day }}, with the change since {{ r.first_day }}.{% else %}Value on {{ r.last_day }}; changes appear from the next daily snapshot.{% endif %}</p>
   <div class="overflow-x-auto mt-3">
   <table class="st-table w-full text-sm">
-    <thead><tr><th scope="col">Protocol</th><th scope="col">Metric</th><th scope="col" class="num">{{ r.first_day }}</th><th scope="col" class="num">{{ r.last_day }}</th><th scope="col" class="num">Change</th></tr></thead>
+    <thead><tr><th scope="col">Protocol</th>{% for m in ("indexed", "reachable", "verified", "ready") %}<th scope="col" class="num">{{ m|capitalize }}</th>{% endfor %}</tr></thead>
     <tbody>
-    {% for k in r.kpis %}
+    {% for kind in ("all", "x402", "mcp", "a2a") %}
       <tr>
-        <th scope="row" class="!text-slate-900 !font-medium !text-sm">{{ labels[k.kind] if loop.index0 % 4 == 0 else "" }}</th>
-        <td class="text-slate-600">{{ k.metric|capitalize }}</td>
-        <td class="num mono">{{ k.start|num }}</td>
-        <td class="num mono">{{ k.end|num }}</td>
-        <td class="num mono {{ 'text-emerald-700' if k.change > 0 else ('text-red-700' if k.change < 0 else 'text-slate-400') }}">{{ "%+d"|format(k.change) }}{% if k.change_pct is not none %} ({{ "%+.1f"|format(k.change_pct) }}%){% endif %}</td>
+        <th scope="row" class="!text-slate-900 !font-medium !text-sm whitespace-nowrap">{{ labels[kind] }}</th>
+        {% for k in r.kpis if k.kind == kind %}
+        <td class="num mono">{{ k.end|num }}{% if r.days_covered > 1 %}
+          <div class="text-xs {{ 'text-emerald-700' if k.change > 0 else ('text-red-700' if k.change < 0 else 'text-slate-400') }}">{{ "{:+,}".format(k.change) }}{% if k.change_pct is not none %} · {{ "%+.1f"|format(k.change_pct) }}%{% endif %}</div>{% endif %}</td>
+        {% endfor %}
       </tr>
     {% endfor %}
     </tbody>
@@ -65,7 +67,7 @@
 </section>
 
 <section class="mt-6 svc-card p-5 md:p-6" aria-labelledby="findings">
-  <h2 id="findings" class="text-lg font-bold text-slate-900">Findings at month end</h2>
+  <h2 id="findings" class="text-lg font-bold text-slate-900">{{ "Findings at month end" if r.complete else "Findings so far" }}</h2>
   <ul class="mt-3 space-y-2 text-sm text-slate-700 list-disc pl-5 leading-relaxed">
     {% for key, line in r.findings.items() %}{% if line %}<li>{{ line }}</li>{% endif %}{% endfor %}
   </ul>

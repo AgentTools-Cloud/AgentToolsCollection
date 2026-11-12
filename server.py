@@ -418,7 +418,7 @@ def well_known_mcp(request: Request) -> dict[str, Any]:
             {"name": "get", "description": "Get full details + ready-to-paste call template for a service by slug."},
             {"name": "list_categories", "description": "List all directory categories."},
             {"name": "stats", "description": "x402 size, healthy count and chains, plus the daily cross-protocol digest."},
-            {"name": "directory_stats", "description": "Daily ecosystem statistics for all, MCP, x402 or A2A: counts, findings and key facts."},
+            {"name": "directory_stats", "description": "Daily ecosystem statistics for all, MCP, x402 or A2A: counts, findings, probe outcomes, top searches and links to topic pages and monthly reports."},
             {"name": "get_methodology", "description": "How quality grades, readiness scores and statistics are computed."},
             {"name": "list_articles", "description": "List published Blog articles (metadata)."},
             {"name": "get_article", "description": "Read one Blog article with its Markdown body."},

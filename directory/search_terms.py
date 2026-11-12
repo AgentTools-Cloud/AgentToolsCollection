@@ -43,7 +43,14 @@ CREATE TABLE IF NOT EXISTS search_terms (
 CREATE INDEX IF NOT EXISTS search_terms_term ON search_terms(term);
 """
 
-_DROP = re.compile(r"@|https?:|://|www\.|0x[0-9a-f]{6,}|\d{4,}|[a-z0-9]{25,}")
+_DROP = re.compile(
+    r"@|https?:|://|www\.|/|\\"                      # e-mail, URL, path
+    r"|0x[0-9a-f]{6,}|\d{4,}|[a-z0-9]{25,}"            # address, long number, opaque id
+    r"|\b\d{1,3}(?:\.\d{1,3}){3}\b"                    # IPv4
+    r"|\d{3}[-. ]\d{3,4}[-. ]\d{3,4}"                  # phone number
+    r"|\b(?:sk|pk|rk|ak|key|tok|token|ghp|gho|ghs|xox[a-z]?)[-_](?=[a-z0-9_-]*\d)[a-z0-9_-]{4,}"  # API key
+    r"|\b(?=[a-z_-]*\d)(?=[\d_-]*[a-z])[a-z0-9_-]{24,}\b"  # long mixed token
+)
 _EDGE = re.compile(r"^[^\w]+|[^\w+#.]+$")
 _SPACE = re.compile(r"\s+")
 
@@ -88,7 +95,8 @@ def record(kind: str, q: str | None, results: int, channel: str) -> None:
             due = (len(_pending) >= FLUSH_PENDING
                    or time.monotonic() - _last_flush >= FLUSH_SECONDS)
         if due:
-            flush()
+            # Off the request thread (and the event loop for MCP tools).
+            threading.Thread(target=flush, name="search-terms-flush", daemon=True).start()
     except Exception:  # noqa: BLE001 - statistics must never break a search
         log.exception("search term record failed")
 
@@ -104,6 +112,9 @@ def _connect(read_only: bool = False) -> sqlite3.Connection:
     return c
 
 
+_flush_lock = threading.Lock()
+
+
 def flush() -> None:
     global _last_flush
     with _lock:
@@ -112,6 +123,11 @@ def flush() -> None:
         _last_flush = time.monotonic()
     if not items:
         return
+    with _flush_lock:
+        _write(items)
+
+
+def _write(items: dict) -> None:
     rows: dict = {}
     for (day, kind, channel, term, field), v in items.items():
         rows.setdefault((day, kind, channel, term), {"n": 0, "zero": 0})[field] += v

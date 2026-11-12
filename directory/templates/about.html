@@ -202,7 +202,8 @@
       conformance methodology</a> so operators see the same levers on both sites; how
       each one is measured is ours. Grades are fixed thresholds: A&nbsp;&ge;&nbsp;90,
       B&nbsp;&ge;&nbsp;75, C&nbsp;&ge;&nbsp;60, D&nbsp;&ge;&nbsp;40, F below.</p>
-    <table class="text-sm w-full mt-3">
+<div class="overflow-x-auto mt-3">
+    <table class="text-sm w-full">
       <thead class="text-xs text-slate-500 text-left"><tr class="border-b border-slate-200">
         <th class="py-1.5 pr-3 font-medium">Criterion</th><th class="py-1.5 pr-3 font-medium">Pts</th>
         <th class="py-1.5 pr-3 font-medium">A2A</th><th class="py-1.5 pr-3 font-medium">MCP</th>
@@ -228,6 +229,7 @@
           <td class="py-1.5 pr-3" colspan="2">mTLS 5, OAuth with PKCE 4, any scheme or an explicit &ldquo;public&rdquo; 2</td><td class="py-1.5 text-slate-400">n/a (payment is the access control)</td></tr>
       </tbody>
     </table>
+    </div>
     <p class="text-sm mt-2">Criteria marked n/a are left out and the remaining points are
       scaled to 100. Each page also states the latency band and, for paid listings, the
       <b>payment evidence</b> &mdash; how we learned it accepts payment, strongest first:
@@ -263,6 +265,14 @@
       prices, access, safety, topics and growth across all three protocols. It is free to reuse
       under CC BY 4.0 as <a class="text-blue-600 hover:underline mono" href="/stats.json">/stats.json</a>
       and <a class="text-blue-600 hover:underline mono" href="/stats/daily.csv">/stats/daily.csv</a>.</p>
+    <p class="text-sm mt-2">Also: <a class="text-blue-600 hover:underline" href="/stats/usable">how many tools actually work</a>,
+      one page per protocol (<a class="text-blue-600 hover:underline" href="/stats/x402">x402</a>,
+      <a class="text-blue-600 hover:underline" href="/stats/mcp">MCP</a>,
+      <a class="text-blue-600 hover:underline" href="/stats/a2a">A2A</a>), a page per topic
+      (for example <a class="text-blue-600 hover:underline" href="/stats/topics/payment">payment</a>),
+      <a class="text-blue-600 hover:underline" href="/stats/reports">monthly reports</a> and, on every listing,
+      how it compares with its peers. Each has a JSON twin. Search terms are counted only in aggregate
+      (see <a class="text-blue-600 hover:underline" href="/privacy">Privacy</a>).</p>
   </div>
 
   <div id="claim">

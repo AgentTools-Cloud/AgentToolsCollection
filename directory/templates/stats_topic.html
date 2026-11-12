@@ -36,7 +36,6 @@
   <h1 class="text-3xl md:text-4xl font-extrabold tracking-tight mt-3 text-slate-900">{{ t.topic|capitalize }} agent tools</h1>
   <p class="text-lg text-slate-700 mt-4 leading-relaxed">{{ t.answer }}</p>
   <p class="text-xs text-slate-500 mt-3 mono flex flex-wrap gap-x-3 gap-y-1">
-    <span>As of {{ t.as_of }}</span>
     <a href="/stats/topics/{{ t.topic }}.json" class="underline decoration-dotted hover:text-slate-900">JSON</a>
     <a href="/stats#method-topics" class="underline decoration-dotted hover:text-slate-900">How topics are matched</a>
   </p>
@@ -73,7 +72,8 @@
   <h2 id="top" class="text-lg font-bold text-slate-900">Highest readiness, per protocol</h2>
   <p class="text-xs text-slate-500 mt-1">Up to three reachable listings per protocol, by readiness score, then latency. Readiness is display only and not an endorsement.</p>
   {% if t.top %}
-  <table class="st-table w-full text-sm mt-3">
+  <div class="overflow-x-auto mt-3">
+  <table class="st-table w-full text-sm">
     <thead><tr><th scope="col">Listing</th><th scope="col">Protocol</th><th scope="col" class="num">Readiness</th><th scope="col" class="num">Latency</th></tr></thead>
     <tbody>
     {% for i in t.top %}
@@ -86,6 +86,7 @@
     {% endfor %}
     </tbody>
   </table>
+  </div>
   {% else %}<p class="text-sm text-slate-400 mt-2">No scored listings yet.</p>{% endif %}
 </section>
 

@@ -536,7 +536,7 @@ def topics(conn):
 FAILURE_ORDER = ("answered", "auth_required", "not_found", "server_error", "client_error",
                  "no_response", "not_probed", "no_endpoint")
 FAILURE_LABELS = {
-    "answered": "Answered the probe",
+    "answered": "Answered without an error",
     "auth_required": "Answered, but asks for credentials (401/403)",
     "not_found": "Endpoint not found (404)",
     "server_error": "Server error (5xx)",
@@ -610,6 +610,27 @@ def _share_below(qs, value):
     return 100.0
 
 
+# How to win back the points of each readiness criterion; (kind, key) first, then key.
+GAP_FIXES = {
+    "identity": "Claim the listing and prove control of its domain.",
+    "security": "State how to authenticate (an auth scheme, or that none is needed).",
+    "freshness": "Keep the listing current in the registry or source it comes from.",
+    "uptime": "Stay reachable in our daily probes.",
+    "protocol_version": "Support the current protocol revision.",
+    "signature": "Publish a signed descriptor.",
+    ("a2a", "signature"): "Sign the Agent Card (JWS).",
+    ("mcp", "skills"): "Declare every tool with a description and input schema.",
+    ("x402", "skills"): "Declare each paid resource with its input and output schema.",
+    ("a2a", "skills"): "Declare skills with ids, descriptions, tags and examples.",
+    ("mcp", "live"): "Answer initialize and tools/list at the declared endpoint.",
+    ("x402", "live"): "Answer the paid path with a valid 402 challenge.",
+    "live_jsonrpc": "Answer JSON-RPC at the URL the Agent Card declares.",
+    ("mcp", "valid_card"): "Complete the MCP handshake without errors.",
+    ("x402", "valid_card"): "Return complete payment requirements in the 402 challenge.",
+    ("a2a", "valid_card"): "Serve an Agent Card that validates against the A2A schema.",
+}
+
+
 def peer_position(snap, kind, readiness=None, latency_ms=None):
     """Where one listing stands among reachable listings of the same protocol.
 
@@ -637,8 +658,10 @@ def peer_position(snap, kind, readiness=None, latency_ms=None):
             continue
         lost = float(c.get("max_points") or 0) - float(c.get("points") or 0)
         if lost >= 0.5:
-            gaps.append({"key": c.get("key"), "label": c.get("label"), "points_lost": round(lost, 1),
-                         "detail": c.get("detail")})
+            key = c.get("key")
+            gaps.append({"key": key, "label": c.get("label"), "points_lost": round(lost, 1),
+                         "now": c.get("detail"),
+                         "fix": GAP_FIXES.get((kind, key)) or GAP_FIXES.get(key)})
     out["biggest_gaps"] = sorted(gaps, key=lambda g: -g["points_lost"])[:3]
     return out
 
@@ -761,6 +784,10 @@ def monthly_report(conn, month: str, now=None):
     answer = (f"{title}: the index went from {fk['indexed']:,} to {k['indexed']:,} listings "
               f"({k['indexed'] - fk['indexed']:+,}); listings ready for agents (readiness A or B) "
               f"went from {fk['ready']:,} to {k['ready']:,} ({k['ready'] - fk['ready']:+,}).")
+    if len(rows) < 2:
+        answer = (f"{title} so far: our daily snapshots start on {first_day}, with {k['indexed']:,} listings "
+                  f"indexed and {k['ready']:,} ready for agents (readiness A or B). Month-on-month changes "
+                  f"appear from the next daily snapshot.")
     return {"month": month, "title": title, "complete": complete, "first_day": first_day,
             "last_day": last_day, "days_covered": len(rows), "answer": answer, "kpis": kpis,
             "new_listings": new, "findings": headlines(last), "x402_price_quantiles": last["x402"]["price_quantiles"],
