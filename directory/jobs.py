@@ -647,6 +647,13 @@ def cmd_health(only_unknown: bool = False, quarantined_only: bool = False) -> in
             cmd_readiness()
         except Exception as e:
             log.warning("readiness scoring failed: %r", e)
+        # Quality now reads readiness (x402, A2A) and A2A health/latency, all
+        # written after the rescore above; rescore again so the stored score
+        # is not a day behind.
+        try:
+            cmd_rescore()
+        except Exception as e:
+            log.warning("post-readiness rescore failed: %r", e)
         try:
             cmd_stats_snapshot()
         except Exception as e:
@@ -715,7 +722,8 @@ def cmd_readiness(kinds=("mcp", "x402")) -> int:
     """Store MCP / x402 readiness score + grade from what the probes recorded.
 
     No network: reads the probe columns, 30-day probe history and listing
-    sources. Display only; search order keeps using quality_score.
+    sources. x402 readiness feeds 15 points of quality_score; cmd_health
+    rescores after this runs.
     """
     now = int(time.time())
     specs = {

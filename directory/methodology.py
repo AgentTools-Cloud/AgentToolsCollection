@@ -24,7 +24,7 @@ QUALITY_COMPONENTS = {
         {"name": "Demand", "max": 35,
          "how": "Latest 30-day USDC receipts at the payTo address read from the chain; distinct "
                 "payers two thirds (full at 1,000), transfer count one third (full at 10,000), "
-                "both on a log scale. A wallet shared by several listings is split between them; "
+                "both on a log scale. A wallet shared by several reachable listings is split between them; "
                 "more than 20 transfers per payer is discounted, down to half. Chains without a "
                 "free indexer leave this blank rather than zero."},
         {"name": "Performance", "max": 10,

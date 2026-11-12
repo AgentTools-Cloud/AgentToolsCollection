@@ -4738,14 +4738,23 @@ _PAYTO_SHARED_WINDOW = 30 * 86400
 
 
 def update_payto_shared(conn, now: int | None = None) -> int:
-    """services.payto_shared = how many listings advertise the same wallet
-    (largest over the listing's own wallets), from the last 30 days."""
+    """services.payto_shared = how many reachable listings advertise the same
+    wallet (largest over the listing's own wallets), from the last 30 days.
+
+    Only ok/degraded listings count: crawlers leave dead copies behind, and a
+    wallet with 2 live listings and 127 dead ones must split by 2, not 129.
+    Only EVM hex addresses are case-folded; base58 (Solana) is case-sensitive.
+    """
     since = int(now or time.time()) - _PAYTO_SHARED_WINDOW
+    key = "CASE WHEN {0} LIKE '0x%' THEN lower({0}) ELSE {0} END"
     rows = conn.execute(
         "SELECT p.service_id sid, MAX(c.n) n FROM service_paytos p JOIN ("
-        " SELECT chain, lower(address) a, COUNT(DISTINCT service_id) n"
-        " FROM service_paytos WHERE last_seen>=? GROUP BY chain, lower(address)"
-        ") c ON c.chain=p.chain AND c.a=lower(p.address) "
+        " SELECT q.chain, " + key.format("q.address") + " a,"
+        " COUNT(DISTINCT q.service_id) n"
+        " FROM service_paytos q JOIN services s ON s.id=q.service_id"
+        " WHERE q.last_seen>=? AND s.health IN ('ok','degraded')"
+        " GROUP BY 1, 2"
+        ") c ON c.chain=p.chain AND c.a=" + key.format("p.address") + " "
         "WHERE p.last_seen>=? GROUP BY p.service_id", (since, since)).fetchall()
     conn.execute("UPDATE services SET payto_shared=NULL "
                  "WHERE payto_shared IS NOT NULL")
