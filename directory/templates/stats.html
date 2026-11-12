@@ -18,6 +18,10 @@
   .st-toggle a[aria-current="true"] { background: #0f172a; color: #fff; }
   .st-toc a { display: block; padding: 4px 0 4px 10px; border-left: 2px solid #e2e8f0; color: #64748b; font-size: 13px; }
   .st-toc a:hover { color: #0f172a; border-left-color: #0f172a; }
+  .st-explore a { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 999px;
+    background: #fff; border: 1px solid #e2e8f0; font-size: 13px; font-weight: 500; color: #334155; }
+  .st-explore a:hover { border-color: #2563eb; color: #1d4ed8; }
+  .st-explore a span { color: #2563eb; font-size: 12px; }
   .tnum { font-variant-numeric: tabular-nums; }
   /* Inter's contextual alternates draw "x" between digits as "×" ("06 x402"). */
   main { font-feature-settings: "calt" 0; }
@@ -108,7 +112,12 @@
     <a href="/stats/daily.csv" class="underline decoration-dotted hover:text-slate-900">CSV</a>
     <a href="#cite" class="underline decoration-dotted hover:text-slate-900">Cite</a>
   </p>
-  <p class="mt-4 text-sm"><a href="/stats/usable" class="inline-flex items-center gap-1 font-medium text-blue-700 hover:text-blue-900">How many agent tools actually work, and why the rest do not <span aria-hidden="true">→</span></a></p>
+  <nav class="st-explore mt-5 flex flex-wrap gap-2" aria-label="Explore the data">
+    <a href="/stats/usable">Do they actually work? <span aria-hidden="true">→</span></a>
+    <a href="#topics">Topics <span aria-hidden="true">→</span></a>
+    <a href="/stats/reports">Monthly reports <span aria-hidden="true">→</span></a>
+    {% if view == 'all' %}<a href="#searches">What people search for <span aria-hidden="true">→</span></a>{% endif %}
+  </nav>
 </header>
 
 <nav class="mt-6 flex flex-wrap items-center gap-3" aria-label="Stats view">
