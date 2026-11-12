@@ -16,15 +16,24 @@ SITE = "https://agent-tools.cloud"
 
 QUALITY_COMPONENTS = {
     "x402": [
-        {"name": "Availability", "max": 40,
+        {"name": "Availability", "max": 20,
          "how": "Endpoint probe: ok 100%, degraded 45%, unknown 22%, down 0."},
-        {"name": "Payability", "max": 20,
+        {"name": "Payability", "max": 15,
          "how": "Live HTTP 402 challenge 15, /.well-known/x402 descriptor 5, payment address 5, "
-                "settlement network 3, price 2; of 30, scaled to 20."},
-        {"name": "Demand", "max": 40,
-         "how": "30-day USDC receipts at the payTo address read from the chain; distinct payers "
-                "two thirds, transfer count one third, both on a log scale. Chains without a free "
-                "indexer leave this blank rather than zero."},
+                "settlement network 3, price 2; of 30, scaled to 15."},
+        {"name": "Demand", "max": 35,
+         "how": "Latest 30-day USDC receipts at the payTo address read from the chain; distinct "
+                "payers two thirds (full at 1,000), transfer count one third (full at 10,000), "
+                "both on a log scale. A wallet shared by several listings is split between them; "
+                "more than 20 transfers per payer is discounted, down to half. Chains without a "
+                "free indexer leave this blank rather than zero."},
+        {"name": "Performance", "max": 10,
+         "how": "Latency of the last reachable probe: full marks at <= 200 ms, falling linearly "
+                "to 0 at >= 2000 ms."},
+        {"name": "Readiness", "max": 15,
+         "how": "Agent readiness score (0-100), scaled to 15; only while the endpoint is reachable."},
+        {"name": "Owner verified", "max": 5,
+         "how": "Operator proved control of the domain."},
     ],
     "mcp": [
         {"name": "Availability", "max": 25, "how": "ok 25, degraded 10."},
@@ -36,19 +45,22 @@ QUALITY_COMPONENTS = {
                 "transport declared 3."},
     ],
     "a2a": [
-        {"name": "Availability", "max": 35, "how": "Agent card fetched and parsed: ok 35, degraded 14."},
-        {"name": "Conformance", "max": 25, "how": "pass 25, partial 10."},
-        {"name": "Card detail", "max": 20,
+        {"name": "Availability", "max": 30, "how": "Agent card fetched and parsed: ok 30, degraded 12."},
+        {"name": "Conformance", "max": 20, "how": "pass 20, partial 8."},
+        {"name": "Card detail", "max": 15,
          "how": "Skills declared 8, three or more skills 4, callable endpoint 6, capabilities 4, "
-                "protocol version 3, auth scheme 3, documentation 2; of 30, scaled to 20."},
+                "protocol version 3, auth scheme 3, documentation 2; of 30, scaled to 15."},
+        {"name": "Readiness", "max": 15,
+         "how": "Agent readiness score (0-100), scaled to 15; only while the card is reachable."},
         {"name": "Performance", "max": 20,
-         "how": "Full marks at <= 150 ms, falling linearly to 0 at >= 1500 ms."},
+         "how": "Full marks at <= 50 ms, falling linearly to 0 at >= 1500 ms."},
     ],
 }
 QUALITY_RULES = [
     "An x402 service whose endpoint is down is held at D regardless of the other components.",
     "An MCP server flagged by the safety scan is capped: suspicious at C, malicious at E.",
-    "Owner verification adds a bonus of %g points to x402 services." % db._OWNER_BONUS,
+    "Owner verification adds %g points to MCP servers, and to A2A agents as score x 0.97 + 3 "
+    "so a claimed agent never saturates at 100." % db._OWNER_BONUS,
     "Bands are set per resource type, so grades are not comparable across types. Below the D threshold is E.",
 ]
 
@@ -80,8 +92,8 @@ def build() -> dict:
             "rules": QUALITY_RULES,
         },
         "readiness_score": {
-            "purpose": "Display only: whether an agent could call the listing today. Does not change "
-                       "search order.",
+            "purpose": "Whether an agent could call the listing today. Feeds 15 points of the x402 "
+                       "quality score (and of the A2A one); otherwise display only.",
             "criteria": {k: _criteria(k) for k in kinds},
             "notes": {"a2a": A.METHODOLOGY, "mcp": L.METHODOLOGY["mcp"], "x402": L.METHODOLOGY["x402"]},
             "grade_bands": [{"min": lo, "grade": g} for lo, g in A.GRADES] + [{"min": 0, "grade": "F"}],

@@ -88,27 +88,41 @@
     <table class="text-sm w-full">
       <tbody class="align-top">
         <tr class="border-b border-slate-100">
-          <td class="py-1.5 pr-3 font-medium w-32">Availability</td><td class="py-1.5 pr-3 mono w-10">40</td>
+          <td class="py-1.5 pr-3 font-medium w-32">Availability</td><td class="py-1.5 pr-3 mono w-10">20</td>
           <td class="py-1.5">Endpoint probe: <span class="mono">ok</span> 100%,
             <span class="mono">degraded</span> 45%, <span class="mono">unknown</span> 22%,
             <span class="mono">down</span> 0.</td>
         </tr>
         <tr class="border-b border-slate-100">
-          <td class="py-1.5 pr-3 font-medium">Payability</td><td class="py-1.5 pr-3 mono">20</td>
+          <td class="py-1.5 pr-3 font-medium">Payability</td><td class="py-1.5 pr-3 mono">15</td>
           <td class="py-1.5">Real HTTP 402 challenge 15, <code class="mono bg-slate-100 px-1 rounded">/.well-known/x402</code>
-            descriptor 5, payment address 5, settlement network 3, price 2 — of 30, scaled to 20.</td>
+            descriptor 5, payment address 5, settlement network 3, price 2 — of 30, scaled to 15.</td>
+        </tr>
+        <tr class="border-b border-slate-100">
+          <td class="py-1.5 pr-3 font-medium">Demand</td><td class="py-1.5 pr-3 mono">35</td>
+          <td class="py-1.5">Latest 30-day USDC receipts at the <span class="mono">payTo</span> address,
+            read from the chain. Distinct payers carry two thirds (full at 1,000), transfer count
+            one third (full at 10,000); both on a log scale. A wallet shared by several listings
+            is split between them, and more than 20 transfers per payer is discounted, down to
+            half. Chains with no free indexer (currently Sui) leave this blank rather than zero.</td>
+        </tr>
+        <tr class="border-b border-slate-100">
+          <td class="py-1.5 pr-3 font-medium">Performance</td><td class="py-1.5 pr-3 mono">10</td>
+          <td class="py-1.5">Latency of the last reachable probe: full marks at ≤ 200 ms,
+            falling linearly to 0 at ≥ 2000 ms.</td>
+        </tr>
+        <tr class="border-b border-slate-100">
+          <td class="py-1.5 pr-3 font-medium">Readiness</td><td class="py-1.5 pr-3 mono">15</td>
+          <td class="py-1.5">Agent readiness score (0–100), scaled to 15; only while the endpoint is reachable.</td>
         </tr>
         <tr>
-          <td class="py-1.5 pr-3 font-medium">Demand</td><td class="py-1.5 pr-3 mono">40</td>
-          <td class="py-1.5">30-day USDC receipts at the <span class="mono">payTo</span> address,
-            read from the chain. Distinct payers carry two thirds, transfer count one third;
-            both on a log scale. Chains with no free indexer (currently Sui) leave this blank
-            rather than zero.</td>
+          <td class="py-1.5 pr-3 font-medium">Owner verified</td><td class="py-1.5 pr-3 mono">5</td>
+          <td class="py-1.5">Operator proved control of the domain.</td>
         </tr>
       </tbody>
     </table>
     <p class="text-sm mt-2">A service whose endpoint is <span class="mono">down</span> is held
-      at D regardless of the other two components.</p>
+      at D regardless of the other components.</p>
 
     <h3 class="text-sm font-semibold mt-4 mb-1">MCP servers</h3>
     <table class="text-sm w-full">
@@ -144,22 +158,27 @@
     <table class="text-sm w-full">
       <tbody class="align-top">
         <tr class="border-b border-slate-100">
-          <td class="py-1.5 pr-3 font-medium w-32">Availability</td><td class="py-1.5 pr-3 mono w-10">35</td>
-          <td class="py-1.5">Agent card fetched and parsed: <span class="mono">ok</span> 35,
-            <span class="mono">degraded</span> 14.</td>
+          <td class="py-1.5 pr-3 font-medium w-32">Availability</td><td class="py-1.5 pr-3 mono w-10">30</td>
+          <td class="py-1.5">Agent card fetched and parsed: <span class="mono">ok</span> 30,
+            <span class="mono">degraded</span> 12.</td>
         </tr>
         <tr class="border-b border-slate-100">
-          <td class="py-1.5 pr-3 font-medium">Conformance</td><td class="py-1.5 pr-3 mono">25</td>
-          <td class="py-1.5">pass 25, partial 10.</td>
+          <td class="py-1.5 pr-3 font-medium">Conformance</td><td class="py-1.5 pr-3 mono">20</td>
+          <td class="py-1.5">pass 20, partial 8.</td>
         </tr>
         <tr class="border-b border-slate-100">
-          <td class="py-1.5 pr-3 font-medium">Card detail</td><td class="py-1.5 pr-3 mono">20</td>
+          <td class="py-1.5 pr-3 font-medium">Card detail</td><td class="py-1.5 pr-3 mono">15</td>
           <td class="py-1.5">Skills declared 8, three or more skills 4, callable endpoint 6,
-            capabilities 4, protocol version 3, auth scheme 3, documentation 2 — of 30, scaled to 20.</td>
+            capabilities 4, protocol version 3, auth scheme 3, documentation 2 — of 30, scaled to 15.</td>
+        </tr>
+        <tr class="border-b border-slate-100">
+          <td class="py-1.5 pr-3 font-medium">Performance</td><td class="py-1.5 pr-3 mono">20</td>
+          <td class="py-1.5">Full marks at ≤ 50 ms, falling linearly to 0 at ≥ 1500 ms.</td>
         </tr>
         <tr>
-          <td class="py-1.5 pr-3 font-medium">Performance</td><td class="py-1.5 pr-3 mono">20</td>
-          <td class="py-1.5">Full marks at ≤ 150 ms, falling linearly to 0 at ≥ 1500 ms.</td>
+          <td class="py-1.5 pr-3 font-medium">Readiness</td><td class="py-1.5 pr-3 mono">15</td>
+          <td class="py-1.5">Agent readiness score (0–100), scaled to 15; only while the card is reachable.
+            A verified owner adds 3 as score × 0.97 + 3, so no agent sits at a flat 100.</td>
         </tr>
       </tbody>
     </table>
@@ -175,9 +194,9 @@
         <th class="py-1 font-medium mono">D</th>
       </tr></thead>
       <tbody class="mono">
-        <tr class="border-b border-slate-100"><td class="py-1.5 pr-3">x402</td><td class="py-1.5 pr-3">88</td><td class="py-1.5 pr-3">80</td><td class="py-1.5 pr-3">62</td><td class="py-1.5 pr-3">53</td><td class="py-1.5 pr-3">43</td><td class="py-1.5">12</td></tr>
+        <tr class="border-b border-slate-100"><td class="py-1.5 pr-3">x402</td><td class="py-1.5 pr-3">70</td><td class="py-1.5 pr-3">65</td><td class="py-1.5 pr-3">55</td><td class="py-1.5 pr-3">46</td><td class="py-1.5 pr-3">36</td><td class="py-1.5">9</td></tr>
         <tr class="border-b border-slate-100"><td class="py-1.5 pr-3">MCP</td><td class="py-1.5 pr-3">95</td><td class="py-1.5 pr-3">88</td><td class="py-1.5 pr-3">72</td><td class="py-1.5 pr-3">56</td><td class="py-1.5 pr-3">40</td><td class="py-1.5">20</td></tr>
-        <tr><td class="py-1.5 pr-3">A2A</td><td class="py-1.5 pr-3">98</td><td class="py-1.5 pr-3">96</td><td class="py-1.5 pr-3">92</td><td class="py-1.5 pr-3">85</td><td class="py-1.5 pr-3">66</td><td class="py-1.5">60</td></tr>
+        <tr><td class="py-1.5 pr-3">A2A</td><td class="py-1.5 pr-3">92</td><td class="py-1.5 pr-3">90</td><td class="py-1.5 pr-3">85</td><td class="py-1.5 pr-3">80</td><td class="py-1.5 pr-3">61</td><td class="py-1.5">55</td></tr>
       </tbody>
     </table>
     <p class="text-sm mt-2">Anything below the D threshold is E.</p>
@@ -285,7 +304,7 @@
     <p class="text-sm mt-2">Nothing is required of you. Listings stay up either way and
       submitting one does not need an account. A verified claim gets an
       <b>Owner verified</b> badge, lets you edit the descriptive fields, and adds 3
-      points to the grade. <b>Measured fields &mdash; availability, grade, latency,
+      to 5 points to the grade. <b>Measured fields &mdash; availability, grade, latency,
       conformance, on-chain demand &mdash; are not editable by anyone.</b></p>
     <p class="text-sm mt-2"><a class="text-blue-600 hover:underline" href="/docs/claim">How
       to claim a listing &rarr;</a></p>

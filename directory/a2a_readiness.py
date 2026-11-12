@@ -58,7 +58,7 @@ METHODOLOGY = (
     "agent-tools.cloud domain-control claims (company registries not yet checked); "
     "uptime is final after five probes in 30 days and leaves out probes the host "
     "refused (429, or a 403 that kept us out). Grades: A>=90, B>=75, C>=60, "
-    "D>=40, F<40. Display only: search order uses the quality grade."
+    "D>=40, F<40. It also feeds 15 points of the A2A quality grade."
 )
 
 
