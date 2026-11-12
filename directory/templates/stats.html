@@ -137,9 +137,10 @@
     <div class="text-3xl font-bold mt-1 tnum text-slate-900">{{ k.value|num }}</div>
     {% if k.delta is not none %}
       <div class="text-xs mt-2 mono {{ 'text-emerald-600' if k.delta > 0 else ('text-red-600' if k.delta < 0 else 'text-slate-400') }}">
-        {{ '▲' if k.delta > 0 else ('▼' if k.delta < 0 else '·') }} {{ (k.delta|abs)|num }} vs {{ period }}d ago
+        {{ '▲' if k.delta > 0 else ('▼' if k.delta < 0 else '·') }} {{ (k.delta|abs)|num }}
+        {% if history_days > period %}vs {{ period }}d ago{% else %}since {{ k.since }}{% endif %}
       </div>
-      <div class="mt-2">{{ spark(k.series) }}</div>
+      {% if k.series|length >= 3 %}<div class="mt-2">{{ spark(k.series) }}</div>{% endif %}
     {% else %}
       <div class="text-xs text-slate-400 mt-2">Trend starts {{ first_day or snap.as_of[:10] }}</div>
     {% endif %}

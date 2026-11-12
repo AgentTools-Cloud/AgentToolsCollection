@@ -357,11 +357,18 @@ def _stats_payload() -> tuple[dict | None, list]:
 
 
 def _kpi_trend(history, view, metric, period):
-    """(sparkline points, change vs `period` days ago) from stored snapshots."""
-    series = [kp.get(view, {}).get(metric) for _d, kp in history[-period - 1:]]
-    series = [v for v in series if isinstance(v, (int, float))]
-    delta = series[-1] - series[0] if len(series) >= 2 else None
-    return series, delta
+    """(sparkline points, change, day the change is measured from).
+
+    Only snapshots inside the period count. When the stored history is shorter
+    than the period the change is measured from the first stored day, and the
+    page says so instead of claiming "vs 30d ago".
+    """
+    cutoff = time.strftime("%Y-%m-%d", time.gmtime(time.time() - period * 86400))
+    points = [(d, kp.get(view, {}).get(metric)) for d, kp in history if d >= cutoff]
+    points = [(d, v) for d, v in points if isinstance(v, (int, float))]
+    if len(points) < 2:
+        return [v for _d, v in points], None, None
+    return [v for _d, v in points], points[-1][1] - points[0][1], points[0][0]
 
 
 @router.get("/stats", response_class=HTMLResponse, include_in_schema=False)
@@ -385,8 +392,9 @@ def _render_stats(request: Request, view: str, period: int):
             request, "stats.html", {"request": request, "snap": None}, status_code=503)
     kpis = {}
     for metric in ("indexed", "reachable", "verified", "ready"):
-        series, delta = _kpi_trend(history, view, metric, period)
-        kpis[metric] = {"value": snap["kpis"][view][metric], "series": series, "delta": delta}
+        series, delta, since = _kpi_trend(history, view, metric, period)
+        kpis[metric] = {"value": snap["kpis"][view][metric], "series": series, "delta": delta,
+                        "since": since}
     return TEMPLATES.TemplateResponse(request, "stats.html", {
         "request": request, "snap": snap, "view": view, "period": period,
         "kpis": kpis, "headlines": stats_mod.headlines(snap, view),
