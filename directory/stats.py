@@ -757,6 +757,12 @@ def public_snapshot(snap):
         out["topics"] = t
     if out.get("search_demand"):
         out["search_demand"] = searches_view(out, full=False)
+    out["access_tier"] = {
+        "full": False,
+        "shortened": {"topics.detail.*.top": f"{PUBLIC_TOP_PER_KIND} per protocol (10 with an account)",
+                      "search_demand.top/unmet": f"{PUBLIC_SEARCH_TERMS} terms (up to {FULL_SEARCH_TERMS} with an account)"},
+        "how": "add ?full=1 and sign in, or send Authorization: Bearer <key> (free: POST /api/v1/keys)",
+    }
     return out
 
 
