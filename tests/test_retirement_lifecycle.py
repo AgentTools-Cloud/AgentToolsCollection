@@ -108,7 +108,9 @@ for p,key in (("/api/v1/search","services"),("/api/v1/mcp/search","servers"),("/
  values=body.get(key,[])
  retired_slugs={fixtures[kind]["slug"] for kind in fixtures}
  check(p+" excludes retired",not any(x.get("slug") in retired_slugs for x in values))
-sitemap=client.get("/sitemap.xml").text
+import re as _re
+sitemap="".join(client.get(u.replace("https://agent-tools.cloud","")).text
+                for u in _re.findall(r"<loc>([^<]+)</loc>",client.get("/sitemap.xml").text))
 check("sitemap excludes retired",not any(slug in sitemap for slug in retired_slugs))
 
 # Restore is deliberate and auditable.
