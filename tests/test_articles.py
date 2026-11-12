@@ -1800,7 +1800,8 @@ class ArticleRouteTests(unittest.TestCase):
                     homepage = client.get("/")
                     self.assertEqual(homepage.status_code, 200, homepage.text)
                     self.assertIn("已审核文章", homepage.text)
-                    sitemap = client.get("/sitemap.xml")
+                    self.assertIn("/sitemaps/pages.xml", client.get("/sitemap.xml").text)
+                    sitemap = client.get("/sitemaps/pages.xml")
                     self.assertEqual(sitemap.status_code, 200, sitemap.text)
                     self.assertIn("/articles/connection-checklist", sitemap.text)
                     self.assertIn("no-cache", sitemap.headers["cache-control"])
@@ -1811,7 +1812,7 @@ class ArticleRouteTests(unittest.TestCase):
                     self.store.save(article["id"], 1, {**self.snapshot, "title": "不应出现在首页"}, editor_id=7)
                     self.assertNotIn("不应出现在首页", client.get("/").text)
                     self.store.withdraw(article["id"], 2, editor_id=7)
-                    self.assertNotIn("/articles/connection-checklist", client.get("/sitemap.xml").text)
+                    self.assertNotIn("/articles/connection-checklist", client.get("/sitemaps/pages.xml").text)
 
 
 if __name__ == "__main__":

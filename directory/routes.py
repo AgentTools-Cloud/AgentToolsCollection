@@ -10,6 +10,7 @@ import time
 from contextlib import closing
 from pathlib import Path
 from urllib.parse import urlencode
+from xml.sax.saxutils import escape as xml_escape
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
@@ -2427,17 +2428,79 @@ def well_known():
     }
 
 
+_SITEMAP_BASE = "https://agent-tools.cloud"
+# Detail pages that are reachable today and readiness A or B: the ones an agent
+# could actually call. Dead listings and the rest stay out of the sitemap (they
+# remain crawlable through the site) so thin pages do not dilute the site.
+# One URL per endpoint: when several listings point at the same endpoint, only
+# the best-scored one is offered.
+_SITEMAP_KINDS = {
+    "x402": ("services", "url", "/services/"),
+    "mcp": ("mcp_servers", "endpoint_url", "/mcp/servers/"),
+    "a2a": ("a2a_agents", "COALESCE(endpoint_url, card_url)", "/a2a/agents/"),
+}
+SITEMAP_CHUNK = 20000   # well under the 50,000-URL / 50 MB protocol limit
+
+
+def _sitemap_listing_sql(kind: str) -> str:
+    table, endpoint, _ = _SITEMAP_KINDS[kind]
+    return (
+        "SELECT slug, updated_at FROM ("
+        f" SELECT id, slug, updated_at, ROW_NUMBER() OVER ("
+        f"  PARTITION BY lower(rtrim(COALESCE({endpoint}, slug), '/'))"
+        "   ORDER BY COALESCE(quality_score, 0) DESC, id) AS rn"
+        f" FROM {table} WHERE health='ok' AND readiness_grade IN ('A','B')"
+        ") WHERE rn=1 ORDER BY id")
+
+
+def _sitemap_counts() -> dict:
+    with _conn() as c:
+        return {k: c.execute(f"SELECT COUNT(*) FROM ({_sitemap_listing_sql(k)})").fetchone()[0]
+                for k in _SITEMAP_KINDS}
+
+
+def _sitemap_iso(ts):
+    if not ts:
+        return None
+    try:
+        return time.strftime("%Y-%m-%d", time.gmtime(int(ts)))
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _sitemap_url(loc, lastmod=None, priority=None, changefreq=None):
+    out = ["  <url>", f"    <loc>{xml_escape(loc)}</loc>"]
+    if lastmod:
+        out.append(f"    <lastmod>{lastmod}</lastmod>")
+    if changefreq:
+        out.append(f"    <changefreq>{changefreq}</changefreq>")
+    if priority:
+        out.append(f"    <priority>{priority}</priority>")
+    out.append("  </url>")
+    return "\n".join(out)
+
+
 @router.get("/sitemap.xml", include_in_schema=False)
 def sitemap_xml(request: Request) -> Response:
-    """Dynamic sitemap for the canonical public pages.
+    """Sitemap index: site pages, then one or more files per protocol."""
+    names = ["pages"]
+    for kind, n in _sitemap_counts().items():
+        names += [f"{kind}-{i}" for i in range(1, max(1, -(-n // SITEMAP_CHUNK)) + 1)]
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    parts = ['<?xml version="1.0" encoding="UTF-8"?>',
+             '<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">']
+    for name in names:
+        parts.append(f"  <sitemap>\n    <loc>{_SITEMAP_BASE}/sitemaps/{name}.xml</loc>\n"
+                     f"    <lastmod>{today}</lastmod>\n  </sitemap>")
+    parts.append("</sitemapindex>")
+    return Response(content="\n".join(parts) + "\n", media_type="application/xml",
+                    headers={"Cache-Control": "public, max-age=3600"})
 
-    Keep this intentionally selective. The directory contains thousands of
-    machine-generated detail pages, many with similar metadata and some churn as
-    upstream registries change. A smaller sitemap gives search engines the main
-    product pages plus a sample of healthy, high-signal detail pages instead of
-    presenting the whole database as equally index-worthy.
-    """
-    base = "https://agent-tools.cloud"
+
+@router.get("/sitemaps/pages.xml", include_in_schema=False)
+def sitemap_pages_xml(request: Request) -> Response:
+    """Site pages: catalogue, statistics, topics, finished reports, Blog."""
+    base = _SITEMAP_BASE
     static_pages = [
         ("/", "1.0", "daily"),
         ("/mcp", "0.9", "daily"),
@@ -2457,25 +2520,7 @@ def sitemap_xml(request: Request) -> Response:
     ]
     parts = ['<?xml version="1.0" encoding="UTF-8"?>',
              '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">']
-
-    def _url(loc, lastmod=None, priority=None, changefreq=None):
-        out = ["  <url>", f"    <loc>{loc}</loc>"]
-        if lastmod:
-            out.append(f"    <lastmod>{lastmod}</lastmod>")
-        if changefreq:
-            out.append(f"    <changefreq>{changefreq}</changefreq>")
-        if priority:
-            out.append(f"    <priority>{priority}</priority>")
-        out.append("  </url>")
-        return "\n".join(out)
-
-    def _iso(ts):
-        if not ts:
-            return None
-        try:
-            return time.strftime("%Y-%m-%d", time.gmtime(int(ts)))
-        except (TypeError, ValueError, OverflowError):
-            return None
+    _url, _iso = _sitemap_url, _sitemap_iso
 
     for path, prio, freq in static_pages:
         parts.append(_url(base + path, priority=prio, changefreq=freq))
@@ -2502,31 +2547,31 @@ def sitemap_xml(request: Request) -> Response:
         except (ArticleError, sqlite3.Error):
             raise HTTPException(503, "文章索引暂不可用", headers={"Cache-Control": "no-cache"}) from None
 
-    with _conn() as c:
-        for slug, ts in c.execute(
-                  "SELECT slug, updated_at FROM mcp_servers "
-                  "WHERE health='ok' "
-                  "ORDER BY COALESCE(quality_score, 0) DESC, updated_at DESC "
-                  "LIMIT 300"):
-            parts.append(_url(f"{base}/mcp/servers/{slug}", _iso(ts), "0.7"))
-        for slug, ts in c.execute(
-                  "SELECT slug, updated_at FROM a2a_agents "
-                  "WHERE health='ok' "
-                  "ORDER BY COALESCE(confidence, 0) DESC, updated_at DESC "
-                  "LIMIT 200"):
-            parts.append(_url(f"{base}/a2a/agents/{slug}", _iso(ts), "0.7"))
-        for slug, ts in c.execute(
-                  "SELECT slug, updated_at FROM services "
-                  "WHERE health='ok' "
-                  "ORDER BY COALESCE(tx_30d, 0) DESC, COALESCE(confidence, 0) DESC, updated_at DESC "
-                  "LIMIT 200"):
-            parts.append(_url(f"{base}/services/{slug}", _iso(ts), "0.7"))
-
     parts.append("</urlset>")
     xml = "\n".join(parts) + "\n"
     return Response(content=xml, media_type="application/xml",
                     headers={"Cache-Control": "no-cache, must-revalidate" if article_store is not None
                              else "public, max-age=3600"})
+
+
+@router.get("/sitemaps/{name}.xml", include_in_schema=False)
+def sitemap_listings_xml(name: str) -> Response:
+    kind, _, page = name.rpartition("-")
+    if kind not in _SITEMAP_KINDS or not page.isdigit() or int(page) < 1:
+        raise HTTPException(404)
+    prefix = _SITEMAP_KINDS[kind][2]
+    with _conn() as c:
+        rows = c.execute(_sitemap_listing_sql(kind) + " LIMIT ? OFFSET ?",
+                         (SITEMAP_CHUNK, (int(page) - 1) * SITEMAP_CHUNK)).fetchall()
+    if not rows and int(page) > 1:
+        raise HTTPException(404)
+    parts = ['<?xml version="1.0" encoding="UTF-8"?>',
+             '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">']
+    for slug, ts in rows:
+        parts.append(_sitemap_url(f"{_SITEMAP_BASE}{prefix}{slug}", _sitemap_iso(ts)))
+    parts.append("</urlset>")
+    return Response(content="\n".join(parts) + "\n", media_type="application/xml",
+                    headers={"Cache-Control": "public, max-age=3600"})
 
 
 @router.get("/robots.txt", include_in_schema=False)
