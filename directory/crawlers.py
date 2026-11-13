@@ -3855,18 +3855,27 @@ def _modelscope_row(s: dict) -> dict | None:
     return None
 
 
-def fetch_modelscope_mcp(page_size: int = 100, page_sleep: float = 0.2,
-                         max_requests: int = 4000) -> list:
-    """Import ModelScope MCP Plaza listings that publish a public remote URL."""
+def fetch_modelscope_mcp(page_size: int = _MODELSCOPE_WINDOW, page_sleep: float = 0.2,
+                         max_requests: int = 2000, workers: int = 4) -> list:
+    """Import ModelScope MCP Plaza listings that publish a public remote URL.
+
+    Each call costs ~2-4 s of server time regardless of size, so a partition
+    is read as one 300-row page and partitions run on a few threads.
+    """
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
     seen: dict[str, dict] = {}
-    state = {"requests": 0, "errors": 0}
+    state = {"requests": 0, "errors": 0, "stop": False}
+    lock = threading.Lock()
     hdr = {"User-Agent": UA, "Accept": "application/json",
            "Content-Type": "application/json"}
 
     def query(c, criterion, text="", page=1, size=page_size):
-        if state["requests"] >= max_requests:
-            raise RuntimeError("modelscope request budget exhausted")
-        state["requests"] += 1
+        with lock:
+            if state["stop"] or state["requests"] >= max_requests:
+                state["stop"] = True
+                raise RuntimeError("modelscope request budget exhausted")
+            state["requests"] += 1
         body = {"PageSize": size, "PageNumber": page, "Query": text,
                 "Criterion": criterion}
         r = None
@@ -3897,7 +3906,8 @@ def fetch_modelscope_mcp(page_size: int = 100, page_sleep: float = 0.2,
             except RuntimeError as e:
                 if "budget" in str(e):
                     raise
-                state["errors"] += 1
+                with lock:
+                    state["errors"] += 1
                 log.warning("modelscope: %s query=%r page=%d failed: %s",
                             criterion[-1], text, page, e)
                 break
@@ -3909,13 +3919,28 @@ def fetch_modelscope_mcp(page_size: int = 100, page_sleep: float = 0.2,
             time.sleep(page_sleep)
         return total
 
+    def job(c, crit, text):
+        if state["stop"]:
+            return
+        try:
+            drain(c, crit, text)
+        except RuntimeError:
+            state["stop"] = True
+        except Exception as e:  # never let one partition sink the crawl
+            with lock:
+                state["errors"] += 1
+            log.warning("modelscope: partition %s %r failed: %r", crit[-1], text, e)
+
     try:
         with httpx.Client(timeout=TIMEOUT, headers=hdr, follow_redirects=True) as c:
+            jobs: list = []
             for hosted in (True, False):
                 h = {"Category": "Hosted", "Predicate": "contains", "BoolValues": [hosted]}
                 try:
                     _, _, cats = query(c, [h], size=1)
                 except RuntimeError as e:
+                    if "budget" in str(e):
+                        break
                     state["errors"] += 1
                     log.warning("modelscope: category list failed: %s", e)
                     continue
@@ -3926,14 +3951,15 @@ def fetch_modelscope_mcp(page_size: int = 100, page_sleep: float = 0.2,
                         continue
                     crit = [h, {"Category": "Category", "Predicate": "contains",
                                 "StringValues": [value]}]
-                    drain(c, crit)
+                    jobs.append((crit, ""))
                     if count > _MODELSCOPE_WINDOW:
-                        for ch in _MODELSCOPE_SPLIT:
-                            drain(c, crit, ch)
-    except RuntimeError as e:
-        log.warning("modelscope: stopped early: %s", e)
+                        jobs.extend((crit, ch) for ch in _MODELSCOPE_SPLIT)
+            with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+                list(pool.map(lambda j: job(c, *j), jobs))
     except httpx.HTTPError as e:
         log.warning("modelscope: list error: %r", e)
+    if state["stop"]:
+        log.warning("modelscope: stopped early: request budget exhausted")
 
     out: list = []
     seen_ep: set = set()
