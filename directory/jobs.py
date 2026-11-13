@@ -2273,6 +2273,9 @@ def _load_env_file(path: str = "/opt/mcpserver/.env") -> None:
 def main(argv=None) -> int:
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    from . import log_redact
+
+    log_redact.install()
     _load_env_file()
     p = argparse.ArgumentParser(prog="directory.jobs")
     sub = p.add_subparsers(dest="cmd", required=True)
