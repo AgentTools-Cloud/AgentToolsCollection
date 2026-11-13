@@ -239,6 +239,60 @@ def _retired_response(request: Request, kind: str, slug: str):
     )
 
 
+# Detail pages offered to search engines are exactly the sitemap set: reachable,
+# readiness A or B, and the best-scored listing for its endpoint. Every other
+# detail page stays reachable and linkable but asks not to be indexed, so the
+# thin and duplicate pages do not drag down the ones worth indexing.
+_DETAIL_INDEX_SQL = {
+    "x402": ("services", "url", "url IN (?, ?)"),
+    "mcp": ("mcp_servers", "endpoint_url", "endpoint_url IN (?, ?)"),
+    "a2a": ("a2a_agents", "COALESCE(endpoint_url, card_url)",
+            "(endpoint_url IN (?, ?) OR (endpoint_url IS NULL AND card_url IN (?, ?)))"),
+}
+
+
+def _detail_noindex(kind: str, listing_id) -> bool:
+    table, endpoint, match = _DETAIL_INDEX_SQL[kind]
+    try:
+        with _conn() as c:
+            row = c.execute(
+                f"SELECT health, readiness_grade, COALESCE(quality_score, 0) q, "
+                f"{endpoint} ep FROM {table} WHERE id=?", (listing_id,)).fetchone()
+            if row is None:
+                return True
+            if row["health"] != "ok" or row["readiness_grade"] not in ("A", "B"):
+                return True
+            if not row["ep"]:
+                return False
+            base = str(row["ep"]).rstrip("/")
+            variants = (base, base + "/") * match.count("IN (?, ?)")
+            better = c.execute(
+                f"SELECT 1 FROM {table} WHERE {match} AND id != ? AND health='ok' "
+                "AND readiness_grade IN ('A','B') AND (COALESCE(quality_score, 0) > ? "
+                "OR (COALESCE(quality_score, 0) = ? AND id < ?)) LIMIT 1",
+                (*variants, listing_id, row["q"], row["q"], listing_id)).fetchone()
+            return better is not None
+    except sqlite3.Error:
+        return False
+
+
+# Whole sources deleted on purpose: every listing they produced is gone for
+# good (2026-09-14 Glama purge, 4,199 rows; its slugs all start "glama-").
+# Only these get 410; any other unknown slug stays a plain 404 so it cannot be
+# told apart from a privacy-suppressed one.
+_PURGED_MCP_PREFIXES = ("glama-",)
+
+
+def _detail_gone(request: Request, detail: str):
+    """410 so search engines drop a deliberately deleted listing faster than
+    they drop a 404."""
+    headers = {"X-Robots-Tag": "noindex, nofollow"}
+    if "text/html" in request.headers.get("accept", ""):
+        return TEMPLATES.TemplateResponse(request, "404.html", {"request": request},
+                                          status_code=410, headers=headers)
+    return JSONResponse({"detail": detail}, status_code=410, headers=headers)
+
+
 def _owned_detail_headers(row):
     if row.get("owner_verified"):
         return {"Cache-Control": "private, no-store", "CDN-Cache-Control": "no-store",
@@ -267,6 +321,7 @@ def service_detail(request: Request, slug: str):
         paid_summary = paid_verify.public_summary(c, int(svc["id"]))
     return TEMPLATES.TemplateResponse(request, "service.html", {
         "request": request, "svc": svc, "rating": db.score_breakdown(svc),
+        "noindex": _detail_noindex("x402", svc["id"]),
         "paid_summary": paid_summary,
         "call_template": cards.build_call_template(svc),
         "interface_declaration": directory_auth.owner_declarations.public_state(svc)},
@@ -678,9 +733,12 @@ def mcp_detail(request: Request, slug: str):
         retired = _retired_response(request, "mcp", slug)
         if retired is not None:
             return retired
+        if slug.startswith(_PURGED_MCP_PREFIXES):
+            return _detail_gone(request, "mcp server not found")
         raise HTTPException(404, "mcp server not found")
     return TEMPLATES.TemplateResponse(request, "mcp_server.html", {
-        "request": request, "m": m, "quality": db.rate_row("mcp", m)},
+        "request": request, "m": m, "quality": db.rate_row("mcp", m),
+        "noindex": _detail_noindex("mcp", m["id"])},
         headers=_owned_detail_headers(m))
 
 
@@ -745,7 +803,8 @@ def a2a_detail(request: Request, slug: str):
             return retired
         raise HTTPException(404, "a2a agent not found")
     return TEMPLATES.TemplateResponse(request, "a2a_agent.html", {
-        "request": request, "a": a, "quality": db.rate_row("a2a", a)},
+        "request": request, "a": a, "quality": db.rate_row("a2a", a),
+        "noindex": _detail_noindex("a2a", a["id"])},
         headers=_owned_detail_headers(a))
 
 
