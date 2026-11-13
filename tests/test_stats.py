@@ -357,12 +357,14 @@ class AgentAccessTests(unittest.TestCase):
         self.assertFalse(stats.summary(None)["available"])
 
     def test_a2a_stats_intent(self):
-        from directory import a2a
-        self.assertEqual(a2a._stats_request({}, "How many MCP servers are reachable?"), "mcp")
-        self.assertEqual(a2a._stats_request({}, "what is the state of agent tools today"), "all")
-        self.assertEqual(a2a._stats_request(
-            {"parts": [{"kind": "data", "data": {"skill": "directory_stats", "view": "x402"}}]}, ""), "x402")
-        self.assertIsNone(a2a._stats_request({}, "find a statistics API for sports data"))
+        from directory import a2a, a2a_research
+        parse = a2a_research.parse_request
+        self.assertEqual(parse({}, "How many MCP servers are reachable?"),
+                         {"skill": "ecosystem_report", "view": "mcp"})
+        self.assertEqual(parse({}, "what is the state of agent tools today")["skill"], "ecosystem_report")
+        self.assertEqual(parse({"parts": [{"kind": "data", "data": {"skill": "directory_stats", "view": "x402"}}]}, ""),
+                         {"skill": "ecosystem_report", "view": "x402"})
+        self.assertEqual(parse({}, "find a statistics API for sports data"), {"skill": "tool_request"})
         stats._latest_cache.update(at=time.time(), snap=self.snap)
         try:
             out = a2a._answer({"parts": [{"kind": "text", "text": "directory stats for x402"}]})
@@ -370,9 +372,10 @@ class AgentAccessTests(unittest.TestCase):
             stats._latest_cache.update(at=0.0, snap=None)
         self.assertIn("3 indexed", out["text"])
         self.assertEqual(out["data"]["view"], "x402")
+        self.assertEqual(out["data"]["license"], "CC BY 4.0")
         skills = [s["id"] for s in a2a.own_agent_card()["skills"]]
-        self.assertIn("directory_stats", skills)
-
+        self.assertIn("ecosystem_report", skills)
+        self.assertNotIn("search_x402_services", skills)
 
 if __name__ == "__main__":
     unittest.main()
