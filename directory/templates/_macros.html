@@ -248,6 +248,24 @@
 
 
 {#- What our own probes measured, as sentences (directory/measured.py). -#}
+{#- One promotion slot (directory/promo.py). Paid items are labelled and use
+     rel="sponsored nofollow"; house items are our own pages. -#}
+{% macro promo_slot(p) -%}
+{% if p %}
+<aside class="mt-8 rounded-xl border {{ 'border-amber-200 bg-amber-50/60' if p.sponsored else 'border-slate-200 bg-slate-50' }} px-5 py-4 flex flex-col sm:flex-row sm:items-center gap-3 justify-between"
+       aria-label="{{ 'Sponsored' if p.sponsored else 'From agent-tools.cloud' }}" data-promo="{{ 'sponsored' if p.sponsored else 'house' }}">
+  <div class="min-w-0">
+    {% if p.sponsored %}<div class="text-[11px] font-semibold uppercase tracking-wide text-amber-700">Sponsored · {{ p.sponsor }}</div>{% endif %}
+    <div class="text-sm font-semibold text-slate-900">{{ p.title }}</div>
+    {% if p.text %}<p class="text-sm text-slate-600 mt-0.5">{{ p.text }}</p>{% endif %}
+  </div>
+  <a href="{{ p.href }}" {% if p.rel %}rel="{{ p.rel }}" target="_blank"{% endif %}
+     class="shrink-0 text-sm font-medium text-blue-600 hover:underline">{{ p.cta }} →</a>
+</aside>
+{% endif %}
+{%- endmacro %}
+
+
 {% macro measured_section(meas) -%}
 {% if meas and meas.sentences %}
 <section class="svc-card p-6 mb-6" id="measured">

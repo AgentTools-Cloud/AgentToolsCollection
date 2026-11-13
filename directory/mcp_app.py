@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import re
+import secrets
 from typing import Any
 
 from fastapi import HTTPException, Request
@@ -60,7 +61,7 @@ _INSTRUCTIONS = (
     "     directory.\n"
     "  6. `prepare_paid_verification` -> sign `typed_data` in your wallet ->\n"
     "     `execute_paid_verification`: pay a service once and record the\n"
-    "     result. Needs an API key (POST /api/v1/keys)."
+    "     result. Needs an API key (`create_api_key` or POST /api/v1/keys)."
     "\n  7. With an account API key in the Authorization: Bearer header, use "
     "`claim_service_url(url)` -> publish the returned token -> "
     "`verify_service_url(claim_id, token)` -> `get_owned_listing` / "
@@ -85,6 +86,9 @@ _VERIFY_URL = ToolAnnotations(readOnlyHint=False, destructiveHint=True,
                               idempotentHint=True, openWorldHint=True)
 _OWNER_EDIT = ToolAnnotations(readOnlyHint=False, destructiveHint=True,
                               idempotentHint=True, openWorldHint=False)
+# Creates a new anonymous account + key; every call makes another one.
+_MINT_KEY = ToolAnnotations(readOnlyHint=False, destructiveHint=False,
+                            idempotentHint=False, openWorldHint=False)
 
 _TS = TransportSecuritySettings(enable_dns_rebinding_protection=False)
 discover_mcp = FastMCP(
@@ -641,6 +645,7 @@ async def directory_stats(
     view: str = "all",
     topic: str | None = None,
     month: str | None = None,
+    api_key: str | None = None,
     ctx: Context | None = None,
 ) -> dict[str, Any]:
     """Daily statistics on the agent-tool ecosystem as seen by our probes.
@@ -650,6 +655,8 @@ async def directory_stats(
         topic: Optional topic word (e.g. "payment", "weather") to get that topic
             instead: supply per protocol, readiness, best listings, searches.
         month: Optional "YYYY-MM" to get that monthly report instead.
+        api_key: Optional account key (free from create_api_key) for complete
+            lists when you cannot send the Authorization header.
 
     Returns counts (indexed, reachable, protocol-verified, readiness A/B), one
     finding sentence per topic, key facts (x402 prices and networks, MCP and A2A
@@ -657,12 +664,14 @@ async def directory_stats(
     latest probe ended), the most searched terms (view "all"), the snapshot
     time, and links to the full JSON snapshot, the daily CSV, the methodology,
     the "how many work" page, per-protocol and per-topic pages and the monthly
-    reports. With an account API key in the Authorization: Bearer header the
-    topic and search lists are complete (10 listings per protocol, up to 100
-    terms); without one they are shortened.
+    reports. With an account API key (Authorization: Bearer header or
+    `api_key`; free from `create_api_key`) the topic and search lists are
+    complete (10 listings per protocol, up to 100 terms); without one they
+    are shortened.
     """
     from . import stats as directory_stats_mod
-    full = _has_account()
+    full = _has_account() or (bool((api_key or "").strip())
+                              and _pv_user_id(api_key) is not None)
     snap = directory_stats_mod.latest(_open)
     if topic:
         out = directory_stats_mod.topic_page(snap, topic.strip().lower(), full=full) or {
@@ -1082,7 +1091,8 @@ async def _ownership_api(tool_name: str, method: str, path: str, handler,
     if scheme.lower() != "bearer" or not raw_key.strip():
         return {"error": "unauthorized", "status_code": 401,
                 "message": "Send an account API key in the MCP Authorization: Bearer header.",
-                "get_a_key": {"method": "POST", "url": "https://agent-tools.cloud/api/v1/keys"}}
+                "get_a_key": {"method": "POST", "url": "https://agent-tools.cloud/api/v1/keys",
+                              "mcp_tool": "create_api_key"}}
     request = Request({
         "type": "http", "method": method, "path": path, "root_path": "", "scheme": "https",
         "server": ("agent-tools.cloud", 443), "client": (_current_client_ip.get() or "unknown", 0),
@@ -1190,9 +1200,61 @@ async def edit_owned_listing(kind: str, slug: str, fields: dict[str, Any],
 _PV_PREPARE_LIMITS = (("minute", 6, 60), ("day", 60, 86400))
 _PV_AUTH_ERROR = {
     "error": "unauthorized",
-    "message": "API key required: POST https://agent-tools.cloud/api/v1/keys, "
-               "then send Authorization: Bearer <key> or api_key.",
+    "message": "API key required: call the create_api_key tool (or POST "
+               "https://agent-tools.cloud/api/v1/keys), then send "
+               "Authorization: Bearer <key> or api_key.",
 }
+
+
+@discover_mcp.tool(annotations=_MINT_KEY)
+async def create_api_key(name: str | None = None,
+                         ctx: Context | None = None) -> dict[str, Any]:
+    """Create a free account API key. No sign-up, email or existing key needed.
+
+    The key is returned once and cannot be recovered. Store it in your secret
+    store; do not print it back to the user or write it to logs. Send it as
+    `Authorization: Bearer <key>` (or the `api_key` argument where offered) to
+    get complete `directory_stats` lists, run paid verifications and claim
+    your own listings. Shares the HTTP limit of POST /api/v1/keys (a few keys
+    per IP per day).
+
+    Args:
+        name: Optional label to recognise the key later, e.g. your agent name.
+    """
+    from . import routes
+
+    state = limits.check_ip_limits(
+        _current_client_ip.get(), "mint-key",
+        (("day", routes.KEY_MINT_LIMIT_PER_DAY, 86400),))
+    if state:
+        out = {"error": "rate_limited",
+               "message": "Too many keys minted from this IP today.",
+               "retry_after_seconds": int(state.get("retry_after") or 1)}
+        _log_call("create_api_key", ctx=ctx, args={"outcome": "rate_limited"},
+                  result_n=0)
+        return out
+    label = (name or "").strip()[:60] or None
+
+    def mint() -> str:
+        with directory_db.writer() as conn:
+            puid = secrets.token_hex(16)
+            uid = directory_db.upsert_user(
+                conn, provider="domain", provider_uid=puid,
+                login=directory_db.key_user_login(puid))
+            return directory_db.create_api_key(conn, uid, name=label)
+
+    raw = await asyncio.to_thread(mint)
+    # Never log the key or its name.
+    _log_call("create_api_key", ctx=ctx, args={"outcome": "created"}, result_n=1)
+    return {
+        "api_key": raw,
+        "prefix": raw[:15],
+        "message": ("Store this now -- it is not shown again. Do not echo it "
+                    "to the user or logs. Send it as Authorization: Bearer "
+                    "<api_key>."),
+        "use_with": ["directory_stats (complete lists)",
+                     "prepare_paid_verification", "claim_service_url"],
+    }
 
 
 def _pv_user_id(api_key: str | None) -> int | None:
