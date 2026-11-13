@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 
 import yaml
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qsl, urljoin, urlparse
 
 import os
 import httpx
@@ -3681,6 +3681,391 @@ def fetch_apify_mcp(max_pages: int = 40, per_page: int = 100,
 
 
 MCP_CRAWLERS["apify"] = fetch_apify_mcp
+
+
+# ---------------------------------------------------------------------------
+# Remote-endpoint helpers shared by directory crawlers whose listings carry a
+# client config ({"mcpServers": {name: {"type": ..., "url": ...}}}).
+# ---------------------------------------------------------------------------
+
+_PLACEHOLDER_RE = re.compile(r"<[^>]*>|\$\{|\{\{|\{[A-Za-z_][\w-]*\}|YOUR[_-]|your[_-]")
+_SECRET_PARAM_RE = re.compile(
+    r"key|token|secret|passw|pwd|auth|sig|session|credential|access", re.I)
+
+
+def _remote_endpoint(url: Any) -> tuple[str, bool] | None:
+    """Normalise a directory-supplied remote MCP URL.
+
+    Returns ``(endpoint, needs_key)`` or None. A placeholder in the query
+    string (``?key=<YOUR_KEY>``) means the endpoint is real but keyed: the
+    query is dropped and ``needs_key`` is set. A placeholder anywhere else
+    (host/path) means there is no fixed endpoint, so the row is skipped.
+    """
+    if not isinstance(url, str):
+        return None
+    url = url.strip()
+    if not url.lower().startswith(("http://", "https://")) or len(url) > 500:
+        return None
+    try:
+        p = urlparse(url)
+    except ValueError:
+        return None
+    host = (p.hostname or "").lower().rstrip(".")
+    # Directory configs often carry dev leftovers (localhost:8000/mcp,
+    # my-box.local, intranet names): nothing a remote client can reach.
+    if (not host or "." not in host
+            or host.endswith((".localhost", ".local", ".internal", ".lan",
+                              ".home", ".example", ".test", ".invalid"))
+            or host in ("example.com", "example.org", "example.net")):
+        return None
+    head = f"{p.scheme}://{p.netloc}{p.path}"
+    if _PLACEHOLDER_RE.search(head):
+        return None
+    # Listings sometimes paste a working credential (?key=abc123) into the
+    # URL. Never republish it: drop the query and mark the endpoint keyed.
+    needs_key = bool(_PLACEHOLDER_RE.search(p.query or "")) or any(
+        _SECRET_PARAM_RE.search(k) for k, _v in parse_qsl(p.query or "", keep_blank_values=True))
+    if p.username or p.password:
+        return None
+    endpoint = head if needs_key else url.split("#", 1)[0]
+    if not _url_acceptable(endpoint):
+        return None
+    return endpoint, needs_key
+
+
+def _config_remotes(raw: Any) -> list[tuple[str, str | None]]:
+    """Extract ``(url, transport)`` pairs from an mcpServers client config.
+
+    Directories store it as JSON, as a Python repr string, or as a list of
+    either. Unknown shapes yield nothing rather than raising.
+    """
+    if not raw:
+        return []
+    obj = raw
+    if isinstance(raw, str):
+        text = raw.strip()
+        if len(text) > 20000:
+            return []
+        obj = None
+        try:
+            obj = json.loads(text)
+        except ValueError:
+            try:
+                import ast
+                obj = ast.literal_eval(text)
+            except (ValueError, SyntaxError, MemoryError, RecursionError):
+                obj = None
+        if obj is None:
+            return [(u, None) for u in re.findall(r"https?://[^\s'\"<>]+", text)]
+    out: list[tuple[str, str | None]] = []
+
+    def walk(node, depth=0):
+        if depth > 6:
+            return
+        if isinstance(node, list):
+            for x in node:
+                walk(x, depth + 1)
+        elif isinstance(node, dict):
+            u = node.get("url") or node.get("baseUrl")
+            if isinstance(u, str):
+                t = str(node.get("type") or node.get("transport") or "").lower()
+                out.append((u, t or None))
+            for k, v in node.items():
+                if k not in ("url", "baseUrl") and isinstance(v, (dict, list)):
+                    walk(v, depth + 1)
+
+    walk(obj)
+    return out
+
+
+def _transport_name(hint: str | None, url: str) -> str | None:
+    h = (hint or "").replace("_", "-").replace(" ", "").lower()
+    if h in ("sse",):
+        return "sse"
+    if h in ("streamable-http", "streamablehttp", "http"):
+        return "streamable-http"
+    low = url.lower().split("?", 1)[0].rstrip("/")
+    if low.endswith("/sse"):
+        return "sse"
+    return "streamable-http"
+
+
+# ---------------------------------------------------------------------------
+# ModelScope MCP Plaza (modelscope.cn). Public list API (no auth) used by the
+# site itself: PUT /api/v1/dolphin/mcpServers. Any one query only pages
+# through its first 300 hits, so the crawl partitions by Hosted x Category and
+# splits partitions still larger than the window by single-character name
+# queries. Only listings that declare a public Streamable-HTTP/SSE URL are
+# imported; ModelScope's own per-user proxy URLs are private and skipped.
+# ---------------------------------------------------------------------------
+
+MODELSCOPE_MCP_API = "https://modelscope.cn/api/v1/dolphin/mcpServers"
+MODELSCOPE_MCP_PAGE = "https://modelscope.cn/mcp/servers/{path}"
+_MODELSCOPE_WINDOW = 300
+_MODELSCOPE_SPLIT = "abcdefghijklmnopqrstuvwxyz0123456789"
+_MODELSCOPE_PRIVATE_HOSTS = ("modelscope.net", "modelscope.cn", "modelscope.ai")
+
+
+def _modelscope_row(s: dict) -> dict | None:
+    remotes = []
+    for key in ("StreamableHTTPServerConfig", "SSEServerConfig"):
+        hint = "streamable-http" if key.startswith("Streamable") else "sse"
+        for u, t in _config_remotes(s.get(key)):
+            remotes.append((u, t or hint))
+    for u, t in remotes:
+        norm = _remote_endpoint(u)
+        if not norm:
+            continue
+        endpoint, needs_key = norm
+        host = (urlparse(endpoint).hostname or "").lower()
+        if any(host == h or host.endswith("." + h) for h in _MODELSCOPE_PRIVATE_HOSTS):
+            continue
+        path = (s.get("Path") or "").strip().strip("/")
+        name_en = (s.get("Name") or "").strip()
+        sid = str(s.get("Id") or path or endpoint)
+        if not path:
+            owner = (s.get("Publisher") or s.get("NickName") or "").strip()
+            path = f"{owner}/{name_en}" if owner and name_en else ""
+        title = (s.get("ChineseName") or "").strip() or name_en or _host_slug(endpoint)
+        desc = (s.get("Abstract") or s.get("AbstractCN") or s.get("TranslatedAbstract") or "").strip()
+        desc = re.sub(r"\s+", " ", desc)
+        if len(desc) > 240:
+            desc = desc[:240].rstrip() + "\u2026"
+        cats = [str(c).strip() for c in (s.get("Category") or []) if str(c).strip()]
+        tags = [str(t).strip() for t in (s.get("Tags") or []) if str(t).strip()]
+        hosted = bool(s.get("Hosted"))
+        homepage = (s.get("FromSiteUrl") or "").strip() or None
+        return {
+            "slug": _slugify(path or name_en or _host_slug(endpoint))[:70] + "-modelscope",
+            "name": title,
+            "description": desc or None,
+            "endpoint_url": endpoint,
+            "homepage_url": homepage or (MODELSCOPE_MCP_PAGE.format(path=path) if path else None),
+            "transport": _transport_name(t, endpoint),
+            "auth_method": "required" if needs_key else None,
+            "source_code_url": homepage if homepage and "github.com" in homepage else None,
+            "tags": (cats + tags)[:8],
+            "x402_supported": _mcp_x402(desc, title),
+            "source": "modelscope",
+            "source_id": sid,
+            "source_url": MODELSCOPE_MCP_PAGE.format(path=path) if path else "https://modelscope.cn/mcp",
+            # Hosted = ModelScope connected and listed tools through its proxy.
+            "confidence": 0.7 if hosted else 0.5,
+        }
+    return None
+
+
+def fetch_modelscope_mcp(page_size: int = 100, page_sleep: float = 0.2,
+                         max_requests: int = 4000) -> list:
+    """Import ModelScope MCP Plaza listings that publish a public remote URL."""
+    seen: dict[str, dict] = {}
+    state = {"requests": 0, "errors": 0}
+    hdr = {"User-Agent": UA, "Accept": "application/json",
+           "Content-Type": "application/json"}
+
+    def query(c, criterion, text="", page=1, size=page_size):
+        if state["requests"] >= max_requests:
+            raise RuntimeError("modelscope request budget exhausted")
+        state["requests"] += 1
+        body = {"PageSize": size, "PageNumber": page, "Query": text,
+                "Criterion": criterion}
+        r = None
+        for attempt in range(3):
+            try:
+                r = c.put(MODELSCOPE_MCP_API, json=body)
+            except httpx.HTTPError as e:
+                if attempt == 2:
+                    raise RuntimeError(type(e).__name__) from None
+                time.sleep(2.0 * (attempt + 1))
+                continue
+            if r.status_code < 500 and r.status_code != 429:
+                break
+            if attempt < 2:
+                time.sleep(2.0 * (attempt + 1))
+        if r.status_code != 200:
+            raise RuntimeError(f"HTTP {r.status_code}")
+        data = (r.json() or {}).get("Data") or {}
+        ms = data.get("McpServer") or {}
+        return (int(ms.get("TotalCount") or 0), ms.get("McpServers") or [],
+                (data.get("FiledAgg") or {}).get("Category") or [])
+
+    def drain(c, criterion, text=""):
+        total = 0
+        for page in range(1, _MODELSCOPE_WINDOW // page_size + 1):
+            try:
+                total, rows, _ = query(c, criterion, text, page)
+            except RuntimeError as e:
+                if "budget" in str(e):
+                    raise
+                state["errors"] += 1
+                log.warning("modelscope: %s query=%r page=%d failed: %s",
+                            criterion[-1], text, page, e)
+                break
+            for s in rows:
+                if isinstance(s, dict) and s.get("Id") is not None:
+                    seen[str(s["Id"])] = s
+            if len(rows) < page_size:
+                break
+            time.sleep(page_sleep)
+        return total
+
+    try:
+        with httpx.Client(timeout=TIMEOUT, headers=hdr, follow_redirects=True) as c:
+            for hosted in (True, False):
+                h = {"Category": "Hosted", "Predicate": "contains", "BoolValues": [hosted]}
+                try:
+                    _, _, cats = query(c, [h], size=1)
+                except RuntimeError as e:
+                    state["errors"] += 1
+                    log.warning("modelscope: category list failed: %s", e)
+                    continue
+                for cat in cats:
+                    value = str(cat.get("Value") or "").strip()
+                    count = int(cat.get("Count") or 0)
+                    if not value or count <= 0:
+                        continue
+                    crit = [h, {"Category": "Category", "Predicate": "contains",
+                                "StringValues": [value]}]
+                    drain(c, crit)
+                    if count > _MODELSCOPE_WINDOW:
+                        for ch in _MODELSCOPE_SPLIT:
+                            drain(c, crit, ch)
+    except RuntimeError as e:
+        log.warning("modelscope: stopped early: %s", e)
+    except httpx.HTTPError as e:
+        log.warning("modelscope: list error: %r", e)
+
+    out: list = []
+    seen_ep: set = set()
+    for s in seen.values():
+        row = _modelscope_row(s)
+        if not row:
+            continue
+        key = row["endpoint_url"].lower().rstrip("/")
+        if key in seen_ep:
+            continue
+        seen_ep.add(key)
+        out.append(row)
+    log.info("modelscope: %d listings seen (%d requests, %d errors) -> %d remote MCP servers",
+             len(seen), state["requests"], state["errors"], len(out))
+    return out
+
+
+MCP_CRAWLERS["modelscope"] = fetch_modelscope_mcp
+
+
+# ---------------------------------------------------------------------------
+# Docker MCP Catalog (github.com/docker/mcp-registry). Each server lives in
+# servers/<name>/server.yaml; ``type: remote`` entries carry a hosted URL.
+# One tarball download per crawl; image-based (local) servers are skipped.
+# ---------------------------------------------------------------------------
+
+DOCKER_MCP_TARBALL = "https://codeload.github.com/docker/mcp-registry/tar.gz/refs/heads/main"
+DOCKER_MCP_PAGE = "https://hub.docker.com/mcp/server/{name}/overview"
+_DOCKER_MCP_MAX_BYTES = 40 * 1024 * 1024
+
+
+def _docker_mcp_row(d: dict) -> dict | None:
+    if not isinstance(d, dict) or d.get("type") != "remote":
+        return None
+    name = str(d.get("name") or "").strip()
+    remote = d.get("remote") or {}
+    if not name or not isinstance(remote, dict):
+        return None
+    norm = _remote_endpoint(remote.get("url"))
+    if not norm:
+        return None
+    endpoint, needs_key = norm
+    about = d.get("about") or {}
+    meta = d.get("meta") or {}
+    src = d.get("source") or {}
+    title = str(about.get("title") or name).strip()
+    desc = re.sub(r"\s+", " ", str(about.get("description") or "")).strip()
+    if len(desc) > 240:
+        desc = desc[:240].rstrip() + "\u2026"
+    tags = [str(t) for t in (meta.get("tags") or []) if t and str(t) != "remote"]
+    cat = meta.get("category")
+    if cat and cat not in tags:
+        tags.insert(0, str(cat))
+    if d.get("oauth"):
+        auth = "oauth"
+    elif remote.get("headers") or needs_key:
+        auth = "required"
+    else:
+        auth = None
+    project = src.get("project") if isinstance(src, dict) else None
+    page = DOCKER_MCP_PAGE.format(name=name)
+    return {
+        "slug": _slugify(name)[:70] + "-docker",
+        "name": title,
+        "description": desc or None,
+        "endpoint_url": endpoint,
+        "homepage_url": project or page,
+        "transport": _transport_name(remote.get("transport_type"), endpoint),
+        "auth_method": auth,
+        "source_code_url": project if project and "github.com" in str(project) else None,
+        "tags": tags[:8],
+        "x402_supported": _mcp_x402(desc, title),
+        "source": "docker-mcp",
+        "source_id": name,
+        "source_url": page,
+        # Docker reviews every catalog PR before it ships.
+        "confidence": 0.8,
+    }
+
+
+def fetch_docker_mcp() -> list:
+    """Import remote servers from Docker's MCP catalog repository."""
+    import io
+    import tarfile
+    try:
+        with httpx.Client(timeout=httpx.Timeout(connect=10.0, read=60.0, write=10.0, pool=10.0),
+                          headers={"User-Agent": UA}, follow_redirects=True) as c:
+            r = c.get(DOCKER_MCP_TARBALL)
+            if r.status_code != 200:
+                log.warning("docker-mcp: tarball HTTP %d", r.status_code)
+                return []
+            blob = r.content
+    except httpx.HTTPError as e:
+        log.warning("docker-mcp: download failed: %r", e)
+        return []
+    if len(blob) > _DOCKER_MCP_MAX_BYTES:
+        log.warning("docker-mcp: tarball too large (%d bytes)", len(blob))
+        return []
+    out: list = []
+    seen_ep: set = set()
+    total = 0
+    try:
+        with tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz") as tf:
+            for m in tf:
+                parts = m.name.split("/")
+                if not (m.isfile() and len(parts) == 4 and parts[1] == "servers"
+                        and parts[3] == "server.yaml" and m.size < 256 * 1024):
+                    continue
+                total += 1
+                f = tf.extractfile(m)
+                if f is None:
+                    continue
+                try:
+                    d = yaml.safe_load(f.read().decode("utf-8", "replace"))
+                except yaml.YAMLError:
+                    continue
+                row = _docker_mcp_row(d)
+                if not row:
+                    continue
+                key = row["endpoint_url"].lower().rstrip("/")
+                if key in seen_ep:
+                    continue
+                seen_ep.add(key)
+                out.append(row)
+    except (tarfile.TarError, OSError) as e:
+        log.warning("docker-mcp: bad tarball: %r", e)
+        return []
+    log.info("docker-mcp: %d catalog servers -> %d remote MCP servers", total, len(out))
+    return out
+
+
+MCP_CRAWLERS["docker-mcp"] = fetch_docker_mcp
 
 
 def _db_resources_text(entries):
