@@ -368,6 +368,45 @@ class HyperEvmBulkTests(unittest.TestCase):
                                              [crawlers._topic_addr(PAYTO)]])
 
 
+class BulkSweepMemoryTests(unittest.TestCase):
+    def test_parallel_sweep_keeps_few_windows_queued(self):
+        """Every window used to be submitted up front, so finished futures kept
+        all log lists alive and the 2026-11-13 Base run was OOM-killed."""
+        submitted = []
+        real_executor = crawlers.ThreadPoolExecutor
+
+        class Tracking(real_executor):
+            def submit(self, fn, *args, **kwargs):
+                fut = super().submit(fn, *args, **kwargs)
+                submitted.append(fut)
+                live = sum(1 for f in submitted if not f.done())
+                self.peak = max(getattr(self, "peak", 0), live)
+                Tracking.last = self
+                return fut
+
+        def handler(request):
+            body = request.read().decode()
+            if "eth_blockNumber" in body:
+                return httpx.Response(200, json={"result": hex(99999)})
+            if "eth_getBlockByNumber" in body:
+                return httpx.Response(200, json={"result": {"timestamp": "0x0"}})
+            return httpx.Response(200, json={"result": [
+                {"topics": [crawlers._TRANSFER_TOPIC, crawlers._topic_addr(PAYER),
+                            crawlers._topic_addr(PAYTO)]}]})
+
+        cfg = {"base": ("https://rpc.invalid", "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                        2.0, 1000, 4000)}
+        with patch.object(crawlers, "BULK_LOG_CHAINS", cfg), \
+                patch.object(crawlers, "ThreadPoolExecutor", Tracking), \
+                patch.object(crawlers.time, "sleep"), \
+                patch.object(crawlers.httpx, "Client", side_effect=_client_with(handler)):
+            results, ok = crawlers.fetch_chain_activity_bulk([PAYTO], chain="base", days=2)
+        self.assertTrue(ok)
+        self.assertEqual(results[PAYTO.lower()]["tx"], len(submitted))
+        self.assertGreater(len(submitted), 50)
+        self.assertLessEqual(Tracking.last.peak, crawlers.BULK_LOG_WORKERS["base"] * 2)
+
+
 class ArcBulkConfigTests(unittest.TestCase):
     def test_arc_uses_official_node_with_wide_windows_and_pacing(self):
         url, contract, _secs, window, _batch = crawlers.BULK_LOG_CHAINS["arc"]

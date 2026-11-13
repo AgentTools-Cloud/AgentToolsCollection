@@ -49,6 +49,7 @@ SOURCE_LABELS = {
     "verantis": "Verantis",
     "a2aregistry": "the A2A Registry",
     "a2a-registry": "the A2A Registry",
+    "localmark": "LocalMark",
     "awesome-a2a": "Awesome A2A",
     "awesome-x402": "Awesome x402",
     "x402scan": "x402scan",

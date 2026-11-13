@@ -1149,6 +1149,143 @@ def crawl_a2a_registry_global(page_size: int = 100, max_pages: int = 60) -> dict
     return result
 
 
+# LocalMark (localmark.ai) publishes a daily snapshot of the A2A cards it
+# checks. Its observations and compilation are CC BY 4.0 ("Data: LocalMark
+# (localmark.ai)"); the card contents belong to each publisher and LocalMark
+# grants nothing on them. So the snapshot is only a list of leads: we take the
+# card URL, fetch the card from the publisher ourselves and store nothing of
+# LocalMark's observations. Only cards we do not hold yet are fetched, and one
+# host may contribute at most LOCALMARK_PER_HOST cards per run (one CloudBase
+# host alone publishes ~900 generated cards).
+LOCALMARK_FEED = "https://localmark.ai/data/latest.jsonl.gz"
+LOCALMARK_PER_HOST = 20
+LOCALMARK_MAX_NEW = 400
+LOCALMARK_WORKERS = 6
+
+
+def _url_key(url: str | None) -> str:
+    return (url or "").strip().rstrip("/").lower()
+
+
+def localmark_leads(records: list[dict], known: set[str],
+                    per_host: int = LOCALMARK_PER_HOST,
+                    max_new: int = LOCALMARK_MAX_NEW) -> list[dict]:
+    """Card URLs from a LocalMark snapshot that we should try to fetch.
+
+    Skips cards LocalMark's own last check failed, non-https URLs, cards whose
+    card or endpoint URL we already index, and anything past the per-host cap.
+    """
+    out: list[dict] = []
+    seen: set[str] = set()
+    hosts: dict[str, int] = {}
+    for rec in records:
+        if len(out) >= max_new:
+            break
+        if not isinstance(rec, dict):
+            continue
+        card_url = (rec.get("card_url") or "").strip()
+        if not card_url.lower().startswith("https://"):
+            continue
+        check = ((rec.get("observations") or {}).get("latest_card_check") or {})
+        if check.get("passed") is False:
+            continue
+        key = _url_key(card_url)
+        if (key in seen or key in known
+                or _url_key(rec.get("endpoint_url")) in known):
+            continue
+        host = (urlparse(card_url).hostname or "").lower()
+        if not host or hosts.get(host, 0) >= per_host:
+            continue
+        seen.add(key)
+        hosts[host] = hosts.get(host, 0) + 1
+        out.append({"card_url": card_url,
+                    "source_id": str(rec.get("agent_id") or card_url),
+                    "source_url": rec.get("profile_url")})
+    return out
+
+
+def _fetch_localmark_feed() -> list[dict]:
+    import gzip
+    timeout = httpx.Timeout(connect=10.0, read=60.0, write=10.0, pool=10.0)
+    with public_http.client(timeout=timeout, follow_redirects=True,
+                            headers={"User-Agent": UA}) as c:
+        r = c.get(LOCALMARK_FEED)
+        r.raise_for_status()
+        raw = gzip.decompress(r.content)
+    records = []
+    for line in raw.splitlines():
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(rec, dict):
+            records.append(rec)
+    return records
+
+
+def _known_a2a_urls() -> set[str]:
+    from contextlib import closing
+    with closing(db.connect(read_only=True)) as conn:
+        rows = conn.execute(
+            "SELECT card_url, endpoint_url FROM a2a_agents").fetchall()
+    return {_url_key(u) for r in rows for u in r if u}
+
+
+def crawl_localmark() -> dict:
+    """Use LocalMark's daily snapshot as discovery leads for new A2A cards."""
+    from concurrent.futures import ThreadPoolExecutor
+    from . import ingestion
+
+    records = _fetch_localmark_feed()
+    leads = localmark_leads(records, _known_a2a_urls())
+    rows: list[dict] = []
+    with public_http.client(
+            timeout=TIMEOUT, follow_redirects=True,
+            headers={"User-Agent": UA, "Accept": "application/json"}) as c:
+
+        def fetch(lead):
+            try:
+                return lead, fetch_agent_card(lead["card_url"], client=c,
+                                              homepage=False)
+            except Exception as e:  # noqa: BLE001 -- one bad host is not fatal
+                log.info("localmark: card fetch failed for %s: %r",
+                         lead["card_url"], e)
+                return lead, (None, None)
+
+        with ThreadPoolExecutor(max_workers=LOCALMARK_WORKERS) as pool:
+            for lead, (card, card_url) in pool.map(fetch, leads):
+                if not card:
+                    continue
+                try:
+                    row = card_to_row(card, card_url or lead["card_url"],
+                                      source="localmark",
+                                      source_id=lead["source_id"])
+                except Exception as e:  # noqa: BLE001
+                    log.warning("localmark: card_to_row failed for %s: %r",
+                                lead["card_url"], e)
+                    continue
+                # Slug from name alone would merge same-named agents on
+                # different hosts; keep the host in it.
+                row["slug"] = f"{_slugify(row['name'])}-{_host_slug(row['card_url'])}"[:80]
+                row["source_url"] = lead["source_url"]
+                rows.append(row)
+
+    def write(batch):
+        with db.writer(immediate=True) as conn:
+            return ingestion.ingest_batch(conn, "a2a", "localmark", batch,
+                                          db.upsert_a2a_agent)
+
+    inserted = updated = rejected = 0
+    for i in range(0, len(rows), 100):
+        res = db.with_retry(lambda b=rows[i:i + 100]: write(b))
+        inserted += res["added"]; updated += res["updated"]; rejected += res["rejected"]
+    log.info("localmark: snapshot=%d leads=%d resolved=%d inserted=%d",
+             len(records), len(leads), len(rows), inserted)
+    return {"snapshot": len(records), "candidates": len(leads),
+            "resolved": len(rows), "inserted": inserted, "updated": updated,
+            "rejected": rejected}
+
+
 GITHUB_TOPIC_SEARCH = "https://api.github.com/search/repositories"
 
 

@@ -8,7 +8,7 @@ import logging
 import random
 import re
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextlib import closing
 from datetime import datetime, timezone
 
@@ -1441,31 +1441,48 @@ def fetch_chain_activity_bulk(paytos, chain="base", days=30, rate=0.15):
             for batch in batches:
                 topics = [_TRANSFER_TOPIC, None,
                           [_topic_addr(a) for a in batch]]
-                spans = [(lo, min(lo + block_window - 1, head)) for lo in windows]
+                spans = iter([(lo, min(lo + block_window - 1, head))
+                              for lo in windows])
                 # Windows are independent; a few in flight hide node latency.
-                # Results are folded in on this thread only.
+                # Results are folded in on this thread only. Submission is
+                # bounded: a completed future holds its whole log list, so
+                # queueing every window at once kept all 13k results alive and
+                # the 2026-11-13 run was OOM-killed at 2.6 GB.
                 with ThreadPoolExecutor(max_workers=workers) as pool:
-                    futures = [pool.submit(fetch_window, topics, lo, hi)
-                               for lo, hi in spans]
-                    for fut in as_completed(futures):
-                        logs = fut.result()
-                        if logs is None:
-                            for f in futures:
-                                f.cancel()
-                            return {}, False
-                        for entry in logs:
-                            tp = entry.get("topics") or []
-                            if len(tp) < 3:
-                                continue
-                            addr = topic_to_addr.get(tp[2].lower())
-                            if addr is None:
-                                continue
-                            counts[addr]["tx"] += 1
-                            counts[addr]["payers"].add(tp[1].lower())
-                        done += 1
-                        if done % 200 == 0:
-                            log.info("onchain bulk %s: %d/%d windows",
-                                     chain, done, total)
+                    pending: set = set()
+
+                    def fill():
+                        while len(pending) < workers * 2:
+                            nxt = next(spans, None)
+                            if nxt is None:
+                                return
+                            pending.add(pool.submit(fetch_window, topics, *nxt))
+
+                    fill()
+                    while pending:
+                        finished, rest = wait(pending, return_when=FIRST_COMPLETED)
+                        pending.clear()
+                        pending.update(rest)
+                        for fut in finished:
+                            logs = fut.result()
+                            if logs is None:
+                                for f in pending:
+                                    f.cancel()
+                                return {}, False
+                            for entry in logs:
+                                tp = entry.get("topics") or []
+                                if len(tp) < 3:
+                                    continue
+                                addr = topic_to_addr.get(tp[2].lower())
+                                if addr is None:
+                                    continue
+                                counts[addr]["tx"] += 1
+                                counts[addr]["payers"].add(tp[1].lower())
+                            done += 1
+                            if done % 200 == 0:
+                                log.info("onchain bulk %s: %d/%d windows",
+                                         chain, done, total)
+                        fill()
     except Exception as e:
         log.warning("onchain bulk %s sweep failed: %r", chain, e)
         return {}, False
