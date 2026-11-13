@@ -13,8 +13,9 @@ an operator sees the same levers on both sites. Differences, all documented in
 * Uptime needs five probes in 30 days before it is final; until then the
   observed ratio is shown as provisional.
 
-The score is shown alongside the existing directory rating and does not change
-search ranking.
+The score is shown on its own and also contributes up to 15 of the 100 points
+of the A2A quality score (see db._score_a2a), so it does affect
+search order and leaderboards through that grade.
 """
 from __future__ import annotations
 
