@@ -241,12 +241,12 @@ Endpoint: https://agent-tools.cloud/mcp-discovery/
 Tools: search, get, search_mcp_servers, get_mcp_server, search_a2a_agents,
 search_resources, ask_services, list_categories, stats, directory_stats, get_methodology,
 list_articles, get_article, scan_mcp_safety, register,
-prepare_paid_verification, execute_paid_verification, get_paid_verification,
+create_api_key, prepare_paid_verification, execute_paid_verification, get_paid_verification,
 claim_service_url, verify_service_url, get_owned_listing, edit_owned_listing.
 
 ## Claim and edit an exact service URL
 
-Send Authorization: Bearer <API_KEY>. Obtain a key with POST /api/v1/keys.
+Send Authorization: Bearer <API_KEY>. Obtain a key with POST /api/v1/keys or create_api_key.
 claim_service_url(url, method=None) -> publish the returned token ->
 verify_service_url(claim_id, token) -> get_owned_listing(kind, slug) ->
 edit_owned_listing(kind, slug, fields).
@@ -431,6 +431,7 @@ def well_known_mcp(request: Request) -> dict[str, Any]:
             {"name": "search_resources", "description": "Unified search across x402 services, MCP servers and A2A agents."},
             {"name": "scan_mcp_safety", "description": "Check an MCP server (by endpoint URL) for malware / prompt-injection / tool-poisoning: returns our stored verdict if indexed, else probes + scans + indexes it."},
             {"name": "register", "description": "Submit an x402 / MCP service; it is verified automatically and listed when verification passes."},
+            {"name": "create_api_key", "description": "Create a free account API key (no sign-up); returned once. Unlocks complete directory_stats lists, paid verification and claims."},
             {"name": "prepare_paid_verification", "description": "Quote a sponsored paid verification of an x402 service: returns EIP-712 typed data for your own wallet to sign (non-custodial, Base USDC, <= $1)."},
             {"name": "execute_paid_verification", "description": "Relay your signed authorization to the service exactly once and score the paid call."},
             {"name": "get_paid_verification", "description": "Read one of your own paid verifications."},
@@ -530,6 +531,7 @@ def _build_openapi() -> dict[str, Any]:
         "Whole-host claims use /api/v1/claims and are unavailable on shared hosts. "
         "Paid verification requires the buyer's signed wallet authorization and is never retried. "
         "MCP provides prepare_paid_verification, execute_paid_verification and get_paid_verification. "
+        "MCP-only clients can mint a key with the create_api_key tool. "
         "Proof methods: https://agent-tools.cloud/docs/claim."
     )
 

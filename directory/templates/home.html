@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_macros.html" import leaderboard %}
+{% from "_macros.html" import leaderboard, promo_slot %}
 {% block title %}agent-tools.cloud — Search x402 APIs, MCP servers, and A2A agents{% endblock %}
 {% block desc %}agent-tools.cloud is an open discovery directory for x402 paid APIs, remotely callable MCP servers, and A2A agents, with health checks and safety signals for agentic workflows.{% endblock %}
 {% block og_title %}agent-tools.cloud — x402, MCP, and A2A discovery directory{% endblock %}
@@ -114,6 +114,43 @@
   </aside>
 </section>
 
+{# ---------- From the data: entry points to the stats pages ---------- #}
+{% if band %}
+<section class="mt-10" aria-labelledby="hm-band">
+  <h2 id="hm-band" class="hm-kicker">From the data</h2>
+  <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mt-3 [&>*]:min-w-0">
+    <a href="/stats/usable" class="svc-card p-5 block group">
+      <div class="text-xs text-slate-500">How many agent tools actually work?</div>
+      <p class="text-[15px] font-semibold text-slate-900 leading-snug mt-2">
+        {{ band.usable.reachable_pct }}% answer our probes; {{ band.usable.ready_pct }}% are ready for an agent to call.
+      </p>
+      <span class="text-xs text-slate-500 mt-3 inline-block group-hover:text-blue-600">Out of {{ band.usable.indexed|num }} listings →</span>
+    </a>
+    <a href="/stats/reports/{{ band.report.month }}" class="svc-card p-5 block group">
+      <div class="text-xs text-slate-500">Monthly report · {{ band.report.title }}</div>
+      <p class="text-[15px] font-semibold text-slate-900 leading-snug mt-2">
+        {% if band.report.ready_change is not none %}
+        {{ '{:+,}'.format(band.report.ready_change) }} listings ready for agents since {{ band.report.since }}, now {{ band.report.ready|num }}.
+        {% else %}
+        {{ band.report.ready|num }} listings ready for agents so far this month.
+        {% endif %}
+      </p>
+      <span class="text-xs text-slate-500 mt-3 inline-block group-hover:text-blue-600">Read the report →</span>
+    </a>
+    <div class="svc-card p-5">
+      <div class="text-xs text-slate-500">Largest topics among reachable listings</div>
+      <div class="flex flex-wrap gap-2 mt-3">
+        {% for t in band.topics %}
+        <a class="hm-chip" href="/stats/topics/{{ t.topic }}">{{ t.topic }} <span class="text-slate-400 ml-1 tnum">{{ t.reachable|num }}</span></a>
+        {% endfor %}
+      </div>
+      <a href="/stats/topics" class="text-xs text-slate-500 mt-3 inline-block hover:text-blue-600">All topics →</a>
+    </div>
+  </div>
+</section>
+{% endif %}
+{{ promo_slot(promo['home-after-index']) if promo }}
+
 {# ---------- Three protocols ---------- #}
 <section class="mt-16" aria-labelledby="hm-protocols">
   <div class="hm-kicker">01 · Browse</div>
@@ -184,6 +221,8 @@
     {% endfor %}
   </div>
 </section>
+
+{{ promo_slot(promo['home-before-blog']) if promo }}
 
 {# ---------- Blog ---------- #}
 {% if articles_enabled and latest_articles %}

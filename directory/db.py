@@ -437,6 +437,16 @@ CREATE TABLE IF NOT EXISTS stats_snapshots (
   generated_at  INTEGER NOT NULL,
   json          TEXT NOT NULL
 );
+-- KPI values for days before the first snapshot, rebuilt from raw probe
+-- history (`jobs stats-backfill`). Only metrics that can be rebuilt are
+-- present (reachable per protocol); KPI trends read them, monthly reports
+-- and snapshot JSON do not.
+CREATE TABLE IF NOT EXISTS stats_kpi_backfill (
+  day           TEXT PRIMARY KEY,     -- YYYY-MM-DD (UTC)
+  kpis          TEXT NOT NULL,        -- {"x402": {"reachable": n}, ...}
+  method        TEXT NOT NULL,
+  generated_at  INTEGER NOT NULL
+);
 
 -- External adoption signals (directory/popularity.py), keyed by the external
 -- identity and joined to listings on read. Display only.
@@ -1986,14 +1996,43 @@ def latest_stats_snapshot(conn) -> dict | None:
 
 
 def stats_history(conn, days: int = 90) -> list[tuple[str, dict]]:
-    """[(day, kpis)] oldest first; only the small KPI block of each snapshot."""
+    """[(day, kpis)] oldest first; only the small KPI block of each snapshot.
+
+    Days before the first stored snapshot come from `stats_kpi_backfill` and
+    carry only the metrics that could be rebuilt (each has `"backfill": True`
+    at the top level).
+    """
     try:
         rows = conn.execute(
             "SELECT day, json_extract(json,'$.kpis') FROM stats_snapshots "
             "ORDER BY day DESC LIMIT ?", (int(days),)).fetchall()
     except sqlite3.OperationalError:
         return []
-    return [(r[0], json.loads(r[1] or "{}")) for r in reversed(rows)]
+    out = [(r[0], json.loads(r[1] or "{}")) for r in reversed(rows)]
+    if out and len(out) < days:
+        first = out[0][0]
+        try:
+            older = conn.execute(
+                "SELECT day, kpis FROM stats_kpi_backfill WHERE day < ? "
+                "ORDER BY day DESC LIMIT ?", (first, int(days) - len(out))).fetchall()
+        except sqlite3.OperationalError:
+            older = []
+        out = [(r[0], {**json.loads(r[1] or "{}"), "backfill": True})
+               for r in reversed(older)] + out
+    return out
+
+
+def save_kpi_backfill(conn, rows: dict[str, dict], method: str) -> int:
+    """Upsert backfilled KPI days; days that have a real snapshot are skipped."""
+    real = {r[0] for r in conn.execute("SELECT day FROM stats_snapshots")}
+    now = int(time.time())
+    keep = [(d, json.dumps(k, separators=(",", ":")), method, now)
+            for d, k in sorted(rows.items()) if d not in real]
+    # Upsert only: raw probes are pruned, so a later run must not drop older days.
+    conn.executemany("INSERT INTO stats_kpi_backfill(day, kpis, method, generated_at) "
+                     "VALUES (?,?,?,?) ON CONFLICT(day) DO UPDATE SET kpis=excluded.kpis, "
+                     "method=excluded.method, generated_at=excluded.generated_at", keep)
+    return len(keep)
 
 
 def stats(conn):

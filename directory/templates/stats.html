@@ -144,7 +144,7 @@
     {% if k.delta is not none %}
       <div class="text-xs mt-2 mono {{ 'text-emerald-600' if k.delta > 0 else ('text-red-600' if k.delta < 0 else 'text-slate-400') }}">
         {{ '▲' if k.delta > 0 else ('▼' if k.delta < 0 else '·') }} {{ (k.delta|abs)|num }}
-        {% if history_days > period %}vs {{ period }}d ago{% else %}since {{ k.since }}{% endif %}
+        {% if k.full %}vs {{ period }}d ago{% else %}since {{ k.since }}{% endif %}{% if k.backfilled %}<sup>*</sup>{% endif %}
       </div>
       {% if k.series|length >= 3 %}<div class="mt-2">{{ spark(k.series) }}</div>{% endif %}
     {% else %}
@@ -158,6 +158,9 @@
   </div>
   {% endfor %}
 </section>
+{% if backfill_used %}
+<p class="text-xs text-slate-400 mt-2"><sup>*</sup> Before {{ first_day }} the reachable trend is rebuilt from our raw probe logs (listings whose latest probe that day was ok); other figures start on {{ first_day }}.</p>
+{% endif %}
 
 {# Go deeper: the other stats pages #}
 {% set kk = snap.kpis[view if view != 'all' else 'all'] %}

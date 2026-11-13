@@ -12,7 +12,7 @@ from directory.mcp_app import discover_mcp
 # else must be marked read-only.
 WRITE_TOOLS = {"register", "scan_mcp_safety", "prepare_paid_verification",
                "execute_paid_verification", "claim_service_url",
-               "verify_service_url", "edit_owned_listing"}
+               "verify_service_url", "edit_owned_listing", "create_api_key"}
 DESTRUCTIVE_TOOLS = {"execute_paid_verification", "verify_service_url",
                      "edit_owned_listing"}
 
@@ -45,7 +45,8 @@ class McpToolMetadataTests(unittest.TestCase):
     def test_stats_tools_present(self):
         tools = _tools()
         self.assertIn("directory_stats", tools)
-        self.assertEqual(set(tools["directory_stats"].inputSchema["properties"]), {"view", "topic", "month"})
+        self.assertEqual(set(tools["directory_stats"].inputSchema["properties"]),
+                         {"view", "topic", "month", "api_key"})
 
 
 if __name__ == "__main__":

@@ -1032,6 +1032,84 @@ LINKS = {
 _latest_cache: dict = {"at": 0.0, "snap": None}
 
 
+def home_band(snap: dict | None, history: list, topics_shown: int = 5) -> dict | None:
+    """Three cards for the home page "From the data" band, read from stored data.
+
+    `history` is `db.stats_history` output; only real snapshot days count for
+    the month's change.
+    """
+    if not snap:
+        return None
+    k = snap["kpis"]["all"]
+    pct = lambda a, b: round(100 * a / b) if b else 0  # noqa: E731
+    usable_card = {"reachable_pct": pct(k["reachable"], k["indexed"]),
+                   "ready_pct": pct(k["ready"], k["indexed"]), "indexed": k["indexed"]}
+    month = snap["as_of"][:7]
+    days = [(d, kp) for d, kp in history
+            if not kp.get("backfill") and d.startswith(month) and "all" in kp]
+    report = {"month": month, "title": time.strftime("%B %Y", time.strptime(month, "%Y-%m")),
+              "ready": k["ready"], "ready_change": None, "indexed_change": None, "since": None}
+    if len(days) >= 2:
+        first = days[0][1]["all"]
+        report.update(ready_change=k["ready"] - first.get("ready", k["ready"]),
+                      indexed_change=k["indexed"] - first.get("indexed", k["indexed"]),
+                      since=days[0][0])
+    rows = ((snap.get("topics") or {}).get("rows") or [])[:topics_shown]
+    topics_card = [{"topic": r["topic"], "reachable": sum(r.get(kk, 0) for kk in KINDS)}
+                   for r in rows]
+    return {"usable": usable_card, "report": report, "topics": topics_card}
+
+
+BACKFILL_METHOD = ("reachable = listings whose latest probe at the end of the UTC day "
+                   "was ok, rebuilt from raw probe history")
+_RAW_PROBES = {"x402": ("health_history", "service_id"),
+               "mcp": ("mcp_health_history", "server_id"),
+               "a2a": ("a2a_health_history", "agent_id")}
+
+
+def backfill_kpis(conn, before: str, warmup_days: int = 2) -> dict[str, dict]:
+    """{day: {kind: {"reachable": n}}} for UTC days before `before`.
+
+    Replays each protocol's raw probes in time order and counts, at the end of
+    every day, the listings whose latest probe was ok -- the same rule as the
+    snapshot's `health='ok'`. Only `reachable` can be rebuilt: indexed counts,
+    protocol checks and readiness were not stored per day. The first
+    `warmup_days` of each protocol are dropped while the replay has not yet
+    seen every listing. There is no "all" total because the protocols' raw
+    histories start on different days.
+    """
+    out: dict[str, dict] = defaultdict(dict)
+    for kind, (table, col) in _RAW_PROBES.items():
+        try:
+            cur = conn.execute(f"SELECT {col}, checked_at, status FROM {table} "
+                               "ORDER BY checked_at")
+        except Exception:  # noqa: BLE001 - table missing on old databases
+            continue
+        state: dict[int, bool] = {}
+        ok = 0
+        days: list[tuple[str, int]] = []
+        day = None
+        for lid, ts, status in cur:
+            d = _day(ts)
+            if d >= before:
+                break
+            if day is not None and d != day:
+                days.append((day, ok))
+            day = d
+            now_ok = status == "ok"
+            was = state.get(lid)
+            if was is None:
+                ok += now_ok
+            elif was != now_ok:
+                ok += 1 if now_ok else -1
+            state[lid] = now_ok
+        if day is not None:
+            days.append((day, ok))
+        for d, n in days[warmup_days:]:
+            out[d][kind] = {"reachable": n}
+    return dict(out)
+
+
 def latest(conn_factory, ttl: float = 600.0) -> dict | None:
     """The newest stored snapshot, cached in-process for `ttl` seconds.
 

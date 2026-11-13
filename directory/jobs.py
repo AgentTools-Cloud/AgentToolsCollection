@@ -703,6 +703,32 @@ def cmd_stats_snapshot() -> int:
     return 0
 
 
+def cmd_stats_backfill() -> int:
+    """Rebuild KPI trend values for days before the first /stats snapshot.
+
+    Idempotent: upserts `stats_kpi_backfill` (older days survive raw pruning). Only the reachable count per
+    protocol is rebuilt (see stats.backfill_kpis); days with a real snapshot
+    are never overwritten.
+    """
+    from . import stats as stats_mod
+    with db.connect(read_only=True) as c:
+        row = c.execute("SELECT MIN(day) FROM stats_snapshots").fetchone()
+        first = row[0] if row else None
+        if not first:
+            log.info("stats backfill: no snapshot yet, nothing to do")
+            return 0
+        rows = stats_mod.backfill_kpis(c, first)
+
+    def op():
+        with db.writer() as c:
+            return db.save_kpi_backfill(c, rows, stats_mod.BACKFILL_METHOD)
+    n = db.with_retry(op)
+    span = (min(rows), max(rows)) if rows else (None, None)
+    print(json.dumps({"days": n, "from": span[0], "to": span[1],
+                      "before_first_snapshot": first}))
+    return 0
+
+
 def cmd_history_rollup(backfill: bool = False) -> int:
     """Keep one row per listing per UTC day indefinitely (data/history.db).
 
@@ -2294,6 +2320,7 @@ def main(argv=None) -> int:
     sub.add_parser("health-a2a")
     sub.add_parser("readiness")
     sub.add_parser("stats-snapshot")
+    sub.add_parser("stats-backfill")
     p_hist = sub.add_parser("history-rollup")
     p_hist.add_argument("--backfill", action="store_true")
     p_pop = sub.add_parser("popularity")
@@ -2396,6 +2423,8 @@ def main(argv=None) -> int:
         return cmd_readiness()
     if args.cmd == "stats-snapshot":
         return cmd_stats_snapshot()
+    if args.cmd == "stats-backfill":
+        return cmd_stats_backfill()
     if args.cmd == "history-rollup":
         return cmd_history_rollup(args.backfill)
     if args.cmd == "popularity":

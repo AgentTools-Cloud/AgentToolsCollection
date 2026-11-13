@@ -154,19 +154,28 @@ def home(request: Request):
     # The daily /stats snapshot feeds the hero panel and the findings; the page
     # falls back to the live counters when no snapshot exists yet.
     try:
-        snap, _history = _stats_payload()
+        snap, history = _stats_payload()
     except Exception:
-        snap = None
-    headlines = None
+        snap, history = None, []
+    headlines = band = None
     if snap:
         from . import stats as stats_mod
         try:
             headlines = stats_mod.headlines(snap)
         except Exception:
             headlines = None
+        try:
+            band = stats_mod.home_band(snap, history)
+        except Exception:  # noqa: BLE001 - the band is optional
+            import logging
+            logging.getLogger(__name__).exception("home band")
+            band = None
+    from . import promo
     return TEMPLATES.TemplateResponse(
         request, "home.html", {"request": request, "latest_articles": latest_articles,
-                               "snap": snap, "headlines": headlines, **_home_payload()})
+                               "snap": snap, "headlines": headlines, "band": band,
+                               "promo": promo.slots("home-after-index", "home-before-blog"),
+                               **_home_payload()})
 
 
 @router.get("/x402", response_class=HTMLResponse, include_in_schema=False)
@@ -448,14 +457,20 @@ def _render_stats(request: Request, view: str, period: int):
         return TEMPLATES.TemplateResponse(
             request, "stats.html", {"request": request, "snap": None}, status_code=503)
     kpis = {}
+    real = [d for d, kp in history if not kp.get("backfill")]
+    first_real = real[0] if real else None
+    full_from = time.strftime("%Y-%m-%d", time.gmtime(time.time() - (period - 1) * 86400))
     for metric in ("indexed", "reachable", "verified", "ready"):
         series, delta, since = _kpi_trend(history, view, metric, period)
         kpis[metric] = {"value": snap["kpis"][view][metric], "series": series, "delta": delta,
-                        "since": since}
+                        "since": since,
+                        "full": bool(since and since <= full_from),
+                        "backfilled": bool(since and first_real and since < first_real)}
     return TEMPLATES.TemplateResponse(request, "stats.html", {
         "request": request, "snap": snap, "view": view, "period": period,
         "kpis": kpis, "headlines": stats_mod.headlines(snap, view),
-        "history_days": len(history), "first_day": history[0][0] if history else None,
+        "history_days": len(real), "first_day": first_real,
+        "backfill_used": any(k["backfilled"] for k in kpis.values()),
         "kinds": [k for k in stats_mod.KINDS if view in ("all", k)],
         "kind_label": stats_mod.KIND_LABEL,
         "page_title": (stats_mod.KIND_LABEL[view] + " statistics") if view != "all" else "The state of agent tools",
@@ -2311,6 +2326,7 @@ def well_known():
             "recheck_hours": 24,
             "api": {
                 "mint_key": "https://agent-tools.cloud/api/v1/keys",
+                "mint_key_mcp": "create_api_key tool at https://agent-tools.cloud/mcp-discovery/",
                 "open_claim": "https://agent-tools.cloud/api/v1/claims",
                 "verify_claim":
                     "https://agent-tools.cloud/api/v1/claims/{claim_id}/verify",
