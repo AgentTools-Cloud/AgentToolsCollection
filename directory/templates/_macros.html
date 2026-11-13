@@ -15,8 +15,9 @@
 {%- endmacro %}
 
 
-{#- Readiness breakdown (A2A / MCP / x402). Display only: search order uses
-     the quality grade, passed in as `quality` = (score, grade). -#}
+{#- Readiness breakdown (A2A / MCP / x402). Search order uses the quality
+     grade, passed in as `quality` = (score, grade); for x402 and A2A that
+     grade includes up to 15 readiness points, for MCP it does not. -#}
 {% macro readiness_section(r, title, quality=None, quality_basis="availability, conformance and speed") -%}
 {% if r and r.criteria %}
 <section class="svc-card p-6 mb-6" id="readiness">
@@ -26,8 +27,8 @@
   </div>
   <p class="text-xs text-slate-500 mb-4">
     Readiness is how fully this listing follows its protocol and how it behaved
-    in our probes over 30 days. It is shown for reference and does not move it
-    in search.
+    in our probes over 30 days. For x402 and A2A listings it contributes up to
+    15 of the 100 quality points; for MCP listings it is shown for reference only.
     {% if quality %}Search order and leaderboards use the separate quality grade
     (here {{ quality[1] }}, {{ "%.1f"|format(quality[0]) }}/100), which weighs {{ quality_basis }}.{% endif %}
     <a class="text-blue-600 hover:underline" href="/about#readiness">How the two differ</a>

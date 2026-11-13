@@ -353,3 +353,20 @@ class BotsRatedPauseTests(TemporaryDatabaseTestCase):
         self.assertGreater(result["paused_until"], int(botsrated.time.time()) + 3000)
         rows = self.query("SELECT value FROM meta WHERE key=?", (botsrated.PAUSE_META_KEY,))
         self.assertEqual(int(rows[0]["value"]), result["paused_until"])
+
+
+class BotsRatedExitCodeTests(unittest.TestCase):
+    def run_cli(self, result):
+        from directory import jobs
+        with patch.object(jobs.botsrated_mod, "sync_botsrated_quality",
+                          return_value=result), \
+                patch("builtins.print"):
+            return jobs.main(["sync-botsrated"])
+
+    def test_rate_limited_skip_exits_zero(self):
+        self.assertEqual(self.run_cli({"skipped": "rate_limited",
+                                       "paused_until": 1}), 0)
+
+    def test_errors_still_exit_one(self):
+        self.assertEqual(self.run_cli({"errors": 2}), 1)
+        self.assertEqual(self.run_cli({"errors": 0}), 0)

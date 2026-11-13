@@ -2406,7 +2406,8 @@ def main(argv=None) -> int:
         result = botsrated_mod.sync_botsrated_quality(
             limit=args.limit, stale_hours=args.stale_hours)
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
-        return 0 if not result["errors"] else 1
+        # A rate-limit skip/pause is expected and has no "errors" key.
+        return 0 if not result.get("errors") else 1
     if args.cmd == "retire":
         return cmd_retire(args.kind, args.slug, args.reason, args.actor,
                           args.requested_by, args.request_email,
