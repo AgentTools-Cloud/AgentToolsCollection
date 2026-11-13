@@ -13,10 +13,19 @@ UNSUB = "https://agent-tools.cloud/email/claim-invitations/unsubscribe#tok"
 class InvitationReadiness(unittest.TestCase):
     def test_readiness_line_present(self):
         subject, text, markup = mailer.claim_invitation_message(
-            "Demo", "the official MCP Registry", LISTING, UNSUB, {"grade": "C", "score": 68})
-        self.assertIn("Its readiness grade is C (68/100)", text)
+            "Demo", "the official MCP Registry", LISTING, UNSUB, {"grade": "B", "score": 81})
+        self.assertIn("Its readiness grade is B (81/100)", text)
         self.assertIn(LISTING + "#readiness", text)
-        self.assertIn("<b>C</b> (68/100)", markup)
+        self.assertIn("<b>B</b> (81/100)", markup)
+        self.assertIn("https://agent-tools.cloud/docs/claim", text)
+
+    def test_low_grades_not_mentioned(self):
+        for grade in ("C", "D", "F", "<b>"):
+            _s, text, markup = mailer.claim_invitation_message(
+                "Demo", "the official MCP Registry", LISTING, UNSUB, {"grade": grade, "score": 41})
+            self.assertNotIn("readiness", text)
+            self.assertNotIn("41/100", markup)
+            self.assertIn("Claiming is free", text)
         self.assertIn("https://agent-tools.cloud/docs/claim", text)
         self.assertIn("DNS TXT record", text)
 
@@ -28,10 +37,10 @@ class InvitationReadiness(unittest.TestCase):
 
     def test_group_single_passes_readiness(self):
         listing = {"name": "Demo", "source_name": "Smithery", "listing_url": LISTING,
-                   "readiness": {"grade": "<b>", "score": 50}}
+                   "readiness": {"grade": "A", "score": 95}}
         _s, text, markup = mailer.claim_invitation_group_message([listing], UNSUB)
-        self.assertIn("(50/100)", text)
-        self.assertNotIn("<b><b>", markup)  # grade is escaped
+        self.assertIn("(95/100)", text)
+        self.assertIn("<b>A</b>", markup)
 
 
 if __name__ == "__main__":
