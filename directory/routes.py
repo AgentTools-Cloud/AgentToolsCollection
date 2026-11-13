@@ -30,6 +30,7 @@ from . import reverify_x402 as directory_reverify
 from . import mailer as directory_mailer
 from . import limits
 from . import search_terms
+from . import measured as directory_measured
 from . import auth as directory_auth
 from . import ownership as directory_ownership
 from . import public_http as directory_public_http
@@ -321,7 +322,7 @@ def service_detail(request: Request, slug: str):
         paid_summary = paid_verify.public_summary(c, int(svc["id"]))
     return TEMPLATES.TemplateResponse(request, "service.html", {
         "request": request, "svc": svc, "rating": db.score_breakdown(svc),
-        "noindex": _detail_noindex("x402", svc["id"]),
+        "noindex": _detail_noindex("x402", svc["id"]), "meta_desc": directory_measured.meta_description("x402", svc),
         "paid_summary": paid_summary,
         "call_template": cards.build_call_template(svc),
         "interface_declaration": directory_auth.owner_declarations.public_state(svc)},
@@ -738,7 +739,7 @@ def mcp_detail(request: Request, slug: str):
         raise HTTPException(404, "mcp server not found")
     return TEMPLATES.TemplateResponse(request, "mcp_server.html", {
         "request": request, "m": m, "quality": db.rate_row("mcp", m),
-        "noindex": _detail_noindex("mcp", m["id"])},
+        "noindex": _detail_noindex("mcp", m["id"]), "meta_desc": directory_measured.meta_description("mcp", m)},
         headers=_owned_detail_headers(m))
 
 
@@ -804,7 +805,7 @@ def a2a_detail(request: Request, slug: str):
         raise HTTPException(404, "a2a agent not found")
     return TEMPLATES.TemplateResponse(request, "a2a_agent.html", {
         "request": request, "a": a, "quality": db.rate_row("a2a", a),
-        "noindex": _detail_noindex("a2a", a["id"])},
+        "noindex": _detail_noindex("a2a", a["id"]), "meta_desc": directory_measured.meta_description("a2a", a)},
         headers=_owned_detail_headers(a))
 
 

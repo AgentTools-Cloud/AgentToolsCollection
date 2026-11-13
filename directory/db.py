@@ -1782,6 +1782,7 @@ def get_by_slug(conn, slug):
     out["sources"] = listing_sources(conn, "x402", int(out["id"]))
     _attach_readiness(conn, "x402", out)
     _attach_peer(conn, "x402", out)
+    _attach_measured(conn, "x402", out)
     _attach_popularity(conn, "x402", out)
     return out
 
@@ -1811,6 +1812,16 @@ def _attach_peer(conn, kind: str, out: dict) -> None:
     except Exception:  # noqa: BLE001 - a display extra must never break a page
         import logging
         logging.getLogger(__name__).exception("peer position failed for %s id=%s", kind, out.get("id"))
+
+
+def _attach_measured(conn, kind: str, out: dict) -> None:
+    """Our own 30-day probe record and tools list as page text."""
+    from . import measured
+    try:
+        measured.attach(conn, kind, out)
+    except Exception:  # noqa: BLE001 - a display extra must never break a page
+        import logging
+        logging.getLogger(__name__).exception("measured summary failed for %s id=%s", kind, out.get("id"))
 
 
 def _attach_popularity(conn, kind: str, out: dict) -> None:
@@ -3612,6 +3623,7 @@ def get_a2a_by_slug(conn, slug):
     out = a2a_row_to_dict(row)
     out["sources"] = listing_sources(conn, "a2a", int(out["id"]))
     _attach_peer(conn, "a2a", out)
+    _attach_measured(conn, "a2a", out)
     _attach_popularity(conn, "a2a", out)
     return out
 
@@ -4121,6 +4133,7 @@ def get_mcp_by_slug(conn, slug):
     out["sources"] = listing_sources(conn, "mcp", int(out["id"]))
     _attach_readiness(conn, "mcp", out)
     _attach_peer(conn, "mcp", out)
+    _attach_measured(conn, "mcp", out)
     _attach_popularity(conn, "mcp", out)
     return out
 

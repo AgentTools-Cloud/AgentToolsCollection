@@ -1,7 +1,7 @@
 {% extends "base.html" %}
-{% from "_macros.html" import readiness_section, peer_section, popularity_section %}
-{% block title %}{{ m.name }} — MCP server — agent-tools.cloud{% endblock %}
-{% block desc %}{{ (m.description or m.name)|truncate(140) }}{% endblock %}
+{% from "_macros.html" import readiness_section, peer_section, popularity_section, measured_section %}
+{% block title %}{{ m.name }} — MCP server{% if m.measured and m.measured.tools_total %} with {{ m.measured.tools_total }} tool{{ "s" if m.measured.tools_total != 1 }}{% endif %} — agent-tools.cloud{% endblock %}
+{% block desc %}{{ meta_desc or (m.description or m.name)|truncate(140) }}{% endblock %}
 {% block head_extra %}{% set schema = {
   "@context": "https://schema.org",
   "@type": "SoftwareApplication",
@@ -9,7 +9,7 @@
   "name": m.name,
   "description": (m.description or m.name),
   "url": "https://agent-tools.cloud/mcp/servers/" + m.slug,
-} %}{% if m.pricing is mapping and m.pricing.offers %}{% set updated = schema.update({"offers": m.pricing.offers}) %}{% endif %}<script type="application/ld+json">{{ schema|tojson }}</script>{% endblock %}
+} %}{% if m.measured and m.measured.tools %}{% set _f = schema.update({"featureList": m.measured.tools[:30]|map(attribute="name")|list}) %}{% endif %}{% if m.pricing is mapping and m.pricing.offers %}{% set updated = schema.update({"offers": m.pricing.offers}) %}{% endif %}<script type="application/ld+json">{{ schema|tojson }}</script>{% endblock %}
 {% block track %}<script>atTrackView('mcp', {{ m.slug|tojson }});</script>{% endblock %}
 {% block content %}
 <a href="/mcp" class="text-sm text-slate-500 hover:text-blue-600 inline-flex items-center gap-1">
@@ -60,6 +60,23 @@
     {% for tag in m.tags[:8] %}<li class="text-xs rounded bg-slate-100 text-slate-700 px-2 py-0.5">{{ tag }}</li>{% endfor %}
   </ul>
   {% endif %}
+</section>
+{% endif %}
+
+{{ measured_section(m.measured) }}
+
+{% if m.measured and m.measured.tools %}
+<section class="svc-card p-6 mb-6" id="tools">
+  <h2 class="text-base font-semibold mb-1">Tools ({{ m.measured.tools_total|num }})</h2>
+  <p class="text-xs text-slate-500 mb-4">As returned by the server's own <span class="mono">tools/list</span> when we called it{% if m.measured.tools_total > m.measured.tools|length %}; first {{ m.measured.tools|length }} shown{% endif %}.</p>
+  <dl class="divide-y divide-slate-100 text-sm">
+    {% for t in m.measured.tools %}
+    <div class="py-2 sm:grid sm:grid-cols-3 sm:gap-4">
+      <dt class="mono text-slate-900 break-all">{{ t.name }}</dt>
+      <dd class="text-slate-600 sm:col-span-2 mt-0.5 sm:mt-0">{{ t.description or "—" }}</dd>
+    </div>
+    {% endfor %}
+  </dl>
 </section>
 {% endif %}
 
