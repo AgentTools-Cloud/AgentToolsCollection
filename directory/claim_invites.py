@@ -29,6 +29,8 @@ SOURCE_LABELS = {
     "mcp-keepalive": "MCP Keepalive",
     "official-remote": "a public MCP endpoint",
     "apify": "Apify",
+    "modelscope": "the ModelScope MCP Plaza",
+    "docker-mcp": "the Docker MCP Catalog",
     "chiark": "Chiark",
     "prowl": "Prowl",
     "pulsemcp": "PulseMCP",
