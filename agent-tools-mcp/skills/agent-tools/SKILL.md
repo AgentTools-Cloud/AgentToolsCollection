@@ -32,6 +32,8 @@ Find x402 paid APIs, MCP servers and A2A agents by intent, from the
 | `prepare_paid_verification(slug, payer)` | Quote a one-off paid test; returns `typed_data` to sign |
 | `execute_paid_verification(id, signature)` | Pay once (Base USDC, ≤ $1, straight to the service) and score the result |
 | `get_paid_verification(id)` | Read the result |
+| `create_api_key(name?)` | Free account key, returned once |
+| `directory_stats(view?, topic?, month?, api_key?)` | Daily statistics and monthly reports |
 
 Flow: `search_all` (or a protocol-specific search) → `get*` → call the service
 with your own x402 client.
