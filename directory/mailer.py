@@ -255,6 +255,10 @@ def send_approval_email(
     return _send(to_email, subject, text, html)
 
 
+# Grades worth showing in a first-contact claim invitation ("ready" = A or B).
+INVITE_READINESS_GRADES = frozenset({"A", "B"})
+
+
 def claim_invitation_message(
     service_name: str,
     source_name: str,
@@ -265,7 +269,9 @@ def claim_invitation_message(
     """Render an English invitation without consulting SMTP or sending mail.
 
     `readiness` ({"grade", "score"}) adds one line pointing at the listing's
-    readiness breakdown; omitted when the listing has not been scored.
+    readiness breakdown; omitted when the listing has not been scored or is
+    not ready (grade C/D/F). A first-contact invitation only asks for a claim;
+    improving a low grade is a separate follow-up.
     """
     name = " ".join(str(service_name).split())[:160]
     source = " ".join(str(source_name).split())[:160]
@@ -283,7 +289,7 @@ def claim_invitation_message(
     grade = str((readiness or {}).get("grade") or "").strip()[:2]
     score = (readiness or {}).get("score")
     readiness_line = readiness_html = ""
-    if grade and isinstance(score, (int, float)):
+    if grade in INVITE_READINESS_GRADES and isinstance(score, (int, float)):
         readiness_line = (
             f"Its readiness grade is {grade} ({score:.0f}/100). The listing page shows "
             "each check and what is missing:\n"
