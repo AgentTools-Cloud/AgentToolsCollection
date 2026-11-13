@@ -1,6 +1,5 @@
 # agent-tools-mcp
 
-[![smithery badge](https://smithery.ai/badge/kangletian/agent-tools-mcp)](https://smithery.ai/servers/kangletian/agent-tools-mcp)
 [![MCP](https://img.shields.io/badge/MCP-Server-blue)](https://modelcontextprotocol.io)
 [![PyPI](https://img.shields.io/pypi/v/agent-tools-mcp)](https://pypi.org/project/agent-tools-mcp/)
 [![License](https://img.shields.io/badge/License-Apache_2.0-green.svg)](https://opensource.org/licenses/Apache-2.0)
@@ -19,7 +18,7 @@ Backed by [agent-tools.cloud](https://agent-tools.cloud), an open directory that
 
 Tools never pay or sign on your behalf. Call `stats` for live counts.
 
-Also listed on [Smithery](https://smithery.ai/servers/kangletian/agent-tools-mcp) for one-click hosted install.
+Hosted endpoint (no install, more tools including listing claims): `https://agent-tools.cloud/mcp-discovery/`. Also on the [official MCP Registry](https://registry.modelcontextprotocol.io) and [ClawHub](https://clawhub.ai/joursbleu/skills/agent-tools-cloud).
 
 ## Tools
 
