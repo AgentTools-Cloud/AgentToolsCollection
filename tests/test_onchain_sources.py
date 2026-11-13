@@ -176,6 +176,7 @@ class BulkSweepThrottleTests(unittest.TestCase):
                         2.0, 1000, 2000)}
         with patch.object(crawlers, "BULK_LOG_CHAINS", cfg), \
                 patch.object(crawlers.time, "sleep"), \
+                patch.dict(crawlers.BULK_LOG_WORKERS, {"base": 1}), \
                 patch.object(crawlers.httpx, "Client", side_effect=_client_with(handler)):
             results, ok = crawlers.fetch_chain_activity_bulk([PAYTO], chain="base", days=1)
         self.assertTrue(ok)
@@ -419,6 +420,71 @@ class ArcBulkConfigTests(unittest.TestCase):
         self.assertTrue(ok)
         # one refused call, then the two halves -- no six-attempt retry first
         self.assertEqual(state["calls"], 3)
+
+
+class ConcurrentBulkTests(unittest.TestCase):
+    """Base windows run in parallel; every window counts once, failures stay fatal."""
+
+    def run_bulk(self, handler, workers=4):
+        cfg = {"base": ("https://rpc.invalid", "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                        1.0, 100, 4000)}
+        with patch.object(crawlers, "BULK_LOG_CHAINS", cfg), \
+                patch.dict(crawlers.BULK_LOG_WORKERS, {"base": workers}), \
+                patch.object(crawlers.time, "sleep"), \
+                patch.object(crawlers.httpx, "Client", side_effect=_client_with(handler)):
+            return crawlers.fetch_chain_activity_bulk([PAYTO], chain="base", days=5000 / 86400)
+
+    @staticmethod
+    def rpc(handler_logs):
+        import json, threading
+        lock = threading.Lock()
+        seen = []
+
+        def handler(request):
+            body = json.loads(request.content)
+            if body["method"] == "eth_blockNumber":
+                return httpx.Response(200, json={"result": hex(9999)})
+            if body["method"] == "eth_getBlockByNumber":
+                return httpx.Response(200, json={"result": {"timestamp": "0x0"}})
+            q = body["params"][0]
+            lo, hi = int(q["fromBlock"], 16), int(q["toBlock"], 16)
+            with lock:
+                seen.append((lo, hi))
+            return handler_logs(lo, hi)
+        return handler, seen
+
+    def test_each_window_counted_once(self):
+        def logs(lo, hi):
+            # one transfer per window, from a different payer each time
+            payer = "0x" + ("%040x" % (lo + 1))
+            return httpx.Response(200, json={"result": [
+                {"topics": [crawlers._TRANSFER_TOPIC, crawlers._topic_addr(payer),
+                            crawlers._topic_addr(PAYTO)]}]})
+        handler, seen = self.rpc(logs)
+        results, ok = self.run_bulk(handler)
+        self.assertTrue(ok)
+        self.assertEqual(len(seen), 51)                  # blocks 4999..9999 in 100s
+        self.assertEqual(len(set(seen)), 51)
+        self.assertEqual(results[PAYTO.lower()]["tx"], 51)
+        self.assertEqual(results[PAYTO.lower()]["payers"], 51)
+
+    def test_split_and_failure_with_workers(self):
+        def logs(lo, hi):
+            if hi - lo + 1 == 100 and lo == 5099:
+                return httpx.Response(200, json={"error": {"message": "Response is too big"}})
+            return httpx.Response(200, json={"result": []})
+        handler, seen = self.rpc(logs)
+        _results, ok = self.run_bulk(handler)
+        self.assertTrue(ok)                              # the busy window was halved
+        self.assertIn((5099, 5148), seen)
+
+        def broken(lo, hi):
+            if lo == 7099:
+                return httpx.Response(200, json={"error": {"message": "Response is too big"}})
+            return httpx.Response(200, json={"result": []})
+        handler, _seen = self.rpc(broken)
+        _results, ok = self.run_bulk(handler)
+        self.assertFalse(ok)                             # a single-block failure is fatal
 
 
 if __name__ == "__main__":
