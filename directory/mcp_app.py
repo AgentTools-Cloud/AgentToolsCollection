@@ -1090,9 +1090,13 @@ async def _ownership_api(tool_name: str, method: str, path: str, handler,
     scheme, _, raw_key = authorization.partition(" ")
     if scheme.lower() != "bearer" or not raw_key.strip():
         return {"error": "unauthorized", "status_code": 401,
-                "message": "Send an account API key in the MCP Authorization: Bearer header.",
+                "message": ("Send an account API key in the MCP Authorization: Bearer header. "
+                            "Claim and listing tools read only that header, not an api_key "
+                            "argument; if your client cannot set headers, use the REST "
+                            "endpoints in `rest` with the same key."),
                 "get_a_key": {"method": "POST", "url": "https://agent-tools.cloud/api/v1/keys",
-                              "mcp_tool": "create_api_key"}}
+                              "mcp_tool": "create_api_key"},
+                "rest": "https://agent-tools.cloud/docs/claim"}
     request = Request({
         "type": "http", "method": method, "path": path, "root_path": "", "scheme": "https",
         "server": ("agent-tools.cloud", 443), "client": (_current_client_ip.get() or "unknown", 0),
@@ -1215,7 +1219,8 @@ async def create_api_key(name: str | None = None,
     store; do not print it back to the user or write it to logs. Send it as
     `Authorization: Bearer <key>` (or the `api_key` argument where offered) to
     get complete `directory_stats` lists, run paid verifications and claim
-    your own listings. Shares the HTTP limit of POST /api/v1/keys (a few keys
+    your own listings. The claim and listing tools read the key only from the
+    Authorization header; without header support use the REST claim API. Shares the HTTP limit of POST /api/v1/keys (a few keys
     per IP per day).
 
     Args:

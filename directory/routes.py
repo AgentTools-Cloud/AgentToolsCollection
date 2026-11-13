@@ -469,7 +469,7 @@ def _render_stats(request: Request, view: str, period: int):
     return TEMPLATES.TemplateResponse(request, "stats.html", {
         "request": request, "snap": snap, "view": view, "period": period,
         "kpis": kpis, "headlines": stats_mod.headlines(snap, view),
-        "history_days": len(real), "first_day": first_real,
+        "first_day": first_real,
         "backfill_used": any(k["backfilled"] for k in kpis.values()),
         "kinds": [k for k in stats_mod.KINDS if view in ("all", k)],
         "kind_label": stats_mod.KIND_LABEL,

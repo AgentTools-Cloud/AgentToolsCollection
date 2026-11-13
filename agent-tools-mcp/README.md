@@ -39,8 +39,10 @@ Also listed on [Smithery](https://smithery.ai/servers/kangletian/agent-tools-mcp
 | `prepare_paid_verification(slug, payer)` | Quote a one-off paid test of an x402 service; returns EIP-712 `typed_data` to sign in your wallet |
 | `execute_paid_verification(id, signature)` | Pay the service once (Base USDC, <= $1, straight to its payTo) and score the result |
 | `get_paid_verification(id)` | Read your result |
+| `create_api_key(name)` | Create a free account key (returned once; store it, do not echo it) |
+| `directory_stats(view, topic, month, api_key)` | Daily ecosystem statistics, topic pages and monthly reports; complete lists with a key |
 
-Paid-verification tools need a free API key: `POST https://agent-tools.cloud/api/v1/keys`, then set `AGENT_TOOLS_API_KEY`.
+Paid-verification tools need a free API key: call `create_api_key` (or `POST https://agent-tools.cloud/api/v1/keys`), then set `AGENT_TOOLS_API_KEY`.
 
 Typical flow: ask `ask` for a recommendation, start with `search_all` if you don't know which resource type fits, or
 go straight to the protocol-specific search (`search` / `search_mcp_servers` /

@@ -21,6 +21,8 @@ Tools:
 - prepare_paid_verification(slug, payer)           - quote a paid test of an x402 service
 - execute_paid_verification(id, signature)         - run it once with your wallet signature
 - get_paid_verification(id)                        - read the result
+- create_api_key(name)                             - free account key (shown once)
+- directory_stats(view, topic, month, api_key)     - daily ecosystem statistics / reports
 
 Tools never pay or sign on your behalf.
 
@@ -85,8 +87,9 @@ async def _post(path: str, body: dict[str, Any], timeout: float = 60.0) -> dict[
 
 _NEED_KEY = {
     "error": "unauthorized",
-    "message": "API key required: POST https://agent-tools.cloud/api/v1/keys, "
-               "then set AGENT_TOOLS_API_KEY or pass api_key.",
+    "message": "API key required: call create_api_key (or POST "
+               "https://agent-tools.cloud/api/v1/keys), then set "
+               "AGENT_TOOLS_API_KEY or pass api_key.",
 }
 
 
@@ -420,6 +423,73 @@ def build_server() -> Any:
         if not key:
             return dict(_NEED_KEY)
         return await _authed("GET", f"/api/v1/paid-verifications/{id}", key)
+
+    # ------------------------------------------------------------ account
+    @mcp.tool()
+    async def create_api_key(name: str | None = None) -> dict[str, Any]:
+        """Create a free agent-tools.cloud account API key. No sign-up needed.
+
+        The key is returned once and cannot be recovered. Store it (for example
+        as AGENT_TOOLS_API_KEY); do not print it back to the user or into logs.
+        It unlocks complete `directory_stats` lists and paid verification.
+        A few keys per IP per day.
+
+        Args:
+            name: Optional label to recognise the key later, e.g. your agent name.
+        """
+        async with _client() as cx:
+            r = await cx.post(f"{_api_base()}/api/v1/keys",
+                              json=_clean({"name": (name or "").strip()[:60] or None}))
+        try:
+            data = r.json()
+        except ValueError:
+            data = {}
+        if r.status_code >= 400:
+            detail = data.get("detail") if isinstance(data, dict) else None
+            msg = detail.get("message") if isinstance(detail, dict) else detail
+            return {"error": "rate_limited" if r.status_code == 429 else "http_error",
+                    "status": r.status_code, "message": str(msg or r.text[:300])}
+        return {"api_key": data.get("api_key"), "prefix": data.get("prefix"),
+                "message": ("Store this now -- it is not shown again. Do not echo it "
+                            "to the user or logs. Set AGENT_TOOLS_API_KEY or pass api_key.")}
+
+    # ------------------------------------------------------- statistics
+    @mcp.tool()
+    async def directory_stats(view: str = "all", topic: str | None = None,
+                              month: str | None = None,
+                              api_key: str | None = None) -> dict[str, Any]:
+        """Daily statistics on the agent-tool ecosystem as seen by our probes.
+
+        Counts (indexed, reachable, protocol-verified, ready), findings, probe
+        outcomes and top searches. With an account key the topic and search
+        lists are complete; without one they are shortened.
+
+        Args:
+            view: "all", "mcp", "x402" or "a2a".
+            topic: Optional topic word (e.g. "payment", "weather") for that topic instead.
+            month: Optional "YYYY-MM" for that monthly report instead.
+            api_key: Optional; defaults to AGENT_TOOLS_API_KEY.
+        """
+        key = _api_key(api_key)
+        if topic:
+            path, params = f"/stats/topics/{topic.strip().lower()}.json", {}
+        elif month:
+            path, params = f"/stats/reports/{month.strip()}.json", {}
+        else:
+            path, params = "/api/v1/stats/summary", {"view": view}
+        if key and not month:
+            params["full"] = "true"
+        async with _client() as cx:
+            r = await cx.get(f"{_api_base()}{path}", params=params,
+                             headers={"Authorization": f"Bearer {key}"} if key else None)
+        try:
+            data = r.json()
+        except ValueError:
+            data = {"message": r.text[:300]}
+        if r.status_code >= 400:
+            return {"error": "http_error", "status": r.status_code,
+                    "message": str(data.get("detail") if isinstance(data, dict) else data)[:300]}
+        return data
 
     log.info("agent-tools-mcp %s server built (api_base=%s)", __version__, _api_base())
     return mcp
