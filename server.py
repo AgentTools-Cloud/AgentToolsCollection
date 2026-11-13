@@ -209,10 +209,10 @@ _LLMS_TXT = """# agent-tools.cloud
 
 - Search all types: GET /api/v1/resources/search?q=...
 - MCP: GET /api/v1/mcp/search and /api/v1/mcp/servers/{slug}
-- A2A: GET /api/v1/a2a/search and /api/v1/a2a/agents/{slug}
+- A2A: GET /api/v1/a2a/search, /api/v1/a2a/agents/{slug}; reports: POST /a2a
 - x402 card: GET /api/v1/services/{slug}
 - Recommendations: GET /api/v1/ask?q=...
-- Categories and stats: /api/v1/categories, /api/v1/stats
+- Categories: /api/v1/categories, /api/v1/stats
 - Daily ecosystem statistics (CC BY 4.0): GET /api/v1/stats/summary?view=all|mcp|x402|a2a,
   full snapshot /stats.json, history /stats/daily.csv, page /stats
 - How many tools work, and why not: /stats/usable.json ; topics: /stats/topics/{topic}.json ;

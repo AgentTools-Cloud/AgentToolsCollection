@@ -2447,6 +2447,9 @@ def well_known():
             "a2a": {
                 "agent_card": "https://agent-tools.cloud/.well-known/agent-card.json",
                 "jsonrpc": "https://agent-tools.cloud/a2a",
+                "research_skills": ["ecosystem_report", "trend_report", "topic_report",
+                                    "monthly_report", "usability_report",
+                                    "search_demand_report", "listing_benchmark"],
                 "search": "https://agent-tools.cloud/api/v1/a2a/search",
                 "get_agent": "https://agent-tools.cloud/api/v1/a2a/agents/{slug}",
             },

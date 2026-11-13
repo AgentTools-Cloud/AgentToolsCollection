@@ -1,5 +1,4 @@
 """A2A 1.0 + 0.3 dual serving for agent-tools.cloud's own agent."""
-import contextlib
 import os
 import sys
 import unittest
@@ -8,20 +7,12 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from directory import a2a  # noqa: E402
 
-SERVICES = [{"slug": "acme-weather", "name": "Acme Weather", "category": "data", "chains": ["base"]}]
-AGENTS = [{"slug": "acme-agent", "name": "Acme Agent", "endpoint_url": "https://acme.example/a2a"}]
-
-
-@contextlib.contextmanager
-def _fake_connect(read_only=True):
-    yield object()
+def _fake_report(req, detail=None):
+    return {"text": f"report {req['skill']}", "data": dict(req)}
 
 
 def _patched():
-    return mock.patch.multiple(
-        a2a.db, connect=_fake_connect,
-        search=mock.Mock(return_value=SERVICES),
-        search_a2a=mock.Mock(return_value=AGENTS))
+    return mock.patch.object(a2a.a2a_research, "respond", side_effect=_fake_report)
 
 
 def _send(method, parts, version=None, **msg):
@@ -89,10 +80,10 @@ class V1Tests(unittest.TestCase):
         self.assertTrue(msg["messageId"])
         self.assertNotIn("kind", msg)
         self.assertEqual(msg["parts"][0]["mediaType"], "text/plain")
-        self.assertIn("Found 1 x402 service(s) and 1 A2A agent(s)", msg["parts"][0]["text"])
+        self.assertEqual(msg["parts"][0]["text"], "report topic_report")
         data = msg["parts"][1]
         self.assertEqual(data["mediaType"], "application/json")
-        self.assertEqual(data["data"]["services"][0]["slug"], "acme-weather")
+        self.assertEqual(data["data"], {"skill": "topic_report", "topic": "weather"})
         for part in msg["parts"]:
             self.assertNotIn("kind", part)
 
@@ -101,13 +92,15 @@ class V1Tests(unittest.TestCase):
         self.assertEqual(resp["result"]["message"]["role"], "ROLE_AGENT")
         self.assertTrue(resp["result"]["message"]["contextId"])
 
-    def test_v1_data_part_triggers_safety_scan(self):
-        verdict = {"endpoint_url": "https://x.example/mcp", "verdict": "clean", "score": 0, "source": "stored"}
-        with mock.patch("directory.safety_service.scan_endpoint", return_value=verdict) as scan:
-            resp = _send("SendMessage", [{"data": {"skill": "scan_mcp_safety",
-                                                    "endpoint_url": "https://x.example/mcp"}}], "1.0")
-        scan.assert_called_once()
-        self.assertIn("Safety verdict", resp["result"]["message"]["parts"][0]["text"])
+    def test_v1_data_part_selects_research_skill(self):
+        resp = _send("SendMessage", [{"data": {"skill": "trend_report", "view": "mcp", "days": 7}}], "1.0")
+        data = resp["result"]["message"]["parts"][1]["data"]
+        self.assertEqual(data, {"skill": "trend_report", "view": "mcp", "days": 7})
+
+    def test_old_tool_skills_are_redirected_to_mcp(self):
+        resp = _send("SendMessage", [{"data": {"skill": "scan_mcp_safety",
+                                                "endpoint_url": "https://x.example/mcp"}}], "1.0")
+        self.assertEqual(resp["result"]["message"]["parts"][1]["data"]["skill"], "tool_request")
 
     def test_empty_text_is_invalid_params(self):
         resp = _send("SendMessage", [{"url": "https://x/doc.pdf"}], "1.0")

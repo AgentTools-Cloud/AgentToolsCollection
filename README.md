@@ -32,7 +32,7 @@ Also listed on [Smithery](https://smithery.ai/servers/kangletian/agent-tools-x40
 | `POST /api/v1/keys` | free | Mint an API key (no signup) for account-scoped actions |
 | `POST /api/v1/services/{slug}/paid-verifications` | API key | Sponsored paid verification: quote, then `/api/v1/paid-verifications/{id}/execute` |
 | `POST /mcp-discovery/` | free | **MCP streamable-http** discovery server |
-| `POST /a2a` | free | **A2A JSON-RPC** agent (0.3 `message/send` and 1.0 `SendMessage`): directory search, MCP safety scan, daily statistics |
+| `POST /a2a` | free | **A2A JSON-RPC** research agent (0.3 `message/send` and 1.0 `SendMessage`): data reports on the ecosystem (state, trends, topics, monthly, usability, search demand, per-listing benchmarks). Search and safety scans are on the MCP endpoint |
 | `GET /healthz` | free | Liveness |
 | `GET /v1/models` | free | Upstream model listing (read-only) |
 | `GET /.well-known/agent-tools.json` | free | Agent discovery manifest |
@@ -93,7 +93,7 @@ response", and coercion to read & forward `.key`/`.pem`/`.ssh`/`.env` files.
 Source-code-oriented rules (SQL/command/code injection) are intentionally not
 applied to natural-language descriptions to avoid false positives. Each live
 call also runs a frontier-LLM second opinion as an advisory dimension.
-It is also exposed as an A2A skill on `POST /a2a`. The hosted server carries the
+Safety scans are MCP-only; the A2A agent on `POST /a2a` writes research reports. The hosted server carries the
 full tool set above; the stdio `agent-tools-mcp` PyPI package ships the core
 search tools only.
 

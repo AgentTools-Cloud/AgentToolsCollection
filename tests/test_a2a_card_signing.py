@@ -140,7 +140,7 @@ class MissingKeyTests(unittest.TestCase):
             card = card_signing.sign_card(a2a.own_agent_card(BASE), BASE)
             self.assertNotIn("signatures", card)
             self.assertEqual(card_signing.public_jwks(), {"keys": []})
-            self.assertEqual(card["name"], "Agent Tools Directory")
+            self.assertEqual(card["name"], "Agent Tools Research")
 
     def test_wrong_curve_key_serves_unsigned_card(self):
         with tempfile.TemporaryDirectory() as d:

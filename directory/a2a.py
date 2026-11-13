@@ -3,8 +3,8 @@
 Two roles:
   1. agent-tools.cloud is *itself* an A2A agent. `own_agent_card()` returns the
      Agent Card served at /.well-known/agent-card.json, and `handle_jsonrpc()`
-     answers a minimal JSON-RPC `message/send` by routing the user's text to the
-     directory search (x402 services + A2A agents).
+     answers JSON-RPC `message/send` / `SendMessage` with research reports on the
+     agent-tool ecosystem (see a2a_research); search lives on the MCP server.
   2. agent-tools.cloud *indexes* external A2A agents. `fetch_agent_card()` pulls
      a remote Agent Card and `card_to_row()` normalises it into an a2a_agents row.
 
@@ -24,14 +24,14 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 
-from . import crawlers, db, public_http
+from . import a2a_research, crawlers, db, public_http
 
 log = logging.getLogger("directory.a2a")
 
 SITE = "https://agent-tools.cloud"
 PROTOCOL_VERSION = "0.3.0"  # legacy top-level field kept for 0.3 clients
 SUPPORTED_A2A_VERSIONS = ("1.0", "0.3")  # preference order, Major.Minor
-AGENT_VERSION = "0.7.0"
+AGENT_VERSION = "0.8.0"
 
 UA = "agent-tools.cloud-a2a/0.1 (+https://agent-tools.cloud)"
 TIMEOUT = httpx.Timeout(connect=10.0, read=20.0, write=10.0, pool=10.0)
@@ -83,12 +83,11 @@ def own_agent_card(base_url: str = SITE) -> dict:
         ],
         # Legacy 0.3 top-level fields; 1.0 clients ignore unknown fields.
         "protocolVersion": PROTOCOL_VERSION,
-        "name": "Agent Tools Directory",
+        "name": "Agent Tools Research",
         "description": (
-            "Discovery agent for the agentic economy. Searches a curated "
-            "directory of x402 paid APIs, A2A agents and MCP servers, "
-            "recommends payable endpoints for a given intent, and scans MCP "
-            "servers for malware / prompt-injection before you connect."
+            "Data reports on x402 APIs, MCP servers and A2A agents from our daily probes "
+            "(CC BY 4.0). Brief answers by default; send \"detail\": \"full\" for the whole "
+            f"report. To search or safety-scan tools use our MCP server: {base}/mcp-discovery/"
         ),
         "url": endpoint,
         "preferredTransport": "JSONRPC",
@@ -103,88 +102,9 @@ def own_agent_card(base_url: str = SITE) -> dict:
             "pushNotifications": False,
             "extendedAgentCard": False,
         },
-        "defaultInputModes": ["text/plain"],
+        "defaultInputModes": ["text/plain", "application/json"],
         "defaultOutputModes": ["text/plain", "application/json"],
-        "skills": [
-            {
-                "id": "search_x402_services",
-                "name": "Search x402 services",
-                "description": "Find x402-payable APIs by intent, category or chain.",
-                "tags": ["x402", "payments", "search", "api"],
-                "examples": ["find a weather API that accepts x402 on Base"],
-            },
-            {
-                "id": "search_a2a_agents",
-                "name": "Search A2A agents",
-                "description": "Find A2A agents by skill or capability.",
-                "tags": ["a2a", "agents", "search"],
-                "examples": ["find an A2A agent that can summarise PDFs"],
-            },
-            {
-                "id": "search_mcp_servers",
-                "name": "Search MCP servers",
-                "description": "Find MCP servers and tools relevant to a task.",
-                "tags": ["mcp", "tools", "search"],
-                "examples": ["find an MCP server for GitHub"],
-            },
-            {
-                "id": "get_service",
-                "name": "Get service card",
-                "description": "Return the full agent-readable card for one listing.",
-                "tags": ["x402", "card", "detail"],
-                "examples": ["show me the card for slug acme-weather"],
-            },
-            {
-                "id": "get_agent",
-                "name": "Get A2A agent",
-                "description": "Return the indexed Agent Card for one A2A agent.",
-                "tags": ["a2a", "card", "detail"],
-                "examples": ["show me the agent card for slug acme-research"],
-            },
-            {
-                "id": "recommend_paid_service",
-                "name": "Recommend a paid service",
-                "description": "Recommend the best payable endpoint for an intent.",
-                "tags": ["x402", "recommendation", "payments"],
-                "examples": ["I need to pay for on-demand OCR, what should I use?"],
-            },
-            {
-                "id": "scan_mcp_safety",
-                "name": "Scan MCP server safety",
-                "description": (
-                    "Check an MCP server (by streamable-http endpoint URL) for "
-                    "malware / prompt-injection lures. Returns our stored verdict "
-                    "if it is already indexed, otherwise probes + statically scans "
-                    "it, adds an advisory LLM second opinion, and indexes it if it "
-                    "answered (documentation hosts like example.com are never indexed)."
-                ),
-                "tags": ["mcp", "security", "safety", "malware", "scan"],
-                "examples": [
-                    "is https://example.com/mcp safe to connect to?",
-                    "scan https://foo.bar/mcp for malware",
-                ],
-            },
-            {
-                "id": "directory_stats",
-                "name": "Agent tool ecosystem statistics",
-                "description": (
-                    "Daily statistics from our probes: how many x402 APIs, MCP "
-                    "servers and A2A agents are indexed, reachable, protocol-verified "
-                    "and ready to call, with findings on prices, protocol versions "
-                    "and access. Send a data part {\"skill\": \"directory_stats\", "
-                    "\"view\": \"all|mcp|x402|a2a\"}, add \"topic\" (e.g. \"payment\") "
-                    "or \"month\" (\"YYYY-MM\") for a topic or monthly report, or ask in "
-                    "plain text. Lists are shortened here; complete lists need an account "
-                    "key over HTTP or MCP (full=1, see /.well-known/agent-tools.json)."
-                ),
-                "tags": ["stats", "statistics", "ecosystem", "mcp", "x402", "a2a"],
-                "examples": [
-                    "how many MCP servers are reachable right now?",
-                    "directory stats for x402",
-                    "what is the state of agent tools today?",
-                ],
-            },
-        ],
+        "skills": [dict(skill) for skill in a2a_research.SKILLS],
     }
 
 
@@ -219,42 +139,6 @@ def _agent_message(text: str, data: Any = None) -> dict:
         "messageId": f"atc-{int(time.time() * 1000)}",
         "kind": "message",
     }
-
-
-# Safety-scan intent: a request to vet an MCP server. Triggered either by an
-# explicit structured data part ({skill: scan_mcp_safety, endpoint_url: ...}) or
-# by free text that pairs a URL with a security-intent keyword.
-_SCAN_URL_RE = re.compile(r"https?://\S+", re.I)
-_SCAN_INTENT_RE = re.compile(
-    r"\b(scan|safety|safe|malicious|malware|unsafe|phish|audit|vet|"
-    r"trustworthy|legit|suspicious)\b",
-    re.I,
-)
-
-
-def _safety_scan_request(message: dict, text: str) -> dict | None:
-    """Return scan kwargs if this message is a safety-scan request, else None."""
-    # 1. explicit structured request via a data part
-    for p in (message.get("parts") or []):
-        if (isinstance(p, dict) and isinstance(p.get("data"), dict)
-                and p.get("kind") in ("data", None)):
-            d = p["data"]
-            skill = str(d.get("skill") or d.get("id") or d.get("intent") or "").lower()
-            url = d.get("endpoint_url") or d.get("url")
-            if url and ("safety" in skill or "scan" in skill or "malic" in skill):
-                return {
-                    "endpoint_url": str(url),
-                    "name": str(d.get("name") or ""),
-                    "description": str(d.get("description") or ""),
-                    "tools_text": str(d.get("tools_text") or ""),
-                }
-    # 2. free text: a URL paired with a security-intent keyword
-    if text and _SCAN_INTENT_RE.search(text):
-        m = _SCAN_URL_RE.search(text)
-        if m:
-            return {"endpoint_url": m.group(0).rstrip(".,);]}'\""),
-                    "name": "", "description": "", "tools_text": ""}
-    return None
 
 
 _V1_METHODS = frozenset({
@@ -337,7 +221,7 @@ def handle_jsonrpc(payload: dict, a2a_version: str | None = None) -> dict:
     if method not in ("message/send", "message/stream"):
         return _jsonrpc_error(req_id, -32601, f"Method not found: {method}")
     message = params.get("message") or {}
-    outcome = _answer(message if isinstance(message, dict) else {})
+    outcome = _answer(message if isinstance(message, dict) else {}, _accepted_modes(params))
     if "error" in outcome:
         code, msg = outcome["error"]
         return _jsonrpc_error(req_id, code, msg)
@@ -352,7 +236,7 @@ def _handle_v1(req_id, method, params: dict) -> dict:
         if message.get("taskId"):
             return _a2a_error(req_id, -32001, "Task not found", "TASK_NOT_FOUND",
                               {"taskId": str(message.get("taskId"))[:120]})
-        outcome = _answer(message)
+        outcome = _answer(message, _accepted_modes(params))
         if "error" in outcome:
             code, msg = outcome["error"]
             return _jsonrpc_error(req_id, code, msg)
@@ -376,147 +260,30 @@ def _handle_v1(req_id, method, params: dict) -> dict:
     return _jsonrpc_error(req_id, -32601, f"Method not found: {method}")
 
 
-# Statistics intent: explicit data part, or plain-text questions about the
-# size/state of the ecosystem. Kept narrow so "find a statistics API" still
-# goes to search.
-_STATS_INTENT_RE = re.compile(
-    r"\b(how many|directory stats|directory statistics|stats for|statistics for|"
-    r"state of (?:the )?(?:agent tools|ecosystem|directory)|ecosystem (?:size|stats|statistics)|"
-    r"what share|what percentage)\b", re.I)
-_STATS_VIEW_RE = {"mcp": re.compile(r"\bmcp\b", re.I), "x402": re.compile(r"\bx402\b", re.I),
-                  "a2a": re.compile(r"\ba2a\b", re.I)}
+def _answer(message: dict, accepted: list | None = None) -> dict:
+    """Version-neutral core: returns {text, data} or {error: (code, message)}.
 
-
-def _stats_request(message: dict, text: str) -> str | None:
-    """Return the requested view (all/mcp/x402/a2a) for a stats request, else None."""
-    for p in (message.get("parts") or []):
-        if isinstance(p, dict) and isinstance(p.get("data"), dict):
-            d = p["data"]
-            skill = str(d.get("skill") or d.get("id") or d.get("intent") or "").lower()
-            if skill in ("directory_stats", "stats", "statistics"):
-                if d.get("topic"):
-                    return "topic:" + str(d["topic"]).strip().lower()[:40]
-                if d.get("month"):
-                    return "month:" + str(d["month"]).strip()[:7]
-                view = str(d.get("view") or "all").lower()
-                return view if view in ("all", "mcp", "x402", "a2a") else "all"
-    if text and _STATS_INTENT_RE.search(text):
-        hits = [k for k, rx in _STATS_VIEW_RE.items() if rx.search(text)]
-        return hits[0] if len(hits) == 1 else "all"
-    return None
-
-
-def _stats_answer(view: str) -> dict:
-    from . import stats as stats_mod
-    if view.startswith(("topic:", "month:")):
-        kind, _, arg = view.partition(":")
-        try:
-            if kind == "topic":
-                out = stats_mod.topic_page(stats_mod.latest(lambda: db.connect(read_only=True)), arg)
-            else:
-                with db.connect(read_only=True) as c:
-                    out = stats_mod.monthly_report(c, arg)
-        except Exception:
-            log.exception("a2a message/send: stats %s failed", kind)
-            out = None
-        if out is None:
-            return {"text": f"No {kind} '{arg}'. Topics: {', '.join(stats_mod.TOPICS)}; "
-                            "reports: https://agent-tools.cloud/stats/reports.json",
-                    "data": {"error": f"unknown_{kind}"}}
-        return {"text": out["answer"], "data": out}
-    try:
-        out = stats_mod.summary(stats_mod.latest(lambda: db.connect(read_only=True)), view)
-    except Exception:
-        log.exception("a2a message/send: stats summary failed")
-        return {"text": "Statistics are unavailable right now.", "data": {"error": "stats_failed"}}
-    if not out.get("available"):
-        return {"text": out.get("note") or "No statistics yet.", "data": out}
-    k = out["kpis"][out["view"]]
-    scope = "x402 APIs, MCP servers and A2A agents" if view == "all" else stats_mod.KIND_LABEL[view]
-    lines = [f"As of {out['as_of']}, across {scope}: {k['indexed']:,} indexed, "
-             f"{k['reachable']:,} reachable, {k['verified']:,} protocol-verified, "
-             f"{k['ready']:,} graded A or B for readiness."]
-    for key in ("funnel", "x402", "protocols", "access"):
-        if out["findings"].get(key) and (view == "all" or key != "x402" or view == "x402"):
-            lines.append(out["findings"][key])
-    lines.append(f"Full data: {stats_mod.LINKS['snapshot_json']} (CC BY 4.0).")
-    return {"text": " ".join(lines), "data": out}
-
-
-def _answer(message: dict) -> dict:
-    """Version-neutral core: returns {text, data} or {error: (code, message)}."""
+    Our A2A agent answers with research reports; tool search, cards and
+    safety scans live on the MCP server so the two surfaces do not overlap.
+    """
     text = _extract_text(message)
+    req = a2a_research.parse_request(message, text)
+    if req is None:
+        return {"error": (-32602, "params.message must contain a text or data part")}
+    out = a2a_research.respond(req)
+    if accepted is not None and not _wants_json(accepted):
+        out = {k: v for k, v in out.items() if k != "data"}
+    return out
 
-    # Safety-scan skill: vet an MCP server by endpoint URL via the shared core.
-    scan_req = _safety_scan_request(message, text)
-    if scan_req is not None:
-        from . import safety_service
-        try:
-            verdict = safety_service.scan_endpoint(**scan_req)
-        except Exception:
-            log.exception("a2a message/send: safety scan failed")
-            return {"text": "Safety scan failed.", "data": {"error": "scan_failed"}}
-        v = verdict.get("verdict")
-        if v:
-            summary = (
-                f"Safety verdict for {verdict.get('endpoint_url')}: {v} "
-                f"(score {verdict.get('score')}; source {verdict.get('source')})."
-            )
-            adv = verdict.get("advisory")
-            if adv:
-                summary += " " + adv
-        else:
-            summary = f"Could not scan: {verdict.get('message') or verdict.get('error')}"
-        return {"text": summary, "data": verdict}
 
-    stats_view = _stats_request(message, text)
-    if stats_view is not None:
-        return _stats_answer(stats_view)
+def _accepted_modes(params: dict) -> list | None:
+    cfg = params.get("configuration")
+    modes = cfg.get("acceptedOutputModes") if isinstance(cfg, dict) else None
+    return [str(m).lower() for m in modes] if isinstance(modes, list) and modes else None
 
-    if not text:
-        return {"error": (-32602, "params.message must contain a text part")}
 
-    services: list[dict] = []
-    agents: list[dict] = []
-    with db.connect(read_only=True) as c:
-        try:
-            services = db.search(c, q=text, limit=5)
-        except Exception:
-            log.exception("a2a message/send: service search failed")
-        try:
-            agents = db.search_a2a(c, q=text, limit=5)
-        except Exception:
-            log.exception("a2a message/send: agent search failed")
-
-    svc_brief = [
-        {
-            "slug": s.get("slug"),
-            "name": s.get("name"),
-            "category": s.get("category"),
-            "chains": s.get("chains"),
-            "url": f"{SITE}/api/v1/services/{s.get('slug')}",
-        }
-        for s in services
-    ]
-    agent_brief = [
-        {
-            "slug": a.get("slug"),
-            "name": a.get("name"),
-            "endpoint_url": a.get("endpoint_url"),
-            "url": f"{SITE}/api/v1/a2a/agents/{a.get('slug')}",
-        }
-        for a in agents
-    ]
-
-    if svc_brief or agent_brief:
-        summary = (
-            f"Found {len(svc_brief)} x402 service(s) and {len(agent_brief)} "
-            f"A2A agent(s) for: {text}"
-        )
-    else:
-        summary = f"No directory matches for: {text}"
-
-    return {"text": summary, "data": {"services": svc_brief, "agents": agent_brief}}
+def _wants_json(modes: list) -> bool:
+    return any(m in ("application/json", "*/*", "application/*", "data") for m in modes)
 
 
 # ---------------------------------------------------------------------------
