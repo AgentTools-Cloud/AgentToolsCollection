@@ -1,7 +1,7 @@
 {% extends "base.html" %}
-{% from "_macros.html" import readiness_section, peer_section, popularity_section %}
+{% from "_macros.html" import readiness_section, peer_section, popularity_section, measured_section %}
 {% block title %}{{ svc.name_zh or svc.name }} — agent-tools.cloud{% endblock %}
-{% block desc %}{{ (svc.description_zh or svc.description or svc.name)|truncate(140) }}{% endblock %}
+{% block desc %}{{ meta_desc or (svc.description_zh or svc.description or svc.name)|truncate(140) }}{% endblock %}
 {% block head_extra %}<script type="application/ld+json">{{ {
   "@context": "https://schema.org",
   "@type": "WebAPI",
@@ -184,6 +184,7 @@
 
 {{ readiness_section(svc.readiness, "x402 readiness", (rating.score, rating.grade),
                      "availability, payability and on-chain demand") }}
+{{ measured_section(svc.measured) }}
 {{ peer_section(svc.peer) }}
 {{ popularity_section(svc.popularity) }}
 

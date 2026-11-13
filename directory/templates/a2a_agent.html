@@ -1,7 +1,7 @@
 {% extends "base.html" %}
-{% from "_macros.html" import readiness_section, peer_section, popularity_section %}
+{% from "_macros.html" import readiness_section, peer_section, popularity_section, measured_section %}
 {% block title %}{{ a.name }} — A2A agent — agent-tools.cloud{% endblock %}
-{% block desc %}{{ (a.description or a.name)|truncate(140) }}{% endblock %}
+{% block desc %}{{ meta_desc or (a.description or a.name)|truncate(140) }}{% endblock %}
 {% block head_extra %}<script type="application/ld+json">{{ {
   "@context": "https://schema.org",
   "@type": "SoftwareApplication",
@@ -80,6 +80,7 @@
 
 {{ readiness_section(a.readiness, "A2A readiness", quality,
                      "availability, conformance, card completeness and speed") }}
+{{ measured_section(a.measured) }}
 {{ peer_section(a.peer) }}
 {{ popularity_section(a.popularity) }}
 

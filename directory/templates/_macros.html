@@ -244,3 +244,15 @@
     </div>
   </div>
 {%- endmacro %}
+
+
+{#- What our own probes measured, as sentences (directory/measured.py). -#}
+{% macro measured_section(meas) -%}
+{% if meas and meas.sentences %}
+<section class="svc-card p-6 mb-6" id="measured">
+  <h2 class="text-base font-semibold mb-2">What we measured</h2>
+  {% for s in meas.sentences %}<p class="text-sm text-slate-700 leading-relaxed{% if not loop.first %} mt-2{% endif %}">{{ s }}</p>{% endfor %}
+  <p class="text-xs text-slate-400 mt-3">From agent-tools.cloud's own probes{% if meas.record %}, last checked {{ meas.record.last }}{% endif %}. <a href="/about#statistics" class="underline decoration-dotted hover:text-slate-700">How we measure</a></p>
+</section>
+{% endif %}
+{%- endmacro %}
