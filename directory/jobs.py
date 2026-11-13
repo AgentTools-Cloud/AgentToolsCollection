@@ -467,6 +467,13 @@ def cmd_crawl_a2a() -> int:
     except Exception as e:
         errors.append(f"a2a-registry: {e!r}"); log.warning("a2a a2a-registry crawl failed: %r", e)
     try:
+        lm = a2a_mod.crawl_localmark()
+        added += lm["inserted"]; updated += lm["updated"]
+        log.info("a2a localmark: snapshot=%d candidates=%d resolved=%d inserted=%d updated=%d",
+                 lm["snapshot"], lm["candidates"], lm["resolved"], lm["inserted"], lm["updated"])
+    except Exception as e:
+        errors.append(f"localmark: {e!r}"); log.warning("a2a localmark crawl failed: %r", e)
+    try:
         gh = a2a_mod.crawl_github_topic()
         added += gh["inserted"]; updated += gh["updated"]
         log.info("a2a github-topic: candidates=%d resolved=%d inserted=%d updated=%d",
