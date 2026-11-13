@@ -8,6 +8,7 @@ import logging
 import random
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import closing
 from datetime import datetime, timezone
 
@@ -1294,8 +1295,10 @@ def fetch_payto_activity(payto, chain="base", days=30, max_pages=8):
 # mainnet.base.org answers eth_getLogs with HTTP 429 to our egress since mid-October;
 # Tenderly's public gateway serves it with a 1000-block cap (verified 2026-10-21).
 BULK_LOG_CHAINS = {
+    # Base: 0.2 s blocks since 2026 -> ~13k windows per 30 days. 4000 topic
+    # addresses per call is accepted; ~5700 is refused ("not supported", 2026-11-13).
     "base": ("https://base.gateway.tenderly.co",
-             "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913", 2.0, 1000, 2000),
+             "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913", 0.2, 1000, 4000),
     "optimism": ("https://mainnet.optimism.io",
                  "0x0b2c639c533813f4aa9d7837caf62653d097ff85", 2.0, 10000, 400),
     "gnosis": ("https://rpc.gnosischain.com",
@@ -1314,6 +1317,9 @@ BULK_LOG_CHAINS = {
 }
 # Minimum seconds between eth_getLogs calls for nodes that throttle bursts.
 BULK_LOG_MIN_INTERVAL = {"arc": 2.0, "hyperevm": 1.0}
+# eth_getLogs calls in flight per chain. Tenderly's public Base gateway served
+# 4 concurrent calls at ~4.3/s without a 429 (2026-11-13); 8 drew 429s.
+BULK_LOG_WORKERS = {"base": 4}
 _TRANSFER_TOPIC = (
     "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef")
 
@@ -1365,6 +1371,7 @@ def fetch_chain_activity_bulk(paytos, chain="base", days=30, rate=0.15):
         return {}, False
     rpc_url, contract, block_secs, block_window, addr_batch = cfg
     rate = max(rate, BULK_LOG_MIN_INTERVAL.get(chain, 0.0))
+    workers = max(1, BULK_LOG_WORKERS.get(chain, 1))
 
     wanted = sorted({a.lower() for a in paytos if a})
     counts = {a: {"tx": 0, "payers": set()} for a in wanted}
@@ -1394,15 +1401,12 @@ def fetch_chain_activity_bulk(paytos, chain="base", days=30, rate=0.15):
             log.info("onchain bulk %s: %d addresses, %d windows, %d calls",
                      chain, len(wanted), len(windows), total)
 
-            done = 0
-            for batch in batches:
-                topics = [_TRANSFER_TOPIC, None,
-                          [_topic_addr(a) for a in batch]]
-                pending = [(lo, min(lo + block_window - 1, head))
-                           for lo in windows]
-                while pending:
-                    lo, hi = pending.pop()
-                    params = [{"fromBlock": hex(lo), "toBlock": hex(hi),
+            def fetch_window(topics, lo, hi):
+                """All logs for [lo, hi]; halves busy ranges. None on failure."""
+                stack, out = [(lo, hi)], []
+                while stack:
+                    a, b = stack.pop()
+                    params = [{"fromBlock": hex(a), "toBlock": hex(b),
                                "address": contract, "topics": topics}]
                     logs = None
                     err = None
@@ -1421,28 +1425,47 @@ def fetch_chain_activity_bulk(paytos, chain="base", days=30, rate=0.15):
                         # Busy ranges return more logs than the node will
                         # serialize. Halving keeps the sweep going instead of
                         # discarding the whole chain's results.
-                        if hi > lo:
-                            mid = (lo + hi) // 2
-                            pending.append((mid + 1, hi))
-                            pending.append((lo, mid))
+                        if b > a:
+                            mid = (a + b) // 2
+                            stack.append((mid + 1, b))
+                            stack.append((a, mid))
                             continue
                         log.warning("onchain bulk %s: block %d failed: %r",
-                                    chain, lo, err)
-                        return {}, False
-                    for entry in logs:
-                        tp = entry.get("topics") or []
-                        if len(tp) < 3:
-                            continue
-                        addr = topic_to_addr.get(tp[2].lower())
-                        if addr is None:
-                            continue
-                        counts[addr]["tx"] += 1
-                        counts[addr]["payers"].add(tp[1].lower())
-                    done += 1
-                    if done % 50 == 0:
-                        log.info("onchain bulk %s: %d/%d windows (%d queued)",
-                                 chain, done, total, len(pending))
+                                    chain, a, err)
+                        return None
+                    out.extend(logs)
                     time.sleep(rate)
+                return out
+
+            done = 0
+            for batch in batches:
+                topics = [_TRANSFER_TOPIC, None,
+                          [_topic_addr(a) for a in batch]]
+                spans = [(lo, min(lo + block_window - 1, head)) for lo in windows]
+                # Windows are independent; a few in flight hide node latency.
+                # Results are folded in on this thread only.
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    futures = [pool.submit(fetch_window, topics, lo, hi)
+                               for lo, hi in spans]
+                    for fut in as_completed(futures):
+                        logs = fut.result()
+                        if logs is None:
+                            for f in futures:
+                                f.cancel()
+                            return {}, False
+                        for entry in logs:
+                            tp = entry.get("topics") or []
+                            if len(tp) < 3:
+                                continue
+                            addr = topic_to_addr.get(tp[2].lower())
+                            if addr is None:
+                                continue
+                            counts[addr]["tx"] += 1
+                            counts[addr]["payers"].add(tp[1].lower())
+                        done += 1
+                        if done % 200 == 0:
+                            log.info("onchain bulk %s: %d/%d windows",
+                                     chain, done, total)
     except Exception as e:
         log.warning("onchain bulk %s sweep failed: %r", chain, e)
         return {}, False
