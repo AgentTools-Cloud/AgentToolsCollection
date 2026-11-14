@@ -493,6 +493,30 @@ def well_known_mcp_registry_auth():
                              headers={"Cache-Control": "public, max-age=300"})
 
 
+SECURITY_CONTACT = "admin@agent-tools.cloud"
+
+
+@app.get("/.well-known/security.txt", include_in_schema=False)
+def well_known_security_txt():
+    """RFC 9116 security contact.
+
+    Also the contact that directories (e.g. MCPBundles) read to verify that we
+    control this site before letting us claim our listing. Expires is rolled
+    forward on every request so the file never goes stale (RFC 9116 asks for
+    less than a year).
+    """
+    import datetime as _dt
+    from fastapi.responses import PlainTextResponse
+
+    expires = (_dt.datetime.now(_dt.timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+               + _dt.timedelta(days=180))
+    body = (f"Contact: mailto:{SECURITY_CONTACT}\n"
+            f"Expires: {expires.strftime('%Y-%m-%dT%H:%M:%SZ')}\n"
+            "Preferred-Languages: en, zh\n"
+            "Canonical: https://agent-tools.cloud/.well-known/security.txt\n")
+    return PlainTextResponse(body, headers={"Cache-Control": "public, max-age=3600"})
+
+
 @app.post("/a2a", tags=["a2a"])
 async def a2a_jsonrpc(request: Request):
     """A2A JSON-RPC research analyst: 1.0 `SendMessage` / 0.3 `message/send` (A2A-Version header).
