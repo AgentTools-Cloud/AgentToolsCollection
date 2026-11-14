@@ -24,6 +24,14 @@ if not os.path.exists(SRC):
     raise SystemExit(0)
 
 CP = "/tmp/test-resource-floor-%d.db" % os.getpid()
+# Each copy is the full live DB (~1.4 GB). Refuse to fill the disk, and
+# remove the copy however this script exits (errors used to leak it).
+import atexit, shutil  # noqa: E401,E402
+if shutil.disk_usage("/tmp").free < 3 * os.path.getsize(SRC):
+    print("SKIP: not enough free space in /tmp for a copy of %s" % SRC)
+    raise SystemExit(0)
+atexit.register(lambda: [os.unlink(p) for p in (CP, CP + "-wal", CP + "-shm")
+                         if os.path.exists(p)])
 sqlite3.connect(SRC).backup(sqlite3.connect(CP))
 os.environ["AGENT_TOOLS_DB_PATH"] = CP
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -97,6 +105,5 @@ crawl("cdp-bazaar", "rf:1", 0, [])
 check("zero from the owning source is still a lowering", row()[0] == 43,
       "got %s" % row()[0])
 
-os.unlink(CP)
 print("\n%d passed, %d failed" % (passed, failed))
 raise SystemExit(bool(failed))
