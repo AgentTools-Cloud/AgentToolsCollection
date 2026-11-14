@@ -107,6 +107,19 @@ class InternalNoticeTests(TemporaryDatabaseTestCase):
         with patch.object(notices.time, 'time', return_value=2_000_000_000 + 12 * day):
             self.assertEqual([n for n in self.feed()['notices'] if n['category'] == 'disk'], [])
 
+    def test_disk_report_rerun_same_day_replaces_numbers(self):
+        with patch.object(notices.time, 'time', return_value=2_000_000_000):
+            self.assertTrue(notices.publish_disk_report(61, 21, 8, 7, 3, 27, action_needed=True))
+        with patch.object(notices.time, 'time', return_value=2_000_000_000 + 7200):
+            self.assertTrue(notices.publish_disk_report(54, 28, 4.4, 4, 0, 2, action_needed=True))
+            disk = [n for n in self.feed()['notices'] if n['category'] == 'disk']
+        self.assertEqual(len(disk), 1)
+        self.assertEqual(disk[0]['severity'], 'info')
+        self.assertEqual(disk[0]['data']['used_pct'], 54)
+        self.assertEqual(disk[0]['data']['tmp_copies'], 0)
+        self.assertIn('磁盘已用 54%', disk[0]['summary'])
+        self.assertEqual(disk[0]['occurrences'], 2)
+
     def test_repeat_notice_deduplicates_and_updates_occurrence(self):
         for _ in range(3):
             self.assertTrue(notices.store('system', 'info', 'Fixed event', 'Fixed summary', event_key='same'))

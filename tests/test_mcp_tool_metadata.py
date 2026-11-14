@@ -49,5 +49,13 @@ class McpToolMetadataTests(unittest.TestCase):
                          {"view", "topic", "month", "api_key"})
 
 
+    def test_discovery_manifests_list_every_tool(self):
+        from directory import routes
+        names = set(_tools())
+        self.assertEqual(set(routes.well_known()["endpoints"]["mcp"]["tools"]), names)
+        for tool in _tools().values():
+            self.assertNotIn("PulseMCP", tool.description or "", tool.name)
+
+
 if __name__ == "__main__":
     unittest.main()

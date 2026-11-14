@@ -94,7 +94,15 @@ def store(category, severity, title, summary, *, event_key=None, listing_kind=No
                 'verdict,data_json,first_seen,last_seen) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) '
                 # Concurrent writers can commit out of order; never move last_seen backwards.
                 'ON CONFLICT(event_key) DO UPDATE SET last_seen=MAX(last_seen,excluded.last_seen),'
-                'occurrences=occurrences+1',
+                'occurrences=occurrences+1,'
+                # A disk report is a rolling status: a later run the same day
+                # replaces its numbers and severity instead of only bumping the count.
+                "severity=CASE WHEN category='disk' AND excluded.last_seen>=last_seen "
+                'THEN excluded.severity ELSE severity END,'
+                "summary=CASE WHEN category='disk' AND excluded.last_seen>=last_seen "
+                'THEN excluded.summary ELSE summary END,'
+                "data_json=CASE WHEN category='disk' AND excluded.last_seen>=last_seen "
+                'THEN excluded.data_json ELSE data_json END',
                 (key, category, severity, title, summary, listing_kind, listing_id, submission_id,
                  verdict, payload, now, now))
             conn.execute('DELETE FROM internal_notices WHERE last_seen<?',
