@@ -514,7 +514,9 @@ async def a2a_jsonrpc(request: Request):
     # probe a remote endpoint + call the LLM), so run it off the event loop.
     client_ip = (request.headers.get("cf-connecting-ip")
                  or (request.client.host if request.client else None))
-    result = await run_in_threadpool(directory_a2a.handle_jsonrpc, payload, a2a_version, client_ip)
+    scheme, _, token = (request.headers.get("authorization") or "").partition(" ")
+    api_key = token.strip() if scheme.lower() == "bearer" else None
+    result = await run_in_threadpool(directory_a2a.handle_jsonrpc, payload, a2a_version, client_ip, api_key)
     return JSONResponse(result)
 
 

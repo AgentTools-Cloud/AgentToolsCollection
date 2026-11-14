@@ -108,8 +108,9 @@ def own_agent_card(base_url: str = SITE) -> dict:
         "description": (
             "LLM research analyst for the agent-tool economy (x402 paid APIs, MCP servers, "
             "A2A agents). Ask in plain language; it queries our daily probe data, writes the "
-            "analysis and checks every number against the data (CC BY 4.0). Multi-turn via "
-            f"contextId. To search or safety-scan tools use our MCP server: {base}/mcp-discovery/"
+            "analysis and checks every number against the data (CC BY 4.0). Multi-turn: send back "
+            "the contextId we return; to choose your own contextId, send an API key "
+            f"(Authorization: Bearer). To search or safety-scan tools use our MCP server: {base}/mcp-discovery/"
         ),
         "url": endpoint,
         "preferredTransport": "JSONRPC",
@@ -151,16 +152,19 @@ def _extract_text(message: dict) -> str:
     return " ".join(chunks).strip()
 
 
-def _agent_message(text: str, data: Any = None) -> dict:
+def _agent_message(text: str, data: Any = None, context_id: str | None = None) -> dict:
     parts: list[dict] = [{"kind": "text", "text": text}]
     if data is not None:
         parts.append({"kind": "data", "data": data})
-    return {
+    msg = {
         "role": "agent",
         "parts": parts,
         "messageId": f"atc-{int(time.time() * 1000)}",
         "kind": "message",
     }
+    if context_id:
+        msg["contextId"] = context_id
+    return msg
 
 
 _V1_METHODS = frozenset({
@@ -226,15 +230,18 @@ def _agent_message_v1(text: str, data: Any = None,
 
 
 _CLIENT_IP: contextvars.ContextVar[str | None] = contextvars.ContextVar("a2a_client_ip", default=None)
+_API_KEY: contextvars.ContextVar[str | None] = contextvars.ContextVar("a2a_api_key", default=None)
 
 
-def handle_jsonrpc(payload: dict, a2a_version: str | None = None, client_ip: str | None = None) -> dict:
+def handle_jsonrpc(payload: dict, a2a_version: str | None = None, client_ip: str | None = None,
+                   api_key: str | None = None) -> dict:
     """A2A JSON-RPC handler serving 0.3 (`message/send`) and 1.0 (`SendMessage`).
 
     The version comes from the A2A-Version header; this agent answers with a
     direct Message and never creates tasks.
     """
     _CLIENT_IP.set(client_ip)
+    _API_KEY.set(api_key)
     if not isinstance(payload, dict):
         return _jsonrpc_error(None, -32600, "Invalid Request")
     req_id = payload.get("id")
@@ -257,7 +264,8 @@ def handle_jsonrpc(payload: dict, a2a_version: str | None = None, client_ip: str
     outcome = _answer(message if isinstance(message, dict) else {}, _accepted_modes(params))
     if "error" in outcome:
         return _outcome_error(req_id, outcome["error"])
-    return _jsonrpc_result(req_id, _agent_message(outcome["text"], data=outcome.get("data")))
+    return _jsonrpc_result(req_id, _agent_message(outcome["text"], data=outcome.get("data"),
+                                                  context_id=outcome.get("context_id")))
 
 
 def _handle_v1(req_id, method, params: dict) -> dict:
@@ -272,7 +280,7 @@ def _handle_v1(req_id, method, params: dict) -> dict:
         if "error" in outcome:
             return _outcome_error(req_id, outcome["error"])
         return _jsonrpc_result(req_id, {"message": _agent_message_v1(
-            outcome["text"], outcome.get("data"), message.get("contextId"))})
+            outcome["text"], outcome.get("data"), outcome.get("context_id") or message.get("contextId"))})
     if method in ("SendStreamingMessage", "SubscribeToTask", "GetExtendedAgentCard"):
         return _a2a_error(req_id, -32004, f"{method} is not supported by this agent",
                           "UNSUPPORTED_OPERATION")
@@ -314,6 +322,7 @@ def _answer(message: dict, accepted: list | None = None) -> dict:
         out = a2a_agent.run(
             question, skill=a2a_agent.pick_skill(text, data_part),
             context_id=cid if isinstance(cid, str) else None, ip=_CLIENT_IP.get(),
+            account=a2a_agent.account_for_key(_API_KEY.get()),
             detail=data_part.get("detail") or req.get("detail"))
         if out is not None and "error" in out:
             return out
