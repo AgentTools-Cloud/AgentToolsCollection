@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from directory import db as directory_db
@@ -464,6 +464,33 @@ def well_known_jwks() -> JSONResponse:
 
     return JSONResponse(card_signing.public_jwks(),
                         headers={"Cache-Control": "public, max-age=3600"})
+
+
+_MCP_REGISTRY_AUTH_FILE = "/etc/agent-tools/mcp-registry-auth"
+
+
+@app.get("/.well-known/mcp-registry-auth", include_in_schema=False)
+def well_known_mcp_registry_auth():
+    """Public proof record(s) for the official MCP Registry's HTTP domain auth.
+
+    Lets us publish under the reverse-DNS namespace ``cloud.agent-tools/*``.
+    The file holds only ``v=MCPv1; k=ed25519; p=<public key>`` lines; the
+    private key never lives on the web host's code path.
+    """
+    from fastapi.responses import PlainTextResponse
+
+    path = os.environ.get("AGENT_TOOLS_MCP_REGISTRY_AUTH_FILE", _MCP_REGISTRY_AUTH_FILE)
+    try:
+        with open(path, encoding="ascii") as fh:
+            body = fh.read(4097)
+    except (OSError, UnicodeDecodeError):
+        raise HTTPException(status_code=404)
+    lines = [ln.strip() for ln in body.splitlines()
+             if ln.strip().startswith("v=MCPv1;")]
+    if not lines or len(body) > 4096:
+        raise HTTPException(status_code=404)
+    return PlainTextResponse("\n".join(lines) + "\n",
+                             headers={"Cache-Control": "public, max-age=300"})
 
 
 @app.post("/a2a", tags=["a2a"])
