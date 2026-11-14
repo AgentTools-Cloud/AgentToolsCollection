@@ -69,12 +69,38 @@ class LoopTests(Base):
         self.assertIn("62,428", out["text"])
         self.assertNotIn("unverified_numbers", out["data"])
 
-    def test_memory_carries_to_next_turn_and_skips_cache(self):
+    def test_anonymous_memory_uses_the_id_we_issue(self):
         with mock.patch.object(ag, "_chat", side_effect=[_final("hi", summary="goal: MCP growth")]):
-            ag.run("hello", context_id="ctx", ip="1.1.1.3")
+            first = ag.run("hello", context_id="ctx", ip="1.1.1.3")      # caller-chosen id: replaced
+        cid = first["context_id"]
+        self.assertRegex(cid, r"^atc-ctx-[0-9a-f]{32}$")
+        self.assertEqual(first["data"]["context"]["scope"], "issued")
+        self.assertIn("note", first["data"]["context"])
         with mock.patch.object(ag, "_chat", side_effect=[_final("ok")]) as chat:
-            ag.run("and x402?", context_id="ctx", ip="1.1.1.3")
+            second = ag.run("and x402?", context_id=cid, ip="1.1.1.3")
         self.assertIn("goal: MCP growth", chat.call_args[0][0][1]["content"])
+        self.assertEqual((second["context_id"], second["data"]["context"]["memory"]), (cid, "continued"))
+
+    def test_anonymous_cannot_reuse_a_common_id(self):
+        with mock.patch.object(ag, "_chat", side_effect=[_final("a", summary="secret plan")]):
+            ag.run("question one", context_id="ctx-1", ip="1.1.1.10")
+        with mock.patch.object(ag, "_chat", side_effect=[_final("b")]) as chat:
+            out = ag.run("question two", context_id="ctx-1", ip="1.1.1.11")
+        self.assertNotIn("secret plan", chat.call_args[0][0][1]["content"])
+        self.assertEqual(out["data"]["context"]["memory"], "new")
+        self.assertNotEqual(out["context_id"], "ctx-1")
+
+    def test_account_ids_are_scoped_per_account(self):
+        with mock.patch.object(ag, "_chat", side_effect=[_final("a", summary="acct 7 plan")]):
+            first = ag.run("question one", context_id="ctx-1", ip="1.1.1.12", account=7)
+        self.assertEqual((first["context_id"], first["data"]["context"]["scope"]), ("ctx-1", "account"))
+        with mock.patch.object(ag, "_chat", side_effect=[_final("b")]) as chat:
+            ag.run("question two", context_id="ctx-1", ip="1.1.1.13", account=8)   # other account, same id
+        self.assertNotIn("acct 7 plan", chat.call_args[0][0][1]["content"])
+        with mock.patch.object(ag, "_chat", side_effect=[_final("c")]) as chat:
+            again = ag.run("and then?", context_id="ctx-1", ip="1.1.1.14", account=7)  # same account, new IP
+        self.assertIn("acct 7 plan", chat.call_args[0][0][1]["content"])
+        self.assertEqual(again["data"]["context"]["memory"], "continued")
 
     def test_cache_hit_costs_nothing(self):
         with mock.patch.object(ag, "_chat", side_effect=[_final("answer A")]):
@@ -82,7 +108,8 @@ class LoopTests(Base):
         with mock.patch.object(ag, "_chat") as chat:
             again = ag.run("state of   mcp?", ip="1.1.1.5")
         chat.assert_not_called()
-        self.assertEqual(first, again)
+        self.assertEqual(first["text"], again["text"])
+        self.assertNotEqual(first["context_id"], again["context_id"])   # each caller gets its own conversation
 
     def test_llm_error_is_an_error(self):
         with mock.patch.object(ag, "_chat", side_effect=RuntimeError("down")):
@@ -120,10 +147,21 @@ class LoopTests(Base):
             third = ag.run("question three", ip="5.5.5.3")      # another client, cap is shared
             again = ag.run("question one", ip="5.5.5.4")        # cached: served past the cap
         self.assertEqual(third["error"][2], "DAILY_LIMIT_REACHED")
-        self.assertEqual(again, first)
+        self.assertEqual(again["text"], first["text"])
 
 
 class EndpointTests(Base):
+    def test_reply_carries_context_id(self):
+        req = {"jsonrpc": "2.0", "id": 9, "method": "SendMessage", "params": {"message": {
+            "role": "ROLE_USER", "messageId": "m", "contextId": "mine", "parts": [{"text": "how is the market?"}]}}}
+        with mock.patch.object(ag, "_chat", side_effect=[_final("x"), _final("y")]):
+            anon = a2a.handle_jsonrpc(req, "1.0", "4.4.4.1")
+            with mock.patch.object(ag, "account_for_key", return_value=42):
+                keyed = a2a.handle_jsonrpc(req, "1.0", "4.4.4.2", "some-key")
+        self.assertRegex(anon["result"]["message"]["contextId"], r"^atc-ctx-")
+        self.assertEqual(keyed["result"]["message"]["contextId"], "mine")
+
+
     def test_text_goes_to_llm_and_raw_report_does_not(self):
         with mock.patch.object(ag, "_chat", side_effect=[_final("LLM answer")]):
             res = a2a.handle_jsonrpc({"jsonrpc": "2.0", "id": 1, "method": "message/send", "params": {

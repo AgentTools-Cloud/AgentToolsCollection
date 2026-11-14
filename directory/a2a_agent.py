@@ -28,6 +28,7 @@ import logging
 import math
 import os
 import re
+import secrets
 import sqlite3
 import threading
 import time
@@ -381,19 +382,70 @@ def _record(ip, skill, tin, tout, usd, cached=False, fallback=None):
         log.exception("a2a: recording usage failed")
 
 
-def _get_ctx(cid):
-    if not cid:
+# Conversation ids (contextId). Memory is keyed so one caller can never read
+# another caller's conversation:
+# - with a valid API key the caller may choose its own contextId; memory is
+#   stored under (account, contextId), so equal ids from different accounts
+#   never meet;
+# - without a key we ignore caller-chosen ids and issue an unguessable one
+#   ("atc-ctx-" + 32 hex) in the reply; only an id we issued and still hold
+#   continues a conversation.
+ISSUED_PREFIX = "atc-ctx-"
+_ISSUED_RE = re.compile(r"^atc-ctx-[0-9a-f]{32}$")
+
+
+def account_for_key(raw: str | None) -> int | None:
+    """Active account id for an API key, else None."""
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    try:
+        with closing(db.connect(read_only=True)) as conn:
+            key = db.api_key_row(conn, raw)
+            if key is None:
+                return None
+            user = conn.execute("SELECT status FROM users WHERE id=?", (key["user_id"],)).fetchone()
+    except Exception:  # noqa: BLE001 - an unreadable key is treated as anonymous
+        log.exception("a2a: API key lookup failed")
+        return None
+    return int(key["user_id"]) if user is not None and user[0] == "active" else None
+
+
+def resolve_context(client_cid, account: int | None) -> dict:
+    """{"id": contextId to return, "key": memory key, "scope", "continued"}."""
+    cid = client_cid.strip()[:200] if isinstance(client_cid, str) else ""
+    if account is not None:
+        if not cid:
+            cid = ISSUED_PREFIX + secrets.token_hex(16)
+        key = f"u{account}:{cid}"
+        return {"id": cid, "key": key, "scope": "account", "continued": _ctx_exists(key)}
+    if cid and _ISSUED_RE.match(cid) and _ctx_exists("anon:" + cid):
+        return {"id": cid, "key": "anon:" + cid, "scope": "issued", "continued": True}
+    cid = ISSUED_PREFIX + secrets.token_hex(16)
+    return {"id": cid, "key": "anon:" + cid, "scope": "issued", "continued": False,
+            "replaced": bool(client_cid)}
+
+
+def _ctx_exists(key) -> bool:
+    with closing(_state()) as s:
+        row = s.execute("SELECT updated FROM ctx WHERE id=?", (key,)).fetchone()
+    return bool(row and row[0] > time.time() - CTX_TTL)
+
+
+def _get_ctx(key):
+    if not key:
         return None
     with closing(_state()) as s:
-        row = s.execute("SELECT summary, updated FROM ctx WHERE id=?", (cid,)).fetchone()
-    return row[0] if row and row[1] > time.time() - CTX_TTL else None
+        row = s.execute("SELECT summary, updated FROM ctx WHERE id=?", (key,)).fetchone()
+    return (row[0] or None) if row and row[1] > time.time() - CTX_TTL else None
 
 
-def _put_ctx(cid, summary):
-    if not cid or not summary:
+def _put_ctx(key, summary):
+    """Store (or refresh) a conversation; an empty summary still registers an issued id."""
+    if not key:
         return
     with _state_lock, closing(_state()) as s:
-        s.execute("INSERT OR REPLACE INTO ctx VALUES(?,?,?)", (cid[:200], str(summary)[:1200], int(time.time())))
+        s.execute("INSERT OR REPLACE INTO ctx VALUES(?,?,?)", (key[:260], str(summary or "")[:1200], int(time.time())))
         s.execute("DELETE FROM ctx WHERE updated<?", (int(time.time()) - CTX_TTL,))
         s.commit()
 
@@ -553,7 +605,8 @@ def _parse_final(content: str) -> dict:
 
 
 def run(question: str, *, skill: str = "ask_analyst", context_id: str | None = None,
-        ip: str | None = None, detail: str | None = None, budget_s: float = 55.0) -> dict | None:
+        ip: str | None = None, detail: str | None = None, budget_s: float = 55.0,
+        account: int | None = None) -> dict | None:
     """Answer with the LLM analyst: {text, data}, or {"error": ...} when it cannot run.
 
     Refusals are errors, never a silent downgrade: the caller decides whether to
@@ -569,13 +622,15 @@ def run(question: str, *, skill: str = "ask_analyst", context_id: str | None = N
     skill = skill if skill in SKILLS else "ask_analyst"
     snap = _snap() or {}
     as_of = snap.get("as_of") or ""
-    memory = _get_ctx(context_id)
+    ctx = resolve_context(context_id, account)
+    memory = _get_ctx(ctx["key"]) if ctx["continued"] else None
     key = None if memory else _cache_key(skill, question, as_of, detail or "")
     if key:
         hit = _cache_get(key)
         if hit:  # free: served before any limit
             _record(ip, skill, 0, 0, 0.0, cached=True)
-            return hit
+            _put_ctx(ctx["key"], hit.get("summary"))
+            return _with_context({"text": hit["text"], "data": dict(hit["data"])}, ctx)
     lim = _limited(ip, skill)
     if lim:
         _record(ip, skill, 0, 0, 0.0, fallback=lim[0])
@@ -643,7 +698,7 @@ def run(question: str, *, skill: str = "ask_analyst", context_id: str | None = N
         _record(ip, skill, tin, tout, usd, fallback="llm_error")
         return error("unavailable", 60)
     _record(ip, skill, tin, tout, usd)
-    _put_ctx(context_id, final.get("summary"))
+    _put_ctx(ctx["key"], final.get("summary"))
     cited = sorted({int(x) for x in re.findall(r"\[(\d+)\]", answer)})
     used = [r for r in results if r["n"] in cited] or results
     data: dict[str, Any] = {
@@ -659,5 +714,17 @@ def run(question: str, *, skill: str = "ask_analyst", context_id: str | None = N
         data["results"] = {str(r["n"]): r["result"] for r in used}
     out = {"text": answer, "data": data}
     if key and not clarify:
-        _cache_put(key, out)
+        _cache_put(key, {**out, "summary": final.get("summary")})
+    return _with_context(out, ctx)
+
+
+def _with_context(out: dict, ctx: dict) -> dict:
+    """Attach the conversation id to return and say how memory was handled."""
+    info = {"contextId": ctx["id"], "memory": "continued" if ctx["continued"] else "new",
+            "scope": ctx["scope"]}
+    if ctx.get("replaced"):
+        info["note"] = ("contextId replaced: without an API key only ids issued by us continue a "
+                        "conversation; send this contextId on your next message")
+    out["data"]["context"] = info
+    out["context_id"] = ctx["id"]
     return out
