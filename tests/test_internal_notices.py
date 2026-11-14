@@ -85,6 +85,28 @@ class InternalNoticeTests(TemporaryDatabaseTestCase):
             self.assertFalse(mailer.send_admin_notification('MCP submission', 'Site', 'listed', []))
         self.smtp.assert_not_called()
 
+    def test_disk_report_shows_only_latest_and_is_active_while_action_needed(self):
+        day = 86400
+        with patch.object(notices.time, 'time', return_value=2_000_000_000):
+            self.assertTrue(notices.publish_disk_report(85, 9, 10.6, 9, 8, 26, action_needed=True))
+        with patch.object(notices.time, 'time', return_value=2_000_000_000 + day):
+            self.assertTrue(notices.publish_disk_report(58, 26, 6.5, 6, 0, 40, action_needed=True))
+            feed = self.feed()
+        disk = [n for n in feed['notices'] if n['category'] == 'disk']
+        self.assertEqual(len(disk), 1)  # one rolling status, no history copies
+        self.assertEqual(disk[0]['status'], 'active')
+        self.assertEqual(disk[0]['severity'], 'warning')  # backup older than 30 h
+        self.assertEqual(disk[0]['data']['candidate_gb'], 6)
+        self.assertRegex(disk[0]['id'], r'^[a-f0-9]{64}$')
+        self.assertIn('只提醒不自动删除', disk[0]['summary'])
+        self.assertTrue(all(type(v) in (int, bool) for v in disk[0]['data'].values()))
+        with patch.object(notices.time, 'time', return_value=2_000_000_000 + 2 * day):
+            self.assertTrue(notices.publish_disk_report(50, 30, 0, 0, 0, 3, action_needed=False))
+            disk = [n for n in self.feed()['notices'] if n['category'] == 'disk']
+        self.assertEqual([(d['status'], d['severity']) for d in disk], [('resolved', 'info')])
+        with patch.object(notices.time, 'time', return_value=2_000_000_000 + 12 * day):
+            self.assertEqual([n for n in self.feed()['notices'] if n['category'] == 'disk'], [])
+
     def test_repeat_notice_deduplicates_and_updates_occurrence(self):
         for _ in range(3):
             self.assertTrue(notices.store('system', 'info', 'Fixed event', 'Fixed summary', event_key='same'))

@@ -228,6 +228,34 @@ def record_lifecycle(conn, action, request_id):
                  '(SELECT id FROM internal_notices ORDER BY last_seen DESC,id DESC LIMIT ?)', (MAX_HISTORY,))
 
 
+DISK_REPORT_ACTIVE_DAYS = 8
+
+
+def publish_disk_report(used_pct, free_gb, candidate_gb, candidate_items, tmp_copies,
+                        backup_age_hours, *, action_needed):
+    """Daily host disk report (ops/disk_cleanup_reminder.py). Counts only.
+
+    The reminder never deletes anything; this row keeps the latest report
+    visible on the Notice page until the listed items are dealt with.
+    """
+    vals = {'used_pct': int(used_pct), 'free_gb': int(free_gb),
+            'candidate_gb': int(round(candidate_gb)), 'candidate_items': int(candidate_items),
+            'tmp_copies': int(tmp_copies), 'action_needed': bool(action_needed)}
+    if backup_age_hours is not None:
+        vals['backup_age_hours'] = int(backup_age_hours)
+    warn = vals['used_pct'] >= 80 or vals['tmp_copies'] > 0 or (
+        backup_age_hours is not None and backup_age_hours > 30)
+    backup = ('读不到' if backup_age_hours is None
+              else f'{int(backup_age_hours)} 小时前' + ('（超过 30 小时）' if backup_age_hours > 30 else ''))
+    summary = (f'磁盘已用 {vals["used_pct"]}%，剩余 {vals["free_gb"]} GB；'
+               f'可清理候选 {vals["candidate_items"]} 项约 {vals["candidate_gb"]} GB'
+               f'（其中测试遗留库副本 {vals["tmp_copies"]} 份）；异地日备最近成功 {backup}。'
+               '清单见 latex-tools 的 /var/lib/agent-tools-disk-reminder/latest.txt；'
+               '只提醒不自动删除，旧快照先归档 NFS 并核对哈希再删。')
+    return store('disk', 'warning' if warn else 'info', 'latex-tools 磁盘清理提醒', summary,
+                 event_key=routine_day_key('disk-report'), data=vals)
+
+
 def capture_legacy_admin(subject, text):
     # Defensive interception of old direct _send(ADMIN_EMAIL, ...). Do not
     # carry arbitrary email bodies into the private feed or back to SMTP.
@@ -237,7 +265,9 @@ def capture_legacy_admin(subject, text):
 
 def _history(conn, now):
     result = []
-    for row in conn.execute('SELECT * FROM internal_notices WHERE last_seen>=? '
+    # Disk reports are a rolling status, not events: only the latest one is
+    # shown, from _active_rows.
+    for row in conn.execute("SELECT * FROM internal_notices WHERE last_seen>=? AND category<>'disk' "
                             'ORDER BY last_seen DESC,id DESC LIMIT ?',
                             (now - RETENTION_DAYS * 86400, MAX_HISTORY)):
         target = None
@@ -350,6 +380,15 @@ def _active_rows(conn, now):
                                       '条目编号与端点指纹仅保留在来源主机。',
                            'first_seen': counts['first_seen'], 'last_seen': counts['last_seen'],
                            'occurrences': counts['occurrences'], 'data': {'warning_pairs': counts['pairs']}})
+    disk = conn.execute("SELECT * FROM internal_notices WHERE category='disk' "
+                        'ORDER BY last_seen DESC,id DESC LIMIT 1').fetchone()
+    if disk is not None and disk['last_seen'] >= now - DISK_REPORT_ACTIVE_DAYS * 86400:
+        data = json.loads(disk['data_json'] or '{}')
+        result.append({'id': disk['event_key'], 'category': 'disk', 'severity': disk['severity'],
+                       'status': 'active' if data.get('action_needed') else 'resolved',
+                       'title': safe_text(disk['title']), 'summary': safe_text(disk['summary'], 600),
+                       'first_seen': disk['first_seen'], 'last_seen': disk['last_seen'],
+                       'occurrences': disk['occurrences'], 'data': data})
     latest = conn.execute(
         "SELECT * FROM crawl_runs WHERE status<>'running' ORDER BY COALESCE(finished_at,started_at) DESC,id DESC")
     seen = set()
