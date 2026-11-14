@@ -203,6 +203,13 @@ def _a2a_error(req_id, code: int, message: str, reason: str,
             "error": {"code": code, "message": message, "data": [info]}}
 
 
+def _outcome_error(req_id, err) -> dict:
+    """(code, message) or (code, message, reason, metadata) -> JSON-RPC error."""
+    if len(err) >= 4:
+        return _a2a_error(req_id, err[0], err[1], err[2], err[3])
+    return _jsonrpc_error(req_id, err[0], err[1])
+
+
 def _agent_message_v1(text: str, data: Any = None,
                       context_id: Any = None) -> dict:
     import uuid
@@ -249,8 +256,7 @@ def handle_jsonrpc(payload: dict, a2a_version: str | None = None, client_ip: str
     message = params.get("message") or {}
     outcome = _answer(message if isinstance(message, dict) else {}, _accepted_modes(params))
     if "error" in outcome:
-        code, msg = outcome["error"]
-        return _jsonrpc_error(req_id, code, msg)
+        return _outcome_error(req_id, outcome["error"])
     return _jsonrpc_result(req_id, _agent_message(outcome["text"], data=outcome.get("data")))
 
 
@@ -264,8 +270,7 @@ def _handle_v1(req_id, method, params: dict) -> dict:
                               {"taskId": str(message.get("taskId"))[:120]})
         outcome = _answer(message, _accepted_modes(params))
         if "error" in outcome:
-            code, msg = outcome["error"]
-            return _jsonrpc_error(req_id, code, msg)
+            return _outcome_error(req_id, outcome["error"])
         return _jsonrpc_result(req_id, {"message": _agent_message_v1(
             outcome["text"], outcome.get("data"), message.get("contextId"))})
     if method in ("SendStreamingMessage", "SubscribeToTask", "GetExtendedAgentCard"):
@@ -302,7 +307,7 @@ def _answer(message: dict, accepted: list | None = None) -> dict:
     question = text or str(data_part.get("question") or "")
     out = None
     # A data part naming one of the raw reports gets that report without the LLM;
-    # everything else is answered by the LLM analyst (templates only as fallback).
+    # everything else is answered by the LLM analyst; limits and model failures are errors.
     if question and data_skill not in a2a_research.SKILL_IDS:
         from . import a2a_agent
         cid = message.get("contextId")
@@ -310,6 +315,8 @@ def _answer(message: dict, accepted: list | None = None) -> dict:
             question, skill=a2a_agent.pick_skill(text, data_part),
             context_id=cid if isinstance(cid, str) else None, ip=_CLIENT_IP.get(),
             detail=data_part.get("detail") or req.get("detail"))
+        if out is not None and "error" in out:
+            return out
     if out is None:
         out = a2a_research.respond(req)
     if accepted is not None and not _wants_json(accepted):
