@@ -1,13 +1,12 @@
 # mcpserver — agent-tools.cloud directory + MCP discovery
 
-[![smithery badge](https://smithery.ai/badge/kangletian/agent-tools-x402-directory)](https://smithery.ai/servers/kangletian/agent-tools-x402-directory)
+[![Listed on mcpservers.org](https://mcpservers.org/badge.svg)](https://mcpservers.org/servers/github-com-agenttools-cloud-agenttoolscollection-tree-main-agent-tools-mcp)
 
 The server that powers [agent-tools.cloud](https://agent-tools.cloud) — an open,
 agent-readable directory of **x402 paid APIs, MCP servers and A2A agents**, probed
 daily, graded and safety-scanned, with a free MCP discovery endpoint and an A2A agent.
 Everything on the site (listings, daily statistics, scoring methodology, Blog) is
 available as JSON and through MCP tools.
-Also listed on [Smithery](https://smithery.ai/servers/kangletian/agent-tools-x402-directory).
 
 > **Branches:** `main` is an older public snapshot. The code that runs the site
 > today, including everything described below, is on the

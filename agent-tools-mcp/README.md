@@ -1,6 +1,6 @@
 # agent-tools-mcp
 
-[![smithery badge](https://smithery.ai/badge/kangletian/agent-tools-mcp)](https://smithery.ai/servers/kangletian/agent-tools-mcp)
+[![Listed on mcpservers.org](https://mcpservers.org/badge.svg)](https://mcpservers.org/servers/github-com-agenttools-cloud-agenttoolscollection-tree-main-agent-tools-mcp)
 [![MCP](https://img.shields.io/badge/MCP-Server-blue)](https://modelcontextprotocol.io)
 [![PyPI](https://img.shields.io/pypi/v/agent-tools-mcp)](https://pypi.org/project/agent-tools-mcp/)
 [![License](https://img.shields.io/badge/License-Apache_2.0-green.svg)](https://opensource.org/licenses/Apache-2.0)
@@ -18,8 +18,6 @@ Backed by [agent-tools.cloud](https://agent-tools.cloud), an open directory that
 > A2A tells agents *who* can do the job. x402 lets them *pay* for it. MCP gives them the *tools* to do it.
 
 This is a **discovery layer, not a facilitator** — your agent keeps full custody of payment. The tools never auto-pay; they only find resources and return call templates. Call the `stats` tool for live counts across all three protocols.
-
-Also listed on [Smithery](https://smithery.ai/servers/kangletian/agent-tools-mcp) for one-click hosted install.
 
 ## Tools
 
