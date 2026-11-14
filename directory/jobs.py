@@ -37,6 +37,7 @@ from . import zero as zero_mod
 from . import directories as directories_mod
 from . import prowl as prowl_mod
 from . import wellknown as wellknown_mod
+from . import peers as peers_mod
 from . import mcp_safety
 
 # agenstry.com reverse-crawl: register its MCP page crawler as a source so
@@ -54,6 +55,11 @@ crawlers.ALL_CRAWLERS["flows-litprotocol"] = flows_mod.fetch_flows_litprotocol
 crawlers.ALL_CRAWLERS["x402-fuchss"] = crawlers.fetch_x402_fuchss
 crawlers.ALL_CRAWLERS["zero"] = zero_mod.fetch_zero
 for _name, _fn in directories_mod.FETCHERS.items():
+    crawlers.ALL_CRAWLERS[_name] = _fn
+# Peer directories that crawl us, used as discovery leads (peers.py).
+for _name, _fn in peers_mod.MCP_FETCHERS.items():
+    crawlers.MCP_CRAWLERS[_name] = _fn
+for _name, _fn in peers_mod.X402_FETCHERS.items():
     crawlers.ALL_CRAWLERS[_name] = _fn
 
 log = logging.getLogger("directory.jobs")
@@ -240,7 +246,8 @@ def _run_one(name):
     if name in _RESOURCE_LIST_SOURCES:
         items = _filter_claimed_resource_items(items, name)
 
-    if name == "paygent-discover" or name in directories_mod.FETCHERS:
+    if (name == "paygent-discover" or name in directories_mod.FETCHERS
+            or name in peers_mod.X402_FETCHERS):
         with db.connect(read_only=True) as c:
             claimed_origins = {
                 db._canonical_origin(row[0])
@@ -567,6 +574,12 @@ def cmd_crawl_a2a() -> int:
                  lm["snapshot"], lm["candidates"], lm["resolved"], lm["inserted"], lm["updated"])
     except Exception as e:
         errors.append(f"localmark: {e!r}"); log.warning("a2a localmark crawl failed: %r", e)
+    try:
+        pr = peers_mod.crawl_a2a_peers()
+        added += pr["inserted"]; updated += pr["updated"]
+        errors.extend(f"peer {e}" for e in pr["errors"])
+    except Exception as e:
+        errors.append(f"peers: {e!r}"); log.warning("a2a peer crawl failed: %r", e)
     try:
         gh = a2a_mod.crawl_github_topic()
         added += gh["inserted"]; updated += gh["updated"]

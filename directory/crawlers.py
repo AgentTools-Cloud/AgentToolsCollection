@@ -1589,7 +1589,8 @@ def url_retired(url: str) -> bool:
 
 # Quick tunnels change name on every restart; listing them only adds dead rows.
 EPHEMERAL_SUFFIXES = (".trycloudflare.com", ".ngrok-free.app", ".ngrok.io", ".ngrok.app",
-                      ".loca.lt", ".hostc.app", ".serveo.net", ".localhost.run")
+                      ".loca.lt", ".hostc.app", ".serveo.net", ".localhost.run",
+                      ".pinggy.link", ".pinggy-free.link", ".pinggy.net", ".pinggy.io")
 
 
 def is_ephemeral_host(url: str | None) -> bool:
