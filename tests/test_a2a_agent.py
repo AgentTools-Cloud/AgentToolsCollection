@@ -54,7 +54,7 @@ class LoopTests(Base):
         self.assertIn("53,642", out["text"])
         self.assertEqual(out["data"]["sources"][0]["tool"], "kpis")
         self.assertNotIn("unverified_numbers", out["data"])
-        self.assertEqual(out["data"]["usage"]["input_tokens"], 200)
+        self.assertNotIn("usage", out["data"])          # no token/cost data, no model name
         self.assertEqual(chat.call_count, 2)
         # tool result went back to the model with its index
         msgs = chat.call_args_list[1][0][0]
