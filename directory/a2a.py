@@ -110,7 +110,9 @@ def own_agent_card(base_url: str = SITE) -> dict:
             "A2A agents). Ask in plain language; it queries our daily probe data, writes the "
             "analysis and checks every number against the data (CC BY 4.0). Multi-turn: send back "
             "the contextId we return; to choose your own contextId, send an API key "
-            f"(Authorization: Bearer). To search or safety-scan tools use our MCP server: {base}/mcp-discovery/"
+            "(Authorization: Bearer). Plain text goes to ask_analyst; for another skill send a data "
+            "part {\"skill\": <id>, \"question\": ...}. "
+            f"To search or safety-scan tools use our MCP server: {base}/mcp-discovery/"
         ),
         "url": endpoint,
         "preferredTransport": "JSONRPC",
