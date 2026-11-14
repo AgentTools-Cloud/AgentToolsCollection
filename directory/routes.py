@@ -1093,8 +1093,8 @@ def api_mcp_search(
 ):
     """Search MCP servers.
 
-    Unions the standalone MCP directory (PulseMCP / official registry import)
-    with x402 services that also expose an mcp_url.
+    Unions the standalone MCP directory (official MCP Registry, Smithery, Agenstry
+    and other crawled sources) with x402 services that also expose an mcp_url.
     """
     effective_sort = db.effective_search_sort(q, sort)
     pull = limit + offset
@@ -2305,6 +2305,11 @@ async def api_submit_a2a(request: Request, payload: A2ASubmissionPayload):
     }
 
 
+def _mcp_tool_names():
+    from . import mcp_app  # lazy: the MCP app imports routes-level helpers
+    return sorted(t.name for t in mcp_app.discover_mcp._tool_manager.list_tools())
+
+
 @router.get("/.well-known/agent-tools.json", tags=["discovery"])
 def well_known():
     return {
@@ -2441,9 +2446,7 @@ def well_known():
             "mcp": {
                 "transport": "streamable-http",
                 "url": "https://agent-tools.cloud/mcp-discovery/",
-                "tools": ["search", "ask_services", "get", "list_categories", "stats",
-                          "directory_stats", "get_methodology", "list_articles", "get_article",
-                          "register"],
+                "tools": _mcp_tool_names(),
             },
             "a2a": {
                 "agent_card": "https://agent-tools.cloud/.well-known/agent-card.json",

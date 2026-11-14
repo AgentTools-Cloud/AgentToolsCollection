@@ -715,8 +715,9 @@ async def search_mcp_servers(
 ) -> dict[str, Any]:
     """Find MCP servers in the directory.
 
-    Searches the standalone MCP directory (PulseMCP / official MCP registry
-    import) unioned with x402 services that also expose an MCP endpoint.
+    Searches the standalone MCP directory (official MCP Registry, Smithery,
+    Agenstry and other crawled sources) unioned with x402 services that also
+    expose an MCP endpoint.
     Returns normalised entries with a ready-to-use streamable-http
     `call_hint.mcp.url`.
 
