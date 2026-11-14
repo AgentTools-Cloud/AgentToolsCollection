@@ -14,8 +14,8 @@ token is paid each turn):
 - conversation memory is a <=180-word summary the model returns with its
   answer (no extra call), not the transcript;
 - answers are cached per (skill, normalised question, snapshot day);
-- per-IP hourly limits and a daily USD budget; past it we fall back to the
-  template reports in a2a_research.
+- per-IP hourly limits and a daily USD budget; past them, or when the model
+  fails, the request gets a JSON-RPC error (no silent downgrade).
 """
 
 from __future__ import annotations
@@ -338,21 +338,22 @@ def _state() -> sqlite3.Connection:
     return conn
 
 
-def _limited(ip: str | None, skill: str) -> str | None:
-    """Reason to refuse an LLM run, or None."""
+def _limited(ip: str | None, skill: str) -> tuple[str, int] | None:
+    """(reason, retry_after_seconds) when an LLM run must be refused, else None."""
     now = int(time.time())
     budget = float(os.getenv("AGENT_TOOLS_A2A_DAILY_USD", "20") or 20)
     with closing(_state()) as s:
         spent = s.execute("SELECT coalesce(sum(usd),0) FROM calls WHERE ts>=?", (now - now % 86400,)).fetchone()[0]
         if spent >= budget:
-            return "daily_budget"
+            return "daily_budget", 86400 - now % 86400
         if ip:
             heavy = SKILLS[skill][2] < 10
-            n = s.execute("SELECT count(*) FROM calls WHERE ts>=? AND ip=? AND cached=0 AND fallback IS NULL"
-                          + (" AND skill IN ('market_scan','research_report')" if heavy else ""),
-                          (now - 3600, ip)).fetchone()[0]
+            n, oldest = s.execute("SELECT count(*), min(ts) FROM calls WHERE ts>=? AND ip=? AND cached=0 "
+                                  "AND fallback IS NULL"
+                                  + (" AND skill IN ('market_scan','research_report')" if heavy else ""),
+                                  (now - 3600, ip)).fetchone()
             if n >= SKILLS[skill][2]:
-                return "rate_limited"
+                return "rate_limited", max(1, (oldest or now) + 3600 - now)
     return None
 
 
@@ -473,6 +474,30 @@ def unsupported_numbers(text: str, results: list) -> list[str]:
     return bad[:8]
 
 
+# --------------------------------------------------------------------------- errors
+
+_ERRORS = {
+    # reason: (JSON-RPC code, A2A ErrorInfo reason, message)
+    "rate_limited": (-32029, "RATE_LIMITED", "Too many analyst requests from this client"),
+    "daily_budget": (-32029, "BUDGET_EXHAUSTED", "Today's analysis budget is used up; it resets at 00:00 UTC"),
+    "unavailable": (-32603, "ANALYST_UNAVAILABLE", "The analyst model is unavailable; retry later"),
+    "empty_question": (-32602, "INVALID_PARAMS", "params.message must contain a question"),
+}
+
+
+def error(reason: str, retry_after: int | None = None, skill: str | None = None) -> dict:
+    code, info_reason, message = _ERRORS[reason]
+    meta: dict[str, Any] = {}
+    if retry_after:
+        meta["retryAfterSeconds"] = int(retry_after)
+        message += f" (retry after {int(retry_after)} s)"
+    if reason == "rate_limited" and skill:
+        meta["limitPerHour"] = SKILLS[skill][2]
+    if reason != "empty_question":
+        meta["rawReports"] = ",".join(a2a_research.SKILL_IDS)
+    return {"error": (code, message, info_reason, meta)}
+
+
 # --------------------------------------------------------------------------- agent
 
 _LISTING_URL = re.compile(r"agent-tools\.cloud/(?:services|mcp/servers|a2a/agents)/[\w.~-]+")
@@ -513,14 +538,23 @@ def _parse_final(content: str) -> dict:
 
 def run(question: str, *, skill: str = "ask_analyst", context_id: str | None = None,
         ip: str | None = None, detail: str | None = None, budget_s: float = 55.0) -> dict | None:
-    """Answer with the LLM analyst. Returns {text, data} or None to fall back to templates."""
-    if not configured() or not question.strip():
+    """Answer with the LLM analyst: {text, data}, or {"error": ...} when it cannot run.
+
+    Refusals are errors, never a silent downgrade: the caller decides whether to
+    retry later or ask for a raw report.
+    """
+    if not question.strip():
+        return error("empty_question")
+    if not configured():
+        # No model in this deployment (dev/tests, or AGENT_TOOLS_A2A_LLM=0):
+        # the caller serves the template reports. Production always has one.
+        log.warning("a2a: LLM analyst not configured; serving template reports")
         return None
     skill = skill if skill in SKILLS else "ask_analyst"
-    why = _limited(ip, skill)
-    if why:
-        _record(ip, skill, 0, 0, 0.0, fallback=why)
-        return None
+    lim = _limited(ip, skill)
+    if lim:
+        _record(ip, skill, 0, 0, 0.0, fallback=lim[0])
+        return error(lim[0], lim[1], skill)
     snap = _snap() or {}
     as_of = snap.get("as_of") or ""
     memory = _get_ctx(context_id)
@@ -588,10 +622,10 @@ def run(question: str, *, skill: str = "ask_analyst", context_id: str | None = N
             if fixed.get("answer"):
                 final, answer = fixed, str(fixed["answer"]).strip()
                 bad = unsupported_numbers(answer, [r["result"] for r in results])
-    except Exception:  # noqa: BLE001 - any LLM/transport failure falls back to templates
+    except Exception:  # noqa: BLE001 - any LLM/transport failure is reported as an error
         log.exception("a2a agent failed (%s)", skill)
         _record(ip, skill, tin, tout, usd, fallback="llm_error")
-        return None
+        return error("unavailable", 60)
     _record(ip, skill, tin, tout, usd)
     _put_ctx(context_id, final.get("summary"))
     cited = sorted({int(x) for x in re.findall(r"\[(\d+)\]", answer)})

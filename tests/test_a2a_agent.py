@@ -1,4 +1,4 @@
-"""LLM analyst behind our A2A agent: tool loop, number check, memory, cache, limits, fallback."""
+"""LLM analyst behind our A2A agent: tool loop, number check, memory, cache, limits, errors."""
 import json
 import os
 import sys
@@ -84,9 +84,11 @@ class LoopTests(Base):
         chat.assert_not_called()
         self.assertEqual(first, again)
 
-    def test_llm_error_falls_back(self):
+    def test_llm_error_is_an_error(self):
         with mock.patch.object(ag, "_chat", side_effect=RuntimeError("down")):
-            self.assertIsNone(ag.run("anything", ip="1.1.1.6"))
+            out = ag.run("anything", ip="1.1.1.6")
+        self.assertEqual(out["error"][2], "ANALYST_UNAVAILABLE")
+        self.assertEqual(out["error"][3]["retryAfterSeconds"], 60)
 
     def test_last_turn_has_no_tools(self):
         seq = [_resp(calls=[("kpis", {"view": "all"})])] * ag.MAX_TURNS + [_final("done")]
@@ -98,11 +100,15 @@ class LoopTests(Base):
         with mock.patch.object(ag, "_chat", side_effect=[_final(f"r{i}") for i in range(5)]):
             outs = [ag.run(f"write a report on topic {i}", skill="research_report", ip="9.9.9.9")
                     for i in range(4)]
-        self.assertEqual([o is None for o in outs], [False, False, False, True])
+        self.assertEqual(["error" in o for o in outs], [False, False, False, True])
+        code, msg, reason, meta = outs[-1]["error"]
+        self.assertEqual((code, reason, meta["limitPerHour"]), (-32029, "RATE_LIMITED", 3))
+        self.assertTrue(1 <= meta["retryAfterSeconds"] <= 3600)
 
     def test_daily_budget(self):
         with mock.patch.dict(os.environ, {"AGENT_TOOLS_A2A_DAILY_USD": "0"}):
-            self.assertIsNone(ag.run("anything", ip="1.1.1.8"))
+            out = ag.run("anything", ip="1.1.1.8")
+        self.assertEqual(out["error"][2], "BUDGET_EXHAUSTED")
 
 
 class EndpointTests(Base):
@@ -117,6 +123,16 @@ class EndpointTests(Base):
                 "message": {"parts": [{"kind": "data", "data": {"skill": "trend_report"}}]}}})
         chat.assert_not_called()
         self.assertEqual(res["result"]["parts"][0]["text"], "raw")
+
+    def test_refusal_is_a_jsonrpc_error_not_a_template(self):
+        with mock.patch.dict(os.environ, {"AGENT_TOOLS_A2A_DAILY_USD": "0"}), \
+                mock.patch.object(a2a.a2a_research, "respond") as tmpl:
+            res = a2a.handle_jsonrpc({"jsonrpc": "2.0", "id": 3, "method": "SendMessage", "params": {
+                "message": {"role": "ROLE_USER", "parts": [{"text": "how is the market?"}]}}}, "1.0", "3.3.3.3")
+        tmpl.assert_not_called()
+        self.assertNotIn("result", res)
+        self.assertEqual(res["error"]["code"], -32029)
+        self.assertEqual(res["error"]["data"][0]["reason"], "BUDGET_EXHAUSTED")
 
 
 class ParseTests(unittest.TestCase):
