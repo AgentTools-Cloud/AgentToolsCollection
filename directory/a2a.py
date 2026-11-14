@@ -1061,59 +1061,72 @@ def _known_a2a_urls() -> set[str]:
     return {_url_key(u) for r in rows for u in r if u}
 
 
-def crawl_localmark() -> dict:
-    """Use LocalMark's daily snapshot as discovery leads for new A2A cards."""
+def crawl_card_leads(source: str, leads: list[dict],
+                     workers: int = LOCALMARK_WORKERS) -> dict:
+    """Fetch each lead's Agent Card from its publisher and ingest it.
+
+    A lead is ``{"card_url", "source_id", "source_url"}``; ``card_url`` may be a
+    direct card URL or a bare origin (``https://host``), in which case the card
+    is discovered at the origin's well-known paths. Nothing from the lead's
+    directory is stored except where it pointed us.
+    """
     from concurrent.futures import ThreadPoolExecutor
     from . import ingestion
 
-    records = _fetch_localmark_feed()
-    leads = localmark_leads(records, _known_a2a_urls())
     rows: list[dict] = []
     with public_http.client(
             timeout=TIMEOUT, follow_redirects=True,
             headers={"User-Agent": UA, "Accept": "application/json"}) as c:
 
         def fetch(lead):
+            url = lead["card_url"]
+            origin_only = urlparse(url).path in ("", "/")
             try:
-                return lead, fetch_agent_card(lead["card_url"], client=c,
-                                              homepage=False)
+                return lead, fetch_agent_card(
+                    url, client=c, homepage=None if origin_only else False)
             except Exception as e:  # noqa: BLE001 -- one bad host is not fatal
-                log.info("localmark: card fetch failed for %s: %r",
-                         lead["card_url"], e)
+                log.info("%s: card fetch failed for %s: %r", source, url, e)
                 return lead, (None, None)
 
-        with ThreadPoolExecutor(max_workers=LOCALMARK_WORKERS) as pool:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
             for lead, (card, card_url) in pool.map(fetch, leads):
                 if not card:
                     continue
                 try:
                     row = card_to_row(card, card_url or lead["card_url"],
-                                      source="localmark",
+                                      source=source,
                                       source_id=lead["source_id"])
                 except Exception as e:  # noqa: BLE001
-                    log.warning("localmark: card_to_row failed for %s: %r",
-                                lead["card_url"], e)
+                    log.warning("%s: card_to_row failed for %s: %r",
+                                source, lead["card_url"], e)
                     continue
                 # Slug from name alone would merge same-named agents on
                 # different hosts; keep the host in it.
                 row["slug"] = f"{_slugify(row['name'])}-{_host_slug(row['card_url'])}"[:80]
-                row["source_url"] = lead["source_url"]
+                row["source_url"] = lead.get("source_url")
                 rows.append(row)
 
     def write(batch):
         with db.writer(immediate=True) as conn:
-            return ingestion.ingest_batch(conn, "a2a", "localmark", batch,
+            return ingestion.ingest_batch(conn, "a2a", source, batch,
                                           db.upsert_a2a_agent)
 
     inserted = updated = rejected = 0
     for i in range(0, len(rows), 100):
         res = db.with_retry(lambda b=rows[i:i + 100]: write(b))
         inserted += res["added"]; updated += res["updated"]; rejected += res["rejected"]
+    return {"candidates": len(leads), "resolved": len(rows),
+            "inserted": inserted, "updated": updated, "rejected": rejected}
+
+
+def crawl_localmark() -> dict:
+    """Use LocalMark's daily snapshot as discovery leads for new A2A cards."""
+    records = _fetch_localmark_feed()
+    leads = localmark_leads(records, _known_a2a_urls())
+    res = crawl_card_leads("localmark", leads)
     log.info("localmark: snapshot=%d leads=%d resolved=%d inserted=%d",
-             len(records), len(leads), len(rows), inserted)
-    return {"snapshot": len(records), "candidates": len(leads),
-            "resolved": len(rows), "inserted": inserted, "updated": updated,
-            "rejected": rejected}
+             len(records), len(leads), res["resolved"], res["inserted"])
+    return {"snapshot": len(records), **res}
 
 
 GITHUB_TOPIC_SEARCH = "https://api.github.com/search/repositories"
