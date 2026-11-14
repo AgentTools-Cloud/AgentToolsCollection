@@ -10,10 +10,14 @@ if not os.path.exists(SOURCE_DB):
     raise SystemExit(0)
 
 COPY = "/tmp/test-fts-literals-%d.db" % os.getpid()
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from live_copy_guard import assert_on_copy, refuse_if_imported  # noqa: E402
+refuse_if_imported()
 sqlite3.connect(SOURCE_DB).backup(sqlite3.connect(COPY))
 os.environ["AGENT_TOOLS_DB_PATH"] = COPY
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from directory import db  # noqa: E402
+assert_on_copy(COPY)
 
 c=db.connect(read_only=True)
 queries=(
