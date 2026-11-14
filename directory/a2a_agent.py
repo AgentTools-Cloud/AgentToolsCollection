@@ -45,26 +45,29 @@ MAX_TURNS = 5
 TOOL_RESULT_CHARS = 4800          # ~1.2k tokens per tool result
 CTX_TTL = 1800                    # conversation memory, seconds
 CACHE_TTL = 6 * 3600
+MAX_OUTPUT_TOKENS = 10000
 SKILLS = {
     # id: (max output tokens per call, request input-token cap, hourly calls per IP)
-    "ask_analyst": (1100, 14000, 20),
-    "compare": (1200, 14000, 20),
-    "listing_audit": (1200, 14000, 20),
-    "market_scan": (2400, 32000, 3),
-    "research_report": (2400, 32000, 3),
+    # No length rules in the prompts: the answer is as long as the question needs.
+    # MAX_OUTPUT_TOKENS is only a ceiling against runaway output.
+    "ask_analyst": (MAX_OUTPUT_TOKENS, 14000, 20),
+    "compare": (MAX_OUTPUT_TOKENS, 14000, 20),
+    "listing_audit": (MAX_OUTPUT_TOKENS, 14000, 20),
+    "market_scan": (MAX_OUTPUT_TOKENS, 32000, 3),
+    "research_report": (MAX_OUTPUT_TOKENS, 32000, 3),
 }
 _SKILL_RULE = {
-    "ask_analyst": "Max 150 words.",
-    "compare": "Compare both sides on the same metrics; end with the single biggest difference. Max 200 words.",
+    "ask_analyst": "",
+    "compare": "Compare both sides on the same metrics; end with the single biggest difference.",
     "listing_audit": ("Call benchmark first. Give rank vs peers, the 3 biggest gaps, and one concrete fix per "
-                      "gap (what to change, where). Max 200 words."),
+                      "gap (what to change, where)."),
     "market_scan": ("Find demand-vs-supply gaps: searched or unmet terms with few ready listings, topics strong "
                     "in one protocol and thin in another. Give 3-5 opportunities, each with its evidence numbers. "
                     "Use the report format."),
     "research_report": "Use the report format.",
 }
 REPORT_FORMAT = ("Report format: Title; Summary (3 sentences); Findings (3-6, each with numbers and [n]); "
-                 "Method and data (1 paragraph: as_of, which tools); Limits (1-3 bullets). Max 900 words.")
+                 "Method and data (1 paragraph: as_of, which tools); Limits (1-3 bullets).")
 
 SYSTEM = """You are Agent Tools Research, the analyst agent of agent-tools.cloud. We index and probe x402 paid APIs, MCP servers and A2A agents every day. You answer research questions about this market for other agents and for people.
 
@@ -79,7 +82,7 @@ How you work:
 
 Definitions: indexed = any source lists it; reachable = answered our latest probe; verified = passed a full protocol check (402 challenge / MCP initialize+tools/list / A2A JSON-RPC reply); ready = readiness grade A or B. Data refreshes daily; state the as_of date once.
 
-Style: answer first in 1-2 sentences, then at most 5 short points. Plain text, no headings unless the report format applies, no filler, no marketing. Write in the user's language; keep product and protocol names in English. Our data licence: CC BY 4.0.
+Style: answer first in 1-2 sentences, then the supporting points the question needs. Plain text, no headings unless the report format applies, no filler, no marketing. Write in the user's language; keep product and protocol names in English. Our data licence: CC BY 4.0.
 
 Final reply format (plain text, no JSON, no code fences):
 <your answer with [n] citations>
@@ -579,7 +582,7 @@ def run(question: str, *, skill: str = "ask_analyst", context_id: str | None = N
         return error(lim[0], lim[1], skill)
     max_out, in_cap, _ = SKILLS[skill]
     rule = _SKILL_RULE[skill] + (" " + REPORT_FORMAT if skill in ("research_report", "market_scan") else "")
-    user = (f"skill: {skill}. {rule}\ntoday: {time.strftime('%Y-%m-%d', time.gmtime())}; data as_of: {as_of}\n"
+    user = (f"skill: {skill}.{' ' + rule if rule else ''}\ntoday: {time.strftime('%Y-%m-%d', time.gmtime())}; data as_of: {as_of}\n"
             + (f"conversation so far: {memory}\n" if memory else "") + f"question: {question[:2000]}")
     messages: list[dict] = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}]
     results: list[dict] = []        # [{"n", "tool", "args", "result"}]
