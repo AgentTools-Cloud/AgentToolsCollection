@@ -261,7 +261,7 @@ def handle_jsonrpc(payload: dict, a2a_version: str | None = None, client_ip: str
         return _handle_v1(req_id, method, params)
 
     if method not in ("message/send", "message/stream"):
-        return _jsonrpc_error(req_id, -32601, f"Method not found: {method}")
+        return _jsonrpc_error(req_id, -32601, f"Method not found: {str(method)[:80]}")
     message = params.get("message") or {}
     outcome = _answer(message if isinstance(message, dict) else {}, _accepted_modes(params))
     if "error" in outcome:
@@ -298,7 +298,7 @@ def _handle_v1(req_id, method, params: dict) -> dict:
     if method in _V1_PUSH_METHODS:
         return _a2a_error(req_id, -32003, "Push notifications are not supported",
                           "PUSH_NOTIFICATION_NOT_SUPPORTED")
-    return _jsonrpc_error(req_id, -32601, f"Method not found: {method}")
+    return _jsonrpc_error(req_id, -32601, f"Method not found: {str(method)[:80]}")
 
 
 def _answer(message: dict, accepted: list | None = None) -> dict:
@@ -313,13 +313,17 @@ def _answer(message: dict, accepted: list | None = None) -> dict:
         return {"error": (-32602, "params.message must contain a text or data part")}
     data_part = next((p["data"] for p in (message.get("parts") or [])
                       if isinstance(p, dict) and isinstance(p.get("data"), dict)), {})
-    data_skill = str(data_part.get("skill") or "").strip().lower()
+    named = any(data_part.get(k) for k in ("skill", "id", "intent"))
     question = text or str(data_part.get("question") or "")
+    from . import a2a_agent
+    # A data part naming a raw report (or a legacy alias of one) gets that report
+    # without the LLM; everything else is answered by the LLM analyst, and limits
+    # and model failures are errors.
+    raw = named and (req.get("skill") in a2a_research.SKILL_IDS or req.get("skill") == "tool_request")
+    if named and not raw and not question and str(data_part.get("skill") or "").lower() in a2a_agent.SKILLS:
+        return a2a_agent.error("empty_question")
     out = None
-    # A data part naming one of the raw reports gets that report without the LLM;
-    # everything else is answered by the LLM analyst; limits and model failures are errors.
-    if question and data_skill not in a2a_research.SKILL_IDS:
-        from . import a2a_agent
+    if question and not raw:
         cid = message.get("contextId")
         out = a2a_agent.run(
             question, skill=a2a_agent.pick_skill(text, data_part),

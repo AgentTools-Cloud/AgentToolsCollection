@@ -455,9 +455,10 @@ def answer(req: dict) -> dict:
         log.exception("a2a research: %s failed", skill)
         return {"text": "This report is unavailable right now.", "data": {"error": "report_failed"}}
     if skill == "tool_request":
-        return {"text": ("I write data reports on the agent-tool ecosystem. To find, compare or "
+        return {"text": ("I answer research questions about the agent-tool market. To find, compare or "
                          f"safety-scan a tool, use our MCP server at {SEARCH_SURFACES['mcp']} or "
                          f"GET {SEARCH_SURFACES['rest_search']}."),
                 "data": {"reports": _menu(), "tools": SEARCH_SURFACES}}
-    return {"text": f"Unknown skill '{req.get('requested', '')}'. Skills: {', '.join(SKILL_IDS)}.",
+    return {"text": (f"Unknown skill '{req.get('requested', '')}'. Analyst skills: ask_analyst, research_report, "
+                     f"market_scan, compare, listing_audit (send a question). Raw reports: {', '.join(SKILL_IDS)}."),
             "data": {"error": "unknown_skill", "reports": _menu()}}

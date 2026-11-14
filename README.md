@@ -32,9 +32,8 @@ Also listed on [Smithery](https://smithery.ai/servers/kangletian/agent-tools-x40
 | `POST /api/v1/keys` | free | Mint an API key (no signup) for account-scoped actions |
 | `POST /api/v1/services/{slug}/paid-verifications` | API key | Sponsored paid verification: quote, then `/api/v1/paid-verifications/{id}/execute` |
 | `POST /mcp-discovery/` | free | **MCP streamable-http** discovery server |
-| `POST /a2a` | free | **A2A JSON-RPC** research agent (0.3 `message/send` and 1.0 `SendMessage`): data reports on the ecosystem (state, trends, topics, monthly, usability, search demand, per-listing benchmarks). Search and safety scans are on the MCP endpoint |
+| `POST /a2a` | free | **A2A JSON-RPC** research analyst (0.3 `message/send`, 1.0 `SendMessage`): an LLM answers market questions from our data. Plain text goes to `ask_analyst`; other skills via a data part `{"skill", "question"}`; raw reports without the LLM via `{"skill": <report id>}`. Multi-turn and limits: [/about#a2a-agent](https://agent-tools.cloud/about#a2a-agent). Search and safety scans are on the MCP endpoint |
 | `GET /healthz` | free | Liveness |
-| `GET /v1/models` | free | Upstream model listing (read-only) |
 | `GET /.well-known/agent-tools.json` | free | Agent discovery manifest |
 | `GET /.well-known/x402` | free | x402 v0.4 self-description (free-only) |
 | `GET /.well-known/mcp.json` | free | MCP self-description |
@@ -93,7 +92,7 @@ response", and coercion to read & forward `.key`/`.pem`/`.ssh`/`.env` files.
 Source-code-oriented rules (SQL/command/code injection) are intentionally not
 applied to natural-language descriptions to avoid false positives. Each live
 call also runs a frontier-LLM second opinion as an advisory dimension.
-Safety scans are MCP-only; the A2A agent on `POST /a2a` writes research reports. The hosted server carries the
+Safety scans are MCP-only; the A2A agent on `POST /a2a` is an LLM research analyst (questions and reports from our data). The hosted server carries the
 full tool set above; the stdio `agent-tools-mcp` PyPI package ships the core
 search tools only.
 
@@ -122,6 +121,8 @@ See [`.env.example`](.env.example). Required:
 - `AGENT_TOOLS_ASK_BASE_URL` / `AGENT_TOOLS_ASK_API_KEY` / `AGENT_TOOLS_ASK_MODEL` — LLM backend for `/api/v1/ask`
 - `AGENT_TOOLS_SAFETY_BASE_URL` / `AGENT_TOOLS_SAFETY_API_KEY` / `AGENT_TOOLS_SAFETY_MODEL` — optional override for the `scan_mcp_safety` advisory LLM (falls back to the `AGENT_TOOLS_ASK_*` backend)
 - `AGENT_TOOLS_DB_PATH` — SQLite path for the directory
+- `AGENT_TOOLS_A2A_BASE_URL` / `AGENT_TOOLS_A2A_API_KEY` / `AGENT_TOOLS_A2A_MODEL` — LLM backend of the A2A analyst (falls back to the `AGENT_TOOLS_SAFETY_*` backend); `AGENT_TOOLS_A2A_LLM=0` disables it
+- `AGENT_TOOLS_A2A_DAILY_CALLS` (default 1000) / `AGENT_TOOLS_A2A_CONCURRENCY` (default 6 per process) — analyst limits
 - `AGENT_TOOLS_ASK_RATE_LIMIT_PER_MINUTE` / `AGENT_TOOLS_ASK_RATE_LIMIT_PER_DAY` — public ask abuse limits
 - `METRICS_BEARER_TOKEN` — optional remote access token for `/metrics`; without it metrics are local-only
 

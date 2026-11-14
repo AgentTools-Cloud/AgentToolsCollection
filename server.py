@@ -495,7 +495,14 @@ def well_known_mcp_registry_auth():
 
 @app.post("/a2a", tags=["a2a"])
 async def a2a_jsonrpc(request: Request):
-    """A2A JSON-RPC endpoint: 1.0 `SendMessage` and 0.3 `message/send` (A2A-Version header)."""
+    """A2A JSON-RPC research analyst: 1.0 `SendMessage` / 0.3 `message/send` (A2A-Version header).
+
+    Plain text goes to ask_analyst; a data part {"skill", "question"} picks another skill;
+    {"skill": <raw report id>} returns that report without the LLM. Optional
+    `Authorization: Bearer <key>` lets the caller choose its own contextId. Errors carry
+    an A2A ErrorInfo reason: RATE_LIMITED, DAILY_LIMIT_REACHED, ANALYST_BUSY,
+    ANALYST_UNAVAILABLE. See https://agent-tools.cloud/about#a2a-agent.
+    """
     from fastapi.concurrency import run_in_threadpool
     from directory import a2a as directory_a2a
 
@@ -510,8 +517,8 @@ async def a2a_jsonrpc(request: Request):
     # A2A service parameter: header, or request parameter as the spec allows.
     a2a_version = (request.headers.get("a2a-version")
                    or request.query_params.get("A2A-Version"))
-    # handle_jsonrpc is synchronous and may do blocking work (a safety scan can
-    # probe a remote endpoint + call the LLM), so run it off the event loop.
+    # handle_jsonrpc is synchronous and may block (the analyst calls the LLM
+    # and data tools for up to ~90 s), so run it off the event loop.
     client_ip = (request.headers.get("cf-connecting-ip")
                  or (request.client.host if request.client else None))
     scheme, _, token = (request.headers.get("authorization") or "").partition(" ")

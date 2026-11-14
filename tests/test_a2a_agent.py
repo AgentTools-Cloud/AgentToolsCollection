@@ -120,8 +120,71 @@ class LoopTests(Base):
         with mock.patch.object(ag, "_chat", side_effect=fake_chat):
             t0 = _t.time(); ag.run("q1", skill="research_report", ip="7.7.7.1")
             t1 = _t.time(); ag.run("q2", skill="ask_analyst", ip="7.7.7.2")
-        self.assertGreater(seen[0] - t0, 100)
+        self.assertGreater(seen[0] - t0, 80)   # 90 s: under Cloudflare's 100 s cut-off
         self.assertLess(seen[1] - t1, 60)
+
+    def test_more_than_six_tool_calls_are_trimmed_consistently(self):
+        many = [("kpis", {"view": "all"})] * 8
+        seq = [_resp(calls=many), _final("done")]
+        with mock.patch.object(ag, "_chat", side_effect=seq) as chat:
+            out = ag.run("q many", ip="8.8.8.1")
+        msgs = chat.call_args_list[1][0][0]
+        asst = [m for m in msgs if m.get("tool_calls")][0]
+        tools = [m for m in msgs if m["role"] == "tool"]
+        self.assertEqual(len(asst["tool_calls"]), 6)
+        self.assertEqual(len(tools), 6)
+        self.assertEqual(out["text"], "done")
+
+    def test_pending_runs_count_against_limits(self):
+        # a run admitted but not finished (still with the model) already uses a slot
+        with mock.patch.dict(os.environ, {"AGENT_TOOLS_A2A_DAILY_CALLS": "1"}):
+            first = ag._admit("8.8.8.2", "ask_analyst")
+            self.assertIsInstance(first, int)
+            second = ag._admit("8.8.8.3", "ask_analyst")
+        self.assertEqual(second[0], "daily_limit")
+
+    def test_failures_count_per_ip(self):
+        with mock.patch.object(ag, "_chat", side_effect=RuntimeError("down")):
+            for i in range(3):
+                ag.run(f"report {i}", skill="research_report", ip="8.8.8.4")
+        with mock.patch.object(ag, "_chat") as chat:
+            out = ag.run("report 9", skill="research_report", ip="8.8.8.4")
+        chat.assert_not_called()
+        self.assertEqual(out["error"][2], "RATE_LIMITED")
+
+    def test_clarify_keeps_the_question_in_memory(self):
+        with mock.patch.object(ag, "_chat", side_effect=[_final(None, clarify="Which protocol?")]):
+            first = ag.run("how many are ready?", ip="8.8.8.5")
+        self.assertIn("Which protocol?", first["text"])
+        self.assertTrue(first["data"]["clarify"])
+        with mock.patch.object(ag, "_chat", side_effect=[_final("ok")]) as chat:
+            ag.run("MCP", context_id=first["context_id"], ip="8.8.8.5")
+        self.assertIn("how many are ready?", chat.call_args[0][0][1]["content"])
+
+    def test_unverified_answers_are_not_cached(self):
+        seq = [_resp(calls=[("kpis", {"view": "mcp"})]), _final("There are 777,777 servers [1]."),
+               _final("There are 999,999 servers [1].")]
+        with mock.patch.object(ag, "_chat", side_effect=seq):
+            out = ag.run("count?", ip="8.8.8.6")
+        self.assertIn("unverified_numbers", out["data"])
+        with mock.patch.object(ag, "_chat", side_effect=[_final("fresh")]) as chat:
+            again = ag.run("count?", ip="8.8.8.7")
+        self.assertEqual(again["text"], "fresh")
+        chat.assert_called_once()
+
+    def test_summary_kept_when_model_omits_it(self):
+        with mock.patch.object(ag, "_chat", side_effect=[_final("a", summary="goal: x402 prices")]):
+            first = ag.run("first", ip="8.8.8.8")
+        with mock.patch.object(ag, "_chat", side_effect=[_resp("no summary line here")]):
+            ag.run("second", context_id=first["context_id"], ip="8.8.8.8")
+        with mock.patch.object(ag, "_chat", side_effect=[_final("c")]) as chat:
+            ag.run("third", context_id=first["context_id"], ip="8.8.8.8")
+        self.assertIn("goal: x402 prices", chat.call_args[0][0][1]["content"])
+
+    def test_cache_key_keeps_operators(self):
+        self.assertNotEqual(ag._cache_key("ask_analyst", "price < 0.01", "d", ""),
+                            ag._cache_key("ask_analyst", "price > 0.01", "d", ""))
+        self.assertEqual(ag._cache_key("ask_analyst", "q", "d", "Brief"), ag._cache_key("ask_analyst", "q", "d", None))
 
     def test_llm_error_is_an_error(self):
         with mock.patch.object(ag, "_chat", side_effect=RuntimeError("down")):
@@ -163,6 +226,26 @@ class LoopTests(Base):
 
 
 class EndpointTests(Base):
+    def test_raw_report_alias_skips_the_model_even_with_text(self):
+        with mock.patch.object(ag, "_chat") as chat, \
+                mock.patch.object(a2a.a2a_research, "respond", return_value={"text": "raw", "data": {}}):
+            res = a2a.handle_jsonrpc({"jsonrpc": "2.0", "id": 5, "method": "message/send", "params": {
+                "message": {"parts": [{"kind": "text", "text": "please"},
+                                      {"kind": "data", "data": {"id": "trend_report"}}]}}})
+        chat.assert_not_called()
+        self.assertEqual(res["result"]["parts"][0]["text"], "raw")
+
+    def test_analyst_skill_without_question_is_invalid(self):
+        res = a2a.handle_jsonrpc({"jsonrpc": "2.0", "id": 6, "method": "message/send", "params": {
+            "message": {"parts": [{"kind": "data", "data": {"skill": "compare"}}]}}})
+        self.assertEqual(res["error"]["code"], -32602)
+
+    def test_busy_when_all_slots_taken(self):
+        with mock.patch.object(ag, "_slots") as slots:
+            slots.acquire.return_value = False
+            out = ag.run("anything at all", ip="8.8.9.1")
+        self.assertEqual(out["error"][2], "ANALYST_BUSY")
+
     def test_reply_carries_context_id(self):
         req = {"jsonrpc": "2.0", "id": 9, "method": "SendMessage", "params": {"message": {
             "role": "ROLE_USER", "messageId": "m", "contextId": "mine", "parts": [{"text": "how is the market?"}]}}}

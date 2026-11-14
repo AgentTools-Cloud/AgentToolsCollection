@@ -23,6 +23,7 @@ from . import ask as directory_ask
 from . import cards, db
 from .articles import ArticleError
 from . import a2a as directory_a2a
+from . import a2a_research
 from . import crawlers as directory_crawlers
 from . import jobs as directory_jobs
 from . import resources as directory_resources
@@ -2447,9 +2448,11 @@ def well_known():
             "a2a": {
                 "agent_card": "https://agent-tools.cloud/.well-known/agent-card.json",
                 "jsonrpc": "https://agent-tools.cloud/a2a",
-                "research_skills": ["ecosystem_report", "trend_report", "topic_report",
-                                    "monthly_report", "usability_report",
-                                    "search_demand_report", "listing_benchmark"],
+                "analyst_skills": ["ask_analyst", "research_report", "market_scan", "compare",
+                                   "listing_audit"],
+                "raw_reports": list(a2a_research.SKILL_IDS),
+                "input": "plain text -> ask_analyst; data part {skill, question} for another skill",
+                "docs": "https://agent-tools.cloud/about#a2a-agent",
                 "search": "https://agent-tools.cloud/api/v1/a2a/search",
                 "get_agent": "https://agent-tools.cloud/api/v1/a2a/agents/{slug}",
             },
