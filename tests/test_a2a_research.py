@@ -27,7 +27,8 @@ class CardTests(unittest.TestCase):
     def test_card_lists_only_research_skills(self):
         card = a2a.own_agent_card("https://agent-tools.cloud")
         ids = [s["id"] for s in card["skills"]]
-        self.assertEqual(ids, list(r.SKILL_IDS))
+        self.assertEqual(ids, ["ask_analyst", "research_report", "market_scan", "compare",
+                               "listing_audit", "raw_report"])
         self.assertTrue(set(ids).isdisjoint(r._TOOL_SKILLS))
         self.assertEqual(card["name"], "Agent Tools Research")
         self.assertIn("https://agent-tools.cloud/mcp-discovery/", card["description"])

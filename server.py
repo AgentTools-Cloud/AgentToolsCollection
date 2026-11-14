@@ -485,7 +485,9 @@ async def a2a_jsonrpc(request: Request):
                    or request.query_params.get("A2A-Version"))
     # handle_jsonrpc is synchronous and may do blocking work (a safety scan can
     # probe a remote endpoint + call the LLM), so run it off the event loop.
-    result = await run_in_threadpool(directory_a2a.handle_jsonrpc, payload, a2a_version)
+    client_ip = (request.headers.get("cf-connecting-ip")
+                 or (request.client.host if request.client else None))
+    result = await run_in_threadpool(directory_a2a.handle_jsonrpc, payload, a2a_version, client_ip)
     return JSONResponse(result)
 
 
