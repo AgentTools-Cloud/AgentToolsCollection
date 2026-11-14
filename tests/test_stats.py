@@ -6,6 +6,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -367,7 +368,9 @@ class AgentAccessTests(unittest.TestCase):
         self.assertEqual(parse({}, "find a statistics API for sports data"), {"skill": "tool_request"})
         stats._latest_cache.update(at=time.time(), snap=self.snap)
         try:
-            out = a2a._answer({"parts": [{"kind": "text", "text": "directory stats for x402"}]})
+            # Template path: never call the real model from a unit test.
+            with patch.dict(os.environ, {"AGENT_TOOLS_A2A_LLM": "0"}):
+                out = a2a._answer({"parts": [{"kind": "text", "text": "directory stats for x402"}]})
         finally:
             stats._latest_cache.update(at=0.0, snap=None)
         self.assertIn("3 indexed", out["text"])
