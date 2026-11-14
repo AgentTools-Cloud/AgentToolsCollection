@@ -14,8 +14,10 @@ token is paid each turn):
 - conversation memory is a <=180-word summary the model returns with its
   answer (no extra call), not the transcript;
 - answers are cached per (skill, normalised question, snapshot day);
-- per-IP hourly limits and a daily USD budget; past them, or when the model
-  fails, the request gets a JSON-RPC error (no silent downgrade).
+- per-IP hourly limits and one shared daily cap on analyst runs
+  (AGENT_TOOLS_A2A_DAILY_CALLS, default 1000); past them, or when the model
+  fails, the request gets a JSON-RPC error (no silent downgrade). Cached
+  answers do not count and are served even when the cap is reached.
 """
 
 from __future__ import annotations
@@ -338,14 +340,23 @@ def _state() -> sqlite3.Connection:
     return conn
 
 
+def _daily_cap() -> int:
+    try:
+        return int(os.getenv("AGENT_TOOLS_A2A_DAILY_CALLS", "1000") or 1000)
+    except ValueError:
+        return 1000
+
+
 def _limited(ip: str | None, skill: str) -> tuple[str, int] | None:
     """(reason, retry_after_seconds) when an LLM run must be refused, else None."""
     now = int(time.time())
-    budget = float(os.getenv("AGENT_TOOLS_A2A_DAILY_USD", "20") or 20)
+    cap = _daily_cap()
     with closing(_state()) as s:
-        spent = s.execute("SELECT coalesce(sum(usd),0) FROM calls WHERE ts>=?", (now - now % 86400,)).fetchone()[0]
-        if spent >= budget:
-            return "daily_budget", 86400 - now % 86400
+        # Model runs today (UTC), for everyone: answered or failed, not cached hits or refusals.
+        used = s.execute("SELECT count(*) FROM calls WHERE ts>=? AND cached=0 "
+                         "AND (fallback IS NULL OR fallback='llm_error')", (now - now % 86400,)).fetchone()[0]
+        if used >= cap:
+            return "daily_limit", 86400 - now % 86400
         if ip:
             heavy = SKILLS[skill][2] < 10
             n, oldest = s.execute("SELECT count(*), min(ts) FROM calls WHERE ts>=? AND ip=? AND cached=0 "
@@ -479,7 +490,7 @@ def unsupported_numbers(text: str, results: list) -> list[str]:
 _ERRORS = {
     # reason: (JSON-RPC code, A2A ErrorInfo reason, message)
     "rate_limited": (-32029, "RATE_LIMITED", "Too many analyst requests from this client"),
-    "daily_budget": (-32029, "BUDGET_EXHAUSTED", "Today's analysis budget is used up; it resets at 00:00 UTC"),
+    "daily_limit": (-32029, "DAILY_LIMIT_REACHED", "Today's analyst requests are used up; they reset at 00:00 UTC"),
     "unavailable": (-32603, "ANALYST_UNAVAILABLE", "The analyst model is unavailable; retry later"),
     "empty_question": (-32602, "INVALID_PARAMS", "params.message must contain a question"),
 }
@@ -493,6 +504,8 @@ def error(reason: str, retry_after: int | None = None, skill: str | None = None)
         message += f" (retry after {int(retry_after)} s)"
     if reason == "rate_limited" and skill:
         meta["limitPerHour"] = SKILLS[skill][2]
+    if reason == "daily_limit":
+        meta["limitPerDay"] = _daily_cap()
     if reason != "empty_question":
         meta["rawReports"] = ",".join(a2a_research.SKILL_IDS)
     return {"error": (code, message, info_reason, meta)}
@@ -551,19 +564,19 @@ def run(question: str, *, skill: str = "ask_analyst", context_id: str | None = N
         log.warning("a2a: LLM analyst not configured; serving template reports")
         return None
     skill = skill if skill in SKILLS else "ask_analyst"
-    lim = _limited(ip, skill)
-    if lim:
-        _record(ip, skill, 0, 0, 0.0, fallback=lim[0])
-        return error(lim[0], lim[1], skill)
     snap = _snap() or {}
     as_of = snap.get("as_of") or ""
     memory = _get_ctx(context_id)
     key = None if memory else _cache_key(skill, question, as_of, detail or "")
     if key:
         hit = _cache_get(key)
-        if hit:
+        if hit:  # free: served before any limit
             _record(ip, skill, 0, 0, 0.0, cached=True)
             return hit
+    lim = _limited(ip, skill)
+    if lim:
+        _record(ip, skill, 0, 0, 0.0, fallback=lim[0])
+        return error(lim[0], lim[1], skill)
     max_out, in_cap, _ = SKILLS[skill]
     rule = _SKILL_RULE[skill] + (" " + REPORT_FORMAT if skill in ("research_report", "market_scan") else "")
     user = (f"skill: {skill}. {rule}\ntoday: {time.strftime('%Y-%m-%d', time.gmtime())}; data as_of: {as_of}\n"
