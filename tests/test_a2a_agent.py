@@ -31,7 +31,7 @@ class Base(unittest.TestCase):
         self.p = [mock.patch.object(ag, "_state_path", return_value=os.path.join(self.tmp.name, "s.db")),
                   mock.patch.object(ag, "configured", return_value=True),
                   mock.patch.object(ag, "_snap", return_value={"as_of": "2026-11-14 01:00 UTC"}),
-                  mock.patch.dict(os.environ, {"AGENT_TOOLS_A2A_DAILY_USD": "20"})]
+                  mock.patch.dict(os.environ, {"AGENT_TOOLS_A2A_DAILY_CALLS": "1000"})]
         for p in self.p:
             p.start()
         self.tool = mock.patch.object(ag, "run_tool", side_effect=lambda n, a: {"reachable": 53642,
@@ -105,10 +105,22 @@ class LoopTests(Base):
         self.assertEqual((code, reason, meta["limitPerHour"]), (-32029, "RATE_LIMITED", 3))
         self.assertTrue(1 <= meta["retryAfterSeconds"] <= 3600)
 
-    def test_daily_budget(self):
-        with mock.patch.dict(os.environ, {"AGENT_TOOLS_A2A_DAILY_USD": "0"}):
+    def test_daily_limit(self):
+        with mock.patch.dict(os.environ, {"AGENT_TOOLS_A2A_DAILY_CALLS": "0"}):
             out = ag.run("anything", ip="1.1.1.8")
-        self.assertEqual(out["error"][2], "BUDGET_EXHAUSTED")
+        self.assertEqual(out["error"][2], "DAILY_LIMIT_REACHED")
+        self.assertEqual(out["error"][3]["limitPerDay"], 0)
+        self.assertNotIn("subscri", out["error"][1].lower())
+
+    def test_daily_limit_is_shared_and_cache_stays_free(self):
+        with mock.patch.dict(os.environ, {"AGENT_TOOLS_A2A_DAILY_CALLS": "2"}), \
+                mock.patch.object(ag, "_chat", side_effect=[_final("a"), _final("b"), _final("c")]):
+            first = ag.run("question one", ip="5.5.5.1")
+            ag.run("question two", ip="5.5.5.2")
+            third = ag.run("question three", ip="5.5.5.3")      # another client, cap is shared
+            again = ag.run("question one", ip="5.5.5.4")        # cached: served past the cap
+        self.assertEqual(third["error"][2], "DAILY_LIMIT_REACHED")
+        self.assertEqual(again, first)
 
 
 class EndpointTests(Base):
@@ -125,14 +137,14 @@ class EndpointTests(Base):
         self.assertEqual(res["result"]["parts"][0]["text"], "raw")
 
     def test_refusal_is_a_jsonrpc_error_not_a_template(self):
-        with mock.patch.dict(os.environ, {"AGENT_TOOLS_A2A_DAILY_USD": "0"}), \
+        with mock.patch.dict(os.environ, {"AGENT_TOOLS_A2A_DAILY_CALLS": "0"}), \
                 mock.patch.object(a2a.a2a_research, "respond") as tmpl:
             res = a2a.handle_jsonrpc({"jsonrpc": "2.0", "id": 3, "method": "SendMessage", "params": {
                 "message": {"role": "ROLE_USER", "parts": [{"text": "how is the market?"}]}}}, "1.0", "3.3.3.3")
         tmpl.assert_not_called()
         self.assertNotIn("result", res)
         self.assertEqual(res["error"]["code"], -32029)
-        self.assertEqual(res["error"]["data"][0]["reason"], "BUDGET_EXHAUSTED")
+        self.assertEqual(res["error"]["data"][0]["reason"], "DAILY_LIMIT_REACHED")
 
 
 class ParseTests(unittest.TestCase):
