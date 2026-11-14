@@ -16,6 +16,14 @@ if not os.path.exists(SRC):
     raise SystemExit(0)
 
 CP = "/tmp/test-api-keys-%d.db" % os.getpid()
+# Each copy is the full live DB (~1.4 GB). Refuse to fill the disk, and
+# remove the copy however this script exits (errors used to leak it).
+import atexit, shutil  # noqa: E401,E402
+if shutil.disk_usage("/tmp").free < 3 * os.path.getsize(SRC):
+    print("SKIP: not enough free space in /tmp for a copy of %s" % SRC)
+    raise SystemExit(0)
+atexit.register(lambda: [os.unlink(p) for p in (CP, CP + "-wal", CP + "-shm")
+                         if os.path.exists(p)])
 sqlite3.connect(SRC).backup(sqlite3.connect(CP))
 os.environ["AGENT_TOOLS_DB_PATH"] = CP
 os.environ["AGENT_TOOLS_KEY_MINT_PER_DAY"] = "200"
@@ -169,6 +177,5 @@ if claimed:
           raw().execute("SELECT name FROM mcp_servers WHERE endpoint_url=?",
                         (claimed[0],)).fetchone()[0] != "ANONYMOUS OVERWRITE")
 
-os.unlink(CP)
 print("%d ok, %d failed" % (ok, fail))
 raise SystemExit(1 if fail else 0)
