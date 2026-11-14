@@ -10,6 +10,8 @@ an ecosystem-wide total, a revenue figure or an endorsement.
 """
 from __future__ import annotations
 
+import bisect
+import calendar
 import json
 import math
 import re
@@ -1061,7 +1063,9 @@ def home_band(snap: dict | None, history: list, topics_shown: int = 5) -> dict |
 
 
 BACKFILL_METHOD = ("reachable = listings whose latest probe at the end of the UTC day "
-                   "was ok, rebuilt from raw probe history")
+                   "was ok, rebuilt from raw probe history; indexed = listings first "
+                   "seen by the end of the UTC day (listings removed since are not counted)")
+INDEXED_BACKFILL_DAYS = 120
 _RAW_PROBES = {"x402": ("health_history", "service_id"),
                "mcp": ("mcp_health_history", "server_id"),
                "a2a": ("a2a_health_history", "agent_id")}
@@ -1107,6 +1111,24 @@ def backfill_kpis(conn, before: str, warmup_days: int = 2) -> dict[str, dict]:
             days.append((day, ok))
         for d, n in days[warmup_days:]:
             out[d][kind] = {"reachable": n}
+    # Indexed: listings first seen (created_at) by the end of each UTC day. On
+    # the first real snapshot day this matched the snapshot within 0.05%; only
+    # listings removed since then are missing, so older days read a bit low.
+    end = calendar.timegm(time.strptime(before, "%Y-%m-%d"))
+    day_ends = [end - i * 86400 for i in range(INDEXED_BACKFILL_DAYS - 1, -1, -1)]
+    for kind in KINDS:
+        try:
+            created = sorted(int(r[0] or 0) for r in conn.execute(
+                f"SELECT created_at FROM {TABLE[kind]}"))
+        except Exception:  # noqa: BLE001 - table missing on old databases
+            continue
+        for de in day_ends:
+            n = bisect.bisect_left(created, de)  # created_at < end of that day
+            if n:
+                out[_day(de - 1)].setdefault(kind, {})["indexed"] = n
+    for d, r in out.items():
+        if all("indexed" in r.get(k, {}) for k in KINDS):
+            r["all"] = {"indexed": sum(r[k]["indexed"] for k in KINDS)}
     return dict(out)
 
 

@@ -159,7 +159,7 @@
   {% endfor %}
 </section>
 {% if backfill_used %}
-<p class="text-xs text-slate-400 mt-2"><sup>*</sup> Before {{ first_day }} the reachable trend is rebuilt from our raw probe logs (listings whose latest probe that day was ok); other figures start on {{ first_day }}.</p>
+<p class="text-xs text-slate-400 mt-2"><sup>*</sup> Before {{ first_day }} the trend is rebuilt: indexed counts the listings we had first seen by each day (listings removed since are not counted), and reachable replays our raw probe logs per protocol (listings whose latest probe that day was ok; all three protocols together only from {{ first_day }}). Protocol-verified and readiness start on {{ first_day }}.</p>
 {% endif %}
 
 {# Go deeper: the other stats pages #}

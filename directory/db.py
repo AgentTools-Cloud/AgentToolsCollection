@@ -2026,8 +2026,18 @@ def save_kpi_backfill(conn, rows: dict[str, dict], method: str) -> int:
     """Upsert backfilled KPI days; days that have a real snapshot are skipped."""
     real = {r[0] for r in conn.execute("SELECT day FROM stats_snapshots")}
     now = int(time.time())
-    keep = [(d, json.dumps(k, separators=(",", ":")), method, now)
-            for d, k in sorted(rows.items()) if d not in real]
+    old = {r[0]: json.loads(r[1] or "{}") for r in conn.execute(
+        "SELECT day, kpis FROM stats_kpi_backfill")}
+    keep = []
+    for d, k in sorted(rows.items()):
+        if d in real:
+            continue
+        # Merge per protocol and metric: a later run may no longer have the
+        # raw probes for an old day, so it must not drop what was rebuilt then.
+        merged = {kind: dict(v) for kind, v in old.get(d, {}).items() if isinstance(v, dict)}
+        for kind, v in k.items():
+            merged.setdefault(kind, {}).update(v)
+        keep.append((d, json.dumps(merged, separators=(",", ":")), method, now))
     # Upsert only: raw probes are pruned, so a later run must not drop older days.
     conn.executemany("INSERT INTO stats_kpi_backfill(day, kpis, method, generated_at) "
                      "VALUES (?,?,?,?) ON CONFLICT(day) DO UPDATE SET kpis=excluded.kpis, "
