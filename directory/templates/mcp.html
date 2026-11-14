@@ -3,6 +3,7 @@
 {% block desc %}Directory of {{ stats.total }} remotely-callable MCP servers, continuously aggregated and health-probed via JSON-RPC initialize.{% endblock %}
 {% block content %}
 {% from "_macros.html" import leaderboard %}
+{% include "_mcp_tabs.html" %}
 
 <section class="mb-10">
   <div class="flex flex-wrap items-start justify-between gap-4 mb-3">

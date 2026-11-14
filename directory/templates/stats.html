@@ -237,6 +237,11 @@
           </li>
           {% endfor %}
         </ol>
+        {% if kind == 'mcp' and snap.code_only and snap.code_only.mcp and snap.code_only.mcp.count %}
+        <p class="text-[11px] text-slate-500 mt-3">MCP counts cover servers with a remote endpoint. Another
+          <a href="/mcp/code" class="text-blue-600 hover:underline">{{ snap.code_only.mcp.count|num }} code-only servers</a>
+          (repository or package, no endpoint) are listed separately and not probed.</p>
+        {% endif %}
       </div>
       {% endfor %}
     </div>

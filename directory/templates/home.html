@@ -104,6 +104,9 @@
       </li>
       {% endfor %}
     </ol>
+    {% if k.mcp.code_only %}
+    <p class="text-[11px] text-slate-500 mt-5">Plus <a href="/mcp/code" class="text-blue-600 hover:underline">{{ k.mcp.code_only|num }} code-only MCP servers</a> you install and run yourself (not probed, not counted above).</p>
+    {% endif %}
     <p class="text-[11px] text-slate-400 mt-5 mono">As of {{ snap.as_of }}</p>
     {% else %}
     <dl class="grid grid-cols-2 gap-4 mt-5">

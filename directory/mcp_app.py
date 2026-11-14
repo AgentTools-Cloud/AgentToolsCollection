@@ -711,6 +711,7 @@ async def search_mcp_servers(
     top_k: int = 5,
     chain: str | None = None,
     require_healthy: bool = False,
+    scope: str = "remote",
     ctx: Context | None = None,
 ) -> dict[str, Any]:
     """Find MCP servers in the directory.
@@ -726,21 +727,26 @@ async def search_mcp_servers(
         top_k: Max servers to return (1-20).
         chain: Optional payment-network filter for paid MCP servers.
         require_healthy: When true, only return servers marked health=ok.
+        scope: "remote" (default) = servers with an endpoint you can call now;
+            "code" = code-only servers (repository / package you install and
+            run yourself, no remote endpoint); "all" = both.
     """
     top_k = max(1, min(20, top_k))
-    health = "ok" if require_healthy else None
+    scope = scope if scope in directory_db.MCP_SCOPES else "remote"
+    health = "ok" if require_healthy and scope != "code" else None
     servers: list[dict[str, Any]] = []
     seen: set[str] = set()
     with _open() as conn:
-        for r in directory_db.search_mcp(conn, q=intent, health=health, limit=top_k):
+        for r in directory_db.search_mcp(conn, q=intent, health=health, limit=top_k,
+                                         scope=scope):
             item = directory_resources.normalize_mcp_server(r)
             key = (item.get("endpoint_url") or item.get("slug") or "").lower()
             if key not in seen:
                 seen.add(key); servers.append(item)
-        for r in directory_db.search(
+        for r in (() if scope == "code" else directory_db.search(
             conn, q=intent, chain=chain, health=health,
             has_mcp=True, limit=top_k,
-        ):
+        )):
             item = directory_resources.normalize_service(r, as_mcp=True)
             key = (item.get("endpoint_url") or item.get("slug") or "").lower()
             if key not in seen:
@@ -748,7 +754,7 @@ async def search_mcp_servers(
     servers = servers[:top_k]
     _log_call("search_mcp_servers", ctx=ctx,
               args={"intent": intent, "top_k": top_k, "chain": chain,
-                    "require_healthy": require_healthy},
+                    "require_healthy": require_healthy, "scope": scope},
               result_n=len(servers),
               result_slug=(servers[0].get("slug") if servers else None))
     return {"intent": intent, "count": len(servers), "servers": servers}

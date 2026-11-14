@@ -155,6 +155,32 @@ def normalize_service(row: dict, as_mcp: bool = False,
     return item
 
 
+_INSTALL_COMMANDS = {
+    "npm": "npx -y {pkg}",
+    "pypi": "uvx {pkg}",
+    "docker": "docker run -i --rm {pkg}",
+    "oci": "docker run -i --rm {pkg}",
+}
+
+
+def code_install_hint(row: dict) -> dict:
+    """Repository / package facts for a code-only MCP server and, when the
+    package registry is known, the usual stdio command to start it."""
+    registry = (row.get("package_registry") or "").strip().lower() or None
+    package = (row.get("package_name") or "").strip() or None
+    repo = row.get("source_code_url") or (
+        row.get("homepage_url") if "github.com/" in (row.get("homepage_url") or "") else None)
+    template = _INSTALL_COMMANDS.get(registry or "")
+    return {
+        "repository": repo,
+        "package_registry": registry,
+        "package_name": package,
+        "command": template.format(pkg=package) if template and package else None,
+        "github_stars": row.get("github_stars"),
+        "downloads_30d": row.get("package_download_count"),
+    }
+
+
 def normalize_mcp_server(row: dict, include_sort_meta: bool = False) -> dict:
     """Normalise a standalone mcp_servers row into the unified shape."""
     from . import mcp_pricing
@@ -191,6 +217,11 @@ def normalize_mcp_server(row: dict, include_sort_meta: bool = False) -> dict:
         "call_hint": call_hint,
         "detail_url": f"https://agent-tools.cloud/api/v1/mcp/servers/{row.get('slug')}",
     }
+    if not endpoint:
+        # Code-only server: nothing to call remotely; say how to run it.
+        item["scope"] = "code"
+        item["code"] = code_install_hint(row)
+        item["page_url"] = f"https://agent-tools.cloud/mcp/code/{row.get('slug')}"
     if row.get("pricing"):
         summary = mcp_pricing.access_summary(row["pricing"])
         access = item["access"]
@@ -278,7 +309,7 @@ def _exact_name_rows(conn, names) -> dict[str, list[dict]]:
         })
     for row in conn.execute(
             "SELECT slug,name,description,endpoint_url,health,x402_supported "
-            "FROM mcp_servers WHERE lower(trim(name)) IN (%s)"
+            "FROM mcp_servers WHERE COALESCE(endpoint_url,'')!='' AND lower(trim(name)) IN (%s)"
             % placeholders, params):
         grouped[row["name"].strip().lower()].append({
             "name": row["name"], "description": row["description"],
