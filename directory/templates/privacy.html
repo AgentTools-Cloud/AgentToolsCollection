@@ -4,7 +4,7 @@
 {% block content %}
 <section class="max-w-3xl mb-8">
   <h1 class="text-3xl md:text-4xl font-extrabold tracking-tight">Privacy Policy</h1>
-  <p class="text-slate-500 mt-2 text-sm">Last updated: 11 November 2026</p>
+  <p class="text-slate-500 mt-2 text-sm">Last updated: 14 November 2026</p>
 </section>
 
 <div class="max-w-3xl space-y-6 text-sm text-slate-600 leading-relaxed">
@@ -19,6 +19,7 @@
       <li><span class="font-medium">Server logs</span> — standard web-server records: IP address, timestamp, requested URL, status code, referrer and user-agent. Used for operations, security, abuse prevention and aggregate traffic statistics.</li>
       <li><span class="font-medium">Page-view counts</span> — when a real browser opens a service detail page, a small script records that the page was viewed (page type, slug, referrer, IP, user-agent). This measures which listings people find useful. Automated agents that don't run scripts are not counted.</li>
       <li><span class="font-medium">MCP tool calls</span> — for calls to <span class="mono">/mcp-discovery/</span> we log the tool name, its arguments (including search text), result count, client name and IP. API keys and wallet signatures are not logged. These logs currently have no fixed expiry.</li>
+      <li><span class="font-medium">A2A research agent requests</span> — for messages to <span class="mono">/a2a</span> that the analyst answers we record the time, IP, skill, token counts and the outcome (answered, cached, refused or failed); we do not keep your message text. A conversation keeps a short summary of itself for 30 minutes after its last message, under the <span class="mono">contextId</span> (and your account, if you sent an API key). An answer to a question asked without conversation memory is cached for 6 hours under a hash of the question, with no caller information.</li>
       <li><span class="font-medium">Rate-limit counters</span> — short-lived per-IP counters to prevent abuse of the API.</li>
       <li><span class="font-medium">Account records, only if you create one</span> — signing in with GitHub stores your GitHub numeric id and login; minting an API key instead stores only a random identifier. Either way we also store the hostnames you have proved you control. A session cookie (<span class="mono">atc_session</span>) keeps a browser signed in; it is not used for tracking and is never sent to third parties.</li>
       <li><span class="font-medium">API keys</span> — we store a SHA-256 hash of the key, never the key itself, alongside a short non-secret prefix and the times it was created and last used.</li>
@@ -51,6 +52,7 @@
   <div>
     <h2 class="text-lg font-semibold text-slate-800 mb-2">6. Third-party services</h2>
     <p>When you connect to a service listed in the directory, that interaction is governed by that third party's own privacy practices, not ours. For sponsored paid verification, we send the listing's public probe request and your signed payment authorization to that service, and query a public Base RPC for the reported transaction receipt. Agent Tools never receives the funds.</p>
+    <p class="mt-2">Our A2A research agent writes its answers with a third-party large language model. Your message, the conversation summary and the directory data needed to answer are sent to that model provider for each request; do not include personal or confidential information in questions to the agent.</p>
   </div>
 
   <div>
