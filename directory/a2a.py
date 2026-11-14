@@ -14,6 +14,7 @@ of scope for P0 -- we only need synchronous message/send.
 
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import os
@@ -31,7 +32,7 @@ log = logging.getLogger("directory.a2a")
 SITE = "https://agent-tools.cloud"
 PROTOCOL_VERSION = "0.3.0"  # legacy top-level field kept for 0.3 clients
 SUPPORTED_A2A_VERSIONS = ("1.0", "0.3")  # preference order, Major.Minor
-AGENT_VERSION = "0.8.0"
+AGENT_VERSION = "0.9.0"
 
 UA = "agent-tools.cloud-a2a/0.1 (+https://agent-tools.cloud)"
 TIMEOUT = httpx.Timeout(connect=10.0, read=20.0, write=10.0, pool=10.0)
@@ -69,6 +70,26 @@ def _upsert_rows(rows: list[dict]) -> tuple[int, int]:
 # Role 1: our own Agent Card + JSON-RPC endpoint
 # ---------------------------------------------------------------------------
 
+def card_skills() -> list[dict]:
+    def s(sid, name, desc, example, tags):
+        return {"id": sid, "name": name, "description": desc, "tags": ["research", *tags], "examples": [example]}
+    raw = ", ".join(a2a_research.SKILL_IDS)
+    return [
+        s("ask_analyst", "Ask the analyst", "Any question about the x402 / MCP / A2A market, answered from our data.",
+          "what share of MCP servers actually work, and why do the rest fail?", ["question"]),
+        s("research_report", "Research report", "A structured report on a topic you name: summary, findings with "
+          "numbers, method, limits.", "write a report on payment tools across x402, MCP and A2A", ["report"]),
+        s("market_scan", "Market scan", "Opportunities for builders: demand with thin or low-quality supply.",
+          "where are the gaps worth building in?", ["opportunity", "demand"]),
+        s("compare", "Compare", "Two protocols, topics or periods on the same metrics.",
+          "compare x402 and MCP on readiness and latency", ["compare"]),
+        s("listing_audit", "Listing audit", "One listing vs its peers, its biggest gaps and how to fix them.",
+          "audit https://agent-tools.cloud/mcp/servers/<slug>", ["benchmark", "readiness"]),
+        s("raw_report", "Raw report (no LLM)", f'Data part {{"skill": <id>, ...}} with id in: {raw}. '
+          'Returns the report JSON directly.', '{"skill":"trend_report","view":"mcp","days":30}', ["data"]),
+    ]
+
+
 def own_agent_card(base_url: str = SITE) -> dict:
     """The A2A Agent Card describing agent-tools.cloud itself."""
     base = base_url.rstrip("/")
@@ -85,9 +106,10 @@ def own_agent_card(base_url: str = SITE) -> dict:
         "protocolVersion": PROTOCOL_VERSION,
         "name": "Agent Tools Research",
         "description": (
-            "Data reports on x402 APIs, MCP servers and A2A agents from our daily probes "
-            "(CC BY 4.0). Brief answers by default; send \"detail\": \"full\" for the whole "
-            f"report. To search or safety-scan tools use our MCP server: {base}/mcp-discovery/"
+            "LLM research analyst for the agent-tool economy (x402 paid APIs, MCP servers, "
+            "A2A agents). Ask in plain language; it queries our daily probe data, writes the "
+            "analysis and checks every number against the data (CC BY 4.0). Multi-turn via "
+            f"contextId. To search or safety-scan tools use our MCP server: {base}/mcp-discovery/"
         ),
         "url": endpoint,
         "preferredTransport": "JSONRPC",
@@ -104,7 +126,7 @@ def own_agent_card(base_url: str = SITE) -> dict:
         },
         "defaultInputModes": ["text/plain", "application/json"],
         "defaultOutputModes": ["text/plain", "application/json"],
-        "skills": [dict(skill) for skill in a2a_research.SKILLS],
+        "skills": card_skills(),
     }
 
 
@@ -196,12 +218,16 @@ def _agent_message_v1(text: str, data: Any = None,
     }
 
 
-def handle_jsonrpc(payload: dict, a2a_version: str | None = None) -> dict:
+_CLIENT_IP: contextvars.ContextVar[str | None] = contextvars.ContextVar("a2a_client_ip", default=None)
+
+
+def handle_jsonrpc(payload: dict, a2a_version: str | None = None, client_ip: str | None = None) -> dict:
     """A2A JSON-RPC handler serving 0.3 (`message/send`) and 1.0 (`SendMessage`).
 
     The version comes from the A2A-Version header; this agent answers with a
     direct Message and never creates tasks.
     """
+    _CLIENT_IP.set(client_ip)
     if not isinstance(payload, dict):
         return _jsonrpc_error(None, -32600, "Invalid Request")
     req_id = payload.get("id")
@@ -270,7 +296,22 @@ def _answer(message: dict, accepted: list | None = None) -> dict:
     req = a2a_research.parse_request(message, text)
     if req is None:
         return {"error": (-32602, "params.message must contain a text or data part")}
-    out = a2a_research.respond(req)
+    data_part = next((p["data"] for p in (message.get("parts") or [])
+                      if isinstance(p, dict) and isinstance(p.get("data"), dict)), {})
+    data_skill = str(data_part.get("skill") or "").strip().lower()
+    question = text or str(data_part.get("question") or "")
+    out = None
+    # A data part naming one of the raw reports gets that report without the LLM;
+    # everything else is answered by the LLM analyst (templates only as fallback).
+    if question and data_skill not in a2a_research.SKILL_IDS:
+        from . import a2a_agent
+        cid = message.get("contextId")
+        out = a2a_agent.run(
+            question, skill=a2a_agent.pick_skill(text, data_part),
+            context_id=cid if isinstance(cid, str) else None, ip=_CLIENT_IP.get(),
+            detail=data_part.get("detail") or req.get("detail"))
+    if out is None:
+        out = a2a_research.respond(req)
     if accepted is not None and not _wants_json(accepted):
         out = {k: v for k, v in out.items() if k != "data"}
     return out

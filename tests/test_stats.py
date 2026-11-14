@@ -374,7 +374,7 @@ class AgentAccessTests(unittest.TestCase):
         self.assertEqual(out["data"]["view"], "x402")
         self.assertEqual(out["data"]["license"], "CC BY 4.0")
         skills = [s["id"] for s in a2a.own_agent_card()["skills"]]
-        self.assertIn("ecosystem_report", skills)
+        self.assertIn("ask_analyst", skills)
         self.assertNotIn("search_x402_services", skills)
 
 if __name__ == "__main__":
