@@ -101,7 +101,10 @@ SUMMARY: <running summary for your next turn: goal, entities and filters in play
 If you need a clarification instead of answering, reply with one line: CLARIFY: <one short question>"""
 
 _KINDS = ("x402", "mcp", "a2a")
-_TABLE = {"x402": "services", "mcp": "mcp_servers", "a2a": "a2a_agents"}
+# MCP tools answer about the remote directory; code-only servers are not probed.
+_TABLE = {"x402": "services",
+          "mcp": "(SELECT * FROM mcp_servers WHERE COALESCE(endpoint_url,'')!='')",
+          "a2a": "a2a_agents"}
 _VIEW_PATH = {"x402": "/services/", "mcp": "/mcp/servers/", "a2a": "/a2a/agents/"}
 _ENUM_VIEW = {"type": "string", "enum": ["all", "mcp", "x402", "a2a"]}
 _ENUM_KIND = {"type": "string", "enum": list(_KINDS)}

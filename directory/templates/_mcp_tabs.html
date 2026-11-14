@@ -1,0 +1,11 @@
+{#- MCP sub-directory switch: remote (callable endpoint) vs code-only. -#}
+<nav class="flex gap-1 border-b border-slate-200 mb-6 text-sm" aria-label="MCP sub-directories">
+  <a href="/mcp" class="px-4 py-2 -mb-px border-b-2 {{ 'border-blue-600 text-slate-900 font-semibold' if active == 'remote' else 'border-transparent text-slate-500 hover:text-slate-800' }}"
+     {% if active == 'remote' %}aria-current="page"{% endif %}>
+    Remote <span class="mono text-xs text-slate-400">{{ stats.total|num }}</span>
+  </a>
+  <a href="/mcp/code" class="px-4 py-2 -mb-px border-b-2 {{ 'border-blue-600 text-slate-900 font-semibold' if active == 'code' else 'border-transparent text-slate-500 hover:text-slate-800' }}"
+     {% if active == 'code' %}aria-current="page"{% endif %}>
+    Code <span class="mono text-xs text-slate-400">{{ stats.code_only|num }}</span>
+  </a>
+</nav>

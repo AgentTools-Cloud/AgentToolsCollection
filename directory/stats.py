@@ -15,13 +15,17 @@ import calendar
 import json
 import math
 import re
+import sqlite3
 import time
 from collections import Counter, defaultdict
 
 VERSION = 1
 KINDS = ("x402", "mcp", "a2a")
 KIND_LABEL = {"x402": "x402 APIs", "mcp": "MCP servers", "a2a": "A2A agents"}
-TABLE = {"x402": "services", "mcp": "mcp_servers", "a2a": "a2a_agents"}
+# MCP statistics cover the remote directory only. Code-only servers (no
+# endpoint to probe) are a separate sub-directory, counted in code_only().
+MCP_REMOTE = "(SELECT * FROM mcp_servers WHERE COALESCE(endpoint_url,'')!='')"
+TABLE = {"x402": "services", "mcp": MCP_REMOTE, "a2a": "a2a_agents"}
 GRADES = ("A", "B", "C", "D", "F")
 REFUSED = ("NOT (COALESCE(http_status,0)=429 OR "
            "(COALESCE(http_status,0)=403 AND status!='ok'))")
@@ -196,7 +200,7 @@ def _a2a_version_bucket(v):
 
 def protocols(conn):
     mcp = Counter()
-    for v, n in _q(conn, "SELECT protocol_version, COUNT(*) FROM mcp_servers WHERE health='ok' GROUP BY 1"):
+    for v, n in _q(conn, f"SELECT protocol_version, COUNT(*) FROM {MCP_REMOTE} WHERE health='ok' GROUP BY 1"):
         v = (v or "").strip()
         mcp[v if v in MCP_REVISIONS else ("Not reported" if not v else "Non-standard")] += n
     mcp_rows = [(r, mcp.get(r, 0)) for r in MCP_REVISIONS] + [
@@ -256,7 +260,7 @@ def readiness(conn):
 def access(conn):
     buckets = Counter()
     for auth, x402, n in _q(conn, "SELECT LOWER(COALESCE(auth_method,'')), COALESCE(x402_supported,0), COUNT(*) "
-                                  "FROM mcp_servers WHERE health='ok' GROUP BY 1,2"):
+                                  f"FROM {MCP_REMOTE} WHERE health='ok' GROUP BY 1,2"):
         if x402:
             key = "x402 pay-per-call"
         elif "oauth" in auth:
@@ -293,9 +297,9 @@ def access(conn):
 
 
 def safety(conn):
-    verdicts = dict(_q(conn, "SELECT COALESCE(safety_verdict,'not scanned'), COUNT(*) FROM mcp_servers GROUP BY 1"))
+    verdicts = dict(_q(conn, f"SELECT COALESCE(safety_verdict,'not scanned'), COUNT(*) FROM {MCP_REMOTE} GROUP BY 1"))
     rules = Counter()
-    for (raw,) in _q(conn, "SELECT safety_reasons FROM mcp_servers WHERE safety_verdict IN ('suspicious','malicious')"):
+    for (raw,) in _q(conn, f"SELECT safety_reasons FROM {MCP_REMOTE} WHERE safety_verdict IN ('suspicious','malicious')"):
         try:
             for r in json.loads(raw or "[]"):
                 if isinstance(r, dict) and r.get("rule"):
@@ -857,6 +861,21 @@ def monthly_report(conn, month: str, now=None):
             "license": "CC BY 4.0"}
 
 
+def code_only(conn, now: int) -> dict:
+    """The code-only MCP sub-directory: repositories / packages with no remote
+    endpoint. Not part of the funnel or any reachable / verified / ready KPI."""
+    base = "FROM mcp_servers WHERE COALESCE(endpoint_url,'')=''"
+    out = {
+        "count": int(_one(conn, f"SELECT COUNT(*) {base}") or 0),
+        "with_repo": int(_one(conn, f"SELECT COUNT(*) {base} AND "
+                              "(source_code_url LIKE '%github.com/%' OR homepage_url LIKE '%github.com/%')") or 0),
+        "stars_100": int(_one(conn, f"SELECT COUNT(*) {base} AND github_stars >= 100") or 0),
+        "new_7d": int(_one(conn, f"SELECT COUNT(*) {base} AND created_at >= ?", (now - 7 * 86400,)) or 0),
+    }
+    out["with_repo_pct"] = _pct(out["with_repo"], out["count"])
+    return out
+
+
 def compute(conn, now: int | None = None) -> dict:
     now = int(now or time.time())
     t0 = time.monotonic()
@@ -890,6 +909,11 @@ def compute(conn, now: int | None = None) -> dict:
         kpis[kind] = {"indexed": steps[0]["count"], "reachable": steps[2]["count"],
                       "verified": steps[3]["count"], "ready": steps[4]["count"]}
     kpis["all"] = {k: sum(kpis[kind][k] for kind in KINDS) for k in ("indexed", "reachable", "verified", "ready")}
+    try:
+        snap["code_only"] = {"mcp": code_only(conn, now)}
+        kpis["mcp"]["code_only"] = snap["code_only"]["mcp"]["count"]
+    except sqlite3.Error:  # older schema in tests / partial copies
+        snap["code_only"] = {"mcp": {"count": 0}}
     snap["kpis"] = kpis
     snap["compute_seconds"] = round(time.monotonic() - t0, 1)
     return snap

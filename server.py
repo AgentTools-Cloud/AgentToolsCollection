@@ -208,7 +208,7 @@ _LLMS_TXT = """# agent-tools.cloud
 ## Discovery
 
 - Search all types: GET /api/v1/resources/search?q=...
-- MCP: GET /api/v1/mcp/search and /api/v1/mcp/servers/{slug}
+- MCP: GET /api/v1/mcp/search?scope=remote|code|all and /api/v1/mcp/servers/{slug}
 - A2A: GET /api/v1/a2a/search, /api/v1/a2a/agents/{slug}; reports: POST /a2a
 - x402 card: GET /api/v1/services/{slug}
 - Recommendations: GET /api/v1/ask?q=...

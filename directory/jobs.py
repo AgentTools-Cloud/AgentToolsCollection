@@ -391,6 +391,30 @@ def cmd_crawl_mcp(only=None, *, probe_new=True) -> int:
     return 0
 
 
+def cmd_crawl_code(github_limit: int | None = None, npm_limit: int | None = None) -> int:
+    """Import code-only MCP servers (GitHub topic:mcp-server + npm keyword
+    mcp-server). Rows have no endpoint: never probed, separate sub-directory."""
+    from . import code_mcp
+    run_id = _start_run("mcp:code")
+    try:
+        rows, info = code_mcp.fetch_all(github_limit=github_limit,
+                                        npm_limit=npm_limit or code_mcp.NPM_MAX)
+    except Exception as e:  # noqa: BLE001 - network / API failure
+        _finish_run(run_id, 0, 0, [f"fetch failed: {e!r}"], status="error")
+        log.warning("code mcp fetch failed: %r", e)
+        return 1
+    added = updated = 0
+    errors: list[str] = []
+    for source in code_mcp.OWN_SOURCES:
+        part = [r for r in rows if r["source"] == source]
+        result = _ingest_rows('mcp', source, part, db.upsert_mcp_server)
+        added += result['added']; updated += result['updated']
+        errors.extend(result['errors'])
+    _finish_run(run_id, added, updated, errors, status="ok" if not errors else "partial")
+    log.info("code mcp: %s added=%d updated=%d errors=%d", info, added, updated, len(errors))
+    return 0
+
+
 def cmd_crawl_a2a() -> int:
     """Refresh A2A agents from the hand-picked seed + awesome-a2a directories."""
     run_id = _start_run("a2a:crawl")
@@ -776,7 +800,10 @@ def cmd_readiness(kinds=("mcp", "x402")) -> int:
         with db.connect(read_only=True) as c:
             hist = history_fn(c, now=now)
             sources = listing_readiness.sources_by_listing(c, kind)
-            for row in c.execute(f"SELECT {cols} FROM {table}"):
+            # Code-only MCP (no remote endpoint) has nothing to probe; its
+            # readiness is cleared below instead of graded on empty probes.
+            where = f" WHERE {db.mcp_scope_sql('remote')}" if kind == "mcp" else ""
+            for row in c.execute(f"SELECT {cols} FROM {table}{where}"):
                 r = dict(row)
                 h = hist.get(r["id"]) or (0, 0, None)
                 kw = {"uptime_ok": h[0], "uptime_total": h[1],
@@ -798,6 +825,16 @@ def cmd_readiness(kinds=("mcp", "x402")) -> int:
                         f"UPDATE {table} SET readiness_score=?, readiness_grade=?, "
                         "readiness_checked=? WHERE id=?", chunk)
             db.with_retry(op)
+        if kind == "mcp":
+            def clear():
+                with db.writer() as c:
+                    return c.execute(
+                        "UPDATE mcp_servers SET readiness_score=NULL, readiness_grade=NULL "
+                        f"WHERE {db.mcp_scope_sql('code')} AND readiness_grade IS NOT NULL"
+                    ).rowcount
+            cleared = db.with_retry(clear)
+            if cleared:
+                log.info("mcp readiness: cleared %d code-only rows", cleared)
         log.info("%s readiness: scored=%d", kind, len(out))
     return 0
 
@@ -2320,6 +2357,9 @@ def main(argv=None) -> int:
     p_crawl.add_argument("source", nargs="?", default=None)
     p_crawl_mcp = sub.add_parser("crawl-mcp")
     p_crawl_mcp.add_argument("source", nargs="?", default=None)
+    p_code = sub.add_parser("crawl-code")
+    p_code.add_argument("--github-limit", type=int, default=None)
+    p_code.add_argument("--npm-limit", type=int, default=None)
     sub.add_parser("crawl-a2a")
     sub.add_parser("crawl-agenstry")
     sub.add_parser("health")
@@ -2414,6 +2454,8 @@ def main(argv=None) -> int:
         return cmd_crawl(args.source)
     if args.cmd == "crawl-mcp":
         return cmd_crawl_mcp(args.source)
+    if args.cmd == "crawl-code":
+        return cmd_crawl_code(args.github_limit, args.npm_limit)
     if args.cmd == "crawl-a2a":
         return cmd_crawl_a2a()
     if args.cmd == "crawl-agenstry":

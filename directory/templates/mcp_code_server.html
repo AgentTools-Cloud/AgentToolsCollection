@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% from "_macros.html" import popularity_section %}
+{% block title %}{{ m.name }} — code-only MCP server — agent-tools.cloud{% endblock %}
+{% block desc %}{{ (m.description or m.name)|truncate(140) }}{% endblock %}
+{% block head_extra %}{% set schema = {
+  "@context": "https://schema.org",
+  "@type": "SoftwareSourceCode",
+  "name": m.name,
+  "description": (m.description or m.name),
+  "url": "https://agent-tools.cloud/mcp/code/" + m.slug,
+} %}{% if m.code.repository %}{% set _r = schema.update({"codeRepository": m.code.repository}) %}{% endif %}{% if m.license %}{% set _l = schema.update({"license": m.license}) %}{% endif %}<script type="application/ld+json">{{ schema|tojson }}</script>{% endblock %}
+{% block track %}<script>atTrackView('mcp', {{ m.slug|tojson }});</script>{% endblock %}
+{% block content %}
+<a href="/mcp/code" class="text-sm text-slate-500 hover:text-blue-600 inline-flex items-center gap-1">
+  <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+  Back to code-only MCP servers
+</a>
+
+<header class="mt-4 mb-6">
+  <div class="flex flex-wrap items-center gap-3">
+    <h1 class="text-3xl md:text-4xl font-extrabold tracking-tight break-words">{{ m.name }}</h1>
+    <span class="badge {{ m.maintenance.css }}" title="{{ m.maintenance.title }}">{{ m.maintenance.label }}</span>
+  </div>
+  {% if m.description %}<p class="text-slate-600 mt-3 max-w-3xl">{{ m.description }}</p>{% endif %}
+  <p class="text-xs text-slate-500 mt-3 max-w-3xl">Code-only MCP server: no hosted endpoint, so you install and run it yourself.
+    It is not probed, graded or counted in our reachability statistics.</p>
+</header>
+
+<section class="svc-card p-6 mb-6">
+  <h2 class="text-base font-semibold mb-4">Get it</h2>
+  <dl class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-4 text-sm">
+    {% if m.code.repository %}
+    <div><dt class="text-xs text-slate-500">Repository</dt>
+      <dd class="mt-1 mono break-all"><a href="{{ m.code.repository }}" class="text-blue-600 hover:underline" rel="nofollow noopener" target="_blank">{{ m.code.repository|replace('https://', '') }}</a></dd></div>
+    {% endif %}
+    {% if m.code.package_name %}
+    <div><dt class="text-xs text-slate-500">Package</dt>
+      <dd class="mt-1 mono break-all">{{ m.code.package_registry or "package" }}: {{ m.code.package_name }}</dd></div>
+    {% endif %}
+    {% if m.code.command %}
+    <div class="sm:col-span-2"><dt class="text-xs text-slate-500">Run (stdio)</dt>
+      <dd class="mt-1"><code class="block mono text-[13px] bg-slate-900 text-slate-100 rounded-md px-3 py-2 overflow-x-auto">{{ m.code.command }}</code>
+        <div class="text-[11px] text-slate-400 mt-1">The usual command for this package registry; check the repository README for required settings.</div></dd></div>
+    {% endif %}
+    <div><dt class="text-xs text-slate-500">License</dt><dd class="mt-1">{{ m.license or "not declared" }}</dd></div>
+    <div><dt class="text-xs text-slate-500">Last update</dt><dd class="mt-1">{{ (m.maintenance.pushed_at or "")[:10] or "unknown" }}</dd></div>
+    {% if m.github_stars is not none %}
+    <div><dt class="text-xs text-slate-500">GitHub stars</dt><dd class="mt-1">★ {{ m.github_stars|num }}</dd></div>
+    {% endif %}
+    {% if m.homepage_url and m.homepage_url != m.code.repository %}
+    <div><dt class="text-xs text-slate-500">Homepage</dt>
+      <dd class="mt-1 mono break-all"><a href="{{ m.homepage_url }}" class="text-blue-600 hover:underline" rel="nofollow noopener" target="_blank">{{ m.homepage_url|replace('https://', '') }}</a></dd></div>
+    {% endif %}
+  </dl>
+  {% if m.tags %}
+  <div class="mt-4 flex flex-wrap gap-1.5">{% for t in m.tags %}<a href="/mcp/code?q={{ t|urlencode }}" class="badge bg-slate-50 text-slate-600 ring-1 ring-slate-200 hover:ring-blue-300">{{ t }}</a>{% endfor %}</div>
+  {% endif %}
+</section>
+
+{{ popularity_section(m.popularity) }}
+
+{% if m.sources %}
+<section class="svc-card p-6 mb-6">
+  <h2 class="text-base font-semibold mb-1">Listed in</h2>
+  <ul class="mt-2 text-sm text-slate-600 space-y-1">
+    {% for s in m.sources %}<li><span class="mono">{{ s.source }}</span>{% if s.source_url %} · <a href="{{ s.source_url }}" class="text-blue-600 hover:underline" rel="nofollow noopener" target="_blank">source</a>{% endif %}</li>{% endfor %}
+  </ul>
+</section>
+{% endif %}
+
+<p class="text-sm text-slate-500">Run this server as a hosted endpoint? <a href="/submit?type=mcp" class="text-blue-600 hover:underline">Submit the endpoint</a> and it moves to the remote directory, where it is probed and graded.</p>
+{% endblock %}

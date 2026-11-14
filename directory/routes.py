@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import secrets
+import calendar
 import json
 import sqlite3
 import threading
@@ -732,7 +733,7 @@ def mcp_page(
             "active_health": health, "active_x402": bool(x402),
             "active_access": access, "active_sort": sort,
             "leaders": leaders, "view": view,
-            "exact_name_groups": exact_name_groups,
+            "exact_name_groups": exact_name_groups, "active": "remote",
         },
     )
 
@@ -753,9 +754,102 @@ def mcp_detail(request: Request, slug: str):
         if slug.startswith(_PURGED_MCP_PREFIXES):
             return _detail_gone(request, "mcp server not found")
         raise HTTPException(404, "mcp server not found")
+    if not (m.get("endpoint_url") or "").strip():
+        return Response(status_code=301, headers={"Location": f"/mcp/code/{slug}"})
     return TEMPLATES.TemplateResponse(request, "mcp_server.html", {
         "request": request, "m": m, "quality": db.rate_row("mcp", m),
         "noindex": _detail_noindex("mcp", m["id"]), "meta_desc": directory_measured.meta_description("mcp", m)},
+        headers=_owned_detail_headers(m))
+
+
+CODE_INDEX_MIN_STARS = 10
+
+
+def _maintenance(row: dict) -> dict:
+    """Upkeep label for a code-only server from its last push / publish."""
+    pop = (row.get("popularity") or {}).get("github") or {}
+    pushed = row.get("repo_pushed_at") or pop.get("pushed_at")
+    if pop.get("archived"):
+        return {"label": "archived", "css": "bg-slate-200 text-slate-600",
+                "title": "The repository is archived", "pushed_at": pushed}
+    days = None
+    if pushed:
+        try:
+            ts = calendar.timegm(time.strptime(str(pushed)[:10], "%Y-%m-%d"))
+            days = max(0, int((time.time() - ts) // 86400))
+        except ValueError:
+            days = None
+    if days is None:
+        return {"label": "no update data", "css": "bg-slate-100 text-slate-500 ring-1 ring-slate-200",
+                "title": "We have no last-update date for this server", "pushed_at": None}
+    if days <= 90:
+        label, css = "active", "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-100"
+    elif days <= 365:
+        label, css = "updated this year", "bg-amber-50 text-amber-700 ring-1 ring-amber-100"
+    else:
+        label, css = "stale", "bg-slate-100 text-slate-500 ring-1 ring-slate-200"
+    return {"label": label, "css": css, "title": f"Last update {days} days ago",
+            "pushed_at": pushed, "days": days}
+
+
+def _code_view(row: dict) -> dict:
+    row["code"] = directory_resources.code_install_hint(row)
+    row["maintenance"] = _maintenance(row)
+    return row
+
+
+def _code_indexable(m: dict) -> bool:
+    """Index only code pages with substance: a description and a repository
+    with some following; the rest stay reachable but noindex."""
+    return bool(m.get("description")) and (m.get("github_stars") or 0) >= CODE_INDEX_MIN_STARS
+
+
+def _code_search(q, sort, limit=60):
+    with _conn() as c:
+        rows = db.search_mcp(c, q=q, sort=sort, limit=limit, scope="code")
+        s = db.mcp_stats(c)
+    return [_code_view(r) for r in rows], s
+
+
+@router.get("/mcp/code", response_class=HTMLResponse, include_in_schema=False)
+def mcp_code_page(
+    request: Request,
+    q: str | None = Query(default=None),
+    sort: str = Query(default="default", pattern=SEARCH_SORT_PATTERN),
+):
+    servers, s = _code_search(q, sort)
+    if not request.query_params.get("ref"):
+        search_terms.record("mcp", q, len(servers), "web")
+    return TEMPLATES.TemplateResponse(request, "mcp_code.html", {
+        "request": request, "servers": servers, "stats": s, "q": q or "",
+        "active_sort": sort, "active": "code"})
+
+
+@router.get("/_partials/mcp-code", response_class=HTMLResponse, include_in_schema=False)
+def mcp_code_partial(
+    request: Request,
+    q: str | None = Query(default=None),
+    sort: str = Query(default="default", pattern=SEARCH_SORT_PATTERN),
+):
+    servers, _s = _code_search(q, sort)
+    return TEMPLATES.TemplateResponse(request, "_mcp_code_grid.html", {
+        "request": request, "servers": servers})
+
+
+@router.get("/mcp/code/{slug}", response_class=HTMLResponse, include_in_schema=False)
+def mcp_code_detail(request: Request, slug: str):
+    with _conn() as c:
+        m = db.get_mcp_by_slug(c, slug)
+    if not m:
+        retired = _retired_response(request, "mcp", slug)
+        if retired is not None:
+            return retired
+        raise HTTPException(404, "mcp server not found")
+    if (m.get("endpoint_url") or "").strip():
+        return Response(status_code=301, headers={"Location": f"/mcp/servers/{slug}"})
+    return TEMPLATES.TemplateResponse(request, "mcp_code_server.html", {
+        "request": request, "m": _code_view(m),
+        "noindex": not _code_indexable(m)},
         headers=_owned_detail_headers(m))
 
 
@@ -1090,11 +1184,17 @@ def api_mcp_search(
                       description=SEARCH_SORT_DOC),
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0, le=MAX_SEARCH_OFFSET),
+    scope: str = Query(default="remote", pattern="^(remote|code|all)$",
+                       description="remote (default): servers with an endpoint you can call; "
+                                   "code: code-only servers you install and run yourself "
+                                   "(repository / package, no endpoint); all: both."),
 ):
     """Search MCP servers.
 
     Unions the standalone MCP directory (official MCP Registry, Smithery, Agenstry
     and other crawled sources) with x402 services that also expose an mcp_url.
+    Code-only servers (no remote endpoint) are a separate sub-directory, returned
+    only with `scope=code` or `scope=all`.
     """
     effective_sort = db.effective_search_sort(q, sort)
     pull = limit + offset
@@ -1102,9 +1202,11 @@ def api_mcp_search(
     seen: set[str] = set()
     with _conn() as c:
         c.execute("BEGIN")
-        mcp_keys, service_keys = db.mcp_search_keys(c, q=q, chain=chain, health=health)
+        mcp_keys, service_keys = db.mcp_search_keys(c, q=q, chain=chain, health=health,
+                                                    scope=scope)
         total_matched = len(mcp_keys | service_keys)
-        for r in db.search_mcp(c, q=q, health=health, sort=effective_sort, limit=pull):
+        for r in db.search_mcp(c, q=q, health=health, sort=effective_sort, limit=pull,
+                               scope=scope):
             item = directory_resources.normalize_mcp_server(
                 r, include_sort_meta=effective_sort != "default")
             key = (item.get("endpoint_url") or item.get("slug") or "").lower()
@@ -1149,6 +1251,7 @@ def api_mcp_search(
     return {
         "query": q,
         "sort": sort,
+        "scope": scope,
         "count": len(window),
         "total_matched": total_matched,
         "servers": window,
@@ -2463,6 +2566,10 @@ def well_known():
                 "search": "https://agent-tools.cloud/api/v1/mcp/search",
                 "get_server": "https://agent-tools.cloud/api/v1/mcp/servers/{slug}",
                 "stats": "https://agent-tools.cloud/api/v1/mcp/stats",
+                "scopes": {"remote": "default: servers with an endpoint, probed and graded",
+                           "code": "code-only: repository / package you run yourself, not probed",
+                           "all": "both"},
+                "code_page": "https://agent-tools.cloud/mcp/code",
             },
             "resources_search": {
                 "method": "GET",
@@ -2525,12 +2632,19 @@ _SITEMAP_KINDS = {
     "x402": ("services", "url", "/services/"),
     "mcp": ("mcp_servers", "endpoint_url", "/mcp/servers/"),
     "a2a": ("a2a_agents", "COALESCE(endpoint_url, card_url)", "/a2a/agents/"),
+    # Code-only MCP: nothing is probed or graded, so the bar is a description
+    # and a repository with some following (same rule as the page's noindex).
+    "mcp-code": ("mcp_servers", None, "/mcp/code/"),
 }
 SITEMAP_CHUNK = 20000   # well under the 50,000-URL / 50 MB protocol limit
 
 
 def _sitemap_listing_sql(kind: str) -> str:
     table, endpoint, _ = _SITEMAP_KINDS[kind]
+    if kind == "mcp-code":
+        return (f"SELECT slug, updated_at FROM {table} "
+                "WHERE COALESCE(endpoint_url,'')='' AND COALESCE(description,'')!='' "
+                f"AND COALESCE(github_stars,0) >= {int(CODE_INDEX_MIN_STARS)} ORDER BY id")
     return (
         "SELECT slug, updated_at FROM ("
         f" SELECT id, slug, updated_at, ROW_NUMBER() OVER ("
@@ -2591,6 +2705,7 @@ def sitemap_pages_xml(request: Request) -> Response:
     static_pages = [
         ("/", "1.0", "daily"),
         ("/mcp", "0.9", "daily"),
+        ("/mcp/code", "0.7", "daily"),
         ("/a2a", "0.9", "daily"),
         ("/x402", "0.9", "daily"),
         ("/categories", "0.6", "weekly"),

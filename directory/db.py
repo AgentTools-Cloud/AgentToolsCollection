@@ -811,6 +811,9 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
             "ALTER TABLE a2a_agents ADD COLUMN owner_verified INTEGER",
             "ALTER TABLE services ADD COLUMN owner_edited TEXT",
             "ALTER TABLE mcp_servers ADD COLUMN owner_edited TEXT",
+            # Code-only MCP: repository facts from the code crawlers.
+            "ALTER TABLE mcp_servers ADD COLUMN license TEXT",
+            "ALTER TABLE mcp_servers ADD COLUMN repo_pushed_at TEXT",
             "ALTER TABLE a2a_agents ADD COLUMN owner_edited TEXT",
         ):
             try:
@@ -3819,7 +3822,7 @@ _MCP_COLS = [
     "slug", "name", "description", "homepage_url", "endpoint_url",
     "transport", "auth_method", "cost_hint", "source_code_url",
     "package_registry", "package_name", "package_download_count",
-    "github_stars", "tags",
+    "github_stars", "tags", "license", "repo_pushed_at",
     "x402_supported", "source", "source_id", "source_url", "kind", "quality",
     "health", "health_checked", "latency_ms", "http_status",
     "last_seen", "last_success_at", "confidence",
@@ -4066,9 +4069,30 @@ def _access_case(alias, kind):
     )
 
 
+MCP_SCOPES = ("remote", "code", "all")
+
+
+def mcp_scope_sql(scope: str | None, alias: str = "") -> str | None:
+    """SQL predicate for one MCP sub-directory.
+
+    "remote" = has an endpoint we can call and probe; "code" = code-only
+    (repository / package, no remote endpoint; stored as kind='catalog').
+    Keyed on the endpoint rather than `kind` so rows written before the
+    column existed are classified the same way."""
+    col = f"{alias}.endpoint_url" if alias else "endpoint_url"
+    if scope == "code":
+        return f"COALESCE({col},'')=''"
+    if scope == "all":
+        return None
+    return f"COALESCE({col},'')!=''"
+
+
 def search_mcp(conn, q=None, health=None, x402_only=False, kind=None,
-               access=None, limit=50, offset=0, sort: str = "default"):
-    """Search standalone MCP servers. Ranks healthy + remotely callable first."""
+               access=None, limit=50, offset=0, sort: str = "default",
+               scope: str = "remote"):
+    """Search standalone MCP servers. Ranks healthy + remotely callable first.
+
+    `scope` picks the sub-directory: remote (default), code or all."""
     sort = effective_search_sort(q, sort)
     select_cols = ["m.*"]
     where: list[str] = []
@@ -4098,9 +4122,20 @@ def search_mcp(conn, q=None, health=None, x402_only=False, kind=None,
         where.append(_access_case("m", "mcp") + "=?"); params.append(access)
     if kind:
         where.append("m.kind=?"); params.append(kind)
+    scope_sql = mcp_scope_sql(scope, "m")
+    if scope_sql:
+        where.append(scope_sql)
     if where:
         sql.append("WHERE " + " AND ".join(where))
-    mcp_default_order = (
+    if scope == "code":
+        # No probe, grade or endpoint to rank on: popularity, then freshness.
+        mcp_default_order = (
+            "(m.github_stars IS NOT NULL) DESC, m.github_stars DESC, "
+            "(m.package_download_count IS NOT NULL) DESC, m.package_download_count DESC, "
+            "m.updated_at DESC")
+    else:
+        mcp_default_order = None
+    mcp_default_order = mcp_default_order or (
         "CASE m.health WHEN 'ok' THEN 0 WHEN 'degraded' THEN 1 "
         "WHEN 'unknown' THEN 2 WHEN 'down' THEN 3 ELSE 4 END ASC, "
         "(m.endpoint_url IS NOT NULL AND m.endpoint_url != '') DESC, "
@@ -4125,12 +4160,16 @@ def search_mcp(conn, q=None, health=None, x402_only=False, kind=None,
     return out
 
 
-def mcp_search_keys(conn, q=None, chain=None, health=None) -> tuple[set[str], set[str]]:
+def mcp_search_keys(conn, q=None, chain=None, health=None,
+                    scope: str = "remote") -> tuple[set[str], set[str]]:
     """Complete per-source MCP identities, without loading tool descriptions."""
     fts_query = _expand_fts_query(q) if q else None
     mcp_sql = "SELECT m.endpoint_url, m.slug FROM mcp_servers m"
     mcp_where = []
     mcp_params = []
+    scope_sql = mcp_scope_sql(scope, "m")
+    if scope_sql:
+        mcp_where.append(scope_sql)
     if fts_query is not None:
         mcp_sql += " JOIN mcp_fts ON mcp_fts.rowid = m.id"
         mcp_where.append("mcp_fts MATCH ?")
@@ -4161,6 +4200,9 @@ def mcp_search_keys(conn, q=None, chain=None, health=None) -> tuple[set[str], se
         return {((row["mcp_url"] or "").strip() or row["url"] or row["slug"] or "").lower()
                 for row in conn.execute(sql, params)}
 
+    if scope == "code":
+        # x402 services that expose an mcp_url are remote by definition.
+        return keys, set()
     matched_services = service_keys(fts_query)
     if not matched_services and fts_query is not None:
         relaxed = _expand_fts_query_relaxed(q)
@@ -4169,8 +4211,8 @@ def mcp_search_keys(conn, q=None, chain=None, health=None) -> tuple[set[str], se
     return keys, matched_services
 
 
-def count_mcp_search(conn, q=None, chain=None, health=None) -> int:
-    mcp_keys, service_keys = mcp_search_keys(conn, q=q, chain=chain, health=health)
+def count_mcp_search(conn, q=None, chain=None, health=None, scope: str = "remote") -> int:
+    mcp_keys, service_keys = mcp_search_keys(conn, q=q, chain=chain, health=health, scope=scope)
     return len(mcp_keys | service_keys)
 
 
@@ -4188,8 +4230,13 @@ def get_mcp_by_slug(conn, slug):
 
 
 def mcp_stats(conn):
+    """Counts for the remote MCP directory; `code_only` is the separate
+    code-only sub-directory (never part of total/healthy/... )."""
     cur = conn.cursor()
-    total = cur.execute("SELECT COUNT(*) AS n FROM mcp_servers").fetchone()["n"]
+    _remote = mcp_scope_sql("remote")
+    total = cur.execute(f"SELECT COUNT(*) AS n FROM mcp_servers WHERE {_remote}").fetchone()["n"]
+    code_only = cur.execute(
+        f"SELECT COUNT(*) AS n FROM mcp_servers WHERE {mcp_scope_sql('code')}").fetchone()["n"]
     healthy = cur.execute(
         "SELECT COUNT(*) AS n FROM mcp_servers WHERE health='ok'"
     ).fetchone()["n"]
@@ -4198,14 +4245,14 @@ def mcp_stats(conn):
         "WHERE endpoint_url IS NOT NULL AND endpoint_url != ''"
     ).fetchone()["n"]
     x402 = cur.execute(
-        "SELECT COUNT(*) AS n FROM mcp_servers WHERE x402_supported=1"
+        f"SELECT COUNT(*) AS n FROM mcp_servers WHERE x402_supported=1 AND {_remote}"
     ).fetchone()["n"]
     conformant = cur.execute(
-        "SELECT COUNT(*) AS n FROM mcp_servers WHERE conformance='pass'"
+        f"SELECT COUNT(*) AS n FROM mcp_servers WHERE conformance='pass' AND {_remote}"
     ).fetchone()["n"]
     new_7d = cur.execute(
         "SELECT COUNT(*) AS n FROM mcp_servers "
-        "WHERE created_at >= strftime('%s', 'now', '-7 days')"
+        f"WHERE created_at >= strftime('%s', 'now', '-7 days') AND {_remote}"
     ).fetchone()["n"]
 
     # Distinct host domains per metric: a single domain can expose several MCP
@@ -4239,8 +4286,9 @@ def mcp_stats(conn):
     avg_p95 = int(_p["a"]) if _p and _p["a"] is not None else None
     _acc = {r["t"]: r["n"] for r in cur.execute(
         "SELECT " + _access_case("mcp_servers", "mcp") + " AS t, COUNT(*) AS n "
-        "FROM mcp_servers GROUP BY t").fetchall()}
+        f"FROM mcp_servers WHERE {_remote} GROUP BY t").fetchall()}
     return {"total": total, "healthy": healthy, "remote_callable": remote,
+            "code_only": code_only,
             "conformant": conformant, "x402_capable": x402, "new_7d": new_7d,
             "access_open": _acc.get("open", 0), "access_key": _acc.get("key", 0),
             "access_x402": _acc.get("x402", 0),
@@ -4907,6 +4955,7 @@ def top_rated(conn, kind: str, limit: int = 20) -> list:
     if kind == "mcp":
         raw = conn.execute(
             "SELECT * FROM mcp_servers WHERE health='ok' "
+            f"AND {mcp_scope_sql('remote')} "
             "AND slug!='agent-tools-x402-directory' "
             "ORDER BY quality_score DESC, confidence DESC, updated_at DESC "
             "LIMIT ?", (limit,)).fetchall()
@@ -4945,7 +4994,7 @@ def mcp_categories(conn, min_count=3):
     searchable keyword: link to /mcp?q=<category> to see the matching servers.
     """
     rows = conn.execute(
-        "SELECT name, description FROM mcp_servers"
+        f"SELECT name, description FROM mcp_servers WHERE {mcp_scope_sql('remote')}"
     ).fetchall()
     counts = {k: 0 for k in _MCP_TOPIC_KEYWORDS}
     for r in rows:
