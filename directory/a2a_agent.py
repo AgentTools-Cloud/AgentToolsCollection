@@ -340,7 +340,8 @@ def _state() -> sqlite3.Connection:
         CREATE TABLE IF NOT EXISTS cache(key TEXT PRIMARY KEY, body TEXT, created INTEGER);
         CREATE TABLE IF NOT EXISTS calls(ts INTEGER, ip TEXT, skill TEXT, tin INTEGER, tout INTEGER,
                                          usd REAL, cached INTEGER, fallback TEXT);
-        CREATE INDEX IF NOT EXISTS calls_ts ON calls(ts);""")
+        CREATE INDEX IF NOT EXISTS calls_ts ON calls(ts);
+        UPDATE calls SET tin=NULL, tout=NULL, usd=NULL WHERE tin IS NOT NULL OR usd IS NOT NULL;""")
     return conn
 
 
@@ -372,11 +373,12 @@ def _limited(ip: str | None, skill: str) -> tuple[str, int] | None:
     return None
 
 
-def _record(ip, skill, tin, tout, usd, cached=False, fallback=None):
+def _record(ip, skill, cached=False, fallback=None):
+    """One row per analyst request: who/when/what and the outcome. No token or cost data."""
     try:
         with _state_lock, closing(_state()) as s:
             s.execute("INSERT INTO calls VALUES(?,?,?,?,?,?,?,?)",
-                      (int(time.time()), ip, skill, tin, tout, usd, int(cached), fallback))
+                      (int(time.time()), ip, skill, None, None, None, int(cached), fallback))
             s.commit()
     except sqlite3.Error:
         log.exception("a2a: recording usage failed")
@@ -628,12 +630,12 @@ def run(question: str, *, skill: str = "ask_analyst", context_id: str | None = N
     if key:
         hit = _cache_get(key)
         if hit:  # free: served before any limit
-            _record(ip, skill, 0, 0, 0.0, cached=True)
+            _record(ip, skill, cached=True)
             _put_ctx(ctx["key"], hit.get("summary"))
             return _with_context({"text": hit["text"], "data": dict(hit["data"])}, ctx)
     lim = _limited(ip, skill)
     if lim:
-        _record(ip, skill, 0, 0, 0.0, fallback=lim[0])
+        _record(ip, skill, fallback=lim[0])
         return error(lim[0], lim[1], skill)
     max_out, in_cap, _ = SKILLS[skill]
     rule = _SKILL_RULE[skill] + (" " + REPORT_FORMAT if skill in ("research_report", "market_scan") else "")
@@ -641,8 +643,7 @@ def run(question: str, *, skill: str = "ask_analyst", context_id: str | None = N
             + (f"conversation so far: {memory}\n" if memory else "") + f"question: {question[:2000]}")
     messages: list[dict] = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}]
     results: list[dict] = []        # [{"n", "tool", "args", "result"}]
-    tin = tout = 0
-    usd = 0.0
+    tin = 0                         # prompt tokens so far, only to enforce in_cap; not stored
     deadline = time.time() + budget_s
     final = None
     try:
@@ -651,8 +652,6 @@ def run(question: str, *, skill: str = "ask_analyst", context_id: str | None = N
             resp = _chat(messages, max_out, tools=not last, deadline=deadline)
             u = resp.get("usage") or {}
             tin += int(u.get("prompt_tokens") or 0)
-            tout += int(u.get("completion_tokens") or 0)
-            usd += float(u.get("total_cost") or 0)
             msg = resp["choices"][0]["message"]
             calls = msg.get("tool_calls") or []
             if not calls or last:
@@ -687,24 +686,21 @@ def run(question: str, *, skill: str = "ask_analyst", context_id: str | None = N
                 "SUMMARY line; do not mention this correction.")}], max_out, tools=False, deadline=deadline)
             u = fix.get("usage") or {}
             tin += int(u.get("prompt_tokens") or 0)
-            tout += int(u.get("completion_tokens") or 0)
-            usd += float(u.get("total_cost") or 0)
             fixed = _parse_final(fix["choices"][0]["message"].get("content") or "")
             if fixed.get("answer"):
                 final, answer = fixed, str(fixed["answer"]).strip()
                 bad = unsupported_numbers(answer, [r["result"] for r in results])
     except Exception:  # noqa: BLE001 - any LLM/transport failure is reported as an error
         log.exception("a2a agent failed (%s)", skill)
-        _record(ip, skill, tin, tout, usd, fallback="llm_error")
+        _record(ip, skill, fallback="llm_error")
         return error("unavailable", 60)
-    _record(ip, skill, tin, tout, usd)
+    _record(ip, skill)
     _put_ctx(ctx["key"], final.get("summary"))
     cited = sorted({int(x) for x in re.findall(r"\[(\d+)\]", answer)})
     used = [r for r in results if r["n"] in cited] or results
     data: dict[str, Any] = {
         "skill": skill, "as_of": as_of, "license": a2a_research.LICENSE,
         "sources": [{"n": r["n"], "tool": r["tool"], "args": r["args"]} for r in used],
-        "usage": {"input_tokens": tin, "output_tokens": tout, "model": _backend()[2]},
     }
     if clarify:
         data["clarify"] = True
