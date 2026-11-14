@@ -47,6 +47,9 @@ TOOL_RESULT_CHARS = 4800          # ~1.2k tokens per tool result
 CTX_TTL = 1800                    # conversation memory, seconds
 CACHE_TTL = 6 * 3600
 MAX_OUTPUT_TOKENS = 10000
+ANSWER_TIME_S = 55.0              # wall-clock budget per request
+REPORT_TIME_S = 120.0             # research_report / market_scan
+REPORT_SKILLS = ("research_report", "market_scan")
 SKILLS = {
     # id: (max output tokens per call, request input-token cap, hourly calls per IP)
     # No length rules in the prompts: the answer is as long as the question needs.
@@ -58,7 +61,7 @@ SKILLS = {
     "research_report": (MAX_OUTPUT_TOKENS, 32000, 3),
 }
 _SKILL_RULE = {
-    "ask_analyst": "",
+    "ask_analyst": "If the user asks for a report or study, use the report format.",
     "compare": "Compare both sides on the same metrics; end with the single biggest difference.",
     "listing_audit": ("Call benchmark first. Give rank vs peers, the 3 biggest gaps, and one concrete fix per "
                       "gap (what to change, where)."),
@@ -574,19 +577,14 @@ _LISTING_URL = re.compile(r"agent-tools\.cloud/(?:services|mcp/servers|a2a/agent
 
 
 def pick_skill(text: str, data: dict | None) -> str:
+    """The caller's explicit skill (data part), else ask_analyst.
+
+    Free text is never routed by keywords: the analyst decides the shape of the
+    answer (including the report format when asked), and report-class limits
+    apply only when a caller asks for a report skill explicitly.
+    """
     s = str((data or {}).get("skill") or "").strip().lower()
-    if s in SKILLS:
-        return s
-    t = (text or "").lower()
-    if _LISTING_URL.search(t) or re.search(r"\baudit\b|my (listing|server|agent|api)|改进|评分为什么", t):
-        return "listing_audit"
-    if re.search(r"opportunit|gap|white ?space|underserved|机会|空白|缺口", t):
-        return "market_scan"
-    if re.search(r"\breport\b|\bstudy\b|研究报告|调研报告|报告", t):
-        return "research_report"
-    if re.search(r"\bvs\.?\b|versus|compare|comparison|对比|比较", t):
-        return "compare"
-    return "ask_analyst"
+    return s if s in SKILLS else "ask_analyst"
 
 
 def _parse_final(content: str) -> dict:
@@ -607,7 +605,7 @@ def _parse_final(content: str) -> dict:
 
 
 def run(question: str, *, skill: str = "ask_analyst", context_id: str | None = None,
-        ip: str | None = None, detail: str | None = None, budget_s: float = 55.0,
+        ip: str | None = None, detail: str | None = None, budget_s: float | None = None,
         account: int | None = None) -> dict | None:
     """Answer with the LLM analyst: {text, data}, or {"error": ...} when it cannot run.
 
@@ -644,6 +642,8 @@ def run(question: str, *, skill: str = "ask_analyst", context_id: str | None = N
     messages: list[dict] = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}]
     results: list[dict] = []        # [{"n", "tool", "args", "result"}]
     tin = 0                         # prompt tokens so far, only to enforce in_cap; not stored
+    if budget_s is None:
+        budget_s = REPORT_TIME_S if skill in REPORT_SKILLS else ANSWER_TIME_S
     deadline = time.time() + budget_s
     final = None
     try:

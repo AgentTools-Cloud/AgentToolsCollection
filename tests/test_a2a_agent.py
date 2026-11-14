@@ -111,6 +111,18 @@ class LoopTests(Base):
         self.assertEqual(first["text"], again["text"])
         self.assertNotEqual(first["context_id"], again["context_id"])   # each caller gets its own conversation
 
+    def test_report_skills_get_longer_time(self):
+        seen = []
+        def fake_chat(messages, max_tokens, tools=True, deadline=None):
+            seen.append(deadline)
+            return _final("ok")
+        import time as _t
+        with mock.patch.object(ag, "_chat", side_effect=fake_chat):
+            t0 = _t.time(); ag.run("q1", skill="research_report", ip="7.7.7.1")
+            t1 = _t.time(); ag.run("q2", skill="ask_analyst", ip="7.7.7.2")
+        self.assertGreater(seen[0] - t0, 100)
+        self.assertLess(seen[1] - t1, 60)
+
     def test_llm_error_is_an_error(self):
         with mock.patch.object(ag, "_chat", side_effect=RuntimeError("down")):
             out = ag.run("anything", ip="1.1.1.6")
@@ -200,12 +212,14 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(ag.unsupported_numbers("71,000 servers", res), ["71,000"])
 
     def test_pick_skill(self):
-        self.assertEqual(ag.pick_skill("audit https://agent-tools.cloud/mcp/servers/x", None), "listing_audit")
-        self.assertEqual(ag.pick_skill("x402 vs MCP latency", None), "compare")
-        self.assertEqual(ag.pick_skill("写一份支付工具调研报告", None), "research_report")
-        self.assertEqual(ag.pick_skill("where are the gaps?", None), "market_scan")
+        # free text always goes to the analyst; only an explicit data-part skill changes it
+        for q in ("audit https://agent-tools.cloud/mcp/servers/x", "x402 vs MCP latency",
+                  "写一份支付工具调研报告", "where are the gaps?", "how many MCP servers?"):
+            self.assertEqual(ag.pick_skill(q, None), "ask_analyst", q)
         self.assertEqual(ag.pick_skill("hi", {"skill": "compare"}), "compare")
-        self.assertEqual(ag.pick_skill("how many MCP servers?", None), "ask_analyst")
+        self.assertEqual(ag.pick_skill("hi", {"skill": "research_report"}), "research_report")
+        self.assertEqual(ag.pick_skill("hi", {"skill": "nonsense"}), "ask_analyst")
+
 
 
 if __name__ == "__main__":
