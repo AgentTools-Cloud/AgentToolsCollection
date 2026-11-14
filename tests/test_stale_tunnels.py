@@ -14,12 +14,16 @@ if not os.path.exists(source_db):
     print("SKIP: no database at %s" % source_db)
     raise SystemExit(0)
 copy_db = "/tmp/test-stale-tunnels-%d.db" % os.getpid()
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from live_copy_guard import assert_on_copy, refuse_if_imported  # noqa: E402
+refuse_if_imported()
 sqlite3.connect(source_db).backup(sqlite3.connect(copy_db))
 os.environ["AGENT_TOOLS_DB_PATH"] = copy_db
 
 from fastapi import HTTPException
 
 from directory import crawlers, db, jobs, routes
+assert_on_copy(copy_db)
 
 passed = failed = 0
 

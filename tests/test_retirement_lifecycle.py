@@ -16,11 +16,15 @@ if not os.path.exists(SOURCE):
 PREVIOUS_DB_ENV=os.environ.get("AGENT_TOOLS_DB_PATH")
 tmp=tempfile.mkdtemp(prefix="retirement-lifecycle-")
 path=os.path.join(tmp,"test.db")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from live_copy_guard import assert_on_copy, refuse_if_imported  # noqa: E402
+refuse_if_imported()
 s=sqlite3.connect(SOURCE); d=sqlite3.connect(path); s.backup(d); d.close(); s.close()
 os.environ["AGENT_TOOLS_DB_PATH"]=path
 sys.path.insert(0,os.environ.get("AGENT_TOOLS_SOURCE_ROOT","/opt/mcpserver"))
 from directory import db
 db=importlib.reload(db)
+assert_on_copy(path)
 
 db.init_db()
 from directory import a2a

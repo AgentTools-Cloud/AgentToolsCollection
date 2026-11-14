@@ -27,11 +27,15 @@ if shutil.disk_usage("/tmp").free < 3 * os.path.getsize(SRC):
     raise SystemExit(0)
 atexit.register(lambda: [os.unlink(p) for p in (CP, CP + "-wal", CP + "-shm")
                          if os.path.exists(p)])
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from live_copy_guard import assert_on_copy, refuse_if_imported  # noqa: E402
+refuse_if_imported()
 sqlite3.connect(SRC).backup(sqlite3.connect(CP))
 os.environ["AGENT_TOOLS_DB_PATH"] = CP
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from directory import collisions, db  # noqa: E402
+assert_on_copy(CP)
 
 db.init_db()
 
