@@ -7,13 +7,13 @@
     "url": "https://github.com/AgentTools-Cloud/AgentToolsCollection",
     "source": "github"
   },
-  "version": "0.5.1",
+  "version": "0.5.2",
   "websiteUrl": "https://agent-tools.cloud",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "agent-tools-mcp",
-      "version": "0.5.1",
+      "version": "0.5.2",
       "transport": {
         "type": "stdio"
       }

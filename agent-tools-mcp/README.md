@@ -132,3 +132,4 @@ Apache-2.0. See [LICENSE](LICENSE).
 - A2A spec: <https://a2a.dev>
 
 <!-- mcp-name: io.github.AgentTools-Cloud/agent-tools-mcp -->
+<!-- mcp-name: cloud.agent-tools/agent-tools-mcp -->
