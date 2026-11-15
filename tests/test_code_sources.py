@@ -70,7 +70,7 @@ class DirectoryRowTests(_TempDB):
              "ServerConfig": [{"mcpServers": {"b": {"command": "uvx", "args": ["uvx-only==1.2"]}}}]},
             {"Id": 4, "Name": "nothing"},
             {"Id": 5, "Name": "remote", "FromSiteUrl": "https://github.com/acme/remote",
-             "StreamableHTTPServerConfig": "[{'mcpServers': {'r': {'url': 'https://r.example/mcp'}}}]"},
+             "StreamableHTTPServerConfig": "[{'mcpServers': {'r': {'url': 'https://api.acme-tools.com/mcp'}}}]"},
         ]
         hints, rows = code_sources.modelscope_rows(items)
         self.assertEqual(hints, {"acme/ms-tool": "modelscope"})

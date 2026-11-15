@@ -505,6 +505,7 @@ def lookup_repos(hints: dict[str, str], max_repos: int = LOOKUP_MAX) -> list[dic
     """GitHub search items for the hinted repositories (forks and archived
     repositories excluded, renamed ones are found under their new name)."""
     cm = _cm()
+    _ensure_lookup_table()
     auth = cm._github_auth()
     repos = sorted(hints)[:max_repos]
     found: dict[str, dict] = {}
