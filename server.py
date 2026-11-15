@@ -17,7 +17,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from directory import db as directory_db
 from directory import log_redact
@@ -515,6 +515,94 @@ def well_known_security_txt():
             "Preferred-Languages: en, zh\n"
             "Canonical: https://agent-tools.cloud/.well-known/security.txt\n")
     return PlainTextResponse(body, headers={"Cache-Control": "public, max-age=3600"})
+
+
+ARD_MEDIA_TYPE = "application/ard+json"
+
+
+def ard_manifest() -> dict[str, Any]:
+    """Agent Resource Discovery manifest (draft-bu-dawn-ard-discovery-00, ARD v0.91).
+
+    Lists what this site offers to agents so ARD registries (e.g. Neuronto) can
+    index us from our own domain. Entries point at the descriptors we already
+    serve; representativeQueries are what registries build their search index from.
+    """
+    base = "https://agent-tools.cloud"
+    pub = "urn:air:agent-tools.cloud"
+    return {
+        "specVersion": "1.0",
+        "host": {"displayName": "agent-tools.cloud", "identifier": "did:web:agent-tools.cloud",
+                 "url": base},
+        "entries": [
+            {
+                "identifier": f"{pub}:mcp:agent-tools-discovery",
+                "displayName": "agent-tools MCP discovery server",
+                "type": "application/mcp-server-card+json",
+                "url": f"{base}/.well-known/mcp.json",
+                "description": ("Search a daily-probed directory of x402 paid APIs, MCP servers and A2A agents; "
+                                "get call templates, scan an MCP server for prompt injection, register or claim "
+                                "a listing. Streamable HTTP at /mcp-discovery/, no key needed."),
+                "representativeQueries": [
+                    "find an MCP server that can read Google Sheets",
+                    "which x402 paid API can I call for web scraping",
+                    "is this MCP server safe to connect to",
+                    "find an A2A agent that can book travel",
+                    "list paid APIs for crypto price data under one cent per call",
+                ],
+                "capabilities": ["search", "search_mcp_servers", "search_a2a_agents", "search_resources",
+                                 "get", "scan_mcp_safety", "directory_stats", "register"],
+                "tags": ["mcp", "x402", "a2a", "directory", "discovery", "security"],
+                "metadata": {"endpoint": f"{base}/mcp-discovery/", "auth": "none",
+                             "stdio": "uvx agent-tools-mcp"},
+            },
+            {
+                "identifier": f"{pub}:a2a:agent-tools-research",
+                "displayName": "Agent Tools Research (A2A analyst)",
+                "type": "application/a2a-agent-card+json",
+                "url": f"{base}/.well-known/agent-card.json",
+                "description": ("A2A research analyst for the agent-tool market: answers questions and writes "
+                                "reports on x402 APIs, MCP servers and A2A agents from our daily probe data, "
+                                "with every number checked against the data."),
+                "representativeQueries": [
+                    "how many MCP servers are actually reachable today",
+                    "write a report on the state of x402 paid APIs",
+                    "where is demand for agent tools not met by supply",
+                    "compare MCP and A2A adoption over the last 90 days",
+                ],
+                "capabilities": ["ask_analyst", "research_report", "market_scan", "compare",
+                                 "listing_audit", "raw_report"],
+                "tags": ["a2a", "research", "market-data", "x402", "mcp"],
+                "metadata": {"endpoint": f"{base}/a2a", "auth": "none",
+                             "docs": f"{base}/about#a2a-agent"},
+            },
+            {
+                "identifier": f"{pub}:api:directory",
+                "displayName": "agent-tools.cloud directory REST API",
+                "type": "application/vnd.oai.openapi+json",
+                "url": f"{base}/openapi.json",
+                "description": ("JSON API over the directory: search x402 services, MCP servers and A2A agents, "
+                                "listing details, daily statistics (CC BY 4.0), submissions and owner claims."),
+                "representativeQueries": [
+                    "search an API directory of MCP servers over REST",
+                    "get daily statistics about x402 and MCP ecosystems as JSON",
+                    "submit my x402 API to a directory",
+                ],
+                "tags": ["api", "directory", "statistics", "x402", "mcp", "a2a"],
+            },
+        ],
+    }
+
+
+@app.get("/.well-known/ard.json", include_in_schema=False)
+@app.get("/.well-known/ai-catalog.json", include_in_schema=False)
+def well_known_ard():
+    """ARD manifest at the well-known path; ai-catalog.json is the earlier draft's name."""
+    import json as _json
+
+    return Response(_json.dumps(ard_manifest(), ensure_ascii=False, indent=1),
+                    media_type=ARD_MEDIA_TYPE,
+                    headers={"Cache-Control": "public, max-age=3600",
+                             "Access-Control-Allow-Origin": "*"})
 
 
 @app.post("/a2a", tags=["a2a"])

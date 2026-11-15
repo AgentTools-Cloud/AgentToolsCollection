@@ -2794,6 +2794,7 @@ def robots_txt() -> Response:
         "Disallow: /account\n"
         "\n"
         "Sitemap: https://agent-tools.cloud/sitemap.xml\n"
+        "Agentmap: https://agent-tools.cloud/.well-known/ard.json\n"
     )
     return Response(content=body, media_type="text/plain",
                     headers={"Cache-Control": "public, max-age=3600"})
