@@ -13,9 +13,10 @@ uptime, descriptions); every row is then fetched or probed by us like any other
 source, and keeps the peer as its ``source`` so the lead can be attributed.
 
 Politeness: one request at a time with a pause between pages, a cap per host and
-per run, and full passes over large directories at most once a week (tracked in
+per run, and one full pass per nightly crawl, like every other source (tracked in
 ``meta`` as ``peer:<name>:last``, written only after the rows were ingested, so a
-failed run is retried the next day).
+failed run is retried; the mark also stops a manual rerun the same day from
+pulling everything again).
 
 Hosts whose owner (or staff on the owner's request) took a listing down are never
 re-added from a peer, even under another URL (``_owner_removed_hosts``).
@@ -40,7 +41,7 @@ log = logging.getLogger("directory.peers")
 UA = crawlers.UA
 TIMEOUT = httpx.Timeout(connect=10.0, read=60.0, write=10.0, pool=10.0)
 PER_HOST = 20          # rows one host may contribute per source and run
-WEEK_DAYS = 6          # full passes over big peers: about once a week
+RUN_EVERY_DAYS = 0.8   # one full pass per nightly crawl, like every other source
 
 MCP_CENSUS_INDEX = "https://www.radixia.ai/census/data"
 MCP_CENSUS_FILE = "https://www.radixia.ai/census/data/{date}/census.jsonl.gz"
@@ -445,7 +446,7 @@ def x402lint_rows(projects: Iterable[dict]) -> list[dict]:
 # fetchers the ALL_CRAWLERS one: return a list of rows; [] when not due.
 # ---------------------------------------------------------------------------
 def fetch_mcp_census() -> list[dict]:
-    if not _due("mcp-census", WEEK_DAYS):
+    if not _due("mcp-census", RUN_EVERY_DAYS):
         return []
     with _client() as c:
         page = _get(c, MCP_CENSUS_INDEX).text
@@ -460,7 +461,7 @@ def fetch_mcp_census() -> list[dict]:
 
 
 def fetch_csoai_census() -> list[dict]:
-    if not _due("csoai-census", WEEK_DAYS):
+    if not _due("csoai-census", RUN_EVERY_DAYS):
         return []
     with _client() as c:
         meta = _get(c, CSOAI_DATASET).json()
@@ -498,8 +499,15 @@ def fetch_assay_x402() -> list[dict]:
     return _drop_removed(assay_split(_assay_board())[2], "url")
 
 
+_agentindex_cache: tuple[float, list[dict]] | None = None
+
+
 def _agentindex_results(pause: float = 1.2) -> list[dict]:
-    """All AgentIndex domains (Crawl-delay: 1)."""
+    """All AgentIndex domains (Crawl-delay: 1). Shared by the x402 and A2A
+    passes of one nightly crawl, so the directory is paged once a night."""
+    global _agentindex_cache
+    if _agentindex_cache and time.time() - _agentindex_cache[0] < 12 * 3600:
+        return _agentindex_cache[1]
     out: list[dict] = []
     with _client() as c:
         offset = 0
@@ -510,12 +518,13 @@ def _agentindex_results(pause: float = 1.2) -> list[dict]:
                 break
             offset += 100
             time.sleep(pause)
+    _agentindex_cache = (time.time(), out)
     return out
 
 
 def fetch_agentindex_x402() -> list[dict]:
-    # x402 and A2A keep separate weekly keys: the A2A crawl runs hours later.
-    if not _due("agentindex-x402", WEEK_DAYS):
+    # x402 and A2A keep separate marks: either may fail on its own.
+    if not _due("agentindex-x402", RUN_EVERY_DAYS):
         return []
     rows = _drop_removed(agentindex_split(_agentindex_results())[0], "url")
     _pending("agentindex", "agentindex-x402")
@@ -523,7 +532,7 @@ def fetch_agentindex_x402() -> list[dict]:
 
 
 def agentindex_fetch_leads() -> list[dict]:
-    if not _due("agentindex-a2a", WEEK_DAYS):
+    if not _due("agentindex-a2a", RUN_EVERY_DAYS):
         return []
     leads = agentindex_split(_agentindex_results())[1]
     _pending("a2a:agentindex", "agentindex-a2a")
@@ -531,7 +540,7 @@ def agentindex_fetch_leads() -> list[dict]:
 
 
 def fetch_x402lint(pause: float = 2.2, max_pages: int = 400) -> list[dict]:
-    if not _due("x402lint", WEEK_DAYS):
+    if not _due("x402lint", RUN_EVERY_DAYS):
         return []
     projects: list[dict] = []
     complete = False
@@ -569,7 +578,7 @@ def _drop_known(leads: list[dict], known_urls: set[str], known_hosts: set[str]) 
 
 
 def agentalog_fetch_leads(pause: float = 1.5) -> list[dict]:
-    if not _due("agentalog", WEEK_DAYS):
+    if not _due("agentalog", RUN_EVERY_DAYS):
         return []
     items: list[dict] = []
     with _client() as c:
