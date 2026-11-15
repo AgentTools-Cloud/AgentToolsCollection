@@ -1,10 +1,12 @@
 """Code-only MCP servers: repositories and packages with no remote endpoint.
 
-Two public sources, merged by GitHub repository before ingestion:
+Public sources, merged by GitHub repository before ingestion:
 
 * GitHub repositories tagged ``topic:mcp-server`` (search API, split by
   creation date because one query returns at most 1,000 results);
-* npm packages with the keyword ``mcp-server``.
+* npm and PyPI packages with the keyword ``mcp-server`` from ecosyste.ms
+  (complete keyword index, with first-release dates), plus npm's own search
+  (which stops returning new results after ~5,250 of its ~11,500 matches).
 
 Every row is ``kind='catalog'`` with ``endpoint_url=None``: it belongs to the
 code-only sub-directory (/mcp/code), is never probed and never counted in the
@@ -32,7 +34,9 @@ log = logging.getLogger(__name__)
 UA = "agent-tools.cloud-crawler/0.1 (+https://agent-tools.cloud)"
 GITHUB_TOPIC = "mcp-server"
 NPM_KEYWORD = "mcp-server"
-OWN_SOURCES = ("github", "npm")
+OWN_SOURCES = ("github", "npm", "pypi")
+ECOSYSTEMS_URL = "https://packages.ecosyste.ms/api/v1/keywords/{kw}"
+ECOSYSTEMS = {"npm": "npm", "pypi": "pypi"}   # ecosyste.ms ecosystem -> our package_registry
 SEARCH_CAP = 1000          # GitHub search returns at most 1,000 results per query
 GITHUB_FIRST_DAY = date(2024, 11, 1)   # MCP was announced 2024-11-25
 NPM_PAGE = 250
@@ -233,6 +237,69 @@ def npm_row(obj: dict) -> dict:
     }
 
 
+def fetch_ecosystems(keyword: str = NPM_KEYWORD, *, max_pages: int = 2000) -> list[dict]:
+    """Every npm / PyPI package with the keyword, from ecosyste.ms (no
+    deep-paging cap; carries first-release dates). Anonymous limit 5,000
+    requests per hour; a full scan is ~320 pages."""
+    out: dict[tuple[str, str], dict] = {}
+    for page in range(1, max_pages + 1):
+        url = ECOSYSTEMS_URL.format(kw=urllib.parse.quote(keyword)) + "?" + urllib.parse.urlencode(
+            {"per_page": 100, "page": page})
+        for attempt in range(4):
+            try:
+                data, _ = _get(url, timeout=60)
+                break
+            except urllib.error.HTTPError as e:
+                if e.code == 429 and attempt < 3:
+                    time.sleep(60)
+                    continue
+                raise
+        pkgs = data.get("packages") or []
+        if not pkgs:
+            break
+        for p in pkgs:
+            reg = ECOSYSTEMS.get(p.get("ecosystem") or "")
+            if reg and p.get("name"):
+                out.setdefault((reg, p["name"].lower()), p)
+    log.info("code mcp: ecosyste.ms keyword:%s npm=%d pypi=%d", keyword,
+             sum(1 for r, _ in out if r == "npm"), sum(1 for r, _ in out if r == "pypi"))
+    return list(out.values())
+
+
+def eco_row(p: dict) -> dict:
+    reg = ECOSYSTEMS[p["ecosystem"]]
+    name = p["name"]
+    repo = github_repo(p.get("repository_url"))
+    repo_url = f"https://github.com/{repo}" if repo else ((p.get("repository_url") or "").strip() or None)
+    page = (f"https://www.npmjs.com/package/{name}" if reg == "npm"
+            else f"https://pypi.org/project/{name}/")
+    lic = p.get("licenses") if isinstance(p.get("licenses"), str) else None
+    owner = (name.split("/")[0].lstrip("@") if "/" in name else reg)
+    row = {
+        "slug": _slug(name.split("/")[-1], owner),
+        "name": name,
+        "description": (p.get("description") or "").strip()[:1000] or None,
+        "homepage_url": (p.get("homepage") or "").strip() or repo_url or page,
+        "endpoint_url": None,
+        "kind": "catalog",
+        "source_code_url": repo_url,
+        "package_registry": reg,
+        "package_name": name,
+        "package_download_count": p.get("downloads") if isinstance(p.get("downloads"), int) else None,
+        "license": (lic or "")[:80] or None,
+        "repo_pushed_at": p.get("latest_release_published_at"),
+        "tags": [k for k in (p.get("keywords_array") or []) if isinstance(k, str)][:12] or None,
+        "source": reg,
+        "source_id": name.lower(),
+        "source_url": page,
+        "confidence": 0.5,
+    }
+    created = _epoch(p.get("first_release_published_at"))
+    if created:
+        row["created_at"] = created
+    return row
+
+
 # ---------------------------------------------------------------------------
 # Merge + de-duplicate
 # ---------------------------------------------------------------------------
@@ -295,7 +362,7 @@ def _slug(name: str, owner: str) -> str:
 
 
 def known_repos(conn) -> tuple[set[str], set[str]]:
-    """(repos owned by another listing, npm packages owned by another listing).
+    """(repos owned by another listing, (registry, package) owned by another listing).
 
     Rows from our own code crawlers are excluded so their re-crawl updates
     them instead of skipping them."""
@@ -308,15 +375,18 @@ def known_repos(conn) -> tuple[set[str], set[str]]:
             r = github_repo(u)
             if r:
                 repos.add(r)
-        if pkg and (reg or "").lower() == "npm":
-            packages.add(pkg.lower())
+        if pkg and (reg or "").lower() in ECOSYSTEMS.values():
+            packages.add(((reg or "").lower(), pkg.lower()))
     return repos, packages
 
 
-def merge(github_items: list[dict], npm_objs: list[dict],
-          known: tuple[set[str], set[str]]) -> tuple[list[dict], dict]:
-    """One row per repository (GitHub first, enriched with its npm package);
-    npm packages without a GitHub repository stay as npm rows."""
+def merge(github_items: list[dict], package_rows: list[dict],
+          known: tuple[set[str], set]) -> tuple[list[dict], dict]:
+    """One row per repository (GitHub first, enriched with its package);
+    packages without a GitHub repository stay as npm / PyPI rows.
+
+    `package_rows` are npm_row() / eco_row() rows (npm search objects are
+    accepted too, for the fallback path)."""
     known_repo, known_pkg = known
     rows: dict[str, dict] = {}
     skipped = {"linked_elsewhere": 0, "duplicate_package": 0}
@@ -328,24 +398,24 @@ def merge(github_items: list[dict], npm_objs: list[dict],
             continue
         rows[repo] = row
     npm_only: dict[str, dict] = {}
-    for obj in npm_objs:
-        row = npm_row(obj)
+    for obj in package_rows:
+        row = npm_row(obj) if "package" in obj else obj
         pkg = row["package_name"].lower()
         repo = github_repo(row.get("source_code_url"))
-        if pkg in known_pkg or (repo and repo in known_repo):
+        if (row["package_registry"], pkg) in known_pkg or (repo and repo in known_repo):
             skipped["linked_elsewhere"] += 1
             continue
         if repo and repo in rows:
             gh = rows[repo]
             if not gh.get("package_name"):
-                gh["package_registry"], gh["package_name"] = "npm", row["package_name"]
+                gh["package_registry"], gh["package_name"] = row["package_registry"], row["package_name"]
             else:
                 skipped["duplicate_package"] += 1
             continue
         if repo and repo in npm_only:
             skipped["duplicate_package"] += 1   # monorepo: first package wins
             continue
-        npm_only[repo or pkg] = row
+        npm_only[repo or (row["package_registry"], pkg)] = row
     out = list(rows.values()) + list(npm_only.values())
     return out, skipped
 
@@ -353,21 +423,29 @@ def merge(github_items: list[dict], npm_objs: list[dict],
 def fetch_all(*, github_limit: int | None = None, npm_limit: int = NPM_MAX,
               min_stars: int = 0, pushed_since: date | None = None) -> tuple[list[dict], dict]:
     gh = fetch_github(max_repos=github_limit, min_stars=min_stars, pushed_since=pushed_since)
-    npm = fetch_npm(max_packages=npm_limit)
+    try:
+        eco = [eco_row(p) for p in fetch_ecosystems()]
+    except Exception as e:  # noqa: BLE001 - fall back to npm search alone
+        log.warning("code mcp: ecosyste.ms failed (%r); npm search only", e)
+        eco = []
+    have = {(r["package_registry"], r["source_id"]) for r in eco}
+    npm = [npm_row(o) for o in fetch_npm(max_packages=npm_limit)]
+    packages = eco + [r for r in npm if ("npm", r["source_id"]) not in have]
     with db.connect(read_only=True) as c:
         known = known_repos(c)
         have_npm = {r[0] for r in c.execute(
             "SELECT source_id FROM mcp_servers WHERE source='npm'")}
-    rows, skipped = merge(gh, npm, known)
-    # npm search has no creation date: look it up only for packages we do not
-    # have yet (the incremental runs stay cheap).
+    rows, skipped = merge(gh, packages, known)
+    # npm search has no creation date: look it up only for search-only packages
+    # we do not have yet (ecosyste.ms rows carry their first-release date).
     need = [r["package_name"] for r in rows
-            if r["source"] == "npm" and r["source_id"] not in have_npm]
+            if r["source"] == "npm" and not r.get("created_at") and r["source_id"] not in have_npm]
     created = npm_created(need) if need else {}
     for r in rows:
-        if r["source"] == "npm":
+        if r["source"] == "npm" and not r.get("created_at"):
             r["created_at"] = created.get(r["package_name"])
-    info = {"github": len(gh), "npm": len(npm), "rows": len(rows), "min_stars": min_stars,
+    info = {"github": len(gh), "ecosystems": len(eco), "npm_search": len(npm),
+            "npm_search_only": len(packages) - len(eco), "rows": len(rows), "min_stars": min_stars,
             "pushed_since": pushed_since.isoformat() if pushed_since else None,
             "npm_created_lookups": len(need), **skipped}
     log.info("code mcp merged: %s", info)
