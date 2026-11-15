@@ -3861,6 +3861,10 @@ MODELSCOPE_MCP_PAGE = "https://modelscope.cn/mcp/servers/{path}"
 _MODELSCOPE_WINDOW = 300
 _MODELSCOPE_SPLIT = "abcdefghijklmnopqrstuvwxyz0123456789"
 _MODELSCOPE_PRIVATE_HOSTS = ("modelscope.net", "modelscope.cn", "modelscope.ai")
+_MODELSCOPE_RAW_FIELDS = ("Id", "Path", "Name", "ChineseName", "Publisher", "NickName",
+                          "Abstract", "AbstractCN", "TranslatedAbstract", "Category", "Tags",
+                          "Hosted", "FromSiteUrl", "ServerConfig",
+                          "StreamableHTTPServerConfig", "SSEServerConfig")
 
 
 def _modelscope_row(s: dict) -> dict | None:
@@ -3971,7 +3975,9 @@ def fetch_modelscope_mcp(page_size: int = _MODELSCOPE_WINDOW, page_sleep: float 
                 break
             for s in rows:
                 if isinstance(s, dict) and s.get("Id") is not None:
-                    seen[str(s["Id"])] = s
+                    # raw callers (code-only crawl) need no readme / tool list
+                    seen[str(s["Id"])] = ({k: s.get(k) for k in _MODELSCOPE_RAW_FIELDS}
+                                           if raw else s)
             if len(rows) < page_size:
                 break
             time.sleep(page_sleep)

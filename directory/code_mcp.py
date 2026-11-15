@@ -161,7 +161,7 @@ def fetch_github(topic: str = GITHUB_TOPIC, *, today: date | None = None,
             for item in data.get("items") or []:
                 repo = (item.get("full_name") or "").lower()
                 if repo and repo not in out:
-                    out[repo] = item
+                    out[repo] = slim_github(item)
             if len(data.get("items") or []) < 100:
                 break
         if max_repos and len(out) >= max_repos:
@@ -184,6 +184,21 @@ def fetch_github_topics(topics=GITHUB_TOPICS, **kw) -> list[dict]:
                 continue
             out[repo] = item
     return list(out.values())
+
+
+# Only what github_row() / the filters read: a full search item is ~100 keys,
+# and a full crawl holds 200k+ of them.
+GITHUB_FIELDS = ("full_name", "name", "html_url", "homepage", "description",
+                 "stargazers_count", "topics", "pushed_at", "created_at")
+ECO_FIELDS = ("ecosystem", "name", "description", "repository_url", "homepage",
+              "registry_url", "licenses", "downloads", "keywords_array",
+              "latest_release_published_at", "first_release_published_at")
+
+
+def slim_github(item: dict) -> dict:
+    out = {k: item.get(k) for k in GITHUB_FIELDS}
+    out["license"] = {"spdx_id": (item.get("license") or {}).get("spdx_id")}
+    return out
 
 
 def github_row(item: dict) -> dict:
@@ -239,7 +254,9 @@ def fetch_npm(keyword: str = NPM_KEYWORD, *, max_packages: int = NPM_MAX) -> lis
         for o in objs:
             p = o.get("package") or {}
             if p.get("name"):
-                out.setdefault(p["name"].lower(), o)
+                out.setdefault(p["name"].lower(), {"package": {
+                    k: p.get(k) for k in ("name", "description", "links", "keywords",
+                                          "license", "date")}})
         offset += len(objs)
         if len(objs) < NPM_PAGE or offset >= int(data.get("total") or 0):
             break
@@ -298,7 +315,7 @@ def fetch_ecosystems(keyword: str = NPM_KEYWORD, *, max_pages: int = 2000) -> li
         for p in pkgs:
             reg = ECOSYSTEMS.get(p.get("ecosystem") or "")
             if reg and p.get("name"):
-                out.setdefault((reg, p["name"].lower()), p)
+                out.setdefault((reg, p["name"].lower()), {k: p.get(k) for k in ECO_FIELDS})
     from collections import Counter
     log.info("code mcp: ecosyste.ms keyword:%s %s", keyword,
              dict(Counter(r for r, _ in out)))
