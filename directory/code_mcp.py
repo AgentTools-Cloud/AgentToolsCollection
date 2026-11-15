@@ -14,6 +14,7 @@ so is one that another directory already lists as code-only.
 """
 from __future__ import annotations
 
+import http.client
 import json
 import logging
 import re
@@ -42,11 +43,27 @@ class CodeCrawlError(RuntimeError):
     pass
 
 
+NET_RETRY_DELAYS = (5, 15, 30, 60, 120)   # a full crawl takes ~1 h; ride out DNS / network blips
+
+
 def _get(url: str, headers: dict | None = None, timeout: int = 40):
     req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "application/json",
                                                **(headers or {})})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.load(r), dict(r.headers)
+    for delay in (*NET_RETRY_DELAYS, None):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return json.load(r), dict(r.headers)
+        except urllib.error.HTTPError as e:
+            # 4xx are answers (callers handle 403/404/429); retry only 5xx.
+            if e.code < 500 or delay is None:
+                raise
+        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError,
+                http.client.HTTPException, json.JSONDecodeError):
+            if delay is None:
+                raise
+        log.warning("code mcp: transient error on %s; retrying in %ss",
+                    url.split("?", 1)[0], delay)
+        time.sleep(delay)
 
 
 # ---------------------------------------------------------------------------

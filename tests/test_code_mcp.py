@@ -78,6 +78,34 @@ class MergeTests(_TempDB):
         self.assertEqual(days, 8)
 
 
+class NetworkRetryTests(_TempDB):
+    def test_dns_failure_is_retried_then_succeeds(self):
+        import io, urllib.error
+
+        class Resp(io.BytesIO):
+            headers = {}
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+        calls = []
+
+        def fake(req, timeout=None):
+            calls.append(1)
+            if len(calls) < 3:
+                raise urllib.error.URLError(OSError(-3, "Temporary failure in name resolution"))
+            return Resp(b'{"ok": 1}')
+        with patch("urllib.request.urlopen", side_effect=fake), patch.object(code_mcp.time, "sleep"):
+            data, _ = code_mcp._get("https://api.github.com/x")
+        self.assertEqual((data, len(calls)), ({"ok": 1}, 3))
+
+    def test_client_errors_are_not_retried(self):
+        import urllib.error
+        err = urllib.error.HTTPError("https://x", 404, "nf", {}, None)
+        with patch("urllib.request.urlopen", side_effect=err) as m, patch.object(code_mcp.time, "sleep"):
+            with self.assertRaises(urllib.error.HTTPError):
+                code_mcp._get("https://x")
+        self.assertEqual(m.call_count, 1)
+
+
 class IncrementalTests(_TempDB):
     def _run(self, gh, npm=(), created=None, **kw):
         created = created or {}
