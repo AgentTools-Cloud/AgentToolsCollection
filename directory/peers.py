@@ -605,7 +605,7 @@ X402_FETCHERS = {
 }
 
 
-def crawl_a2a_peers(max_new: int = 400) -> dict:
+def crawl_a2a_peers(max_new: int = 5000) -> dict:
     """Run every A2A lead source; returns per-source results and totals.
 
     Known cards/hosts are dropped *before* the per-host cap, so a big host
