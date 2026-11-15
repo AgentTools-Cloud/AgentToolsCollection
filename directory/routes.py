@@ -2524,7 +2524,7 @@ def well_known():
             },
             "methodology": "https://agent-tools.cloud/api/v1/methodology",
             "data_use": {
-                "statistics": "CC BY 4.0, link to https://agent-tools.cloud/stats",
+                "statistics": "statistics, reports, grades and A2A answers: CC BY 4.0, credit agent-tools.cloud with a link",
                 "listings": "free to use incl. commercially, credit agent-tools.cloud with a link; "
                             "third-party content stays with its owners",
                 "blog": "copyright of the author; quote excerpts with a link, no full republication",

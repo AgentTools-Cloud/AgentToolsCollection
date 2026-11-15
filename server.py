@@ -228,7 +228,7 @@ _LLMS_TXT = """# agent-tools.cloud
 
 ## Data use
 
-- Statistics: CC BY 4.0, link to https://agent-tools.cloud/stats
+- Statistics, grades, A2A answers: CC BY 4.0
 - Listing data: free to use, including commercially; credit agent-tools.cloud with a link
 - Blog articles: copyright of the author; quote excerpts with a link, do not republish in full
 - Full terms: https://agent-tools.cloud/terms#data
