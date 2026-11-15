@@ -249,8 +249,9 @@ class PeerGateTests(unittest.TestCase):
 
     def test_registered_in_jobs(self):
         from directory import jobs  # noqa: F401 -- registration happens on import
-        for name in ("mcp-census", "csoai-census", "assay"):
+        for name in ("csoai-census", "assay"):
             self.assertIn(name, crawlers.MCP_CRAWLERS)
+        self.assertNotIn("mcp-census", crawlers.MCP_CRAWLERS)  # paused
         for name in ("x402lint", "agentindex", "assay"):
             self.assertIn(name, crawlers.ALL_CRAWLERS)
 

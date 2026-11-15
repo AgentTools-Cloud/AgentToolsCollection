@@ -618,8 +618,10 @@ A2A_LEAD_SOURCES: dict[str, Callable[[], list[dict]]] = {
     "agentindex": agentindex_fetch_leads,
 }
 
+# MCPCensus is paused (2026-11-15): its last downloadable release is 2026-09-13
+# and the repo has had no commit since 09-18. fetch_mcp_census stays ready;
+# re-add it here once a new dated release appears on radixia.ai/census/data.
 MCP_FETCHERS = {
-    "mcp-census": fetch_mcp_census,
     "csoai-census": fetch_csoai_census,
     "assay": fetch_assay_mcp,
 }
