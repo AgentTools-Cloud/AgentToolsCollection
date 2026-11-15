@@ -319,6 +319,21 @@ class ScopeTests(_TempDB):
         self.assertEqual(snap["kpis"]["mcp"]["code_only"], 2)
         self.assertEqual(snap["code_only"]["mcp"]["stars_100"], 1)
 
+    def test_api_never_grades_code_only_rows(self):
+        with db.writer() as c:
+            c.execute("UPDATE mcp_servers SET readiness_grade='F', readiness_score=10, "
+                      "quality_score=4 WHERE slug='weather-code-acme'")
+        d = self.client.get("/api/v1/mcp/servers/weather-code-acme").json()
+        d = d.get("server", d)
+        for k in ("readiness_grade", "readiness_score", "quality_score"):
+            self.assertIsNone(d.get(k), k)
+        self.assertNotIn("readiness", d)
+        with closing(db.connect(read_only=True)) as c:
+            rows = db.attach_ratings("mcp", db.search_mcp(c, q="weather", scope="all"))
+        by = {r["slug"]: r for r in rows}
+        self.assertIsNone(by["weather-code-acme"]["grade"])
+        self.assertIsNotNone(by["weather-remote"]["grade"])
+
 
 if __name__ == "__main__":
     import unittest
