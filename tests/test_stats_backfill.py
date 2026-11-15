@@ -6,6 +6,7 @@ import sqlite3
 import tempfile
 import time
 import unittest
+import unittest.mock
 
 from directory import db, stats
 
@@ -18,6 +19,10 @@ class StatsBackfillTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
+        # The replay rule itself is tested on every protocol.
+        p = unittest.mock.patch.object(stats, "REPLAY_REACHABLE", ("x402", "mcp", "a2a"))
+        p.start()
+        self.addCleanup(p.stop)
         self.path = os.path.join(self.tmp.name, "t.db")
         db.init_db(self.path)
         c = sqlite3.connect(self.path)
@@ -102,3 +107,9 @@ class StatsBackfillTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReplayScopeTests(unittest.TestCase):
+    def test_x402_reachable_not_replayed_by_default(self):
+        self.assertNotIn("x402", stats.REPLAY_REACHABLE)
+        self.assertIn("mcp", stats.REPLAY_REACHABLE)
