@@ -78,6 +78,54 @@ class MergeTests(_TempDB):
         self.assertEqual(days, 8)
 
 
+class IncrementalTests(_TempDB):
+    def _run(self, gh, npm=(), created=None, **kw):
+        created = created or {}
+        with patch.object(code_mcp, "fetch_github", return_value=list(gh)) as fg, \
+                patch.object(code_mcp, "fetch_npm", return_value=list(npm)), \
+                patch.object(code_mcp, "npm_created",
+                             side_effect=lambda names: {n: created[n] for n in names if n in created}):
+            jobs.cmd_crawl_code(**kw)
+        return fg.call_args.kwargs
+
+    def test_first_run_is_full_then_incremental_since_last_run(self):
+        args = self._run([gh_item("acme/a")])
+        self.assertIsNone(args["pushed_since"])
+        args = self._run([gh_item("acme/b")])
+        self.assertIsNotNone(args["pushed_since"])
+        self.assertLessEqual(args["pushed_since"], date.today())
+        args = self._run([], full=True)
+        self.assertIsNone(args["pushed_since"])
+        with closing(db.connect(read_only=True)) as c:
+            runs = [r[0] for r in c.execute("SELECT source FROM crawl_runs ORDER BY id")]
+        self.assertEqual(runs, [jobs.CODE_FULL_RUN, jobs.CODE_INCR_RUN, jobs.CODE_FULL_RUN])
+
+    def test_a_bounded_run_is_not_a_baseline(self):
+        args = self._run([gh_item("acme/a")], min_stars=100)
+        self.assertIsNone(args["pushed_since"])
+        args = self._run([gh_item("acme/b")])
+        self.assertIsNone(args["pushed_since"])   # still no full baseline
+
+    def test_rows_are_dated_by_creation_not_by_import(self):
+        old = dict(gh_item("acme/old"), created_at="2025-03-01T00:00:00Z")
+        self._run([old], [npm_obj("solo-mcp")], created={"solo-mcp": 1735689600})
+        with closing(db.connect(read_only=True)) as c:
+            got = dict(c.execute("SELECT source_id, created_at FROM mcp_servers "
+                                 "WHERE source IN ('github','npm')").fetchall())
+        self.assertEqual(got["acme/old"], 1740787200)
+        self.assertEqual(got["solo-mcp"], 1735689600)
+
+    def test_rows_imported_today_are_backdated_on_the_next_run(self):
+        self._run([gh_item("acme/old")])            # no creation date: stamped now
+        old = dict(gh_item("acme/old"), created_at="2025-03-01T00:00:00Z")
+        self._run([old], full=True)
+        with closing(db.connect(read_only=True)) as c:
+            ts = c.execute("SELECT created_at FROM mcp_servers WHERE source_id='acme/old'").fetchone()[0]
+            snap = stats.compute(c, now=int(time.time()))
+        self.assertEqual(ts, 1740787200)
+        self.assertEqual(snap["code_only"]["mcp"]["new_7d"], 0)
+
+
 class InstallHintTests(_TempDB):
     def test_smithery_local_server_gets_the_smithery_install_command(self):
         from directory import resources

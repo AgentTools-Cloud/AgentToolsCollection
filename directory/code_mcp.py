@@ -94,12 +94,17 @@ def _date_ranges(first: date, last: date, count, cap=SEARCH_CAP):
 
 
 def fetch_github(topic: str = GITHUB_TOPIC, *, today: date | None = None,
-                 max_repos: int | None = None, min_stars: int = 0) -> list[dict]:
+                 max_repos: int | None = None, min_stars: int = 0,
+                 pushed_since: date | None = None) -> list[dict]:
+    """All repositories with the topic, or (incremental) only those pushed
+    on or after `pushed_since` -- new repositories are always pushed."""
     auth = _github_auth()
     today = today or date.today()
     base = f"topic:{topic} fork:false archived:false"
     if min_stars > 0:
         base += f" stars:>={int(min_stars)}"
+    if pushed_since:
+        base += f" pushed:>={pushed_since.isoformat()}"
 
     def count(a, b):
         data, _ = _github_search(f"{base} created:{a.isoformat()}..{b.isoformat()}", 1, auth)
@@ -129,7 +134,7 @@ def github_row(item: dict) -> dict:
     homepage = (item.get("homepage") or "").strip()
     if not homepage.startswith(("https://", "http://")):
         homepage = url
-    return {
+    row = {
         "slug": _slug(name, owner),
         "name": name,
         "description": (item.get("description") or "").strip()[:1000] or None,
@@ -146,6 +151,12 @@ def github_row(item: dict) -> dict:
         "source_url": url,
         "confidence": 0.5,
     }
+    # First seen = when the repository was created, not when we found it, so
+    # importing the existing backlog does not read as thousands of new servers.
+    created = _epoch(item.get("created_at"))
+    if created:
+        row["created_at"] = created
+    return row
 
 
 # ---------------------------------------------------------------------------
@@ -221,6 +232,46 @@ def github_repo(url: str | None) -> str | None:
     return _github_repo(u)
 
 
+def _epoch(value) -> int | None:
+    """ISO-8601 timestamp (GitHub / npm) -> unix seconds."""
+    if not value:
+        return None
+    try:
+        from datetime import datetime
+        return int(datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp())
+    except ValueError:
+        return None
+
+
+def npm_created(names: list[str], workers: int = 6) -> dict[str, int]:
+    """First-publish time of npm packages (`time.created` in the packument)."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    def one(name):
+        url = "https://registry.npmjs.org/" + urllib.parse.quote(name, safe="@")
+        for attempt in range(3):
+            try:
+                # The abbreviated install document has no `time`; the full one does.
+                data, _ = _get(url, {"Accept": "application/json"}, timeout=60)
+                created = (data.get("time") or {}).get("created")
+                return name, _epoch(created)
+            except urllib.error.HTTPError as e:
+                if e.code == 429 and attempt < 2:
+                    time.sleep(20)
+                    continue
+                return name, None
+            except Exception:  # noqa: BLE001 - one package must not stop the run
+                return name, None
+        return name, None
+
+    out: dict[str, int] = {}
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for name, ts in pool.map(one, names):
+            if ts:
+                out[name] = ts
+    return out
+
+
 def _slug(name: str, owner: str) -> str:
     s = re.sub(r"[^a-z0-9]+", "-", f"{name}-{owner}".lower()).strip("-")
     return s[:80] or "mcp-code"
@@ -283,13 +334,24 @@ def merge(github_items: list[dict], npm_objs: list[dict],
 
 
 def fetch_all(*, github_limit: int | None = None, npm_limit: int = NPM_MAX,
-              min_stars: int = 0) -> tuple[list[dict], dict]:
-    gh = fetch_github(max_repos=github_limit, min_stars=min_stars)
+              min_stars: int = 0, pushed_since: date | None = None) -> tuple[list[dict], dict]:
+    gh = fetch_github(max_repos=github_limit, min_stars=min_stars, pushed_since=pushed_since)
     npm = fetch_npm(max_packages=npm_limit)
     with db.connect(read_only=True) as c:
         known = known_repos(c)
+        have_npm = {r[0] for r in c.execute(
+            "SELECT source_id FROM mcp_servers WHERE source='npm'")}
     rows, skipped = merge(gh, npm, known)
+    # npm search has no creation date: look it up only for packages we do not
+    # have yet (the incremental runs stay cheap).
+    need = [r["package_name"] for r in rows
+            if r["source"] == "npm" and r["source_id"] not in have_npm]
+    created = npm_created(need) if need else {}
+    for r in rows:
+        if r["source"] == "npm":
+            r["created_at"] = created.get(r["package_name"])
     info = {"github": len(gh), "npm": len(npm), "rows": len(rows), "min_stars": min_stars,
-            **skipped}
+            "pushed_since": pushed_since.isoformat() if pushed_since else None,
+            "npm_created_lookups": len(need), **skipped}
     log.info("code mcp merged: %s", info)
     return rows, info

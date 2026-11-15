@@ -1,8 +1,8 @@
 [Unit]
-Description=agent-tools code-only MCP crawl (weekly, Monday 03:30)
+Description=agent-tools code-only MCP crawl (daily incremental, 03:30)
 
 [Timer]
-OnCalendar=Mon *-*-* 03:30:00
+OnCalendar=*-*-* 03:30:00
 Persistent=true
 Unit=agent-tools-crawl-code.service
 

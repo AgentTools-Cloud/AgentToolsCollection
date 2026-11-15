@@ -391,16 +391,62 @@ def cmd_crawl_mcp(only=None, *, probe_new=True) -> int:
     return 0
 
 
+CODE_FULL_RUN = "mcp:code:full"
+CODE_INCR_RUN = "mcp:code"
+CODE_INCR_OVERLAP_DAYS = 2
+
+
+def _code_pushed_since():
+    """Start date for an incremental code crawl, or None when no complete
+    baseline exists yet (then the run is a full one)."""
+    from datetime import datetime, timedelta, timezone
+    with db.connect(read_only=True) as c:
+        full = c.execute("SELECT MAX(started_at) FROM crawl_runs WHERE source=? AND status='ok'",
+                         (CODE_FULL_RUN,)).fetchone()[0]
+        if not full:
+            return None
+        last = c.execute("SELECT MAX(started_at) FROM crawl_runs WHERE source IN (?,?) "
+                         "AND status='ok' AND started_at>=?",
+                         (CODE_FULL_RUN, CODE_INCR_RUN, full)).fetchone()[0]
+    day = datetime.fromtimestamp(last, timezone.utc).date()
+    return day - timedelta(days=CODE_INCR_OVERLAP_DAYS)
+
+
+def _code_backdate(rows) -> int:
+    """First-seen time of our code rows = repository / package creation time,
+    so the imported backlog does not show up as new listings today."""
+    pairs = [(r["created_at"], r["source"], r["source_id"], r["created_at"])
+             for r in rows if r.get("created_at")]
+
+    def op():
+        with db.writer() as c:
+            n = 0
+            for i in range(0, len(pairs), 500):
+                cur = c.executemany(
+                    "UPDATE mcp_servers SET created_at=? WHERE source=? AND source_id=? "
+                    "AND COALESCE(endpoint_url,'')='' AND created_at>?", pairs[i:i + 500])
+                n += cur.rowcount
+            return n
+    return db.with_retry(op) if pairs else 0
+
+
 def cmd_crawl_code(github_limit: int | None = None, npm_limit: int | None = None,
-                   min_stars: int = 0) -> int:
+                   min_stars: int = 0, full: bool = False) -> int:
     """Import code-only MCP servers (GitHub topic:mcp-server + npm keyword
-    mcp-server). Rows have no endpoint: never probed, separate sub-directory."""
+    mcp-server). Rows have no endpoint: never probed, separate sub-directory.
+
+    The first run (or --full) imports everything as a baseline; later runs
+    only ask GitHub for repositories pushed since the last successful run.
+    Rows are dated by repository / package creation, so a baseline import
+    never reads as thousands of servers added in one day."""
     from . import code_mcp
-    run_id = _start_run("mcp:code")
+    since = None if (full or min_stars or github_limit) else _code_pushed_since()
+    is_full = since is None and not (min_stars or github_limit)
+    run_id = _start_run(CODE_FULL_RUN if is_full else CODE_INCR_RUN)
     try:
         rows, info = code_mcp.fetch_all(github_limit=github_limit,
                                         npm_limit=npm_limit or code_mcp.NPM_MAX,
-                                        min_stars=min_stars)
+                                        min_stars=min_stars, pushed_since=since)
     except Exception as e:  # noqa: BLE001 - network / API failure
         _finish_run(run_id, 0, 0, [f"fetch failed: {e!r}"], status="error")
         log.warning("code mcp fetch failed: %r", e)
@@ -408,12 +454,22 @@ def cmd_crawl_code(github_limit: int | None = None, npm_limit: int | None = None
     added = updated = 0
     errors: list[str] = []
     for source in code_mcp.OWN_SOURCES:
-        part = [r for r in rows if r["source"] == source]
+        part = []
+        for r in rows:
+            if r["source"] != source:
+                continue
+            r = dict(r)
+            if not r.get("created_at"):
+                r.pop("created_at", None)   # unknown: upsert stamps now
+            part.append(r)
         result = _ingest_rows('mcp', source, part, db.upsert_mcp_server)
         added += result['added']; updated += result['updated']
         errors.extend(result['errors'])
+    backdated = _code_backdate(rows)
     _finish_run(run_id, added, updated, errors, status="ok" if not errors else "partial")
-    log.info("code mcp: %s added=%d updated=%d errors=%d", info, added, updated, len(errors))
+    log.info("code mcp (%s): %s added=%d updated=%d backdated=%d errors=%d",
+             "full" if is_full else f"since {since}" if since else "partial",
+             info, added, updated, backdated, len(errors))
     return 0
 
 
@@ -2364,6 +2420,8 @@ def main(argv=None) -> int:
     p_code.add_argument("--npm-limit", type=int, default=None)
     p_code.add_argument("--min-stars", type=int, default=0,
                         help="only GitHub repositories with at least this many stars")
+    p_code.add_argument("--full", action="store_true",
+                        help="re-import everything instead of repositories pushed since the last run")
     sub.add_parser("crawl-a2a")
     sub.add_parser("crawl-agenstry")
     sub.add_parser("health")
@@ -2459,7 +2517,7 @@ def main(argv=None) -> int:
     if args.cmd == "crawl-mcp":
         return cmd_crawl_mcp(args.source)
     if args.cmd == "crawl-code":
-        return cmd_crawl_code(args.github_limit, args.npm_limit, args.min_stars)
+        return cmd_crawl_code(args.github_limit, args.npm_limit, args.min_stars, args.full)
     if args.cmd == "crawl-a2a":
         return cmd_crawl_a2a()
     if args.cmd == "crawl-agenstry":
