@@ -75,8 +75,8 @@ def _registry_identifier(reg: str, ident: str) -> str:
 def registry_rows(servers: list[dict]) -> tuple[dict, list[dict]]:
     """Latest version of every package-only server -> (repo hints, package rows).
 
-    `servers` are /v0/servers entries (``{"server": ..., "_meta": ...}``) for
-    all versions; the first publish of any version dates the row."""
+    `servers` are /v0/servers entries (``{"server": ..., "_meta": ...}``); when
+    several versions are given, the first publish of any version dates the row."""
     cm = _cm()
     first: dict[str, str] = {}
     latest: dict[str, dict] = {}
@@ -130,12 +130,15 @@ def registry_rows(servers: list[dict]) -> tuple[dict, list[dict]]:
     return hints, rows
 
 
-def fetch_registry(max_pages: int = 2000) -> list[dict]:
+def fetch_registry(max_pages: int = 1500) -> list[dict]:
+    """Latest version of every server (all versions are 200k+ entries).
+    Rows without a GitHub repository are dated by that version's publish
+    time; repository rows by the repository's creation."""
     cm = _cm()
     out: list[dict] = []
     cursor = None
     for _ in range(max_pages):
-        q = {"limit": 100}
+        q = {"limit": 100, "version": "latest"}
         if cursor:
             q["cursor"] = cursor
         data, _h = cm._get(REGISTRY_URL + "?" + urllib.parse.urlencode(q), timeout=60)
