@@ -415,19 +415,31 @@ def _code_pushed_since():
 def _code_backdate(rows) -> int:
     """First-seen time of our code rows = repository / package creation time,
     so the imported backlog does not show up as new listings today."""
-    pairs = [(r["created_at"], r["source"], r["source_id"], r["created_at"])
-             for r in rows if r.get("created_at")]
+    want = {(r["source"], r["source_id"]): r["created_at"]
+            for r in rows if r.get("created_at")}
+    if not want:
+        return 0
+    # One read to find the rows that are dated later than their creation, then
+    # short writes by primary key: (source, source_id) has no index, and one
+    # long write transaction would block the site.
+    sources = sorted({s for s, _ in want})
+    with db.connect(read_only=True) as c:
+        todo = [(want[(s, sid)], rid)
+                for rid, s, sid, ts in c.execute(
+                    "SELECT id, source, source_id, created_at FROM mcp_servers "
+                    f"WHERE source IN ({','.join('?' * len(sources))}) "
+                    "AND COALESCE(endpoint_url,'')=''", sources)
+                if (s, sid) in want and (ts or 0) > want[(s, sid)]]
+    n = 0
+    for i in range(0, len(todo), 500):
+        chunk = todo[i:i + 500]
 
-    def op():
-        with db.writer() as c:
-            n = 0
-            for i in range(0, len(pairs), 500):
-                cur = c.executemany(
-                    "UPDATE mcp_servers SET created_at=? WHERE source=? AND source_id=? "
-                    "AND COALESCE(endpoint_url,'')='' AND created_at>?", pairs[i:i + 500])
-                n += cur.rowcount
-            return n
-    return db.with_retry(op) if pairs else 0
+        def op(chunk=chunk):
+            with db.writer() as c:
+                c.executemany("UPDATE mcp_servers SET created_at=? WHERE id=?", chunk)
+            return len(chunk)
+        n += db.with_retry(op)
+    return n
 
 
 def cmd_crawl_code(github_limit: int | None = None, npm_limit: int | None = None,
