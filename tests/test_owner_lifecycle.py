@@ -1499,6 +1499,25 @@ class OwnerLifecycleTests(OwnershipFixture):
         app.include_router(routes.router)
         return TestClient(app)
 
+    def test_detail_pages_ship_no_edit_url_and_offer_claim_only_when_unowned(self):
+        with db.writer() as conn:
+            db.upsert_mcp_server(conn, {"name": "Edit probe", "slug": "edit-probe",
+                                        "endpoint_url": "https://unowned.example/mcp",
+                                        "source": "fixture", "source_id": "edit-probe", "confidence": 0.5})
+            db.upsert_a2a_agent(conn, {"slug": "edit-probe-a2a", "name": "A2A edit probe",
+                                       "endpoint_url": "https://unowned.example/a2a",
+                                       "card_url": "https://unowned.example/card.json", "source": "a2a-fixture"})
+        with self.client() as client:
+            for kind, slug, path, owned in (("x402", "owned-lifecycle", "/services/owned-lifecycle", True),
+                                            ("mcp", "edit-probe", "/mcp/servers/edit-probe", False),
+                                            ("a2a", "edit-probe-a2a", "/a2a/agents/edit-probe-a2a", False)):
+                page = client.get(path)
+                self.assertEqual(page.status_code, 200, path)
+                self.assertNotIn("/listings/%s/%s/edit" % (kind, slug), page.text)
+                self.assertIn('data-edit-kind="%s"' % kind, page.text)
+                self.assertIn("data-edit-link", page.text)
+                self.assertEqual('href="/docs/claim"' in page.text, not owned, path)
+
     def test_api_requires_auth_and_explicit_confirmation(self):
         with self.client() as client:
             self.assertEqual(client.get("/api/v1/listings/x402/owned-lifecycle/lifecycle").status_code, 401)

@@ -220,7 +220,14 @@
         document.querySelectorAll("[data-account]").forEach(function (a) { a.classList.remove("hidden"); a.classList.add("flex"); });
       }
       if (box && me.signed_in && me.can_edit_listing) {
+        // The edit URL is built only for editors, so HTML-reading crawlers never see it.
+        var edit = box.querySelector("[data-edit-link]");
+        if (edit) {
+          edit.href = "/listings/" + encodeURIComponent(box.getAttribute("data-edit-kind") || "") + "/" +
+            encodeURIComponent(box.getAttribute("data-edit-slug") || "") + "/edit";
+        }
         box.classList.remove("hidden");
+        document.querySelectorAll("[data-claim-cta]").forEach(function (el) { el.classList.add("hidden"); });
       }
     })
     .catch(function () {});

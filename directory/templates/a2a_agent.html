@@ -22,10 +22,13 @@
     <h1 class="text-3xl md:text-4xl font-extrabold tracking-tight">{{ a.name }}</h1>
 
     <div class="mt-3 hidden" data-edit-host="{{ url_host((a.endpoint_url or a.card_url)) }}" data-edit-kind="a2a" data-edit-slug="{{ a.slug }}">
-      <a href="/listings/a2a/{{ a.slug }}/edit"
+      <a data-edit-link
          class="inline-flex items-center gap-1.5 rounded border border-slate-300 bg-white px-3 py-1.5 text-sm hover:border-slate-400">Edit this listing</a>
       <span class="ml-2 text-xs text-slate-500">Verified control of this listing</span>
     </div>
+    {% if not a.owner_verified %}
+    <p class="mt-2 text-sm text-slate-500" data-claim-cta>Run this agent? <a href="/docs/claim" class="text-blue-600 hover:underline">Claim this listing</a> to edit it.</p>
+    {% endif %}
     {% if a.safety %}
     <div class="mt-3 rounded-lg px-4 py-3 text-sm {% if a.safety.verdict == "malicious" %}bg-rose-50 text-rose-800 ring-1 ring-rose-200{% else %}bg-amber-50 text-amber-800 ring-1 ring-amber-200{% endif %}">
       <div class="font-semibold">⚠ {% if a.safety.verdict == "malicious" %}Flagged by static safety scan — do not run install commands from this listing{% else %}Review recommended — static scan found suspicious patterns{% endif %}</div>
