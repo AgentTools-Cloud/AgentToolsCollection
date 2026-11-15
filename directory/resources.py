@@ -160,6 +160,10 @@ _INSTALL_COMMANDS = {
     "pypi": "uvx {pkg}",
     "docker": "docker run -i --rm {pkg}",
     "oci": "docker run -i --rm {pkg}",
+    "cargo": "cargo install {pkg}",
+    "go": "go run {pkg}@latest",
+    "nuget": "dnx {pkg} --yes",
+    "rubygems": "gem install {pkg}",
     "smithery": "npx -y @smithery/cli install {pkg}",
 }
 

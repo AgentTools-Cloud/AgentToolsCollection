@@ -9,7 +9,17 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from test_resources_search_and_payto_limit import _TempDB
-from directory import code_mcp, db, jobs, routes, stats
+from directory import code_mcp, code_sources, db, jobs, routes, stats
+
+_extra = patch.object(code_sources, "fetch_extra", return_value=({}, [], {}))
+
+
+def setUpModule():
+    _extra.start()      # the directories in code_sources are tested offline separately
+
+
+def tearDownModule():
+    _extra.stop()
 
 
 def gh_item(full, stars=50, desc="An MCP server", topics=("mcp-server",), lic="MIT",
