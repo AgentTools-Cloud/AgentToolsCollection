@@ -128,17 +128,30 @@ def _mark(name: str) -> None:
 
 # Fetchers register the meta key they would advance; jobs calls settle() once
 # the rows are ingested, so a run that fails to ingest is retried next day.
-_PENDING: dict[str, str] = {}
+_PENDING: dict[str, tuple[str, str | None]] = {}
 
 
-def _pending(crawler: str, key: str) -> None:
-    _PENDING[crawler] = key
+def _pending(crawler: str, key: str, release: str | None = None) -> None:
+    _PENDING[crawler] = (key, release)
 
 
 def settle(crawler: str, ok: bool) -> None:
-    key = _PENDING.pop(crawler, None)
+    key, release = _PENDING.pop(crawler, (None, None))
     if key and ok:
         _mark(key)
+        if release:
+            def op():
+                with db.writer() as c:
+                    db.set_meta(c, f"peer:{key}:release", release)
+            db.with_retry(op)
+
+
+def _seen_release(name: str) -> str | None:
+    try:
+        with closing(db.connect(read_only=True)) as c:
+            return db.get_meta(c, f"peer:{name}:release")
+    except Exception:  # noqa: BLE001 -- unknown means process it
+        return None
 
 
 def _clean(url: Any) -> tuple[str, bool] | None:
@@ -446,23 +459,25 @@ def x402lint_rows(projects: Iterable[dict]) -> list[dict]:
 # fetchers the ALL_CRAWLERS one: return a list of rows; [] when not due.
 # ---------------------------------------------------------------------------
 def fetch_mcp_census() -> list[dict]:
-    if not _due("mcp-census", RUN_EVERY_DAYS):
-        return []
+    """New MCPCensus releases only. Releases are dated, immutable and manual
+    (2026-08-05/07/09, 09-13); the nightly check is one small page."""
     with _client() as c:
         page = _get(c, MCP_CENSUS_INDEX).text
         dates = sorted(set(re.findall(r"/census/data/(\d{4}-\d{2}-\d{2})/census\.jsonl\.gz", page)))
         if not dates:
             raise RuntimeError("mcp-census: no data file linked from the data page")
+        if _seen_release("mcp-census") == dates[-1]:
+            return []
         raw = gzip.decompress(_get(c, MCP_CENSUS_FILE.format(date=dates[-1])).content)
     rows = _drop_removed(parse_mcp_census(raw.splitlines()), "endpoint_url")
-    _pending("mcp-census", "mcp-census")
+    _pending("mcp-census", "mcp-census", dates[-1])
     log.info("mcp-census %s: %d endpoint leads", dates[-1], len(rows))
     return rows
 
 
 def fetch_csoai_census() -> list[dict]:
-    if not _due("csoai-census", RUN_EVERY_DAYS):
-        return []
+    """New CSOAI weekly result files only (results.public.<date>.jsonl.gz);
+    the nightly check is the dataset's file list."""
     with _client() as c:
         meta = _get(c, CSOAI_DATASET).json()
         files = sorted(s.get("rfilename", "") for s in meta.get("siblings") or []
@@ -471,9 +486,11 @@ def fetch_csoai_census() -> list[dict]:
                                      s.get("rfilename", "")))
         if not files:
             raise RuntimeError("csoai-census: no results.public file in the dataset")
+        if _seen_release("csoai-census") == files[-1]:
+            return []
         raw = gzip.decompress(_get(c, CSOAI_FILE.format(name=files[-1])).content)
     rows = _drop_removed(parse_csoai(raw.splitlines()), "endpoint_url")
-    _pending("csoai-census", "csoai-census")
+    _pending("csoai-census", "csoai-census", files[-1])
     log.info("csoai-census %s: %d endpoint leads", files[-1], len(rows))
     return rows
 

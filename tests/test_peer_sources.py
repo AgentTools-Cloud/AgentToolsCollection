@@ -149,8 +149,6 @@ class PeerGateTests(unittest.TestCase):
     def test_not_due_returns_empty_without_network(self):
         with patch.object(peers, "_due", return_value=False), \
                 patch.object(peers, "_client", side_effect=AssertionError("no network")):
-            self.assertEqual(peers.fetch_mcp_census(), [])
-            self.assertEqual(peers.fetch_csoai_census(), [])
             self.assertEqual(peers.fetch_x402lint(), [])
             self.assertEqual(peers.fetch_agentindex_x402(), [])
             self.assertEqual(peers.agentindex_fetch_leads(), [])
@@ -167,6 +165,36 @@ class PeerGateTests(unittest.TestCase):
             self.assertEqual(marks, ["x402lint"])
             peers.settle("x402lint", True)  # nothing pending
             self.assertEqual(marks, ["x402lint"])
+
+    def test_census_skips_a_release_already_ingested(self):
+        class Resp:
+            def __init__(self, text="", data=None):
+                self.text, self._d = text, data
+            def json(self):
+                return self._d
+        page = Resp(text='<a href="/census/data/2026-09-13/census.jsonl.gz">x</a>')
+        with patch.object(peers, "_get", return_value=page) as g, \
+                patch.object(peers, "_seen_release", return_value="2026-09-13"):
+            self.assertEqual(peers.fetch_mcp_census(), [])
+            self.assertEqual(g.call_count, 1)  # no download
+        meta = Resp(data={"siblings": [{"rfilename": "probe/results.public.2026-11-01.jsonl.gz"}]})
+        with patch.object(peers, "_get", return_value=meta) as g, \
+                patch.object(peers, "_seen_release", return_value="probe/results.public.2026-11-01.jsonl.gz"):
+            self.assertEqual(peers.fetch_csoai_census(), [])
+            self.assertEqual(g.call_count, 1)
+
+    def test_settle_records_release(self):
+        writes = []
+        class W:
+            def __enter__(self_):
+                return "c"
+            def __exit__(self_, *a):
+                return False
+        with patch.object(peers, "_mark"), patch.object(peers.db, "writer", return_value=W()), \
+                patch.object(peers.db, "set_meta", side_effect=lambda c, k, v: writes.append((k, v))):
+            peers._pending("mcp-census", "mcp-census", "2026-09-13")
+            peers.settle("mcp-census", True)
+        self.assertEqual(writes, [("peer:mcp-census:release", "2026-09-13")])
 
     def test_retry_after_negative_does_not_crash(self):
         class R:
