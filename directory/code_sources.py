@@ -143,7 +143,11 @@ def fetch_registry(max_pages: int = 1500) -> list[dict]:
         if cursor:
             q["cursor"] = cursor
         data, _h = cm._get(REGISTRY_URL + "?" + urllib.parse.urlencode(q), timeout=60)
-        out.extend(data.get("servers") or [])
+        for e in data.get("servers") or []:
+            s = e.get("server") or {}
+            out.append({"server": {k: s.get(k) for k in (
+                "name", "title", "description", "repository", "websiteUrl", "packages", "remotes")},
+                "_meta": e.get("_meta") or {}})
         cursor = (data.get("metadata") or {}).get("nextCursor")
         if not cursor:
             break
@@ -546,7 +550,7 @@ def lookup_repos(hints: dict[str, str], max_repos: int = LOOKUP_MAX) -> list[dic
         for item in data.get("items") or []:
             full = (item.get("full_name") or "").lower()
             if full:
-                found[full] = item
+                found[full] = cm.slim_github(item)
         for r in part:
             done.append((r, hints[r], int(r in found)))
         i += len(part)
