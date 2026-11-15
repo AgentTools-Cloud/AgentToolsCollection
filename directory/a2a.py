@@ -108,7 +108,7 @@ def own_agent_card(base_url: str = SITE) -> dict:
         "description": (
             "LLM research analyst for the agent-tool economy (x402 paid APIs, MCP servers, "
             "A2A agents). Ask in plain language; it queries our daily probe data, writes the "
-            "analysis and checks every number against the data (CC BY 4.0). Multi-turn: send back "
+            "analysis and checks its numbers against the data, flagging any it cannot match (CC BY 4.0). Multi-turn: send back "
             "the contextId we return; to choose your own contextId, send an API key "
             "(Authorization: Bearer). Plain text goes to ask_analyst; for another skill send a data "
             "part {\"skill\": <id>, \"question\": ...}. "

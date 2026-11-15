@@ -562,7 +562,7 @@ def ard_manifest() -> dict[str, Any]:
                 "url": f"{base}/.well-known/agent-card.json",
                 "description": ("A2A research analyst for the agent-tool market: answers questions and writes "
                                 "reports on x402 APIs, MCP servers and A2A agents from our daily probe data, "
-                                "with every number checked against the data."),
+                                "with its numbers checked against the data."),
                 "representativeQueries": [
                     "how many MCP servers are actually reachable today",
                     "write a report on the state of x402 paid APIs",
@@ -603,6 +603,12 @@ def well_known_ard():
                     media_type=ARD_MEDIA_TYPE,
                     headers={"Cache-Control": "public, max-age=3600",
                              "Access-Control-Allow-Origin": "*"})
+
+
+@app.options("/a2a", include_in_schema=False)
+async def a2a_preflight():
+    """CORS preflight for browser A2A clients (nginx adds the Allow-* headers)."""
+    return Response(status_code=204, headers={"Access-Control-Max-Age": "86400"})
 
 
 @app.post("/a2a", tags=["a2a"])

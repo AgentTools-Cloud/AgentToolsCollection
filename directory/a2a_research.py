@@ -71,6 +71,8 @@ SKILL_IDS = tuple(s["id"] for s in SKILLS)
 # Skills the old card advertised that now belong to the MCP server.
 _TOOL_SKILLS = frozenset({"search_x402_services", "search_a2a_agents", "search_mcp_servers",
                           "get_service", "get_agent", "recommend_paid_service", "scan_mcp_safety"})
+# Our analyst skills: never mistaken for a tool request ("market_scan" contains "scan").
+_ANALYST_SKILLS = frozenset({"ask_analyst", "research_report", "market_scan", "compare", "listing_audit"})
 _LEGACY = {"directory_stats": "ecosystem_report", "stats": "ecosystem_report",
            "statistics": "ecosystem_report", "ecosystem_stats": "ecosystem_report"}
 
@@ -135,6 +137,8 @@ def parse_request(message: dict, text: str) -> dict | None:
                     skill = "monthly_report"
                 else:
                     skill = _LEGACY[skill]
+            if skill in _ANALYST_SKILLS:
+                return {"skill": skill}     # answered by the LLM analyst, not a raw report
             if skill in _TOOL_SKILLS or "scan" in skill or "safety" in skill:
                 return {"skill": "tool_request", "requested": skill[:60]}
             if skill in SKILL_IDS:

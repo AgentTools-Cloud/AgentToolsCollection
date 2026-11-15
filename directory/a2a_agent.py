@@ -2,8 +2,9 @@
 
 The model (configured by AGENT_TOOLS_A2A_MODEL) is the agent: it reads the question,
 calls data tools over our daily probe snapshot and the live directory, and
-writes the analysis. Code supplies every number (tools) and checks the
-numbers in the answer against the tool results.
+writes the analysis. Code supplies the numbers (tools) and checks the numbers
+in the answer against the tool results; any it cannot match are flagged in
+data.unverified_numbers.
 
 Token discipline (the gateway does not honour prompt caching, so every input
 token is paid each turn):
@@ -22,8 +23,10 @@ token is paid each turn):
 
 from __future__ import annotations
 
+import bisect
 import hashlib
 import inspect
+import ipaddress
 import json
 import logging
 import math
@@ -55,6 +58,9 @@ MAX_TOOL_CALLS_PER_TURN = 6
 MAX_CONCURRENT = int(os.getenv("AGENT_TOOLS_A2A_CONCURRENCY", "6") or 6)  # per process
 CALLS_RETENTION_S = 35 * 86400    # request records (ip, skill, outcome); the dashboard shows 30 days
 REPORT_SKILLS = ("research_report", "market_scan")
+# Per-client daily ceiling on model runs, so one client cannot use up the shared
+# daily cap; IPv6 clients are counted per /64 (one subscriber's prefix).
+IP_DAILY_CALLS = int(os.getenv("AGENT_TOOLS_A2A_IP_DAILY_CALLS", "100") or 100)
 SKILLS = {
     # id: (max output tokens per call, request input-token cap, hourly calls per IP)
     # No length rules in the prompts: the answer is as long as the question needs.
@@ -381,10 +387,24 @@ def _daily_cap() -> int:
 _RUN = "(fallback IS NULL OR fallback IN ('pending','llm_error'))"
 
 
+def client_bucket(ip: str | None) -> str:
+    """The key limits are counted by: the IPv4 address, the IPv6 /64, or 'unknown'."""
+    try:
+        a = ipaddress.ip_address((ip or "").strip())
+    except ValueError:
+        return "unknown"
+    if a.version == 6:
+        if a.ipv4_mapped is not None:
+            return str(a.ipv4_mapped)
+        return str(ipaddress.ip_network(f"{a}/64", strict=False))
+    return str(a)
+
+
 def _admit(ip: str | None, skill: str) -> tuple[str, int] | int:
     """Reserve a model run: its row id, or (reason, retry_after_seconds) when refused."""
     now = int(time.time())
     cap = _daily_cap()
+    ip = client_bucket(ip)
     with _state_lock, closing(_state()) as s:
         s.execute("BEGIN IMMEDIATE")
         try:
@@ -394,18 +414,23 @@ def _admit(ip: str | None, skill: str) -> tuple[str, int] | int:
                 s.execute("INSERT INTO calls VALUES(?,?,?,NULL,NULL,NULL,0,'daily_limit')", (now, ip, skill))
                 s.commit()
                 return "daily_limit", 86400 - now % 86400
-            if ip:
-                limit = SKILLS[skill][2]
-                heavy = " AND skill IN ('market_scan','research_report')" if skill in REPORT_SKILLS else ""
-                n = s.execute(f"SELECT count(*) FROM calls WHERE ts>=? AND ip=? AND cached=0 AND {_RUN}{heavy}",
-                              (now - 3600, ip)).fetchone()[0]
-                if n >= limit:
-                    # the (n-limit+1)-th oldest run in the window is the one whose expiry frees a slot
-                    row = s.execute(f"SELECT ts FROM calls WHERE ts>=? AND ip=? AND cached=0 AND {_RUN}{heavy} "
-                                    "ORDER BY ts LIMIT 1 OFFSET ?", (now - 3600, ip, n - limit)).fetchone()
-                    s.execute("INSERT INTO calls VALUES(?,?,?,NULL,NULL,NULL,0,'rate_limited')", (now, ip, skill))
-                    s.commit()
-                    return "rate_limited", max(1, (row[0] if row else now) + 3600 - now)
+            day_n = s.execute(f"SELECT count(*) FROM calls WHERE ts>=? AND ip=? AND cached=0 AND {_RUN}",
+                              (now - now % 86400, ip)).fetchone()[0]
+            if day_n >= IP_DAILY_CALLS:
+                s.execute("INSERT INTO calls VALUES(?,?,?,NULL,NULL,NULL,0,'rate_limited')", (now, ip, skill))
+                s.commit()
+                return "client_daily_limit", 86400 - now % 86400
+            limit = SKILLS[skill][2]
+            heavy = " AND skill IN ('market_scan','research_report')" if skill in REPORT_SKILLS else ""
+            n = s.execute(f"SELECT count(*) FROM calls WHERE ts>=? AND ip=? AND cached=0 AND {_RUN}{heavy}",
+                          (now - 3600, ip)).fetchone()[0]
+            if n >= limit:
+                # the (n-limit+1)-th oldest run in the window is the one whose expiry frees a slot
+                row = s.execute(f"SELECT ts FROM calls WHERE ts>=? AND ip=? AND cached=0 AND {_RUN}{heavy} "
+                                "ORDER BY ts LIMIT 1 OFFSET ?", (now - 3600, ip, n - limit)).fetchone()
+                s.execute("INSERT INTO calls VALUES(?,?,?,NULL,NULL,NULL,0,'rate_limited')", (now, ip, skill))
+                s.commit()
+                return "rate_limited", max(1, (row[0] if row else now) + 3600 - now)
             cur = s.execute("INSERT INTO calls VALUES(?,?,?,NULL,NULL,NULL,0,'pending')", (now, ip, skill))
             s.execute("DELETE FROM calls WHERE ts<?", (now - CALLS_RETENTION_S,))
             s.commit()
@@ -429,7 +454,7 @@ def _record(ip, skill, cached=False, fallback=None):
     try:
         with _state_lock, closing(_state()) as s:
             s.execute("INSERT INTO calls VALUES(?,?,?,?,?,?,?,?)",
-                      (int(time.time()), ip, skill, None, None, None, int(cached), fallback))
+                      (int(time.time()), client_bucket(ip), skill, None, None, None, int(cached), fallback))
             s.commit()
     except sqlite3.Error:
         log.exception("a2a: recording usage failed")
@@ -541,8 +566,8 @@ def _chat(messages, max_tokens, tools=True, deadline=None):
     body = {"model": model, "messages": messages, "max_tokens": max_tokens, "temperature": 0.2}
     if tools:
         body["tools"] = TOOLS
-    timeout = 60.0 if deadline is None else max(5.0, deadline - time.time())
-    r = httpx.post(base + "/v1/chat/completions", json=body, timeout=timeout,
+    read = 60.0 if deadline is None else max(5.0, deadline - time.time())
+    r = httpx.post(base + "/v1/chat/completions", json=body, timeout=httpx.Timeout(read, connect=5.0),
                    headers={"Authorization": f"Bearer {key}", "User-Agent": "agent-tools-a2a"})
     r.raise_for_status()
     return r.json()
@@ -550,7 +575,9 @@ def _chat(messages, max_tokens, tools=True, deadline=None):
 
 # --------------------------------------------------------------------------- number check
 
-_NUM_RE = re.compile(r"(?<![\w\[])(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d+))?(%?)")
+# Not preceded by a Latin letter, digit, '.', '_' or '[': "x402", "v2" and "[3]" are not
+# figures, but a number right after CJK text ("共有99999个") is.
+_NUM_RE = re.compile(r"(?<![0-9A-Za-z_.\[])(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d+))?(%?)")
 
 
 def _numbers_in(obj, out):
@@ -573,32 +600,46 @@ _DATE_RE = re.compile(r"\b\d{4}-\d{2}(?:-\d{2})?(?:[ T]\d{2}:\d{2}(?::\d{2})?)?(
 _CITE_RE = re.compile(r"\[\d+(?:\s*[,\u3001]\s*\d+)*\]")
 
 
-def unsupported_numbers(text: str, results: list, given: str = "") -> list[str]:
-    """Numbers in text not found in, or derivable (share/difference) from, tool results.
+def _near(sorted_vals: list, target: float, tol: float) -> bool:
+    i = bisect.bisect_left(sorted_vals, target - tol)
+    return i < len(sorted_vals) and sorted_vals[i] <= target + tol
 
-    `given` is text the caller supplied (question, conversation summary): its numbers count as known.
+
+def unsupported_numbers(text: str, results: list, given: str = "") -> list[str]:
+    """Numbers in text not found in, or derivable from, the tool results.
+
+    A number counts as supported when it matches a tool value (within rounding),
+    or is a share, change or difference of two values from the same tool
+    result. `given` is the caller's own question: echoing its numbers is fine.
     """
     known: set[float] = set()
-    _numbers_in(results, known)
+    groups: list[list[float]] = []
+    for r in results:
+        g: set[float] = set()
+        _numbers_in(r, g)
+        g |= {abs(k) for k in g}
+        known |= g
+        groups.append(sorted(v for v in g if v > 0))
     _numbers_in(_DATE_RE.sub(" ", given or ""), known)
-    known |= {abs(k) for k in known}
-    base = sorted({v for v in known if v > 0}, reverse=True)[:600]
+    known_sorted = sorted(known)
     bad = []
     for m in _NUM_RE.finditer(_CITE_RE.sub("", _DATE_RE.sub(" ", text))):
         whole = m.group(1).replace(",", "")
         val = float(whole + ("." + m.group(2) if m.group(2) else ""))
         if val <= 10 and not m.group(3) and not m.group(2):
             continue  # small counts ("3 gaps", "top 5") are wording, not data
-        if 1900 <= val <= 2100 and not m.group(3):
-            continue  # years / dates
+        if (1900 <= val <= 2100 and not m.group(3) and not m.group(2)
+                and len(m.group(1)) == 4):
+            continue  # a year ("2026"), not a count written as "2,050"
         tol = max(0.06 * abs(val), 0.51) if m.group(3) else max(0.006 * abs(val), 0.51)
-        if any(abs(val - k) <= tol for k in known):
+        if _near(known_sorted, val, tol):
             continue
-        if m.group(3) and any(abs(100.0 * a / b - val) <= 0.6 or abs(100.0 * (a - b) / b - val) <= 0.6
-                              for a in base for b in base if b and a != b and a <= 50 * b):
-            continue
-        if not m.group(3) and any(abs((a - b) - val) <= tol for a in base for b in base if a > b):
-            continue
+        if m.group(3):   # share a/b or change (a-b)/b, both values from one result
+            if any(_near(g, b * val / 100.0, 0.006 * b) or _near(g, b * (1 + val / 100.0), 0.006 * b)
+                   or _near(g, b * (1 - val / 100.0), 0.006 * b) for g in groups for b in g):
+                continue
+        elif any(_near(g, b + val, tol) for g in groups for b in g):
+            continue     # difference a-b within one result
         bad.append(m.group(0))
     return bad[:8]
 
@@ -611,6 +652,8 @@ _ERRORS = {
     "daily_limit": (-32029, "DAILY_LIMIT_REACHED", "Today's analyst requests are used up; they reset at 00:00 UTC"),
     "unavailable": (-32603, "ANALYST_UNAVAILABLE", "The analyst model is unavailable; retry later"),
     "busy": (-32029, "ANALYST_BUSY", "The analyst is busy with other requests; retry shortly"),
+    "client_daily_limit": (-32029, "RATE_LIMITED", "Today's analyst requests from this client are used up; "
+                           "they reset at 00:00 UTC"),
     "empty_question": (-32602, "INVALID_PARAMS", "params.message must contain a question"),
 }
 
@@ -625,6 +668,8 @@ def error(reason: str, retry_after: int | None = None, skill: str | None = None)
         meta["limitPerHour"] = SKILLS[skill][2]
     if reason == "daily_limit":
         meta["limitPerDay"] = _daily_cap()
+    if reason == "client_daily_limit":
+        meta["limitPerDayPerClient"] = IP_DAILY_CALLS
     if reason != "empty_question":
         meta["rawReports"] = ",".join(a2a_research.SKILL_IDS)
     return {"error": (code, message, info_reason, meta)}
@@ -680,14 +725,15 @@ def run(question: str, *, skill: str = "ask_analyst", context_id: str | None = N
         log.warning("a2a: LLM analyst not configured; serving template reports")
         return None
     skill = skill if skill in SKILLS else "ask_analyst"
+    started = time.time()
     try:
-        return _run(question, skill, context_id, ip, detail, budget_s, account)
+        return _run(question, skill, context_id, ip, detail, budget_s, account, started)
     except sqlite3.Error:
         log.exception("a2a: state database error")
         return error("unavailable", 30)
 
 
-def _run(question, skill, context_id, ip, detail, budget_s, account):
+def _run(question, skill, context_id, ip, detail, budget_s, account, started=None):
     snap = _snap() or {}
     as_of = snap.get("as_of") or ""
     ctx = resolve_context(context_id, account)
@@ -705,7 +751,7 @@ def _run(question, skill, context_id, ip, detail, budget_s, account):
         admitted = _admit(ip, skill)
         if isinstance(admitted, tuple):
             return error(admitted[0], admitted[1], skill)
-        out, summary, outcome = _analyse(question, skill, memory, as_of, detail, budget_s)
+        out, summary, outcome = _analyse(question, skill, memory, as_of, detail, budget_s, started)
         _finish(admitted, outcome)
     finally:
         _slots.release()
@@ -717,7 +763,7 @@ def _run(question, skill, context_id, ip, detail, budget_s, account):
     return _with_context(out, ctx)
 
 
-def _analyse(question, skill, memory, as_of, detail, budget_s):
+def _analyse(question, skill, memory, as_of, detail, budget_s, started=None):
     """The tool loop. Returns (reply, summary to keep, outcome: None or 'llm_error')."""
     max_out, in_cap, _ = SKILLS[skill]
     rule = _SKILL_RULE[skill] + (" " + REPORT_FORMAT if skill in REPORT_SKILLS else "")
@@ -728,14 +774,18 @@ def _analyse(question, skill, memory, as_of, detail, budget_s):
     tin = 0                         # prompt tokens so far, only to enforce in_cap; not stored
     if budget_s is None:
         budget_s = REPORT_TIME_S if skill in REPORT_SKILLS else ANSWER_TIME_S
-    deadline = time.time() + budget_s
+    # counted from when the request arrived (state reads and admission included);
+    # a few seconds stay for writing the records after the model returns
+    deadline = (started or time.time()) + budget_s - 3.0
     final = None
     try:
         for turn in range(MAX_TURNS + 1):
             last = turn == MAX_TURNS or tin > in_cap or time.time() > deadline - FINAL_RESERVE_S
             if last and not final:
                 messages.append({"role": "user", "content": "Answer now from the tool results you have; no more tools."})
-            resp = _chat(messages, max_out, tools=not last, deadline=deadline)
+            # tool turns may not eat the time kept for the final answer
+            resp = _chat(messages, max_out, tools=not last,
+                         deadline=deadline if last else deadline - FINAL_RESERVE_S)
             u = resp.get("usage") or {}
             tin += int(u.get("prompt_tokens") or 0)
             msg = resp["choices"][0]["message"]
@@ -764,9 +814,13 @@ def _analyse(question, skill, memory, as_of, detail, budget_s):
             answer = (answer + "\n\n" + clarify).strip() if answer else str(clarify)
         if not answer:
             raise RuntimeError(f"empty answer (finish={resp['choices'][0].get('finish_reason')})")
-        given = question + " " + (memory or "") + " " + as_of
+        given = question + " " + as_of
         bad = unsupported_numbers(answer, [r["result"] for r in results], given) if not clarify else []
-        if bad and time.time() < deadline - 10:
+    except Exception:  # noqa: BLE001 - any LLM/transport failure is reported as an error
+        log.exception("a2a agent failed (%s)", skill)
+        return None, None, "llm_error"
+    if bad and time.time() < deadline - 10:
+        try:   # one correction pass; if it fails, the first answer stands with the flags
             fix = _chat(messages + [{"role": "assistant", "content": answer}, {"role": "user", "content": (
                 "These numbers in your answer are not in the tool results: " + ", ".join(bad)
                 + ". Rewrite the answer with them corrected or removed. Return only the answer text and the "
@@ -776,9 +830,8 @@ def _analyse(question, skill, memory, as_of, detail, budget_s):
                 fixed["summary"] = fixed.get("summary") or final.get("summary")
                 final, answer = fixed, str(fixed["answer"]).strip()
                 bad = unsupported_numbers(answer, [r["result"] for r in results], given)
-    except Exception:  # noqa: BLE001 - any LLM/transport failure is reported as an error
-        log.exception("a2a agent failed (%s)", skill)
-        return None, None, "llm_error"
+        except Exception:  # noqa: BLE001
+            log.warning("a2a: number correction failed (%s); keeping the first answer", skill)
     summary = final.get("summary")
     if clarify:   # keep what was asked so the reply to the clarification has context
         summary = (f"{memory} | " if memory else "") + f"asked: {question[:300]}; we asked back: {clarify}"
