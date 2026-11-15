@@ -147,15 +147,57 @@ class EcosystemsTests(_TempDB):
 
 
 class IncrementalTests(_TempDB):
-    def _run(self, gh, npm=(), created=None, eco=(), **kw):
+    def _run(self, gh, npm=(), created=None, eco=(), classes=None, **kw):
         created = created or {}
-        with patch.object(code_mcp, "fetch_github", return_value=list(gh)) as fg, \
+        from directory import code_classify
+
+        def ask(rows):
+            return {i: classes.get(r["name"], "server") for i, r in enumerate(rows)}
+        with patch.object(code_classify, "configured", return_value=classes is not None), \
+                patch.object(code_classify, "_ask", side_effect=ask) as asked, \
+                patch.object(code_mcp, "fetch_github", return_value=list(gh)) as fg, \
                 patch.object(code_mcp, "fetch_ecosystems", return_value=list(eco)), \
                 patch.object(code_mcp, "fetch_npm", return_value=list(npm)), \
                 patch.object(code_mcp, "npm_created",
                              side_effect=lambda names: {n: created[n] for n in names if n in created}):
             jobs.cmd_crawl_code(**kw)
+        self.asked = asked.call_count
         return fg.call_args.kwargs
+
+    def _ids(self):
+        with closing(db.connect(read_only=True)) as c:
+            return {r[0] for r in c.execute(
+                "SELECT source_id FROM mcp_servers WHERE source IN ('github','npm','pypi')")}
+
+    def test_non_servers_are_not_imported_and_old_ones_are_removed(self):
+        # Imported before classification existed.
+        self._run([gh_item("acme/srv"), gh_item("acme/awesome"), gh_item("acme/claimed")])
+        with db.writer() as c:
+            c.execute("UPDATE mcp_servers SET owner_verified=1 WHERE source_id='acme/claimed'")
+        self.assertEqual(self._ids(), {"acme/srv", "acme/awesome", "acme/claimed"})
+        cls = {"awesome": "list", "sdk": "sdk", "claimed": "client"}
+        self._run([gh_item("acme/sdk"), gh_item("acme/new")], classes=cls)
+        self.assertEqual(self._ids(), {"acme/srv", "acme/new", "acme/claimed"})
+        with closing(db.connect(read_only=True)) as c:
+            orphans = c.execute("SELECT COUNT(*) FROM listing_sources WHERE kind='mcp' AND "
+                                "listing_id NOT IN (SELECT id FROM mcp_servers)").fetchone()[0]
+        self.assertEqual(orphans, 0)
+        # Verdicts are cached: an unchanged re-crawl asks the model nothing.
+        self._run([gh_item("acme/sdk"), gh_item("acme/new")], classes=cls)
+        self.assertEqual(self.asked, 0)
+        self.assertEqual(self._ids(), {"acme/srv", "acme/new", "acme/claimed"})
+
+    def test_unanswered_rows_are_not_imported_but_kept_if_stored(self):
+        self._run([gh_item("acme/old")])
+        from directory import code_classify
+        with patch.object(code_classify, "configured", return_value=True), \
+                patch.object(code_classify, "_ask", return_value={}), \
+                patch.object(code_mcp, "fetch_github", return_value=[gh_item("acme/fresh")]), \
+                patch.object(code_mcp, "fetch_ecosystems", return_value=[]), \
+                patch.object(code_mcp, "fetch_npm", return_value=[]), \
+                patch.object(code_mcp, "npm_created", return_value={}):
+            jobs.cmd_crawl_code()
+        self.assertEqual(self._ids(), {"acme/old"})
 
     def test_first_run_is_full_then_incremental_since_last_run(self):
         args = self._run([gh_item("acme/a")])

@@ -475,6 +475,17 @@ def cmd_crawl_code(github_limit: int | None = None, npm_limit: int | None = None
         _finish_run(run_id, 0, 0, [f"fetch failed: {e!r}"], status="error")
         log.warning("code mcp fetch failed: %r", e)
         return 1
+    from . import code_classify
+    classify_on = code_classify.configured()
+    skipped = 0
+    if classify_on:
+        classes = code_classify.classify(rows)
+        keep = [r for r in rows
+                if classes.get((r["source"], r["source_id"])) in code_classify.KEEP]
+        skipped = len(rows) - len(keep)
+        rows = keep
+    else:
+        log.warning("code mcp: no classifier model configured; importing unfiltered")
     added = updated = 0
     errors: list[str] = []
     for source in code_mcp.OWN_SOURCES:
@@ -490,11 +501,46 @@ def cmd_crawl_code(github_limit: int | None = None, npm_limit: int | None = None
         added += result['added']; updated += result['updated']
         errors.extend(result['errors'])
     backdated = _code_backdate(rows)
+    removed = _code_prune() if classify_on else {}
     _finish_run(run_id, added, updated, errors, status="ok" if not errors else "partial")
-    log.info("code mcp (%s): %s added=%d updated=%d backdated=%d errors=%d",
+    log.info("code mcp (%s): %s added=%d updated=%d backdated=%d skipped_non_server=%d "
+             "removed=%s errors=%d",
              "full" if is_full else f"since {since}" if since else "partial",
-             info, added, updated, backdated, len(errors))
+             info, added, updated, backdated, skipped, removed, len(errors))
     return 0
+
+
+def _code_prune() -> dict:
+    """Classify every stored code-only row we crawled ourselves (cached
+    verdicts cost nothing) and delete the ones that are not MCP servers:
+    clients, SDKs, lists, skills, unrelated apps. Owner-claimed rows are
+    never touched. Returns removed counts per class."""
+    from . import code_classify, code_mcp
+    sources = code_mcp.OWN_SOURCES
+    with db.connect(read_only=True) as c:
+        stored = [dict(id=rid, source=s, source_id=sid, name=n, description=d, tags=t)
+                  for rid, s, sid, n, d, t in c.execute(
+                      "SELECT id, source, source_id, name, description, tags FROM mcp_servers "
+                      f"WHERE source IN ({','.join('?' * len(sources))}) "
+                      "AND COALESCE(endpoint_url,'')='' AND COALESCE(owner_verified,0)=0 "
+                      "AND source_id IS NOT NULL", sources)]
+    classes = code_classify.classify(stored)
+    drop = [(r["id"], classes[(r["source"], r["source_id"])]) for r in stored
+            if classes.get((r["source"], r["source_id"]), "server") not in code_classify.KEEP]
+    removed: dict[str, int] = {}
+    for i in range(0, len(drop), 500):
+        chunk = drop[i:i + 500]
+
+        def op(chunk=chunk):
+            with db.writer() as c:
+                ids = [(rid,) for rid, _cls in chunk]
+                c.executemany("DELETE FROM listing_sources WHERE kind='mcp' AND listing_id=?", ids)
+                c.executemany("DELETE FROM mcp_servers WHERE id=? "
+                              "AND COALESCE(endpoint_url,'')='' AND COALESCE(owner_verified,0)=0", ids)
+        db.with_retry(op)
+        for _rid, cls in chunk:
+            removed[cls] = removed.get(cls, 0) + 1
+    return removed
 
 
 def cmd_crawl_a2a() -> int:
