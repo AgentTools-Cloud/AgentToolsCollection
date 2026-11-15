@@ -455,7 +455,8 @@ def _code_backdate(rows) -> int:
 
 
 def cmd_crawl_code(github_limit: int | None = None, npm_limit: int | None = None,
-                   min_stars: int = 0, full: bool = False, baidu: bool | None = None) -> int:
+                   min_stars: int = 0, full: bool = False, baidu: bool | None = None,
+                   from_file: str | None = None) -> int:
     """Import code-only MCP servers (GitHub topics, package keywords and the
     directories in code_sources). Rows have no endpoint: never probed,
     separate sub-directory. Baidu MCP World (slow keyword walk) runs on full
@@ -464,23 +465,38 @@ def cmd_crawl_code(github_limit: int | None = None, npm_limit: int | None = None
     The first run (or --full) imports everything as a baseline; later runs
     only ask GitHub for repositories pushed since the last successful run.
     Rows are dated by repository / package creation, so a baseline import
-    never reads as thousands of servers added in one day."""
+    never reads as thousands of servers added in one day.
+
+    Every fetch is saved (gzip JSON lines) before classification and import;
+    `from_file` resumes from such a file without fetching again."""
     from . import code_mcp, code_sources
-    since = None if (full or min_stars or github_limit) else _code_pushed_since()
-    is_full = since is None and not (min_stars or github_limit)
-    if baidu is None:
-        from datetime import date
-        baidu = is_full or date.today().weekday() == 6
-    run_id = _start_run(CODE_FULL_RUN if is_full else CODE_INCR_RUN)
-    try:
-        rows, info = code_mcp.fetch_all(github_limit=github_limit,
-                                        npm_limit=npm_limit or code_mcp.NPM_MAX,
-                                        min_stars=min_stars, pushed_since=since,
-                                        baidu=baidu)
-    except Exception as e:  # noqa: BLE001 - network / API failure
-        _finish_run(run_id, 0, 0, [f"fetch failed: {e!r}"], status="error")
-        log.warning("code mcp fetch failed: %r", e)
-        return 1
+    if from_file:
+        rows, info, meta = code_mcp.load_fetch(from_file)
+        is_full, since = bool(meta.get("is_full")), meta.get("since")
+        run_id = _start_run(CODE_FULL_RUN if is_full else CODE_INCR_RUN)
+        log.info("code mcp: resuming from %s (%d rows)", from_file, len(rows))
+    else:
+        since = None if (full or min_stars or github_limit) else _code_pushed_since()
+        is_full = since is None and not (min_stars or github_limit)
+        if baidu is None:
+            from datetime import date
+            baidu = is_full or date.today().weekday() == 6
+        run_id = _start_run(CODE_FULL_RUN if is_full else CODE_INCR_RUN)
+        try:
+            rows, info = code_mcp.fetch_all(github_limit=github_limit,
+                                            npm_limit=npm_limit or code_mcp.NPM_MAX,
+                                            min_stars=min_stars, pushed_since=since,
+                                            baidu=baidu)
+        except Exception as e:  # noqa: BLE001 - network / API failure
+            _finish_run(run_id, 0, 0, [f"fetch failed: {e!r}"], status="error")
+            log.warning("code mcp fetch failed: %r", e)
+            return 1
+        try:
+            path = code_mcp.save_fetch(rows, info, {
+                "is_full": is_full, "since": since.isoformat() if since else None})
+            log.info("code mcp: fetch saved to %s", path)
+        except Exception as e:  # noqa: BLE001 - a resume file is a convenience
+            log.warning("code mcp: could not save the fetch: %r", e)
     from . import code_classify
     classify_on = code_classify.configured()
     skipped = 0
@@ -2509,6 +2525,8 @@ def main(argv=None) -> int:
                         help="re-import everything instead of repositories pushed since the last run")
     p_code.add_argument("--baidu", action=argparse.BooleanOptionalAction, default=None,
                         help="walk Baidu MCP World (default: on full runs and Sundays)")
+    p_code.add_argument("--from-file", default=None,
+                        help="resume from a saved fetch (data/code-crawl/fetch-*.jsonl.gz)")
     sub.add_parser("crawl-a2a")
     sub.add_parser("crawl-agenstry")
     sub.add_parser("health")
@@ -2605,7 +2623,7 @@ def main(argv=None) -> int:
         return cmd_crawl_mcp(args.source)
     if args.cmd == "crawl-code":
         return cmd_crawl_code(args.github_limit, args.npm_limit, args.min_stars, args.full,
-                              args.baidu)
+                              args.baidu, args.from_file)
     if args.cmd == "crawl-a2a":
         return cmd_crawl_a2a()
     if args.cmd == "crawl-agenstry":

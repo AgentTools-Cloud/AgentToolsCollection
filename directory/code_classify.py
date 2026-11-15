@@ -144,7 +144,11 @@ def classify(rows: list[dict], *, workers: int = 4) -> dict[tuple[str, str], str
     batches = [todo[i:i + BATCH] for i in range(0, len(todo), BATCH)]
 
     def run(batch):
-        got = _ask([r for _k, _d, r in batch])
+        try:
+            got = _ask([r for _k, _d, r in batch])
+        except Exception as e:  # noqa: BLE001 - one batch must not sink a long crawl
+            log.warning("code classify: batch dropped: %r", e)
+            return []
         return [(k, d, got[i]) for i, (k, d, _r) in enumerate(batch) if i in got]
 
     now = int(time.time())
@@ -163,7 +167,11 @@ def classify(rows: list[dict], *, workers: int = 4) -> dict[tuple[str, str], str
                         "digest=excluded.digest, class=excluded.class, version=excluded.version, "
                         "checked_at=excluded.checked_at",
                         [(k[0], k[1], d, cls, PROMPT_VERSION, now) for k, d, cls in res])
-            db.with_retry(op)
+            try:
+                # Long jobs (health) can hold the write lock for a while.
+                db.with_retry(op, attempts=10, base_delay=1.0)
+            except Exception as e:  # noqa: BLE001 - verdict still used this run
+                log.warning("code classify: could not cache %d verdicts: %r", len(res), e)
             for k, _d, cls in res:
                 out[k] = cls
             done += len(res)

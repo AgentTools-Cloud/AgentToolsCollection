@@ -530,6 +530,40 @@ def merge(github_items: list[dict], package_rows: list[dict],
     return out, skipped
 
 
+def fetch_dir() -> str:
+    import os
+    return os.path.join(os.path.dirname(os.path.abspath(db.DEFAULT_DB_PATH)), "code-crawl")
+
+
+def save_fetch(rows: list[dict], info: dict, meta: dict, keep: int = 3) -> str:
+    """Write a fetch as gzip JSON lines (meta + info first), keep the last few."""
+    import glob
+    import gzip
+    import os
+    d = fetch_dir()
+    os.makedirs(d, exist_ok=True)
+    path = os.path.join(d, time.strftime("fetch-%Y%m%d-%H%M%S.jsonl.gz"))
+    tmp = path + ".part"
+    with gzip.open(tmp, "wt", encoding="utf-8") as f:
+        f.write(json.dumps({"meta": meta, "info": info}, ensure_ascii=False, default=list) + "\n")
+        for r in rows:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    os.replace(tmp, path)
+    for old in sorted(glob.glob(os.path.join(d, "fetch-*.jsonl.gz")))[:-keep]:
+        os.remove(old)
+    return path
+
+
+def load_fetch(path: str) -> tuple[list[dict], dict, dict]:
+    import gzip
+    with gzip.open(path, "rt", encoding="utf-8") as f:
+        head = json.loads(f.readline())
+        rows = [json.loads(line) for line in f if line.strip()]
+    info = head.get("info") or {}
+    info["attach"] = [tuple(a) for a in info.get("attach") or []]
+    return rows, info, head.get("meta") or {}
+
+
 def fetch_all(*, github_limit: int | None = None, npm_limit: int = NPM_MAX,
               min_stars: int = 0, pushed_since: date | None = None,
               baidu: bool = False) -> tuple[list[dict], dict]:
