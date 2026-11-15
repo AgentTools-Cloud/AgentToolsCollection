@@ -8,8 +8,17 @@ wait_healthy() {
     done
     echo "port $1 not healthy after 60s" >&2; return 1
 }
+# nginx upstream uses max_fails=1 fail_timeout=5s: a request that hit the
+# restarting instance marks it down for 5s. Restarting the other instance inside
+# that window leaves no live upstream and nginx returns 502, so wait it out.
+SETTLE_SECONDS="${AGENT_TOOLS_RESTART_SETTLE:-6}"
+first=1
 for pair in "mcpserver-b 9101" "mcpserver 9100"; do
     set -- $pair
+    if [ "$first" = 0 ]; then
+        sleep "$SETTLE_SECONDS"
+    fi
+    first=0
     systemctl restart "$1"
     wait_healthy "$2"
     echo "$1 healthy on :$2"
