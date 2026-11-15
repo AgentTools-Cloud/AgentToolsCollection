@@ -142,7 +142,13 @@ class LookupTests(_TempDB):
             items = code_sources.lookup_repos(hints)
         self.assertEqual(len(items), 20)
         self.assertEqual(queries[:3], [21, 15, 7])
-        self.assertEqual(code_sources.recently_checked(), set(hints))
+        # Found but never classified (e.g. the run died) -> asked again next time.
+        self.assertEqual(code_sources.recently_checked(), {"acme/gone"})
+        from directory import code_classify
+        with db.writer() as c:
+            code_classify.ensure_table(c)
+            c.execute("INSERT INTO code_mcp_class VALUES ('github','acme/r1','d','list',1,0)")
+        self.assertEqual(code_sources.recently_checked(), {"acme/gone", "acme/r1"})
 
 
 class CrawlWithSourcesTests(_TempDB):
@@ -192,6 +198,22 @@ class CrawlWithSourcesTests(_TempDB):
         self.assertNotIn(("npm", "old-dup"), rows)
         # The package offered for the stored repository is attached first.
         self.assertEqual(rows[("github", "acme/old")][0], "old-mcp")
+
+    def test_fetch_is_saved_and_a_run_can_resume_from_it(self):
+        import os, tempfile
+        d = tempfile.mkdtemp()
+        with patch.object(code_mcp, "fetch_dir", return_value=d):
+            self._run([gh_item("acme/saved")], full=True)
+            files = sorted(os.listdir(d))
+            self.assertEqual(len(files), 1)
+            rows, info, meta = code_mcp.load_fetch(os.path.join(d, files[0]))
+        self.assertEqual([r["source_id"] for r in rows], ["acme/saved"])
+        self.assertTrue(meta["is_full"])
+        with db.writer() as c:
+            c.execute("DELETE FROM mcp_servers")
+        with patch.object(code_mcp, "fetch_all", side_effect=AssertionError("no fetch")):
+            jobs.cmd_crawl_code(from_file=os.path.join(d, files[0]))
+        self.assertIn(("github", "acme/saved"), self._rows())
 
     def test_baidu_only_on_full_runs_or_when_asked(self):
         with patch.object(code_mcp, "fetch_github", return_value=[]), \

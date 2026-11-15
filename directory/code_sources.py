@@ -443,7 +443,7 @@ def attach_packages(attach: list[tuple[str, str, str]]) -> int:
                     "WHERE source='github' AND source_id=? AND COALESCE(package_name,'')=''",
                     chunk)
                 return c.total_changes - before
-        n += db.with_retry(op)
+        n += db.with_retry(op, attempts=10, base_delay=1.0)
     return n
 
 
@@ -480,7 +480,7 @@ def drop_duplicate_packages() -> dict[str, int]:
                 c.executemany("DELETE FROM listing_sources WHERE kind='mcp' AND listing_id=?", ids)
                 c.executemany("DELETE FROM mcp_servers WHERE id=? AND COALESCE(owner_verified,0)=0",
                               ids)
-        db.with_retry(op)
+        db.with_retry(op, attempts=10, base_delay=1.0)
         for _rid, src in chunk:
             removed[src] = removed.get(src, 0) + 1
     return removed
@@ -500,11 +500,17 @@ def _ensure_lookup_table():
 
 
 def recently_checked(days: int = LOOKUP_RECHECK_DAYS) -> set[str]:
+    """Repositories not worth asking GitHub about again yet: not found there,
+    or found and already judged by the classifier (a found repository that
+    never got that far -- e.g. the run died -- is looked up again)."""
     _ensure_lookup_table()
     cutoff = int(time.time()) - days * 86400
     with db.connect(read_only=True) as c:
-        return {r[0] for r in c.execute(
-            "SELECT repo FROM code_repo_lookup WHERE checked_at >= ?", (cutoff,))}
+        judged = c.execute("SELECT 1 FROM sqlite_master WHERE name='code_mcp_class'").fetchone()
+        sql = ("SELECT repo FROM code_repo_lookup l WHERE checked_at >= ? AND (found = 0"
+               + (" OR EXISTS (SELECT 1 FROM code_mcp_class k WHERE k.source='github' "
+                  "AND k.source_id=l.repo)" if judged else "") + ")")
+        return {r[0] for r in c.execute(sql, (cutoff,))}
 
 
 def _record_lookups(results: list[tuple[str, str, int]]):
@@ -518,7 +524,7 @@ def _record_lookups(results: list[tuple[str, str, int]]):
                     "INSERT INTO code_repo_lookup(repo, via, checked_at, found) VALUES (?,?,?,?) "
                     "ON CONFLICT(repo) DO UPDATE SET via=excluded.via, "
                     "checked_at=excluded.checked_at, found=excluded.found", chunk)
-        db.with_retry(op)
+        db.with_retry(op, attempts=10, base_delay=1.0)
 
 
 def lookup_repos(hints: dict[str, str], max_repos: int = LOOKUP_MAX) -> list[dict]:
