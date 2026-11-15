@@ -17,12 +17,13 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class AskBackendTests(unittest.TestCase):
-    def test_deployed_ask_and_safety_use_claude_opus55(self):
+    def test_repo_template_does_not_name_the_model(self):
+        # the model ids live only in /etc/agent-tools/ask.env on the server
         settings = dict(line.split('=', 1) for line in
                         (ROOT/'deploy/agent-tools-ask.env').read_text().splitlines()
                         if line and not line.startswith('#'))
-        self.assertEqual(settings['AGENT_TOOLS_ASK_MODEL'], 'Anthropic/Claude-Opus-5.5')
-        self.assertEqual(settings['AGENT_TOOLS_SAFETY_MODEL'], 'Anthropic/Claude-Opus-5.5')
+        self.assertEqual(settings['AGENT_TOOLS_ASK_MODEL'], '')
+        self.assertEqual(settings['AGENT_TOOLS_SAFETY_MODEL'], '')
 
     def setUp(self):
         self.requests = []
