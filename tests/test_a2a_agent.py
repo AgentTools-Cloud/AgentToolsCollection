@@ -120,8 +120,11 @@ class LoopTests(Base):
         with mock.patch.object(ag, "_chat", side_effect=fake_chat):
             t0 = _t.time(); ag.run("q1", skill="research_report", ip="7.7.7.1")
             t1 = _t.time(); ag.run("q2", skill="ask_analyst", ip="7.7.7.2")
-        self.assertGreater(seen[0] - t0, 80)   # 90 s: under Cloudflare's 100 s cut-off
-        self.assertLess(seen[1] - t1, 60)
+        # tool turns end FINAL_RESERVE_S before the deadline; the whole run gets ~90 s
+        # (under Cloudflare's 100 s cut-off) for reports and ~55 s otherwise
+        self.assertGreater(seen[0] + ag.FINAL_RESERVE_S - t0, 80)
+        self.assertLess(seen[0] + ag.FINAL_RESERVE_S - t0, 90)
+        self.assertLess(seen[1] + ag.FINAL_RESERVE_S - t1, 60)
 
     def test_more_than_six_tool_calls_are_trimmed_consistently(self):
         many = [("kpis", {"view": "all"})] * 8
@@ -307,3 +310,102 @@ class CheckTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReviewFixTests(Base):
+    """11-15 review: skill routing, number check, per-client limits, time budget."""
+
+    def _send(self, data, text=None, ip="7.7.7.1"):
+        parts = ([{"kind": "text", "text": text}] if text else []) + [{"kind": "data", "data": data}]
+        return a2a.handle_jsonrpc({"jsonrpc": "2.0", "id": 1, "method": "message/send",
+                                   "params": {"message": {"parts": parts}}}, None, ip)
+
+    def test_every_analyst_skill_reaches_the_model(self):
+        for i, skill in enumerate(("ask_analyst", "research_report", "market_scan", "compare", "listing_audit")):
+            with mock.patch.object(ag, "_chat", side_effect=[_final(f"from {skill}")]) as chat:
+                res = self._send({"skill": skill, "question": f"question {i}"}, ip=f"7.7.7.{i + 10}")
+            chat.assert_called_once()
+            self.assertEqual(res["result"]["parts"][0]["text"], f"from {skill}", skill)
+            self.assertEqual(res["result"]["parts"][1]["data"]["skill"], skill)
+
+    def test_scan_tools_still_point_to_mcp(self):
+        with mock.patch.object(ag, "_chat") as chat:
+            res = self._send({"skill": "scan_mcp_safety"}, text="scan this")
+        chat.assert_not_called()
+        self.assertIn("MCP", res["result"]["parts"][0]["text"])
+
+    def test_numbers_next_to_cjk_are_checked(self):
+        res = [{"reachable": 53642}]
+        self.assertEqual(ag.unsupported_numbers("共有99999个MCP服务器", res), ["99999"])
+        self.assertEqual(ag.unsupported_numbers("可达的有53,642个", res), [])
+        self.assertEqual(ag.unsupported_numbers("x402 和 v2 协议 [1]", res), [])
+
+    def test_years_only_as_four_digits(self):
+        self.assertEqual(ag.unsupported_numbers("in 2026", [{}]), [])
+        self.assertEqual(ag.unsupported_numbers("2,050 servers", [{}]), ["2,050"])
+
+    def test_derived_numbers_need_one_result(self):
+        a, b = {"x": 40, "y": 200}, {"z": 7000}
+        self.assertEqual(ag.unsupported_numbers("20% of them", [a]), [])        # 40/200
+        self.assertEqual(ag.unsupported_numbers("160 more", [a]), [])          # 200-40
+        # values from two unrelated results do not explain a figure
+        self.assertEqual(ag.unsupported_numbers("6,800 more", [a, b]), ["6,800"])
+        self.assertEqual(ag.unsupported_numbers("37% share", [a, b, {"w": 3}]), ["37%"])
+
+    def test_memory_numbers_are_not_known(self):
+        seq = [_resp(calls=[("kpis", {"view": "mcp"})]), _final("There are 4,321 servers [1]."),
+               _final("There are 4,321 servers [1].")]
+        with mock.patch.object(ag, "_chat", side_effect=[_final("hi", summary="earlier: 4,321 servers")]):
+            first = ag.run("hello", ip="7.7.8.1")
+        with mock.patch.object(ag, "_chat", side_effect=seq):
+            out = ag.run("and now?", context_id=first["context_id"], ip="7.7.8.1")
+        self.assertEqual(out["data"]["unverified_numbers"], ["4,321"])
+
+    def test_correction_failure_keeps_the_first_answer(self):
+        seq = [_resp(calls=[("kpis", {"view": "mcp"})]), _final("There are 99,999 servers [1]."),
+               RuntimeError("timeout")]
+        with mock.patch.object(ag, "_chat", side_effect=seq):
+            out = ag.run("count them", ip="7.7.8.2")
+        self.assertNotIn("error", out)
+        self.assertEqual(out["data"]["unverified_numbers"], ["99,999"])
+
+    def test_client_buckets(self):
+        self.assertEqual(ag.client_bucket("1.2.3.4"), "1.2.3.4")
+        self.assertEqual(ag.client_bucket("2001:db8:1:2:aaaa::1"), ag.client_bucket("2001:db8:1:2:bbbb::9"))
+        self.assertEqual(ag.client_bucket("2001:db8:1:2::1"), "2001:db8:1:2::/64")
+        self.assertEqual(ag.client_bucket("::ffff:1.2.3.4"), "1.2.3.4")
+        self.assertEqual(ag.client_bucket(None), "unknown")
+        self.assertEqual(ag.client_bucket("smoke-test"), "unknown")
+
+    def test_ipv6_hourly_limit_is_per_64(self):
+        with mock.patch.object(ag, "_chat", side_effect=[_final(f"r{i}") for i in range(5)]):
+            outs = [ag.run(f"report {i}", skill="research_report", ip=f"2001:db8:9:9::{i + 1}") for i in range(4)]
+        self.assertEqual(["error" in o for o in outs], [False, False, False, True])
+
+    def test_no_ip_is_still_limited(self):
+        with mock.patch.object(ag, "_chat", side_effect=[_final(f"r{i}") for i in range(5)]):
+            outs = [ag.run(f"report {i}", skill="research_report", ip=None) for i in range(4)]
+        self.assertTrue("error" in outs[-1])
+
+    def test_per_client_daily_cap(self):
+        with mock.patch.object(ag, "IP_DAILY_CALLS", 2), \
+                mock.patch.object(ag, "_chat", side_effect=[_final("a"), _final("b"), _final("c")]):
+            ag.run("q1", ip="7.7.9.1")
+            ag.run("q2", ip="7.7.9.1")
+            third = ag.run("q3", ip="7.7.9.1")
+            other = ag.run("q4", ip="7.7.9.2")
+        self.assertEqual(third["error"][2], "RATE_LIMITED")
+        self.assertEqual(third["error"][3]["limitPerDayPerClient"], 2)
+        self.assertNotIn("error", other)
+
+    def test_tool_turns_leave_time_for_the_answer(self):
+        seen = []
+
+        def fake_chat(messages, max_tokens, tools=True, deadline=None):
+            seen.append((tools, deadline))
+            return _resp(calls=[("kpis", {"view": "all"})]) if tools else _final("done")
+        with mock.patch.object(ag, "_chat", side_effect=fake_chat):
+            ag.run("go", ip="7.7.9.3", budget_s=60)
+        tool_deadlines = [d for t, d in seen if t]
+        final_deadline = [d for t, d in seen if not t][0]
+        self.assertTrue(all(final_deadline - d >= ag.FINAL_RESERVE_S - 0.01 for d in tool_deadlines))

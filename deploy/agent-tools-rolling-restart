@@ -21,5 +21,14 @@ for pair in "mcpserver-b 9101" "mcpserver 9100"; do
     first=0
     systemctl restart "$1"
     wait_healthy "$2"
+    # Each nginx worker keeps its own failure state, and a peer marked down only
+    # comes back after a probe request succeeds; a reload starts fresh workers
+    # that see both instances live, so the next restart cannot leave none.
+    if nginx -t -q 2>/dev/null; then
+        systemctl reload nginx
+        sleep 1
+    else
+        echo "nginx -t failed; not reloading" >&2
+    fi
     echo "$1 healthy on :$2"
 done
