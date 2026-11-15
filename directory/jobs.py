@@ -240,6 +240,7 @@ def _run_one(name):
                     name, e.reason, len(items))
     except Exception as e:
         errors.append(f"fetch failed: {e!r}")
+        peers_mod.settle(name, False)
         _finish_run(run_id, 0, 0, errors, status="error")
         return 0, 0, errors
 
@@ -268,6 +269,8 @@ def _run_one(name):
     result = _ingest_rows('x402', name, items, upsert, batch_size=50)
     added, updated = result['added'], result['updated']
     errors.extend(result['errors'])
+    # Peer sources advance their weekly mark only once the rows are in.
+    peers_mod.settle(name, not errors)
 
     _finish_run(run_id, added, updated, errors,
                 status="ok" if not errors else "partial")
@@ -359,6 +362,7 @@ def cmd_crawl_mcp(only=None, *, probe_new=True) -> int:
             log.warning("mcp crawl %s incomplete (%s); keeping %d items, "
                         "watermark held", name, e.reason, len(items))
         except Exception as e:
+            peers_mod.settle(name, False)
             _finish_run(run_id, 0, 0, [f"fetch failed: {e!r}"], status="error")
             log.warning("mcp crawl %s fetch failed: %r", name, e)
             continue
@@ -384,6 +388,7 @@ def cmd_crawl_mcp(only=None, *, probe_new=True) -> int:
         result = _ingest_rows('mcp', name, items, upsert)
         added, updated = result['added'], result['updated']
         errors.extend(result['errors'])
+        peers_mod.settle(name, not errors)
         _finish_run(run_id, added, updated, errors,
                     status="ok" if not errors else "partial")
         if name == "mcp-registry" and max_updated and not truncated and not errors:
