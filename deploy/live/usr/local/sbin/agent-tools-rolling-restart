@@ -10,8 +10,9 @@ wait_healthy() {
 }
 # nginx upstream uses max_fails=1 fail_timeout=5s: a request that hit the
 # restarting instance marks it down for 5s. Restarting the other instance inside
-# that window leaves no live upstream and nginx returns 502, so wait it out.
-SETTLE_SECONDS="${AGENT_TOOLS_RESTART_SETTLE:-6}"
+# that window leaves no live upstream and nginx returns 502, so wait it out;
+# 20s also lets the restarted instance warm up before the other one goes down.
+SETTLE_SECONDS="${AGENT_TOOLS_RESTART_SETTLE:-20}"
 first=1
 for pair in "mcpserver-b 9101" "mcpserver 9100"; do
     set -- $pair
