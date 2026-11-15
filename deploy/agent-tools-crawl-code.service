@@ -13,6 +13,10 @@ Environment="PYTHONPATH=/opt/mcpserver"
 # rows are dated by repository / package creation, not by import day.
 # Daily ~20 min; Sundays add the Baidu MCP World walk (~1 h); a full run
 # with the first backlog of hinted repositories takes several hours.
+# Skip the daily run while a manual full run (systemd-run unit
+# agent-tools-crawl-code-full) is still going: it shares the GitHub quota and
+# memory, and the full run already covers the window.
+ExecCondition=/bin/sh -c '! systemctl is-active --quiet agent-tools-crawl-code-full'
 ExecStart=/opt/mcpserver/.venv/bin/python -m directory.jobs crawl-code
 TimeoutStartSec=8h
 Nice=10

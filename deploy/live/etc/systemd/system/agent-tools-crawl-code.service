@@ -1,5 +1,5 @@
 [Unit]
-Description=agent-tools code-only MCP crawl (GitHub topic:mcp-server + npm keyword mcp-server)
+Description=agent-tools code-only MCP crawl (GitHub topics, package keywords, Registry/Cline/ModelScope/Docker/Baidu)
 After=network-online.target
 
 [Service]
@@ -11,7 +11,13 @@ Environment="PYTHONPATH=/opt/mcpserver"
 # Incremental: repositories pushed since the last successful run (2-day
 # overlap). The first run, or `crawl-code --full`, imports the whole backlog;
 # rows are dated by repository / package creation, not by import day.
+# Daily ~20 min; Sundays add the Baidu MCP World walk (~1 h); a full run
+# with the first backlog of hinted repositories takes several hours.
+# Skip the daily run while a manual full run (systemd-run unit
+# agent-tools-crawl-code-full) is still going: it shares the GitHub quota and
+# memory, and the full run already covers the window.
+ExecCondition=/bin/sh -c '! systemctl is-active --quiet agent-tools-crawl-code-full'
 ExecStart=/opt/mcpserver/.venv/bin/python -m directory.jobs crawl-code
-TimeoutStartSec=3h
+TimeoutStartSec=8h
 Nice=10
 User=root

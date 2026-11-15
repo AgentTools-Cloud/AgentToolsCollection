@@ -3854,7 +3854,20 @@ def mcp_row_to_dict(row) -> dict:
     if _sf:
         d["safety"] = _sf
     d.pop("tools_text", None)
+    if _is_code_only(d):
+        # Code-only rows are never probed or graded: whatever an earlier run
+        # stored (or the scorer's floor) must not reach the API as a grade.
+        for k in ("readiness_score", "readiness_grade", "readiness_checked",
+                  "quality_score"):
+            if k in d:
+                d[k] = None
     return d
+
+
+def _is_code_only(d) -> bool:
+    """True for a code-only MCP row; rows read without the endpoint column
+    are not judged (they keep whatever they carry)."""
+    return "endpoint_url" in d and not (d.get("endpoint_url") or "").strip()
 
 
 def get_meta(conn: sqlite3.Connection, key: str, default=None):
@@ -4222,8 +4235,9 @@ def get_mcp_by_slug(conn, slug):
         return None
     out = mcp_row_to_dict(row)
     out["sources"] = listing_sources(conn, "mcp", int(out["id"]))
-    _attach_readiness(conn, "mcp", out)
-    _attach_peer(conn, "mcp", out)
+    if not _is_code_only(out):
+        _attach_readiness(conn, "mcp", out)
+        _attach_peer(conn, "mcp", out)
     _attach_measured(conn, "mcp", out)
     _attach_popularity(conn, "mcp", out)
     return out
@@ -4917,6 +4931,9 @@ def rescore_mcp(conn) -> int:
 def attach_ratings(kind: str, rows: list) -> list:
     """Annotate each row dict in-place with unrounded score (0-10) + grade."""
     for d in rows:
+        if kind == "mcp" and _is_code_only(d):
+            d["score"] = d["score100"] = d["grade"] = None
+            continue
         s100, g = rate_row(kind, d)
         d["score"] = s100 / 10.0
         d["score100"] = s100
