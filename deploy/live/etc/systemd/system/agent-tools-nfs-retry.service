@@ -1,0 +1,15 @@
+[Unit]
+Description=Retry encrypted Agent Tools main+Hub backups to verified halo-win2 NFS
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+UMask=0077
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 /opt/agent-tools-nfs-daily/source_nfs_backup.py retry
+MemoryMax=384M
+TimeoutStartSec=20min
+Nice=10
+IOSchedulingClass=idle

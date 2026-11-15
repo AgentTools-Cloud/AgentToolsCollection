@@ -1,0 +1,11 @@
+[Unit]
+Description=agent-tools background-job watchdog (alerts on silent stage aborts)
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/mcpserver
+EnvironmentFile=/opt/mcpserver/.env
+Environment="PYTHONPATH=/opt/mcpserver"
+ExecStart=/opt/mcpserver/.venv/bin/python /opt/mcpserver/ops/job_health_alert.py
+User=root

@@ -1,0 +1,20 @@
+[Unit]
+Description=mcpserver second instance (:9101) so nginx keeps serving during restarts
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/mcpserver
+EnvironmentFile=/opt/mcpserver/.env
+EnvironmentFile=/etc/agent-tools/ask.env
+ExecStart=/opt/mcpserver/.venv/bin/python -m uvicorn server:app --host 127.0.0.1 --port 9101 --workers 1 --log-level info --no-access-log
+Restart=on-failure
+RestartSec=3
+MemoryMax=1G
+StandardOutput=journal
+StandardError=journal
+User=root
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,10 @@
+[Unit]
+Description=agent-tools code-only MCP crawl (daily incremental, 03:30)
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+Persistent=true
+Unit=agent-tools-crawl-code.service
+
+[Install]
+WantedBy=timers.target

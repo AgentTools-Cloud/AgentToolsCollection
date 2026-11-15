@@ -1,0 +1,11 @@
+[Unit]
+Description=agent-tools x402 re-verification (real 402 probe owns x402_supported)
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/mcpserver
+EnvironmentFile=/opt/mcpserver/.env
+Environment="PYTHONPATH=/opt/mcpserver"
+ExecStart=/opt/mcpserver/.venv/bin/python -m directory.reverify_x402 --targets mcp,a2a,services --workers 24
+User=root

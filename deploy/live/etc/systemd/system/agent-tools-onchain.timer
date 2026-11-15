@@ -1,0 +1,11 @@
+[Unit]
+Description=agent-tools directory on-chain demand probe (daily)
+
+[Timer]
+OnBootSec=45min
+OnCalendar=daily
+Persistent=true
+Unit=agent-tools-onchain.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,9 @@
+[Unit]
+Description=agent-tools pending claim auto-check (every 10min)
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=10min
+Persistent=true
+Unit=agent-tools-claim-pending.service
+[Install]
+WantedBy=timers.target

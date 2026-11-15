@@ -1,0 +1,11 @@
+[Unit]
+Description=agent-tools daily disk cleanup reminder to Notice (report only, never deletes)
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/mcpserver
+EnvironmentFile=/opt/mcpserver/.env
+ExecStart=/opt/mcpserver/.venv/bin/python /opt/agent-tools-ops/disk_cleanup_reminder.py
+Nice=10
+TimeoutStartSec=600

@@ -1,0 +1,11 @@
+[Unit]
+Description=agent-tools directory auto-review (every 30min)
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=30min
+Persistent=true
+Unit=agent-tools-review.service
+
+[Install]
+WantedBy=timers.target

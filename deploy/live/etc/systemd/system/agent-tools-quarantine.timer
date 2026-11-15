@@ -1,0 +1,11 @@
+[Unit]
+Description=agent-tools directory quarantine re-probe (daily)
+
+[Timer]
+OnBootSec=50min
+OnCalendar=daily
+Persistent=true
+Unit=agent-tools-quarantine.service
+
+[Install]
+WantedBy=timers.target

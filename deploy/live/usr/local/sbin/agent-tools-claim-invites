@@ -1,0 +1,29 @@
+#!/opt/mcpserver/.venv/bin/python
+"""受控运维入口：加载正式配置，转交逐封审核命令，不自动发送。"""
+from __future__ import annotations
+
+import os
+from pathlib import Path
+import sys
+
+APP = Path("/opt/mcpserver")
+ENVIRONMENT_FILES = (APP / ".env", Path("/etc/agent-tools/ask.env"), Path("/etc/agent-tools/claim-invites.env"))
+
+
+def main() -> int:
+    if os.geteuid() != 0:
+        raise PermissionError("此入口仅供授权运维使用")
+    from dotenv import dotenv_values
+
+    for path in ENVIRONMENT_FILES:
+        if path.is_file():
+            os.environ.update({name: value for name, value in dotenv_values(path).items() if value is not None})
+    os.chdir(APP)
+    sys.path.insert(0, str(APP))
+    from directory.jobs import main as jobs_main
+
+    return jobs_main(["claim-invites", *sys.argv[1:]])
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
