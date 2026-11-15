@@ -455,22 +455,28 @@ def _code_backdate(rows) -> int:
 
 
 def cmd_crawl_code(github_limit: int | None = None, npm_limit: int | None = None,
-                   min_stars: int = 0, full: bool = False) -> int:
-    """Import code-only MCP servers (GitHub topic:mcp-server + npm keyword
-    mcp-server). Rows have no endpoint: never probed, separate sub-directory.
+                   min_stars: int = 0, full: bool = False, baidu: bool | None = None) -> int:
+    """Import code-only MCP servers (GitHub topics, package keywords and the
+    directories in code_sources). Rows have no endpoint: never probed,
+    separate sub-directory. Baidu MCP World (slow keyword walk) runs on full
+    runs and on Sundays unless `baidu` says otherwise.
 
     The first run (or --full) imports everything as a baseline; later runs
     only ask GitHub for repositories pushed since the last successful run.
     Rows are dated by repository / package creation, so a baseline import
     never reads as thousands of servers added in one day."""
-    from . import code_mcp
+    from . import code_mcp, code_sources
     since = None if (full or min_stars or github_limit) else _code_pushed_since()
     is_full = since is None and not (min_stars or github_limit)
+    if baidu is None:
+        from datetime import date
+        baidu = is_full or date.today().weekday() == 6
     run_id = _start_run(CODE_FULL_RUN if is_full else CODE_INCR_RUN)
     try:
         rows, info = code_mcp.fetch_all(github_limit=github_limit,
                                         npm_limit=npm_limit or code_mcp.NPM_MAX,
-                                        min_stars=min_stars, pushed_since=since)
+                                        min_stars=min_stars, pushed_since=since,
+                                        baidu=baidu)
     except Exception as e:  # noqa: BLE001 - network / API failure
         _finish_run(run_id, 0, 0, [f"fetch failed: {e!r}"], status="error")
         log.warning("code mcp fetch failed: %r", e)
@@ -501,6 +507,9 @@ def cmd_crawl_code(github_limit: int | None = None, npm_limit: int | None = None
         added += result['added']; updated += result['updated']
         errors.extend(result['errors'])
     backdated = _code_backdate(rows)
+    attach = info.pop("attach", [])
+    info["attached"] = code_sources.attach_packages(attach)
+    info["dropped_duplicates"] = code_sources.drop_duplicate_packages()
     removed = _code_prune() if classify_on else {}
     _finish_run(run_id, added, updated, errors, status="ok" if not errors else "partial")
     log.info("code mcp (%s): %s added=%d updated=%d backdated=%d skipped_non_server=%d "
@@ -2498,6 +2507,8 @@ def main(argv=None) -> int:
                         help="only GitHub repositories with at least this many stars")
     p_code.add_argument("--full", action="store_true",
                         help="re-import everything instead of repositories pushed since the last run")
+    p_code.add_argument("--baidu", action=argparse.BooleanOptionalAction, default=None,
+                        help="walk Baidu MCP World (default: on full runs and Sundays)")
     sub.add_parser("crawl-a2a")
     sub.add_parser("crawl-agenstry")
     sub.add_parser("health")
@@ -2593,7 +2604,8 @@ def main(argv=None) -> int:
     if args.cmd == "crawl-mcp":
         return cmd_crawl_mcp(args.source)
     if args.cmd == "crawl-code":
-        return cmd_crawl_code(args.github_limit, args.npm_limit, args.min_stars, args.full)
+        return cmd_crawl_code(args.github_limit, args.npm_limit, args.min_stars, args.full,
+                              args.baidu)
     if args.cmd == "crawl-a2a":
         return cmd_crawl_a2a()
     if args.cmd == "crawl-agenstry":

@@ -3913,8 +3913,9 @@ def _modelscope_row(s: dict) -> dict | None:
 
 
 def fetch_modelscope_mcp(page_size: int = _MODELSCOPE_WINDOW, page_sleep: float = 0.2,
-                         max_requests: int = 2000, workers: int = 4) -> list:
-    """Import ModelScope MCP Plaza listings that publish a public remote URL.
+                         max_requests: int = 2000, workers: int = 4, raw: bool = False) -> list:
+    """Import ModelScope MCP Plaza listings that publish a public remote URL
+    (``raw=True``: every listing seen, as returned by the API).
 
     Each call costs ~2-4 s of server time regardless of size, so a partition
     is read as one 300-row page and partitions run on a few threads.
@@ -4017,6 +4018,8 @@ def fetch_modelscope_mcp(page_size: int = _MODELSCOPE_WINDOW, page_sleep: float 
         log.warning("modelscope: list error: %r", e)
     if state["stop"]:
         log.warning("modelscope: stopped early: request budget exhausted")
+    if raw:
+        return list(seen.values())
 
     out: list = []
     seen_ep: set = set()
@@ -4097,8 +4100,9 @@ def _docker_mcp_row(d: dict) -> dict | None:
     }
 
 
-def fetch_docker_mcp() -> list:
-    """Import remote servers from Docker's MCP catalog repository."""
+def fetch_docker_mcp(raw: bool = False) -> list:
+    """Import remote servers from Docker's MCP catalog repository
+    (``raw=True``: every parsed server.yaml)."""
     import io
     import tarfile
     try:
@@ -4132,6 +4136,10 @@ def fetch_docker_mcp() -> list:
                 try:
                     d = yaml.safe_load(f.read().decode("utf-8", "replace"))
                 except yaml.YAMLError:
+                    continue
+                if raw:
+                    if isinstance(d, dict):
+                        out.append(d)
                     continue
                 row = _docker_mcp_row(d)
                 if not row:
