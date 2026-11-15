@@ -106,10 +106,51 @@ class NetworkRetryTests(_TempDB):
         self.assertEqual(m.call_count, 1)
 
 
+def eco_pkg(name, ecosystem="npm", repo=None, first="2025-05-01T00:00:00Z"):
+    return {"name": name, "ecosystem": ecosystem, "description": "MCP server",
+            "repository_url": f"https://github.com/{repo}" if repo else "",
+            "homepage": None, "licenses": "MIT", "keywords_array": ["mcp-server"],
+            "downloads": 42, "first_release_published_at": first,
+            "latest_release_published_at": "2026-10-01T00:00:00Z"}
+
+
+class EcosystemsTests(_TempDB):
+    def test_npm_and_pypi_rows_carry_registry_and_first_release(self):
+        npm = code_mcp.eco_row(eco_pkg("@acme/x-mcp"))
+        py = code_mcp.eco_row(eco_pkg("x-mcp", "pypi"))
+        self.assertEqual((npm["source"], npm["package_registry"], npm["created_at"]),
+                         ("npm", "npm", 1746057600))
+        self.assertEqual((py["source"], py["package_registry"], py["source_url"]),
+                         ("pypi", "pypi", "https://pypi.org/project/x-mcp/"))
+
+    def test_merge_attaches_pypi_package_to_its_repository_and_keeps_registries_apart(self):
+        rows, _ = code_mcp.merge(
+            [gh_item("acme/tool")],
+            [code_mcp.eco_row(eco_pkg("tool-mcp", "pypi", repo="acme/tool")),
+             code_mcp.eco_row(eco_pkg("same", "pypi")),
+             code_mcp.eco_row(eco_pkg("same", "npm"))],
+            (set(), {("npm", "taken")}))
+        by = {(r["source"], r["source_id"]): r for r in rows}
+        self.assertEqual(by[("github", "acme/tool")]["package_registry"], "pypi")
+        self.assertIn(("pypi", "same"), by)
+        self.assertIn(("npm", "same"), by)
+
+    def test_crawl_uses_ecosystems_and_adds_npm_search_only_packages(self):
+        IncrementalTests._run(self, [], npm=[npm_obj("search-only")],
+                              eco=[eco_pkg("from-eco"), eco_pkg("py-mcp", "pypi")],
+                              created={"search-only": 1735689600})
+        with closing(db.connect(read_only=True)) as c:
+            got = {(r[0], r[1]): r[2] for r in c.execute(
+                "SELECT source, source_id, created_at FROM mcp_servers WHERE source IN ('npm','pypi')")}
+        self.assertEqual(got, {("npm", "from-eco"): 1746057600, ("pypi", "py-mcp"): 1746057600,
+                               ("npm", "search-only"): 1735689600})
+
+
 class IncrementalTests(_TempDB):
-    def _run(self, gh, npm=(), created=None, **kw):
+    def _run(self, gh, npm=(), created=None, eco=(), **kw):
         created = created or {}
         with patch.object(code_mcp, "fetch_github", return_value=list(gh)) as fg, \
+                patch.object(code_mcp, "fetch_ecosystems", return_value=list(eco)), \
                 patch.object(code_mcp, "fetch_npm", return_value=list(npm)), \
                 patch.object(code_mcp, "npm_created",
                              side_effect=lambda names: {n: created[n] for n in names if n in created}):
