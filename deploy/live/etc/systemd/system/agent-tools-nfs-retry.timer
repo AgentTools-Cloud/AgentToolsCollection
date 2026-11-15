@@ -1,0 +1,10 @@
+[Unit]
+Description=Retry pending Agent Tools NFS deliveries and reconcile verified receipts
+
+[Timer]
+OnBootSec=3min
+OnUnitInactiveSec=10min
+Unit=agent-tools-nfs-retry.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,11 @@
+[Unit]
+Description=agent-tools directory crawler
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/mcpserver
+EnvironmentFile=/opt/mcpserver/.env
+Environment="PYTHONPATH=/opt/mcpserver"
+ExecStart=/opt/mcpserver/.venv/bin/python -m directory.jobs crawl
+User=root

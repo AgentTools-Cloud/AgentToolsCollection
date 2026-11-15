@@ -1,0 +1,10 @@
+[Unit]
+Description=agent-tools background-job watchdog (daily)
+
+[Timer]
+OnCalendar=*-*-* 08:20:00
+Persistent=true
+Unit=agent-tools-watchdog.service
+
+[Install]
+WantedBy=timers.target

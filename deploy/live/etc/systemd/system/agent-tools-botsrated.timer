@@ -1,0 +1,11 @@
+[Unit]
+Description=agent-tools BotsRated quality sync (hourly incremental)
+
+[Timer]
+OnCalendar=*-*-* *:15:00
+Persistent=true
+RandomizedDelaySec=120
+Unit=agent-tools-botsrated.service
+
+[Install]
+WantedBy=timers.target

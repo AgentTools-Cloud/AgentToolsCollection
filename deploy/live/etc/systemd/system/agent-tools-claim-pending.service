@@ -1,0 +1,12 @@
+[Unit]
+Description=agent-tools pending claim auto-check (bounded schedule)
+After=network-online.target
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/mcpserver
+EnvironmentFile=/opt/mcpserver/.env
+Environment="PYTHONPATH=/opt/mcpserver"
+ExecCondition=/bin/sh -c "! systemctl is-active -q agent-tools-crawl.service"
+ExecStart=/opt/mcpserver/.venv/bin/python -m directory.jobs ownership-pending-recheck
+TimeoutStartSec=20min
+User=root

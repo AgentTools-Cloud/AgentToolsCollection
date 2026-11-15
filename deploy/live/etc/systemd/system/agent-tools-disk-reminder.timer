@@ -1,0 +1,9 @@
+[Unit]
+Description=Daily disk check published to the Agent Tools Notice page
+
+[Timer]
+OnCalendar=*-*-* 09:15
+Persistent=true
+
+[Install]
+WantedBy=timers.target

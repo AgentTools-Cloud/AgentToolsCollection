@@ -1,0 +1,11 @@
+[Unit]
+Description=agent-tools x402 re-verification (daily)
+
+[Timer]
+OnBootSec=70min
+OnCalendar=daily
+Persistent=true
+Unit=agent-tools-reverify.service
+
+[Install]
+WantedBy=timers.target

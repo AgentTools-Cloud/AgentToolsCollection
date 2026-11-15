@@ -1,0 +1,10 @@
+[Unit]
+Description=agent-tools directory crawler (daily at 00:30)
+
+[Timer]
+OnCalendar=*-*-* 00:30:00
+Persistent=true
+Unit=agent-tools-crawl.service
+
+[Install]
+WantedBy=timers.target

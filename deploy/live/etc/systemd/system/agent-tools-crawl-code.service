@@ -1,0 +1,17 @@
+[Unit]
+Description=agent-tools code-only MCP crawl (GitHub topic:mcp-server + npm keyword mcp-server)
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/mcpserver
+EnvironmentFile=/opt/mcpserver/.env
+Environment="PYTHONPATH=/opt/mcpserver"
+# GitHub search: ~30 requests/minute with the OAuth App credentials.
+# Incremental: repositories pushed since the last successful run (2-day
+# overlap). The first run, or `crawl-code --full`, imports the whole backlog;
+# rows are dated by repository / package creation, not by import day.
+ExecStart=/opt/mcpserver/.venv/bin/python -m directory.jobs crawl-code
+TimeoutStartSec=3h
+Nice=10
+User=root

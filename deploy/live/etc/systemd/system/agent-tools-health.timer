@@ -1,0 +1,10 @@
+[Unit]
+Description=agent-tools directory health probe (daily at 05:30)
+
+[Timer]
+OnCalendar=*-*-* 05:30:00
+Persistent=true
+Unit=agent-tools-health.service
+
+[Install]
+WantedBy=timers.target
