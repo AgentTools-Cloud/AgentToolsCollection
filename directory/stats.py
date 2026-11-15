@@ -1093,6 +1093,10 @@ INDEXED_BACKFILL_DAYS = 120
 _RAW_PROBES = {"x402": ("health_history", "service_id"),
                "mcp": ("mcp_health_history", "server_id"),
                "a2a": ("a2a_health_history", "agent_id")}
+# Checked against full database backups (10-18, 10-26, 10-29): the MCP replay
+# was within 1%, the x402 replay about 20% low (x402 health is also set outside
+# the probe log), so x402 reachable is not replayed; backup days carry it.
+REPLAY_REACHABLE = ("mcp", "a2a")
 
 
 def backfill_kpis(conn, before: str, warmup_days: int = 2) -> dict[str, dict]:
@@ -1108,6 +1112,8 @@ def backfill_kpis(conn, before: str, warmup_days: int = 2) -> dict[str, dict]:
     """
     out: dict[str, dict] = defaultdict(dict)
     for kind, (table, col) in _RAW_PROBES.items():
+        if kind not in REPLAY_REACHABLE:
+            continue
         try:
             cur = conn.execute(f"SELECT {col}, checked_at, status FROM {table} "
                                "ORDER BY checked_at")
