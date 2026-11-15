@@ -35,7 +35,8 @@ REGISTRY_URL = "https://registry.modelcontextprotocol.io/v0/servers"
 CLINE_URL = "https://api.cline.bot/v1/mcp/marketplace"
 BAIDU_URL = "https://www.mcpworld.com/api/mcp-market/servers"
 BAIDU_PAGE = 25               # pn * pl may not exceed 100
-BAIDU_MAX_REQUESTS = 6000
+BAIDU_MAX_REQUESTS = 8000
+BAIDU_WORKERS = 4
 LOOKUP_BATCH = 30             # repo: qualifiers per GitHub search request
 LOOKUP_RECHECK_DAYS = 30      # repositories not found / not kept are retried after this
 LOOKUP_MAX = 60000
@@ -340,17 +341,23 @@ def baidu_words(limit: int = 1500) -> list[str]:
 
 
 def fetch_baidu(words: list[str], max_requests: int = BAIDU_MAX_REQUESTS,
-                sleep: float = 0.3) -> dict[str, str]:
+                sleep: float = 0.3, workers: int = BAIDU_WORKERS) -> dict[str, str]:
+    """Walk the keyword list (each answer takes ~2.3 s from the US, so a few
+    keywords run at once)."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
     cm = _cm()
     hints: dict[str, str] = {}
-    requests = 0
-    for wd in words:
+    state = {"requests": 0, "exhausted": False}
+    lock = threading.Lock()
+
+    def word(wd):
         for pn in range(1, 100 // BAIDU_PAGE + 1):
-            if requests >= max_requests:
-                log.warning("code mcp: baidu request budget exhausted")
-                log.info("code mcp: baidu repos=%d requests=%d", len(hints), requests)
-                return hints
-            requests += 1
+            with lock:
+                if state["requests"] >= max_requests:
+                    state["exhausted"] = True
+                    return
+                state["requests"] += 1
             url = BAIDU_URL + "?" + urllib.parse.urlencode(
                 {"lg": "zh", "wd": wd, "pn": pn, "pl": BAIDU_PAGE})
             try:
@@ -358,18 +365,24 @@ def fetch_baidu(words: list[str], max_requests: int = BAIDU_MAX_REQUESTS,
                                   timeout=30)
             except Exception as e:  # noqa: BLE001 - one keyword must not stop the walk
                 log.warning("code mcp: baidu %r page %d failed: %r", wd, pn, e)
-                break
+                return
             servers = []
             for grp in ((data or {}).get("data") or {}).get("mcpList") or []:
                 servers.extend(grp.get("servers") or [])
-            for s in servers:
-                repo = cm.github_repo(s.get("serverUrl"))
-                if repo:
-                    hints.setdefault(repo, "baidu-mcpworld")
+            with lock:
+                for s in servers:
+                    repo = cm.github_repo(s.get("serverUrl"))
+                    if repo:
+                        hints.setdefault(repo, "baidu-mcpworld")
             time.sleep(sleep)
             if len(servers) < BAIDU_PAGE:
-                break
-    log.info("code mcp: baidu repos=%d requests=%d", len(hints), requests)
+                return
+
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        list(pool.map(word, words))
+    if state["exhausted"]:
+        log.warning("code mcp: baidu request budget exhausted")
+    log.info("code mcp: baidu repos=%d requests=%d", len(hints), state["requests"])
     return hints
 
 
