@@ -112,6 +112,8 @@ def own_agent_card(base_url: str = SITE) -> dict:
             "the contextId we return; to choose your own contextId, send an API key "
             "(Authorization: Bearer). Plain text goes to ask_analyst; for another skill send a data "
             "part {\"skill\": <id>, \"question\": ...}. "
+            f"Limits per client IP: 20 answers/hour (3 reports) and 100/day; errors carry "
+            f"retryAfterSeconds ({base}/about#a2a-agent). "
             f"To search or safety-scan tools use our MCP server: {base}/mcp-discovery/"
         ),
         "url": endpoint,

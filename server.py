@@ -209,7 +209,7 @@ _LLMS_TXT = """# agent-tools.cloud
 
 - Search all types: GET /api/v1/resources/search?q=...
 - MCP: GET /api/v1/mcp/search?scope=remote|code|all and /api/v1/mcp/servers/{slug}
-- A2A: GET /api/v1/a2a/search, /api/v1/a2a/agents/{slug}; reports: POST /a2a
+- A2A: GET /api/v1/a2a/search, /api/v1/a2a/agents/{slug}; analyst: POST /a2a
 - x402 card: GET /api/v1/services/{slug}
 - Recommendations: GET /api/v1/ask?q=...
 - Categories: /api/v1/categories, /api/v1/stats
@@ -617,9 +617,13 @@ async def a2a_jsonrpc(request: Request):
 
     Plain text goes to ask_analyst; a data part {"skill", "question"} picks another skill;
     {"skill": <raw report id>} returns that report without the LLM. Optional
-    `Authorization: Bearer <key>` lets the caller choose its own contextId. Errors carry
-    an A2A ErrorInfo reason: RATE_LIMITED, DAILY_LIMIT_REACHED, ANALYST_BUSY,
-    ANALYST_UNAVAILABLE. See https://agent-tools.cloud/about#a2a-agent.
+    `Authorization: Bearer <key>` lets the caller choose its own contextId.
+
+    Limits on model-written answers (cached answers and raw reports are free), per client
+    IP (IPv6 per /64): 20 per rolling hour (3 for research_report / market_scan) and 100
+    per UTC day; 1,000 per UTC day across all callers. Errors carry an A2A ErrorInfo
+    reason: RATE_LIMITED, DAILY_LIMIT_REACHED, ANALYST_BUSY, ANALYST_UNAVAILABLE, with
+    retryAfterSeconds and the limit in its metadata. See https://agent-tools.cloud/about#a2a-agent.
     """
     from fastapi.concurrency import run_in_threadpool
     from directory import a2a as directory_a2a
