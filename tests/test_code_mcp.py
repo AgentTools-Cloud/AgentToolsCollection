@@ -78,6 +78,15 @@ class MergeTests(_TempDB):
         self.assertEqual(days, 8)
 
 
+class InstallHintTests(_TempDB):
+    def test_smithery_local_server_gets_the_smithery_install_command(self):
+        from directory import resources
+        hint = resources.code_install_hint({"source": "smithery", "package_name": "acme/tool",
+                                            "endpoint_url": None})
+        self.assertEqual((hint["package_registry"], hint["command"]),
+                         ("smithery", "npx -y @smithery/cli install acme/tool"))
+
+
 class ScopeTests(_TempDB):
     def setUp(self):
         super().setUp()

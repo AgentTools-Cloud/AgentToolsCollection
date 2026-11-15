@@ -160,6 +160,7 @@ _INSTALL_COMMANDS = {
     "pypi": "uvx {pkg}",
     "docker": "docker run -i --rm {pkg}",
     "oci": "docker run -i --rm {pkg}",
+    "smithery": "npx -y @smithery/cli install {pkg}",
 }
 
 
@@ -168,6 +169,9 @@ def code_install_hint(row: dict) -> dict:
     package registry is known, the usual stdio command to start it."""
     registry = (row.get("package_registry") or "").strip().lower() or None
     package = (row.get("package_name") or "").strip() or None
+    if not registry and package and row.get("source") == "smithery":
+        # Smithery local (stdio) servers: package_name is the qualified name.
+        registry = "smithery"
     repo = row.get("source_code_url") or (
         row.get("homepage_url") if "github.com/" in (row.get("homepage_url") or "") else None)
     template = _INSTALL_COMMANDS.get(registry or "")
