@@ -120,6 +120,12 @@ class WellknownCrawlerTests(unittest.TestCase):
             patch.object(jobs.a2a_mod, "crawl_a2a_registry_global", return_value=empty),
             patch.object(jobs.agenstry_mod, "fetch_feed", return_value=[]),
             patch.object(jobs.a2a_mod, "crawl_github_topic", return_value=empty),
+            # LocalMark and the peer directories are network sources too
+            patch.object(jobs.a2a_mod, "crawl_localmark",
+                         return_value={"snapshot": 0, "candidates": 0, "resolved": 0,
+                                       "inserted": 0, "updated": 0}),
+            patch.object(jobs.peers_mod, "crawl_a2a_peers",
+                         return_value={"inserted": 0, "updated": 0, "errors": []}),
             patch.object(jobs.wellknown_mod, "fetch_wellknown_a2a", return_value=[row]),
             patch.object(jobs, "_upsert_wellknown_a2a_rows", return_value=(1, 0, [])) as upsert,
             patch.object(jobs, "_start_run", return_value=1),
