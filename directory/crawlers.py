@@ -7,6 +7,7 @@ import json
 import logging
 import random
 import re
+import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextlib import closing
@@ -1316,12 +1317,49 @@ BULK_LOG_CHAINS = {
             "0x3600000000000000000000000000000000000000", 0.5, 10000, 400),
 }
 # Minimum seconds between eth_getLogs calls for nodes that throttle bursts.
-BULK_LOG_MIN_INTERVAL = {"arc": 2.0, "hyperevm": 1.0}
+BULK_LOG_MIN_INTERVAL = {"arc": 2.0, "hyperevm": 1.0, "base": 0.35}
 # eth_getLogs calls in flight per chain. Tenderly's public Base gateway served
-# 4 concurrent calls at ~4.3/s without a 429 (2026-11-13); 8 drew 429s.
-BULK_LOG_WORKERS = {"base": 4}
+# 4 concurrent calls at ~4.3/s without a 429 on 2026-11-13, but the 11-13 and
+# 11-14 production runs still hit sustained 429s and abandoned the sweep; the
+# request rate is now paced by one limiter shared by all workers (see
+# _Pacer), and 2 workers are enough to hide node latency at that pace.
+BULK_LOG_WORKERS = {"base": 2}
+# Attempts per window when the node answers 429 (each waits longer); a 429 is
+# never answered by splitting the range, which would only add requests.
+BULK_LOG_THROTTLE_TRIES = 10
 _TRANSFER_TOPIC = (
     "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef")
+
+
+class _Pacer:
+    """One request pace shared by all worker threads of a sweep.
+
+    `wait()` blocks until the next slot; `throttled()` widens the interval after
+    a 429 and `ok()` eases it back towards the base interval.
+    """
+
+    def __init__(self, interval: float):
+        self.base = max(interval, 0.05)
+        self.interval = self.base
+        self.next_at = 0.0
+        self.lock = threading.Lock()
+
+    def wait(self):
+        with self.lock:
+            now = time.monotonic()
+            at = max(now, self.next_at)
+            self.next_at = at + self.interval
+        if at > now:
+            time.sleep(at - now)
+
+    def throttled(self):
+        with self.lock:
+            self.interval = min(self.interval * 2, 10.0)
+            self.next_at = time.monotonic() + self.interval
+
+    def ok(self):
+        with self.lock:
+            self.interval = max(self.base, self.interval * 0.9)
 
 
 def _topic_addr(addr):
@@ -1401,8 +1439,15 @@ def fetch_chain_activity_bulk(paytos, chain="base", days=30, rate=0.15):
             log.info("onchain bulk %s: %d addresses, %d windows, %d calls",
                      chain, len(wanted), len(windows), total)
 
+            pacer = _Pacer(rate)
+
             def fetch_window(topics, lo, hi):
-                """All logs for [lo, hi]; halves busy ranges. None on failure."""
+                """All logs for [lo, hi]; halves oversized ranges. None on failure.
+
+                Every call waits for the shared pacer, so N workers together
+                keep the chain's pace. A 429 slows the pacer and retries the
+                same range; only other failures split it.
+                """
                 stack, out = [(lo, hi)], []
                 while stack:
                     a, b = stack.pop()
@@ -1410,18 +1455,31 @@ def fetch_chain_activity_bulk(paytos, chain="base", days=30, rate=0.15):
                                "address": contract, "topics": topics}]
                     logs = None
                     err = None
-                    for attempt in range(6):
+                    throttles = errors = 0
+                    while errors < 6 and throttles < BULK_LOG_THROTTLE_TRIES:
+                        pacer.wait()
                         try:
                             logs = _rpc(c, rpc_url, "eth_getLogs", params)
+                            pacer.ok()
                             break
                         except Exception as e:
                             err = e
                             if _oversized_range(e):
                                 break
                             resp = getattr(e, "response", None)
-                            throttled = resp is not None and resp.status_code == 429
-                            time.sleep(min(60.0, (5.0 if throttled else 1.0) * (2 ** attempt)))
+                            if resp is not None and resp.status_code == 429:
+                                pacer.throttled()
+                                time.sleep(min(120.0, 5.0 * (2 ** throttles)))
+                                throttles += 1
+                            else:
+                                time.sleep(min(30.0, 2 ** errors))
+                                errors += 1
                     if logs is None:
+                        resp = getattr(err, "response", None)
+                        if resp is not None and resp.status_code == 429:
+                            log.warning("onchain bulk %s: still throttled at block %d after %d tries",
+                                        chain, a, throttles)
+                            return None
                         # Busy ranges return more logs than the node will
                         # serialize. Halving keeps the sweep going instead of
                         # discarding the whole chain's results.
@@ -1434,7 +1492,6 @@ def fetch_chain_activity_bulk(paytos, chain="base", days=30, rate=0.15):
                                     chain, a, err)
                         return None
                     out.extend(logs)
-                    time.sleep(rate)
                 return out
 
             done = 0

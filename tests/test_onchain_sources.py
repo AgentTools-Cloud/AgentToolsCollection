@@ -15,6 +15,16 @@ PAYTO = "0xb8491F953e6860D3b5840b73c60883Ff099ceAfA"
 PAYER = "0x1111111111111111111111111111111111111111"
 
 
+def _fake_clock():
+    """time.sleep that advances a fake time.monotonic, so pacing is exact in tests."""
+    from unittest import mock
+    now = [1000.0]
+
+    def sleep(s):
+        now[0] += s
+    return mock.MagicMock(side_effect=sleep), (lambda: now[0])
+
+
 def _client_with(handler):
     real = httpx.Client
     return lambda **kw: real(transport=httpx.MockTransport(handler), **kw)
@@ -313,8 +323,10 @@ class HyperEvmBulkTests(unittest.TestCase):
                             crawlers._topic_addr(PAYTO)]}
             ] if lower == 500 else []})
 
+        sleeper, clock = _fake_clock()
         with patch.object(crawlers.httpx, "Client", side_effect=_client_with(handler)), \
-                patch.object(crawlers.time, "sleep") as sleeper:
+                patch.object(crawlers.time, "sleep", sleeper), \
+                patch.object(crawlers.time, "monotonic", clock):
             results, ok = crawlers.fetch_chain_activity_bulk(
                 [PAYTO], chain="hyperevm", days=1000 / 86400)
         self.assertTrue(ok)
@@ -426,8 +438,10 @@ class ArcBulkConfigTests(unittest.TestCase):
 
         cfg = {"arc": ("https://rpc.invalid", "0x3600000000000000000000000000000000000000",
                        0.5, 10000, 400)}
+        slept, clock = _fake_clock()
         with patch.object(crawlers, "BULK_LOG_CHAINS", cfg), \
-                patch.object(crawlers.time, "sleep") as slept, \
+                patch.object(crawlers.time, "sleep", slept), \
+                patch.object(crawlers.time, "monotonic", clock), \
                 patch.object(crawlers.httpx, "Client", side_effect=_client_with(handler)):
             results, ok = crawlers.fetch_chain_activity_bulk([PAYTO], chain="arc", days=0.1)
         self.assertTrue(ok)
@@ -528,3 +542,44 @@ class ConcurrentBulkTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ThrottleNoSplitTests(unittest.TestCase):
+    """11-15: a 429 slows the shared pacer and retries the same range; it never splits it."""
+
+    def test_persistent_429_does_not_split_the_range(self):
+        import json
+        ranges = []
+
+        def handler(request):
+            body = json.loads(request.content)
+            if body["method"] == "eth_blockNumber":
+                return httpx.Response(200, json={"result": hex(999)})
+            if body["method"] == "eth_getBlockByNumber":
+                return httpx.Response(200, json={"result": {"timestamp": "0x0"}})
+            q = body["params"][0]
+            ranges.append((int(q["fromBlock"], 16), int(q["toBlock"], 16)))
+            return httpx.Response(429, json={})
+
+        cfg = {"base": ("https://rpc.invalid", "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                        1.0, 1000, 4000)}
+        with patch.object(crawlers, "BULK_LOG_CHAINS", cfg), \
+                patch.dict(crawlers.BULK_LOG_WORKERS, {"base": 1}), \
+                patch.object(crawlers.time, "sleep"), \
+                patch.object(crawlers.httpx, "Client", side_effect=_client_with(handler)):
+            _results, ok = crawlers.fetch_chain_activity_bulk([PAYTO], chain="base", days=500 / 86400)
+        self.assertFalse(ok)
+        self.assertEqual(len(ranges), crawlers.BULK_LOG_THROTTLE_TRIES)
+        self.assertEqual(len(set(ranges)), 1)          # same window every time
+
+    def test_pacer_is_shared_and_backs_off(self):
+        p = crawlers._Pacer(0.5)
+        with patch.object(crawlers.time, "sleep"):
+            p.wait()
+            p.throttled()
+            self.assertEqual(p.interval, 1.0)
+            p.ok()
+            self.assertAlmostEqual(p.interval, 0.9)
+            for _ in range(50):
+                p.ok()
+            self.assertEqual(p.interval, 0.5)
