@@ -391,14 +391,16 @@ def cmd_crawl_mcp(only=None, *, probe_new=True) -> int:
     return 0
 
 
-def cmd_crawl_code(github_limit: int | None = None, npm_limit: int | None = None) -> int:
+def cmd_crawl_code(github_limit: int | None = None, npm_limit: int | None = None,
+                   min_stars: int = 0) -> int:
     """Import code-only MCP servers (GitHub topic:mcp-server + npm keyword
     mcp-server). Rows have no endpoint: never probed, separate sub-directory."""
     from . import code_mcp
     run_id = _start_run("mcp:code")
     try:
         rows, info = code_mcp.fetch_all(github_limit=github_limit,
-                                        npm_limit=npm_limit or code_mcp.NPM_MAX)
+                                        npm_limit=npm_limit or code_mcp.NPM_MAX,
+                                        min_stars=min_stars)
     except Exception as e:  # noqa: BLE001 - network / API failure
         _finish_run(run_id, 0, 0, [f"fetch failed: {e!r}"], status="error")
         log.warning("code mcp fetch failed: %r", e)
@@ -2360,6 +2362,8 @@ def main(argv=None) -> int:
     p_code = sub.add_parser("crawl-code")
     p_code.add_argument("--github-limit", type=int, default=None)
     p_code.add_argument("--npm-limit", type=int, default=None)
+    p_code.add_argument("--min-stars", type=int, default=0,
+                        help="only GitHub repositories with at least this many stars")
     sub.add_parser("crawl-a2a")
     sub.add_parser("crawl-agenstry")
     sub.add_parser("health")
@@ -2455,7 +2459,7 @@ def main(argv=None) -> int:
     if args.cmd == "crawl-mcp":
         return cmd_crawl_mcp(args.source)
     if args.cmd == "crawl-code":
-        return cmd_crawl_code(args.github_limit, args.npm_limit)
+        return cmd_crawl_code(args.github_limit, args.npm_limit, args.min_stars)
     if args.cmd == "crawl-a2a":
         return cmd_crawl_a2a()
     if args.cmd == "crawl-agenstry":

@@ -94,10 +94,12 @@ def _date_ranges(first: date, last: date, count, cap=SEARCH_CAP):
 
 
 def fetch_github(topic: str = GITHUB_TOPIC, *, today: date | None = None,
-                 max_repos: int | None = None) -> list[dict]:
+                 max_repos: int | None = None, min_stars: int = 0) -> list[dict]:
     auth = _github_auth()
     today = today or date.today()
     base = f"topic:{topic} fork:false archived:false"
+    if min_stars > 0:
+        base += f" stars:>={int(min_stars)}"
 
     def count(a, b):
         data, _ = _github_search(f"{base} created:{a.isoformat()}..{b.isoformat()}", 1, auth)
@@ -280,12 +282,14 @@ def merge(github_items: list[dict], npm_objs: list[dict],
     return out, skipped
 
 
-def fetch_all(*, github_limit: int | None = None, npm_limit: int = NPM_MAX) -> tuple[list[dict], dict]:
-    gh = fetch_github(max_repos=github_limit)
+def fetch_all(*, github_limit: int | None = None, npm_limit: int = NPM_MAX,
+              min_stars: int = 0) -> tuple[list[dict], dict]:
+    gh = fetch_github(max_repos=github_limit, min_stars=min_stars)
     npm = fetch_npm(max_packages=npm_limit)
     with db.connect(read_only=True) as c:
         known = known_repos(c)
     rows, skipped = merge(gh, npm, known)
-    info = {"github": len(gh), "npm": len(npm), "rows": len(rows), **skipped}
+    info = {"github": len(gh), "npm": len(npm), "rows": len(rows), "min_stars": min_stars,
+            **skipped}
     log.info("code mcp merged: %s", info)
     return rows, info
