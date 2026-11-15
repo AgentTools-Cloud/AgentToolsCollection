@@ -54,8 +54,6 @@ SOURCE_LABELS = {
     "localmark": "LocalMark",
     "mcp-census": "MCPCensus",
     "csoai-census": "the CSOAI MCP census",
-    "inite": "INITE Atlas",
-    "sealkeeper": "SealKeeper",
     "agentalog": "agentalog",
     "assay": "Assay Observatory",
     "agentindex": "AgentIndex",
