@@ -330,6 +330,15 @@ class CrawlerFailureTests(unittest.TestCase):
     def test_retired_chiark_is_not_scheduled(self):
         self.assertNotIn("chiark", crawlers.MCP_CRAWLERS)
 
+    def test_payment_requirements_descriptor_advertises_its_resource(self):
+        descriptor = {"x402Version": 2, "accepts": [
+            {"scheme": "exact", "network": "eip155:8453", "payTo": "0x" + "ab" * 20,
+             "price": "$0.01", "resource": "https://shop.example.test/report"},
+            {"scheme": "exact", "network": "eip155:8453", "payTo": "0x" + "ab" * 20}]}
+        urls = [crawlers._entry_url(e, "https://shop.example.test")
+                for e in crawlers._advertised_entries(descriptor)]
+        self.assertEqual(urls, ["https://shop.example.test/report", ""])
+
     def test_probe_health_uses_descriptor_advertised_post(self):
         endpoint = "https://api.example.test/v1/x402/services/check"
         descriptor = {
