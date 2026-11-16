@@ -947,7 +947,7 @@ def cmd_readiness(kinds=("mcp", "x402")) -> int:
                 "id, health, http_status, conformance, latency_ms, latency_p95_ms, "
                 "protocol_version, tools_json, tool_count, source_code_url, package_name, "
                 "homepage_url, owner_verified, last_seen, x402_supported, pricing, "
-                "auth_method, health_checked, endpoint_url, credential_test_json"),
+                "auth_method, health_checked"),
         "x402": ("services", listing_readiness.history_x402, listing_readiness.assess_x402,
                  "id, health, http_status, x402_ok, latency_ms, payment, resource_count, "
                  "resource_samples, well_known_url, openapi_url, descriptor_checked_at, "
@@ -1290,9 +1290,9 @@ def cmd_health_mcp(only_unknown: bool = False, quarantined_only: bool = False) -
                 for r in batch:
                     p95 = db.mcp_p95_latency(c, r["id"])
                     srow = c.execute(
-                        "SELECT health, http_status, conformance, tool_count, tools_json, "
+                        "SELECT health, conformance, tool_count, tools_json, "
                         "source_code_url, package_name, transport, safety_verdict, "
-                        "owner_verified, endpoint_url, credential_test_json "
+                        "owner_verified "
                         "FROM mcp_servers WHERE id=?", (r["id"],)).fetchone()
                     if srow is None:
                         # a concurrent crawl can merge this row away mid-pass

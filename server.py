@@ -27,7 +27,6 @@ from directory.routes import TEMPLATES, router as directory_router
 from directory.auth import router as auth_router
 from directory.articles import ArticleStore
 from directory.paid_verify_routes import router as paid_verify_router
-from directory.mcp_credential_test_routes import router as mcp_credential_test_router
 from directory.claim_invite_routes import router as claim_invite_router
 from directory.mcp_app import discover_mcp, wrap_with_client_capture
 from metrics import PrometheusMiddleware, metrics_endpoint
@@ -243,10 +242,7 @@ Tools: search, get, search_mcp_servers, get_mcp_server, search_a2a_agents,
 search_resources, ask_services, list_categories, stats, directory_stats, get_methodology,
 list_articles, get_article, scan_mcp_safety, register,
 create_api_key, prepare_paid_verification, execute_paid_verification, get_paid_verification,
-get_mcp_credential_test_link, list_mcp_credential_tests,
 claim_service_url, verify_service_url, get_owned_listing, edit_owned_listing.
-401-gated MCP servers: get_mcp_credential_test_link(slug) returns a page where the person tests
-their own credential; never ask for it in chat.
 
 ## Claim and edit an exact service URL
 
@@ -439,8 +435,6 @@ def well_known_mcp(request: Request) -> dict[str, Any]:
             {"name": "prepare_paid_verification", "description": "Quote a sponsored paid verification of an x402 service: returns EIP-712 typed data for your own wallet to sign (non-custodial, Base USDC, <= $1)."},
             {"name": "execute_paid_verification", "description": "Relay your signed authorization to the service exactly once and score the paid call."},
             {"name": "get_paid_verification", "description": "Read one of your own paid verifications."},
-            {"name": "get_mcp_credential_test_link", "description": "Page where a person tests an MCP server that asks for a credential with their own credential; never ask for it in chat."},
-            {"name": "list_mcp_credential_tests", "description": "Every credential test of one MCP server, newest first (public record)."},
             {"name": "claim_service_url", "description": "Issue a fresh token for one exact public HTTPS URL. Requires an account API key in the MCP Authorization: Bearer header.", "transports": ["streamable_http"]},
             {"name": "verify_service_url", "description": "Verify your published ownership token; grants rights only for the exact URL and returns its listings.", "transports": ["streamable_http"]},
             {"name": "get_owned_listing", "description": "Read editable metadata for a listing covered by your verified claim.", "transports": ["streamable_http"]},
@@ -697,8 +691,6 @@ def _build_openapi() -> dict[str, Any]:
         "Whole-host claims use /api/v1/claims and are unavailable on shared hosts. "
         "Paid verification requires the buyer's signed wallet authorization and is never retried. "
         "MCP provides prepare_paid_verification, execute_paid_verification and get_paid_verification. "
-        "401-gated MCP servers: get_mcp_credential_test_link gives the person a page to test their own "
-        "credential; never collect credentials in chat; list_mcp_credential_tests reads results. "
         "MCP-only clients can mint a key with the create_api_key tool. "
         "Proof methods: https://agent-tools.cloud/docs/claim."
     )
@@ -721,7 +713,6 @@ if ARTICLE_STORE is not None:
 app.include_router(auth_router)
 app.include_router(directory_router)
 app.include_router(paid_verify_router)
-app.include_router(mcp_credential_test_router)
 app.include_router(claim_invite_router)
 app.add_api_route("/metrics", metrics_endpoint, include_in_schema=False, methods=["GET"])
 

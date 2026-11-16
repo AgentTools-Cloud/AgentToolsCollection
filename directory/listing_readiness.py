@@ -67,7 +67,6 @@ LABELS = {
 # crawlers.MCP_LATEST_REVISION (a test keeps them in step).
 MCP_REVISIONS = ("2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25", "2026-07-28")
 AUTH_GATED = (401, 402, 403, 407)
-CREDENTIAL_TEST_OK = ("succeeded", "partial")
 DECAY_START_DAYS = 30
 DECAY_END_DAYS = 120
 DECAY_FLOOR = 0.4
@@ -77,10 +76,7 @@ METHODOLOGY = {
         "Eight criteria, the same as the A2A readiness score, read from our daily "
         "MCP probe (initialize + tools/list) and 30-day probe history. No MCP "
         "standard defines a signed server descriptor, so that criterion is n/a "
-        "and the other 85 points are scaled to 100. When the endpoint asks for a "
-        "credential, the handshake, protocol revision and tool items come from the "
-        "latest successful credential test run on the listing's page; without one "
-        "they score 0. Grades: A>=90, B>=75, C>=60, "
+        "and the other 85 points are scaled to 100. Grades: A>=90, B>=75, C>=60, "
         "D>=40, F<40. Display only: search order uses the quality grade."
     ),
     "x402": (
@@ -352,28 +348,6 @@ def _mcp_security(auth) -> dict:
     return _crit("mcp", "security", 2, "partial", f"Declares credential scheme: {auth}.")
 
 
-def credential_test(row: dict) -> dict | None:
-    """Latest successful credential test of the listing's current endpoint, or None."""
-    test = row.get("credential_test")
-    if test is None:
-        test = _json(row.get("credential_test_json"))
-    if not isinstance(test, dict) or test.get("status") not in CREDENTIAL_TEST_OK:
-        return None
-    if (test.get("endpoint_url") or "") != (row.get("endpoint_url") or ""):
-        return None
-    return test
-
-
-def _tools_crit(n: int, bare: int, lead: str = "") -> dict:
-    if n == 0:
-        return _crit("mcp", "skills", 0, "fail", f"{lead}No tools listed by tools/list.")
-    pts = 10 if n >= 3 else 5
-    if bare and pts > 8:
-        return _crit("mcp", "skills", 8, "partial", f"{lead}{n} tools; {bare} lack a description.")
-    return _crit("mcp", "skills", pts, "pass" if pts == 10 else "partial",
-                 f"{lead}Lists {n} tool(s) with descriptions.")
-
-
 def assess_mcp(row: dict, *, uptime_ok: int = 0, uptime_total: int = 0,
                sources=(), now: int | None = None) -> dict:
     now = int(now or time.time())
@@ -384,11 +358,6 @@ def assess_mcp(row: dict, *, uptime_ok: int = 0, uptime_total: int = 0,
     gate = None
     if h != "down" and conf and conf not in ("pass", "partial") and sc in AUTH_GATED:
         gate = f"Requires {'payment' if sc == 402 else 'authentication'} (HTTP {sc})"
-    tested = credential_test(d) if gate else None
-    via = ""
-    if tested:
-        via = ("Measured with a credential supplied by a signed-in user on "
-               + time.strftime("%Y-%m-%d", time.gmtime(int(tested.get("at") or now))) + ": ")
 
     # 1. handshake
     if h == "down" or not conf:
@@ -397,11 +366,6 @@ def assess_mcp(row: dict, *, uptime_ok: int = 0, uptime_total: int = 0,
         valid = _crit("mcp", "valid_card", 10, "pass", "initialize and tools/list both answered.")
     elif conf == "partial":
         valid = _crit("mcp", "valid_card", 7, "partial", "initialize answered; tools/list failed.",
-                      findings=["tools/list did not return a tools array"])
-    elif tested and tested["status"] == "succeeded":
-        valid = _crit("mcp", "valid_card", 10, "pass", f"{via}initialize and tools/list both answered.")
-    elif tested:
-        valid = _crit("mcp", "valid_card", 7, "partial", f"{via}initialize answered; tools/list failed.",
                       findings=["tools/list did not return a tools array"])
     elif gate:
         valid = _crit("mcp", "valid_card", 0, "info",
@@ -426,10 +390,7 @@ def assess_mcp(row: dict, *, uptime_ok: int = 0, uptime_total: int = 0,
     live = _live("mcp", state, text, latency if h in ("ok", "degraded") else None)
 
     # 3. revision
-    if tested:
-        pts, st, txt = mcp_revision_points(tested.get("protocol_version"))
-        proto = _crit("mcp", "protocol_version", pts, st, via + txt)
-    elif gate and not d.get("protocol_version"):
+    if gate and not d.get("protocol_version"):
         proto = _crit("mcp", "protocol_version", 0, "info",
                       f"{gate}: our anonymous probe could not run initialize, "
                       "so the protocol revision was not measured and scores 0.", auth_gated=True)
@@ -446,16 +407,21 @@ def assess_mcp(row: dict, *, uptime_ok: int = 0, uptime_total: int = 0,
         tools = _json(d.get("tools_json"))
     tools = [t for t in tools if isinstance(t, dict) and t.get("name")] if isinstance(tools, list) else []
     n = len(tools) or int(d.get("tool_count") or 0)
-    if tested:
-        n = int(tested.get("tool_count") or 0)
-        skills = _tools_crit(n, n - int(tested.get("described_count") or 0), via)
-    elif n == 0 and gate:
+    if n == 0 and gate:
         skills = _crit("mcp", "skills", 0, "info",
                        f"{gate}: our anonymous probe could not call tools/list, "
                        "so the tools were not measured and score 0.", auth_gated=True)
+    elif n == 0:
+        skills = _crit("mcp", "skills", 0, "fail", "No tools listed by tools/list.")
     else:
+        pts = 10 if n >= 3 else 5
         bare = [t for t in tools if not str(t.get("description") or "").strip()]
-        skills = _tools_crit(n, len(bare))
+        if bare and pts > 8:
+            skills = _crit("mcp", "skills", 8, "partial",
+                           f"{n} tools; {len(bare)} lack a description.")
+        else:
+            skills = _crit("mcp", "skills", pts, "pass" if pts == 10 else "partial",
+                           f"Lists {n} tool(s) with descriptions.")
 
     # 7. identity
     declared = bool(d.get("source_code_url") or d.get("package_name") or d.get("homepage_url"))

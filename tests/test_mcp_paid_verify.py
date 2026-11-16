@@ -207,7 +207,7 @@ class McpOwnershipClaimTests(TemporaryDatabaseTestCase):
         client = self.public_document_client()
         llms = client.get('/llms.txt').text
         info = client.get('/openapi.json').json()['info']
-        self.assertLessEqual(len(llms.split()), 445)
+        self.assertLessEqual(len(llms.split()), 420)
         self.assertLessEqual(len(info['description'].split()), 55)
         self.assertLessEqual(len(info['x-guidance'].split()), 160)
         text = llms + info['description'] + info['x-guidance']
