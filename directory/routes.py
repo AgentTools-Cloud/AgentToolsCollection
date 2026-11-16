@@ -123,6 +123,30 @@ _home_cache: dict = {"at": 0.0, "payload": None}
 _home_cache_lock = threading.Lock()
 
 
+# /mcp and /mcp/code show the same directory counts on every request, and
+# mcp_stats parses every endpoint URL (~1.6 s CPU at 63k rows). A crawler
+# paging /mcp/code?q=... at ~1 req/s on 11-16 kept both vCPUs busy. The counts
+# only move when the crawl / health timers run, so list pages reuse them for
+# a few minutes (same owner-catalog revision rule as the homepage).
+_LIST_STATS_TTL = limits.env_int("AGENT_TOOLS_LIST_STATS_TTL", 600)
+_list_stats_cache: dict = {"at": 0.0, "stats": None, "revision": None}
+_list_stats_lock = threading.Lock()
+
+
+def _list_mcp_stats(c):
+    with _list_stats_lock:
+        now = time.time()
+        revision = (c.execute("PRAGMA database_list").fetchone()[2],
+                    db.get_meta(c, "owner_catalog_revision", ""))
+        cached = _list_stats_cache["stats"]
+        if (cached is not None and now - _list_stats_cache["at"] < _LIST_STATS_TTL
+                and _list_stats_cache["revision"] == revision):
+            return cached
+        stats = db.mcp_stats(c)
+        _list_stats_cache.update(at=now, stats=stats, revision=revision)
+        return stats
+
+
 def _home_payload():
     now = time.time()
     # Held across the rebuild so a burst on an expired entry recomputes once
@@ -724,7 +748,7 @@ def mcp_page(
             access=access, sort=sort, limit=60))
         exact_name_groups = directory_resources.exact_name_groups(
             c, q, (item.get("name") for item in servers))
-        s = db.mcp_stats(c)
+        s = _list_mcp_stats(c)
         leaders = db.top_rated(c, "mcp", 20)
     if not request.query_params.get("ref"):  # our own links (topic pages) are not demand
         search_terms.record("mcp", q, len(servers), "web")
@@ -807,7 +831,7 @@ def _code_indexable(m: dict) -> bool:
 def _code_search(q, sort, limit=60):
     with _conn() as c:
         rows = db.search_mcp(c, q=q, sort=sort, limit=limit, scope="code")
-        s = db.mcp_stats(c)
+        s = _list_mcp_stats(c)
     return [_code_view(r) for r in rows], s
 
 
