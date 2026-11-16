@@ -406,7 +406,10 @@ def categories_page(
     page = min(page, pages)
     start = (page - 1) * _CATEGORY_PAGE_SIZE
     title, target, param = _CATEGORY_KINDS[kind]
-    items = [{**r, "url": target + "?" + urlencode({param: r["category"]})}
+    # MCP topics and A2A tags open full-text search; the page builds that URL on
+    # click so crawlers never see it. x402 categories are a plain filter link.
+    items = [{**r, "url": target + "?" + urlencode({param: r["category"]})} if param != "q"
+             else {**r, "search_path": target}
              for r in matched[start:start + _CATEGORY_PAGE_SIZE]]
     def page_url(number):
         return "/categories?" + urlencode({"kind": kind, "q": query, "page": number})

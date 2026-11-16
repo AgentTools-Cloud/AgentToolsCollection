@@ -50,9 +50,16 @@ class CategoryBrowseTests(unittest.TestCase):
         bodies = [self.client.get(f'/categories?kind=a2a&page={p}').text for p in (1, 2, 3)]
         self.assertEqual([x.count('data-category-link') for x in bodies], [60, 60, 31])
         for i in range(151):
-            self.assertEqual(sum(f'/a2a?q=tag-{i:04d}' in x for x in bodies), 1)
+            self.assertEqual(sum(f'data-search-q="tag-{i:04d}"' in x for x in bodies), 1)
+        self.assertFalse(any('?q=tag-' in x for x in bodies))
         self.db.a2a_categories.assert_called_once()
         self.assertEqual(self.conn.close.call_count, 3)
+
+    def test_templates_have_no_crawlable_search_links(self):
+        for path in (ROOT / 'directory/templates').glob('*.html'):
+            text = path.read_text()
+            self.assertNotRegex(text, r'href="[^"]*[?&]q=', path.name)
+        self.assertIn('[data-search-path]', (ROOT / 'directory/templates/base.html').read_text())
 
     def test_x402_correct_destination_and_encoding(self):
         self.db.list_categories.return_value = [{'category': 'a&b /中文', 'count': 3}]

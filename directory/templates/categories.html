@@ -24,10 +24,11 @@
   <ul class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
     {% for c in items %}
     <li class="min-w-0">
-      <a href="{{ c.url }}" data-category-link class="svc-card p-4 flex items-center justify-between min-w-0">
+      {% set tag = 'a' if c.url else 'button' %}
+      <{{ tag }} {% if c.url %}href="{{ c.url }}"{% else %}type="button" data-search-path="{{ c.search_path }}" data-search-q="{{ c.category }}"{% endif %} data-category-link class="svc-card p-4 flex items-center justify-between min-w-0 w-full text-left">
         <span class="font-semibold truncate" title="{{ c.category }}">{{ c.category }}</span>
         <span class="badge bg-slate-50 mono shrink-0 ml-2">{{ c.count }}</span>
-      </a>
+      </{{ tag }}>
     </li>
     {% else %}
     <li class="text-slate-500">No matching topics. Try another search.</li>

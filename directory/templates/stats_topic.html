@@ -56,7 +56,7 @@
         <td class="num mono">{{ r.ready|num }}</td>
         <td class="num mono">{{ r.median_readiness if r.median_readiness is not none else "—" }}</td>
         <td class="num mono">{{ (r.median_latency_ms|string ~ " ms") if r.median_latency_ms is not none else "—" }}</td>
-        <td class="text-right whitespace-nowrap"><a class="text-blue-700 hover:underline text-xs" href="/{{ r.kind }}?q={{ t.topic|urlencode }}&health=ok&ref=topic">Browse →</a></td>
+        <td class="text-right whitespace-nowrap"><button type="button" class="text-blue-700 hover:underline text-xs" data-search-path="/{{ r.kind }}" data-search-q="{{ t.topic }}" data-search-extra="health=ok&amp;ref=topic">Browse →</button></td>
       </tr>
     {% endfor %}
     </tbody>

@@ -53,7 +53,7 @@
     {% endif %}
   </dl>
   {% if m.tags %}
-  <div class="mt-4 flex flex-wrap gap-1.5">{% for t in m.tags %}<a href="/mcp/code?q={{ t|urlencode }}" class="badge bg-slate-50 text-slate-600 ring-1 ring-slate-200 hover:ring-blue-300">{{ t }}</a>{% endfor %}</div>
+  <div class="mt-4 flex flex-wrap gap-1.5">{% for t in m.tags %}<button type="button" data-search-path="/mcp/code" data-search-q="{{ t }}" class="badge bg-slate-50 text-slate-600 ring-1 ring-slate-200 hover:ring-blue-300">{{ t }}</button>{% endfor %}</div>
   {% endif %}
 </section>
 

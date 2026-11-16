@@ -196,6 +196,21 @@
       }
     }catch(e){}
   }
+  // Search shortcuts are buttons and the URL is only built on click, so crawlers
+  // never find a search-results URL to follow.
+  (function () {
+    function go(e) {
+      var el = e.target.closest && e.target.closest("[data-search-path]");
+      if (!el || (e.type === "auxclick" && e.button !== 1)) return;
+      e.preventDefault();
+      var url = el.getAttribute("data-search-path") + "?q=" + encodeURIComponent(el.getAttribute("data-search-q") || "");
+      if (el.getAttribute("data-search-extra")) url += "&" + el.getAttribute("data-search-extra");
+      if (e.type === "auxclick" || e.ctrlKey || e.metaKey) window.open(url, "_blank", "noopener");
+      else location.href = url;
+    }
+    document.addEventListener("click", go);
+    document.addEventListener("auxclick", go);
+  })();
   </script>
   {% block track %}{% endblock %}
 <script>
