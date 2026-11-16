@@ -118,6 +118,26 @@ class McpReadiness(unittest.TestCase):
         self.assertEqual(k["uptime"]["status"], "provisional")
         self.assertEqual(k["skills"]["points"], 0)
 
+    def test_auth_gated_items_say_so_and_still_count(self):
+        for sc, gate in ((401, "Requires authentication (HTTP 401): "),
+                         (402, "Requires payment (HTTP 402): ")):
+            rep = L.assess_mcp(mcp_row(conformance="fail", http_status=sc, tools_json=None,
+                                       tool_count=None, protocol_version=None),
+                               uptime_ok=10, uptime_total=10, now=NOW)
+            k = by_key(rep)
+            for key in ("valid_card", "protocol_version", "skills"):
+                self.assertEqual(k[key]["points"], 0)
+                self.assertTrue(k[key]["auth_gated"])
+                self.assertTrue(k[key]["detail"].startswith(gate), k[key]["detail"])
+                self.assertIn("not measured", k[key]["detail"])
+            self.assertEqual(rep["applicable_max"], 90)
+            got = sum(c["points"] for c in rep["criteria"] if c.get("applicable", True))
+            self.assertEqual(rep["score"], round(got * 100 / 90, 1))
+        broken = by_key(L.assess_mcp(mcp_row(conformance="fail", http_status=500, tools_json=None,
+                                             tool_count=None, protocol_version=None), now=NOW))
+        self.assertEqual(broken["skills"]["detail"], "No tools listed by tools/list.")
+        self.assertNotIn("auth_gated", broken["protocol_version"])
+
     def test_down_and_payment_evidence(self):
         rep = L.assess_mcp(mcp_row(health="down", http_status=None, conformance=None,
                                    x402_supported=1, pricing='{"offers": [1]}'),

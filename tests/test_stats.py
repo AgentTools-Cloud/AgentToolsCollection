@@ -201,6 +201,17 @@ class StatsSnapshotTests(unittest.TestCase):
         self.assertIn("Faster than 75%", html)
         self.assertIn("Declare auth", html)
 
+    def test_peer_gap_for_auth_gated_item(self):
+        snap = {"as_of": "2026-11-11 06:00 UTC", "distributions": {"mcp": {
+            "readiness_n": 21, "readiness": list(range(0, 101, 5)), "latency_n": 0, "latency_ms": []}}}
+        r = {"score": 40, "criteria": [
+            {"key": "skills", "label": "Tool declaration", "points": 0, "max_points": 10,
+             "detail": "Requires authentication (HTTP 401): …", "auth_gated": True},
+            {"key": "protocol_version", "label": "Protocol revision", "points": 0, "max_points": 10}]}
+        gaps = {g["key"]: g for g in stats.peer_position(snap, "mcp", r)["biggest_gaps"]}
+        self.assertEqual(gaps["skills"]["fix"], stats.GAP_FIXES["auth_gated"])
+        self.assertEqual(gaps["protocol_version"]["fix"], stats.GAP_FIXES["protocol_version"])
+
 
     def test_topic_page_and_monthly_report(self):
         t = stats.topic_page(self.snap, "weather")

@@ -357,6 +357,10 @@ def assess_mcp(row: dict, *, uptime_ok: int = 0, uptime_total: int = 0,
     d = dict(row)
     h, sc, conf = d.get("health"), d.get("http_status"), d.get("conformance")
     names = source_names(sources)
+    # Behind auth the anonymous probe cannot measure these items: say so, but they still score 0.
+    gate = None
+    if h != "down" and conf and conf not in ("pass", "partial") and sc in AUTH_GATED:
+        gate = f"Requires {'payment' if sc == 402 else 'authentication'} (HTTP {sc})"
 
     # 1. handshake
     if h == "down" or not conf:
@@ -366,9 +370,10 @@ def assess_mcp(row: dict, *, uptime_ok: int = 0, uptime_total: int = 0,
     elif conf == "partial":
         valid = _crit("mcp", "valid_card", 7, "partial", "initialize answered; tools/list failed.",
                       findings=["tools/list did not return a tools array"])
-    elif sc in AUTH_GATED:
+    elif gate:
         valid = _crit("mcp", "valid_card", 0, "info",
-                      f"Handshake needs credentials (HTTP {sc}); not readable anonymously.")
+                      f"{gate}: our anonymous probe could not complete the handshake, "
+                      "so it was not measured and scores 0.", auth_gated=True)
     else:
         valid = _crit("mcp", "valid_card", 0, "fail",
                       "initialize did not answer cleanly" + (f" (HTTP {sc})" if sc else "") + ".")
@@ -388,8 +393,13 @@ def assess_mcp(row: dict, *, uptime_ok: int = 0, uptime_total: int = 0,
     live = _live("mcp", state, text, latency if h in ("ok", "degraded") else None)
 
     # 3. revision
-    pts, st, txt = mcp_revision_points(d.get("protocol_version"))
-    proto = _crit("mcp", "protocol_version", pts, st, txt)
+    if gate and not d.get("protocol_version"):
+        proto = _crit("mcp", "protocol_version", 0, "info",
+                      f"{gate}: our anonymous probe could not run initialize, "
+                      "so the protocol revision was not measured and scores 0.", auth_gated=True)
+    else:
+        pts, st, txt = mcp_revision_points(d.get("protocol_version"))
+        proto = _crit("mcp", "protocol_version", pts, st, txt)
 
     # 5. uptime
     up = _uptime("mcp", uptime_ok, uptime_total)
@@ -400,7 +410,11 @@ def assess_mcp(row: dict, *, uptime_ok: int = 0, uptime_total: int = 0,
         tools = _json(d.get("tools_json"))
     tools = [t for t in tools if isinstance(t, dict) and t.get("name")] if isinstance(tools, list) else []
     n = len(tools) or int(d.get("tool_count") or 0)
-    if n == 0:
+    if n == 0 and gate:
+        skills = _crit("mcp", "skills", 0, "info",
+                       f"{gate}: our anonymous probe could not call tools/list, "
+                       "so the tools were not measured and score 0.", auth_gated=True)
+    elif n == 0:
         skills = _crit("mcp", "skills", 0, "fail", "No tools listed by tools/list.")
     else:
         pts = 10 if n >= 3 else 5

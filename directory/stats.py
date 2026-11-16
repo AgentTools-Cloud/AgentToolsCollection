@@ -640,6 +640,7 @@ GAP_FIXES = {
     ("mcp", "valid_card"): "Complete the MCP handshake without errors.",
     ("x402", "valid_card"): "Return complete payment requirements in the 402 challenge.",
     ("a2a", "valid_card"): "Serve an Agent Card that validates against the A2A schema.",
+    "auth_gated": "Not measurable while the endpoint requires credentials; it still scores 0.",
 }
 
 
@@ -673,7 +674,8 @@ def peer_position(snap, kind, readiness=None, latency_ms=None):
             key = c.get("key")
             gaps.append({"key": key, "label": c.get("label"), "points_lost": round(lost, 1),
                          "now": c.get("detail"),
-                         "fix": GAP_FIXES.get((kind, key)) or GAP_FIXES.get(key)})
+                         "fix": GAP_FIXES["auth_gated"] if c.get("auth_gated")
+                         else GAP_FIXES.get((kind, key)) or GAP_FIXES.get(key)})
     out["biggest_gaps"] = sorted(gaps, key=lambda g: -g["points_lost"])[:3]
     return out
 
