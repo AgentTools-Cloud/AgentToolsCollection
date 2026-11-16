@@ -456,7 +456,7 @@ def _code_backdate(rows) -> int:
 
 def cmd_crawl_code(github_limit: int | None = None, npm_limit: int | None = None,
                    min_stars: int = 0, full: bool = False, baidu: bool | None = None,
-                   from_file: str | None = None) -> int:
+                   from_file: str | None = None, remote_parts: tuple[str, ...] = ()) -> int:
     """Import code-only MCP servers (GitHub topics, package keywords and the
     directories in code_sources). Rows have no endpoint: never probed,
     separate sub-directory. Baidu MCP World (slow keyword walk) runs on full
@@ -486,7 +486,7 @@ def cmd_crawl_code(github_limit: int | None = None, npm_limit: int | None = None
             rows, info = code_mcp.fetch_all(github_limit=github_limit,
                                             npm_limit=npm_limit or code_mcp.NPM_MAX,
                                             min_stars=min_stars, pushed_since=since,
-                                            baidu=baidu)
+                                            baidu=baidu, remote_parts=remote_parts)
         except Exception as e:  # noqa: BLE001 - network / API failure
             _finish_run(run_id, 0, 0, [f"fetch failed: {e!r}"], status="error")
             log.warning("code mcp fetch failed: %r", e)
@@ -2527,6 +2527,15 @@ def main(argv=None) -> int:
                         help="walk Baidu MCP World (default: on full runs and Sundays)")
     p_code.add_argument("--from-file", default=None,
                         help="resume from a saved fetch (data/code-crawl/fetch-*.jsonl.gz)")
+    p_code.add_argument("--remote-parts", default="",
+                        help="comma list of parts another machine delivers to "
+                             "data/code-crawl/parts/ (github:<topic>, packages, extra)")
+    p_part = sub.add_parser("crawl-code-part",
+                            help="fetch one part of the code crawl and write it as a file")
+    p_part.add_argument("part")
+    p_part.add_argument("--out-dir", default=None)
+    p_part.add_argument("--baidu", action="store_true")
+    p_part.add_argument("--words", default=None, help="JSON list of Baidu keywords")
     sub.add_parser("crawl-a2a")
     sub.add_parser("crawl-agenstry")
     sub.add_parser("health")
@@ -2623,7 +2632,14 @@ def main(argv=None) -> int:
         return cmd_crawl_mcp(args.source)
     if args.cmd == "crawl-code":
         return cmd_crawl_code(args.github_limit, args.npm_limit, args.min_stars, args.full,
-                              args.baidu, args.from_file)
+                              args.baidu, args.from_file,
+                              tuple(p for p in args.remote_parts.split(",") if p))
+    if args.cmd == "crawl-code-part":
+        from . import code_mcp
+        words = json.load(open(args.words)) if args.words else None
+        data = code_mcp.fetch_part(args.part, baidu=args.baidu, words=words)
+        print(code_mcp.write_part(args.part, data, args.out_dir))
+        return 0
     if args.cmd == "crawl-a2a":
         return cmd_crawl_a2a()
     if args.cmd == "crawl-agenstry":

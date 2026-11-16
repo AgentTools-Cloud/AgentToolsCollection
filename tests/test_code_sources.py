@@ -235,3 +235,41 @@ class ClassifierModelTests(_TempDB):
             self.assertEqual(code_classify._backend()[2], "big-model")
             with patch.dict("os.environ", {"AGENT_TOOLS_CLASSIFY_MODEL": "small-model"}):
                 self.assertEqual(code_classify._backend(), ("https://gw.example", "k", "small-model"))
+
+
+class RemotePartTests(_TempDB):
+    def test_main_run_uses_parts_from_another_machine(self):
+        import os
+        import tempfile
+        d = tempfile.mkdtemp()
+        topics_seen = []
+
+        def local_fetch(topic, **kw):
+            topics_seen.append(topic)
+            return [gh_item("acme/local")]
+        with patch.object(code_mcp, "parts_dir", return_value=d), \
+                patch.object(code_mcp, "fetch_github", side_effect=local_fetch), \
+                patch.object(code_mcp, "fetch_ecosystems", side_effect=AssertionError("fetched here")), \
+                patch.object(code_mcp, "fetch_npm", side_effect=AssertionError("fetched here")), \
+                patch.object(code_sources, "fetch_extra", side_effect=AssertionError("fetched here")), \
+                patch.object(code_sources, "lookup_repos", return_value=[]), \
+                patch.object(code_mcp, "npm_created", return_value={}):
+            code_mcp.write_part("github:mcp", [code_mcp.slim_github(gh_item("acme/remote"))], d)
+            code_mcp.write_part("packages", {"eco": [], "npm": []}, d)
+            code_mcp.write_part("extra", {"hints": {}, "rows": [], "info": {"cline_repos": 0}}, d)
+            rows, info = code_mcp.fetch_all(remote_parts=("github:mcp", "packages", "extra"))
+        self.assertNotIn("mcp", topics_seen)
+        self.assertEqual({r["source_id"] for r in rows}, {"acme/local", "acme/remote"})
+        self.assertTrue(os.path.exists(os.path.join(d, "github_mcp.json.gz")))
+
+    def test_missing_part_falls_back_to_fetching_here(self):
+        import tempfile
+        with patch.object(code_mcp, "parts_dir", return_value=tempfile.mkdtemp()), \
+                patch.object(code_mcp, "PART_WAIT_SECONDS", 0), \
+                patch.object(code_mcp, "fetch_github", return_value=[]), \
+                patch.object(code_mcp, "fetch_ecosystems", return_value=[]) as fe, \
+                patch.object(code_mcp, "fetch_npm", return_value=[]), \
+                patch.object(code_sources, "fetch_extra", return_value=({}, [], {})), \
+                patch.object(code_mcp, "npm_created", return_value={}):
+            code_mcp.fetch_all(remote_parts=("packages",))
+        self.assertTrue(fe.called)
