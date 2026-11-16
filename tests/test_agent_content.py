@@ -34,7 +34,7 @@ class MethodologyTests(unittest.TestCase):
         for kind, rows in db._GRADE_BANDS_BY_KIND.items():
             self.assertEqual([(b["min"], b["grade"]) for b in bands[kind]], list(rows))
         crit = self.m["readiness_score"]["criteria"]
-        self.assertEqual(sum(c["max_points"] for c in crit["a2a"]), 100)
+        self.assertEqual(sum(c["max_points"] for c in crit["a2a"]), 95)
         self.assertEqual([c["key"] for c in crit["mcp"]], list(L.WEIGHTS))
         self.assertEqual(self.m["readiness_score"]["grade_bands"][0], {"min": A.GRADES[0][0], "grade": "A"})
 

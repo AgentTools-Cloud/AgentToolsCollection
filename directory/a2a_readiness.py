@@ -1,9 +1,11 @@
-"""A2A readiness score: nine criteria, 100 points.
+"""A2A readiness score: eight criteria, 95 points scaled to 100.
 
 Aligned with the public Agenstry conformance methodology (v1.1, CC BY 4.0) so
 an operator sees the same levers on both sites. Differences, all documented in
 `METHODOLOGY`:
 
+* Agenstry's freshness criterion is not scored: all we could measure for it was
+  how recently our own crawler re-read a third-party directory, not the agent.
 * Live JSON-RPC is probed with a read-only `GetTask` / `tasks/get` for a random
   task id instead of `SendMessage`, so the probe never makes a third-party
   agent do work or spend money. Any well-formed JSON-RPC 2.0 reply counts.
@@ -32,7 +34,7 @@ VERSION = "1.0"
 WEIGHTS = {
     "valid_card": 10, "live_jsonrpc": 25, "protocol_version": 10,
     "signature": 10, "uptime": 15, "skills": 10, "identity": 10,
-    "freshness": 5, "security": 5,
+    "security": 5,
 }
 LABELS = {
     "valid_card": "Valid Agent Card",
@@ -42,19 +44,18 @@ LABELS = {
     "uptime": "Uptime (30 days)",
     "skills": "Skill declaration",
     "identity": "Verified identity",
-    "freshness": "Freshness + modern flags",
     "security": "Security declaration",
 }
 GRADES = ((90, "A"), (75, "B"), (60, "C"), (40, "D"))
 UPTIME_WINDOW = 30 * 86400
 UPTIME_MIN_PROBES = 5
 RPC_TIMEOUT = 8.0
-_MODERN_FLAGS = ("x402", "ap2", "ucp", "mpp", "acp")
 _VERSION_RE = re.compile(r"^v?(\d+)(?:\.(\d+))?(?:\.(\d+))?$", re.I)
 
 METHODOLOGY = (
-    "Nine criteria, 100 points, aligned with the public Agenstry conformance "
-    "methodology v1.1. Live JSON-RPC is checked with a read-only GetTask/tasks/get "
+    "Eight criteria (95 points, scaled to 100), aligned with the public Agenstry "
+    "conformance methodology v1.1 minus its freshness criterion. Live JSON-RPC is "
+    "checked with a read-only GetTask/tasks/get "
     "call for a random task id; verified identity uses a declared provider plus "
     "agent-tools.cloud domain-control claims (company registries not yet checked); "
     "uptime is final after five probes in 30 days and leaves out probes the host "
@@ -221,25 +222,6 @@ def score_identity(card: Any, owner_verified: bool) -> dict:
     if owner_verified:
         return _crit("identity", 3, "partial", "Domain control verified, but no provider in the card.")
     return _crit("identity", 0, "fail", "No provider organization/url declared.")
-
-
-def score_freshness(card: Any, last_seen: int | None, x402_supported: bool, now: int) -> dict:
-    pts, notes = 0, []
-    if last_seen:
-        age = now - int(last_seen)
-        if age <= 7 * 86400:
-            pts += 4; notes.append("seen in a source within 7 days")
-        elif age <= 30 * 86400:
-            pts += 2; notes.append("seen within 30 days")
-        else:
-            notes.append("not seen in a source for over 30 days")
-    blob = json.dumps(card.get("capabilities") or {}).lower() if isinstance(card, dict) else ""
-    blob += json.dumps(card.get("securitySchemes") or {}).lower() if isinstance(card, dict) else ""
-    if x402_supported or any(f in blob for f in _MODERN_FLAGS):
-        pts += 1; notes.append("declares a modern payment/commerce flag")
-    pts = min(5, pts)
-    status = "pass" if pts >= 4 else ("partial" if pts else "fail")
-    return _crit("freshness", pts, status, ("; ".join(notes) or "no freshness signal") + ".")
 
 
 # --------------------------------------------------------------------------
@@ -477,7 +459,7 @@ def _card_declares_payment(card: Any) -> bool:
 
 
 def assess(card: Any, card_url: str | None, *, rpc: dict | None, uptime_ok: int,
-           uptime_total: int, owner_verified: bool, last_seen: int | None,
+           uptime_total: int, owner_verified: bool,
            x402_supported: bool, fetch_json: Callable[[str], Any] | None = None,
            now: int | None = None, sources=()) -> dict:
     from . import listing_readiness as L
@@ -490,10 +472,10 @@ def assess(card: Any, card_url: str | None, *, rpc: dict | None, uptime_ok: int,
         score_uptime(uptime_ok, uptime_total),
         score_skills(card),
         score_identity(card, owner_verified),
-        score_freshness(card, last_seen, x402_supported, now),
         score_security(card),
     ]
-    score = round(sum(c["points"] for c in criteria), 1)
+    cap = sum(c["max_points"] for c in criteria)
+    score = round(sum(c["points"] for c in criteria) * 100.0 / cap, 1)
     rpc_status = (rpc or {}).get("http_status")
     declared = _card_declares_payment(card)
     evidence = None
@@ -502,7 +484,7 @@ def assess(card: Any, card_url: str | None, *, rpc: dict | None, uptime_ok: int,
                                       sources=L.source_names(sources))
     latency = (rpc or {}).get("latency_ms")
     return {"version": VERSION, "kind": "a2a", "score": score, "grade": grade(score),
-            "max_score": 100, "applicable_max": 100, "checked_at": now,
+            "max_score": 100, "applicable_max": cap, "checked_at": now,
             "criteria": criteria, "methodology": METHODOLOGY,
             "responsiveness": L.responsiveness(latency),
             "payment_evidence": evidence}
