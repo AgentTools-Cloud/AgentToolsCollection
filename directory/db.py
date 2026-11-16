@@ -4323,8 +4323,8 @@ def mcp_p95_latency(conn, server_id: int, days: int = 14):
     if not vals:
         return None
     vals.sort()
-    idx = max(0, math.ceil(0.95 * len(vals)) - 1)
-    return int(vals[idx])
+    # Daily probes give ~14 samples, where a plain p95 is the maximum: always drop at least the slowest.
+    return int(vals[max(0, len(vals) - 1 - max(1, len(vals) // 20))])
 
 
 def _mcp_descriptor_parts(row) -> list:
