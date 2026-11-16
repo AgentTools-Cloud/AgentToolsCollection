@@ -1287,8 +1287,10 @@ def api_mcp_search(
 
 @router.get("/api/v1/mcp/stats", tags=["mcp"])
 def api_mcp_stats():
+    # Same counts as the list pages (~1.6 s CPU uncached); 3.7-4.2 s per call
+    # on 11-16 before this reused the 10-minute list cache.
     with _conn() as c:
-        return db.mcp_stats(c)
+        return _list_mcp_stats(c)
 
 
 @router.get("/api/v1/mcp/servers/{slug}", tags=["mcp"])
