@@ -781,6 +781,8 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
             "ALTER TABLE mcp_servers ADD COLUMN readiness_score REAL",
             "ALTER TABLE mcp_servers ADD COLUMN readiness_grade TEXT",
             "ALTER TABLE mcp_servers ADD COLUMN readiness_checked INTEGER",
+            # Latest successful credential test (mcp_credential_test); scored when the probe gets 401.
+            "ALTER TABLE mcp_servers ADD COLUMN credential_test_json TEXT",
             "ALTER TABLE services ADD COLUMN readiness_score REAL",
             "ALTER TABLE services ADD COLUMN readiness_grade TEXT",
             "ALTER TABLE services ADD COLUMN readiness_checked INTEGER",
@@ -835,6 +837,9 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
         from . import paid_verify
 
         paid_verify.ensure_schema(c)
+        from . import mcp_credential_test
+
+        mcp_credential_test.ensure_schema(c)
         c.commit()
         from . import claim_invites
 
@@ -3850,6 +3855,12 @@ def mcp_row_to_dict(row) -> dict:
             d["tools"] = json.loads(d["tools_json"])
         except (TypeError, json.JSONDecodeError):
             pass
+    raw_test = d.pop("credential_test_json", None)
+    if raw_test:
+        try:
+            d["credential_test"] = json.loads(raw_test)
+        except (TypeError, json.JSONDecodeError):
+            pass
     _sf = _safety_mark(d.get("name"), d.get("description"), d.get("tools_text"))
     if _sf:
         d["safety"] = _sf
@@ -4236,6 +4247,9 @@ def get_mcp_by_slug(conn, slug):
     out = mcp_row_to_dict(row)
     out["sources"] = listing_sources(conn, "mcp", int(out["id"]))
     if not _is_code_only(out):
+        from . import mcp_credential_test
+
+        out["credential_tests"] = mcp_credential_test.history(conn, int(out["id"]))
         _attach_readiness(conn, "mcp", out)
         _attach_peer(conn, "mcp", out)
     _attach_measured(conn, "mcp", out)
@@ -4339,11 +4353,25 @@ def _mcp_descriptor_parts(row) -> list:
 
     return [
         ("Advertises its tools", 8.0, (row.get("tool_count") or 0) > 0),
-        ("Tool metadata captured", 5.0, _filled("tools_json")),
+        ("Tool metadata captured", 5.0, _filled("tools_json") or bool(row.get("_credential_tools"))),
         ("Source or package published", 4.0,
          _filled("source_code_url") or _filled("package_name")),
         ("Transport declared", 3.0, _filled("transport")),
     ]
+
+
+def _with_credential_test(d: dict) -> dict:
+    """An auth-gated server measured with a user's credential scores like an open one."""
+    from . import listing_readiness
+    if (d.get("health") != "ok" or d.get("conformance") in ("pass", "partial")
+            or d.get("http_status") not in listing_readiness.AUTH_GATED):
+        return d
+    test = listing_readiness.credential_test(d)
+    if not test:
+        return d
+    n = int(test.get("tool_count") or 0)
+    return {**d, "conformance": "pass" if test["status"] == "succeeded" else "partial",
+            "tool_count": n, "_credential_tools": n > 0}
 
 
 def mcp_quality_score(row, p95_ms=None):
@@ -4354,7 +4382,7 @@ def mcp_quality_score(row, p95_ms=None):
     all tie at full marks: full 30 at p95<=50ms, linearly down to 0 at
     >=2000ms (no p95 data => 0).
     """
-    d = row if isinstance(row, dict) else dict(row)
+    d = _with_credential_test(row if isinstance(row, dict) else dict(row))
     if p95_ms is None:
         p95_ms = d.get("latency_p95_ms")
     avail = 25 if d.get("health") == "ok" else (
@@ -4918,9 +4946,9 @@ def rescore_a2a(conn) -> int:
 
 def rescore_mcp(conn) -> int:
     rows = conn.execute(
-        "SELECT id, health, conformance, latency_p95_ms, tool_count, tools_json, "
+        "SELECT id, health, http_status, conformance, latency_p95_ms, tool_count, tools_json, "
         "source_code_url, package_name, transport, safety_verdict, "
-        "owner_verified FROM mcp_servers").fetchall()
+        "owner_verified, endpoint_url, credential_test_json FROM mcp_servers").fetchall()
     ups = [(mcp_quality_score(dict(r)), r["id"]) for r in rows]
     for i in range(0, len(ups), 1000):
         conn.executemany("UPDATE mcp_servers SET quality_score=? WHERE id=?",
