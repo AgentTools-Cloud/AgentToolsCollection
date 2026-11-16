@@ -168,6 +168,31 @@ class CrawlWithSourcesTests(_TempDB):
             return {(s, sid): (pkg, ts) for s, sid, pkg, ts in c.execute(
                 "SELECT source, source_id, package_name, created_at FROM mcp_servers")}
 
+    def test_unchanged_rows_are_not_rewritten(self):
+        self._run([gh_item("acme/a"), gh_item("acme/b")])
+        real = db.upsert_mcp_server
+        with patch.object(db, "upsert_mcp_server", side_effect=real) as up:
+            self._run([gh_item("acme/a"), gh_item("acme/b", desc="Changed")])
+        self.assertEqual([c.args[1]["source_id"] for c in up.call_args_list], ["acme/b"])
+        # A stored row that disappeared (e.g. pruned) is written again.
+        with db.writer() as c:
+            c.execute("DELETE FROM mcp_servers WHERE source='github' AND source_id='acme/a'")
+        with patch.object(db, "upsert_mcp_server", side_effect=real) as up:
+            self._run([gh_item("acme/a"), gh_item("acme/b", desc="Changed")])
+        self.assertEqual([c.args[1]["source_id"] for c in up.call_args_list], ["acme/a"])
+
+    def test_daily_runs_skip_the_generic_mcp_keyword(self):
+        with patch.object(code_mcp, "fetch_github", return_value=[]), \
+                patch.object(code_mcp, "fetch_ecosystems", return_value=[]) as fe, \
+                patch.object(code_mcp, "fetch_npm", return_value=[]), \
+                patch.object(code_sources, "fetch_extra", return_value=({}, [], {})):
+            jobs.cmd_crawl_code(full=True)
+            self.assertIn("mcp", [c.args[0] for c in fe.call_args_list])
+            fe.reset_mock()
+            jobs.cmd_crawl_code(baidu=False)
+            self.assertNotIn("mcp", [c.args[0] for c in fe.call_args_list])
+            self.assertIn("mcp-server", [c.args[0] for c in fe.call_args_list])
+
     def test_hinted_repos_are_looked_up_dated_and_packages_deduplicated(self):
         eco = [{"ecosystem": "cargo", "name": "tool-mcp", "description": "MCP",
                 "repository_url": "https://github.com/acme/hinted",

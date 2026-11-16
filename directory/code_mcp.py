@@ -465,6 +465,58 @@ def _owner_name(reg: str, name: str) -> tuple[str, str]:
     return reg, name
 
 
+# ---------------------------------------------------------------------------
+# Skip unchanged rows: a daily run re-reads ~70k rows and upserting each one
+# costs ~60 ms (an hour a day). code_row_digest remembers what was written.
+# ---------------------------------------------------------------------------
+
+def row_digest(row: dict) -> str:
+    import hashlib
+    body = {k: v for k, v in row.items() if k not in ("created_at", "updated_at", "last_seen")}
+    return hashlib.sha256(json.dumps(body, sort_keys=True, ensure_ascii=False,
+                                     default=str).encode()).hexdigest()[:20]
+
+
+def _ensure_digest_table(c) -> None:
+    c.execute("CREATE TABLE IF NOT EXISTS code_row_digest ("
+              "source TEXT NOT NULL, source_id TEXT NOT NULL, digest TEXT NOT NULL, "
+              "PRIMARY KEY (source, source_id))")
+
+
+def unchanged_rows(rows: list[dict]) -> set[tuple[str, str]]:
+    """(source, source_id) of rows stored with exactly this content."""
+    with db.connect(read_only=True) as c:
+        try:
+            have = {(s, sid): d for s, sid, d in c.execute(
+                "SELECT source, source_id, digest FROM code_row_digest")}
+        except Exception:  # noqa: BLE001 - table not created yet
+            return set()
+        stored = {(s, sid) for s, sid in c.execute(
+            f"SELECT source, source_id FROM mcp_servers WHERE source IN "
+            f"({','.join('?' * len(OWN_SOURCES))}) AND COALESCE(endpoint_url,'')=''",
+            OWN_SOURCES)}
+    out = set()
+    for r in rows:
+        k = (r["source"], r["source_id"])
+        if k in stored and have.get(k) == row_digest(r):
+            out.add(k)
+    return out
+
+
+def remember_rows(rows: list[dict]) -> None:
+    items = [(r["source"], r["source_id"], row_digest(r)) for r in rows]
+    for i in range(0, len(items), 2000):
+        chunk = items[i:i + 2000]
+
+        def op(chunk=chunk):
+            with db.writer() as c:
+                _ensure_digest_table(c)
+                c.executemany(
+                    "INSERT INTO code_row_digest(source, source_id, digest) VALUES (?,?,?) "
+                    "ON CONFLICT(source, source_id) DO UPDATE SET digest=excluded.digest", chunk)
+        db.with_retry(op)
+
+
 def known_repos(conn) -> tuple[set[str], set[str]]:
     """(repos owned by another listing, (registry, package) owned by another listing).
 
@@ -593,14 +645,15 @@ def part_name(part: str) -> str:
     return re.sub(r"[^a-z0-9.-]+", "_", part.lower())
 
 
-def fetch_part(part: str, *, baidu: bool = False, words: list[str] | None = None):
+def fetch_part(part: str, *, baidu: bool = False, words: list[str] | None = None,
+               keywords: tuple[str, ...] = ECO_KEYWORDS):
     """`github:<topic>`, `packages` or `extra`."""
     from . import code_sources
     if part.startswith("github:"):
         return fetch_github_topics(topics=(part.split(":", 1)[1],))
     if part == "packages":
         try:
-            eco = fetch_ecosystems_all()
+            eco = fetch_ecosystems_all(keywords)
         except Exception as e:  # noqa: BLE001 - npm search alone
             log.warning("code mcp: ecosyste.ms failed (%r); npm search only", e)
             eco = []
@@ -669,7 +722,10 @@ def fetch_all(*, github_limit: int | None = None, npm_limit: int = NPM_MAX,
                 gh.append(i)
     pk = wait_part("packages", started) if "packages" in remote else None
     if pk is None:
-        pk = fetch_part("packages")
+        # The generic `mcp` keyword is ~140k packages and 45 min of paging;
+        # daily runs read the specific keywords, weekly / full runs all of them.
+        pk = fetch_part("packages", keywords=ECO_KEYWORDS if baidu else
+                        tuple(k for k in ECO_KEYWORDS if k not in NOISY))
     eco = pk["eco"]
     have = {(r["package_registry"], r["source_id"]) for r in eco}
     eco_keys = set(have)
