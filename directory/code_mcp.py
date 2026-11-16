@@ -96,6 +96,13 @@ def _get(url: str, headers: dict | None = None, timeout: int = 40):
 # GitHub
 # ---------------------------------------------------------------------------
 
+# Search allows 30 (authenticated) or 10 requests per minute. Pace by request
+# start, not by sleeping after each answer: a 100-item page takes 1-2 s to
+# arrive, and sleeping 2.2 s afterwards used only ~13 of the 30 (11-16).
+SEARCH_INTERVAL = {True: 2.05, False: 6.1}
+_search_last = [0.0]
+
+
 def _github_search(q: str, page: int, auth: str | None) -> tuple[dict, dict]:
     url = ("https://api.github.com/search/repositories?" + urllib.parse.urlencode(
         {"q": q, "sort": "updated", "order": "desc", "per_page": 100, "page": page}))
@@ -103,6 +110,10 @@ def _github_search(q: str, page: int, auth: str | None) -> tuple[dict, dict]:
     if auth:
         headers["Authorization"] = auth
     for attempt in range(4):
+        wait = _search_last[0] + SEARCH_INTERVAL[bool(auth)] - time.time()
+        if wait > 0:
+            time.sleep(wait)
+        _search_last[0] = time.time()
         try:
             data, h = _get(url, headers)
         except urllib.error.HTTPError as e:
@@ -111,12 +122,10 @@ def _github_search(q: str, page: int, auth: str | None) -> tuple[dict, dict]:
                 time.sleep(min(90, max(10, reset - time.time() + 2)))
                 continue
             raise
-        # Search allows 30 (authenticated) or 10 requests per minute.
+        # Quota shared with other jobs: wait for the window to reset when spent.
         if int(h.get("X-RateLimit-Remaining", "1") or 1) <= 1:
             reset = int(h.get("X-RateLimit-Reset") or 0)
             time.sleep(min(90, max(2, reset - time.time() + 2)))
-        else:
-            time.sleep(2.2 if auth else 6.5)
         return data, h
     raise CodeCrawlError("github search kept rate-limiting")
 
