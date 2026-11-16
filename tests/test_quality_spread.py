@@ -1,6 +1,7 @@
 """x402 / A2A quality score: the blocks added so healthy listings stop tying at 100."""
 import json
 import sqlite3
+import time
 import unittest
 
 from directory import db
@@ -131,6 +132,31 @@ class PaytoSharedTests(unittest.TestCase):
         self.add(1, "ok", "0xaa")
         self.c.execute("UPDATE services SET payto_shared=9")
         self.assertIsNone(self.shared()[1])
+
+
+class McpP95Tests(unittest.TestCase):
+    def p95(self, latencies, status="ok", age_days=0):
+        c = sqlite3.connect(":memory:")
+        c.execute("CREATE TABLE mcp_health_history(server_id, checked_at, status, latency_ms, http_status)")
+        now = int(time.time())
+        c.executemany("INSERT INTO mcp_health_history VALUES(1,?,?,?,NULL)",
+                      [(now - (age_days + i * 0.3) * 86400, status, ms) for i, ms in enumerate(latencies)])
+        return db.mcp_p95_latency(c, 1)
+
+    def test_one_slow_probe_does_not_set_p95(self):
+        self.assertEqual(self.p95([400] * 13 + [2600]), 400)
+        self.assertEqual(self.p95([400] * 12 + [2600, 2400]), 2400)
+
+    def test_matches_nearest_rank_from_20_samples(self):
+        self.assertEqual(self.p95(range(1, 21)), 19)
+        self.assertEqual(self.p95(range(1, 41)), 38)
+
+    def test_small_and_empty_windows(self):
+        self.assertEqual(self.p95([700]), 700)
+        self.assertEqual(self.p95([300, 900]), 300)
+        self.assertIsNone(self.p95([]))
+        self.assertIsNone(self.p95([400] * 3, status="down"))
+        self.assertIsNone(self.p95([400] * 3, age_days=15))
 
 
 if __name__ == "__main__":
