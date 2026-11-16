@@ -1885,9 +1885,10 @@ _TESTNET_CHAIN_IDS = {
 
 # Keys that carry paid resource entries in the wild. There is no spec for the
 # well-known descriptor, so this is an observed list, not a standard one.
-# `resources`/`endpoints` stay first so probe order does not change.
+# `resources`/`endpoints` stay first so probe order does not change; `accepts`
+# covers a descriptor shaped like a 402 body, whose entries name their URL in `resource`.
 _RESOURCE_CONTAINERS = ("resources", "endpoints", "items", "routes", "tools",
-                        "services", "paidTools", "products")
+                        "services", "paidTools", "products", "accepts")
 
 
 def _entry_url(entry: dict, base: str) -> str:
