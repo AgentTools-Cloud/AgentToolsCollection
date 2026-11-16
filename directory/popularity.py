@@ -259,24 +259,47 @@ def wanted_packages(conn) -> set[str]:
     return out
 
 
+# Scoped packages need one request each (the bulk endpoint refuses them) and
+# the downloads API throttles bursts. Since code-only MCP rows arrived
+# (11-15) the wanted set grew from ~100 to ~9,700 packages and one run no
+# longer fit the 2 h unit timeout -- and wrote nothing, because rows were only
+# saved at the end. Cap scoped lookups per run (stalest first) and save as we go.
+NPM_SCOPED_PER_RUN = 600
+_NPM_FLUSH_EVERY = 200
+
+
 def refresh_npm(conn_factory, writer_factory, *, now: int | None = None,
-                http: Callable = _http, sleep: Callable = time.sleep) -> dict:
+                http: Callable = _http, sleep: Callable = time.sleep,
+                scoped_limit: int = NPM_SCOPED_PER_RUN) -> dict:
     now = int(now or time.time())
     with writer_factory() as w:
         ensure_schema(w)
     with closing(conn_factory()) as c:
         pkgs = wanted_packages(c)
         fetched = dict(c.execute("SELECT package, fetched_at FROM ext_npm_packages").fetchall())
-    todo = sorted(p for p in pkgs if now - fetched.get(p, 0) >= STALE_SECONDS)
+    todo = sorted((p for p in pkgs if now - fetched.get(p, 0) >= STALE_SECONDS),
+                  key=lambda p: (fetched.get(p, 0), p))
     unscoped = [p for p in todo if not p.startswith("@")]
-    scoped = [p for p in todo if p.startswith("@")]
+    scoped_all = [p for p in todo if p.startswith("@")]
+    scoped = scoped_all[:max(0, scoped_limit)]
     rows, done = [], {"ok": 0, "not_found": 0, "error": 0}
+
+    def flush():
+        if rows:
+            with writer_factory() as w:
+                w.executemany(
+                    "INSERT INTO ext_npm_packages(package, downloads_30d, status, fetched_at) VALUES (?,?,?,?) "
+                    "ON CONFLICT(package) DO UPDATE SET downloads_30d=excluded.downloads_30d, "
+                    "status=excluded.status, fetched_at=excluded.fetched_at", rows)
+            rows.clear()
 
     def record(pkg, dl):
         if isinstance(dl, int):
             rows.append((pkg, dl, "ok", now)); done["ok"] += 1
         else:
             rows.append((pkg, None, "not_found", now)); done["not_found"] += 1
+        if len(rows) >= _NPM_FLUSH_EVERY:
+            flush()
 
     for i in range(0, len(unscoped), 100):
         batch = unscoped[i:i + 100]
@@ -306,14 +329,9 @@ def refresh_npm(conn_factory, writer_factory, *, now: int | None = None,
         else:
             done["error"] += 1
         sleep(0.5)
-    if rows:
-        with writer_factory() as w:
-            ensure_schema(w)
-            w.executemany(
-                "INSERT INTO ext_npm_packages(package, downloads_30d, status, fetched_at) VALUES (?,?,?,?) "
-                "ON CONFLICT(package) DO UPDATE SET downloads_30d=excluded.downloads_30d, "
-                "status=excluded.status, fetched_at=excluded.fetched_at", rows)
+    flush()
     done["wanted"], done["queued"] = len(pkgs), len(todo)
+    done["scoped_deferred"] = len(scoped_all) - len(scoped)
     return done
 
 

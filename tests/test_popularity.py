@@ -120,6 +120,25 @@ class JobAndReadTests(unittest.TestCase):
         self.assertEqual(stats["tranco"]["mcp"]["ranked"], 1)
         c.close()
 
+    def test_npm_caps_scoped_lookups_and_saves_as_it_goes(self):
+        c = sqlite3.connect(self.path)
+        for i in range(5):
+            c.execute("INSERT INTO mcp_servers(id, slug, name, package_registry, package_name, health, "
+                      "source, created_at, updated_at) VALUES (?,?,?,?,?,'ok','t',?,?)",
+                      (200 + i, f"s{i}", f"S{i}", "npm", f"@scope/pkg{i}", NOW, NOW))
+        c.commit()
+        c.close()
+        self.calls = []
+        first = P.refresh_npm(self.read, self.writer, http=self.fake_http,
+                              sleep=lambda s: None, scoped_limit=2)
+        self.assertEqual((first["ok"], first["scoped_deferred"]), (2, 4))
+        second = P.refresh_npm(self.read, self.writer, http=self.fake_http,
+                               sleep=lambda s: None, scoped_limit=2)
+        self.assertEqual((second["ok"], second["queued"]), (2, 4))   # the first two are fresh now
+        c = self.read()
+        self.assertEqual(c.execute("SELECT COUNT(*) FROM ext_npm_packages").fetchone()[0], 4)
+        c.close()
+
     def test_github_skips_without_credentials(self):
         with patch.dict(os.environ, {"GITHUB_OAUTH_CLIENT_ID": "", "GITHUB_OAUTH_CLIENT_SECRET": ""}):
             self.assertIn("skipped", P.refresh_github(self.read, self.writer, http=self.fake_http))
