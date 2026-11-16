@@ -412,7 +412,8 @@ def categories_page(
              else {**r, "search_path": target}
              for r in matched[start:start + _CATEGORY_PAGE_SIZE]]
     def page_url(number):
-        return "/categories?" + urlencode({"kind": kind, "q": query, "page": number})
+        params = {"kind": kind, "q": query, "page": number} if query else {"kind": kind, "page": number}
+        return "/categories?" + urlencode(params)
     return TEMPLATES.TemplateResponse(request, "categories.html", {
         "request": request, "kind": kind, "kinds": _CATEGORY_KINDS,
         "q": query, "title": title, "items": items, "total": len(matched),
