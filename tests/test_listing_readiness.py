@@ -97,11 +97,12 @@ class McpReadiness(unittest.TestCase):
                            sources=["mcp-registry"], now=NOW)
         k = by_key(rep)
         self.assertFalse(k["signature"]["applicable"])
-        self.assertEqual(rep["applicable_max"], 90)
+        self.assertEqual(rep["applicable_max"], 85)
         self.assertEqual(k["identity"]["points"], 8)
         self.assertEqual(k["security"]["points"], 4)
-        # 10+25+10+15+10+8+4(fresh, no flag)+4 = 86 of 90
-        self.assertEqual(rep["score"], round(86 * 100 / 90, 1))
+        self.assertNotIn("freshness", k)
+        # 10+25+10+15+10+8+4 = 82 of 85
+        self.assertEqual(rep["score"], round(82 * 100 / 85, 1))
         self.assertEqual(rep["grade"], "A")
 
     def test_auth_gated_and_old_revision(self):
@@ -130,9 +131,9 @@ class McpReadiness(unittest.TestCase):
                 self.assertTrue(k[key]["auth_gated"])
                 self.assertTrue(k[key]["detail"].startswith(gate), k[key]["detail"])
                 self.assertIn("not measured", k[key]["detail"])
-            self.assertEqual(rep["applicable_max"], 90)
+            self.assertEqual(rep["applicable_max"], 85)
             got = sum(c["points"] for c in rep["criteria"] if c.get("applicable", True))
-            self.assertEqual(rep["score"], round(got * 100 / 90, 1))
+            self.assertEqual(rep["score"], round(got * 100 / 85, 1))
         broken = by_key(L.assess_mcp(mcp_row(conformance="fail", http_status=500, tools_json=None,
                                              tool_count=None, protocol_version=None), now=NOW))
         self.assertEqual(broken["skills"]["detail"], "No tools listed by tools/list.")
@@ -145,7 +146,21 @@ class McpReadiness(unittest.TestCase):
         k = by_key(rep)
         self.assertEqual(k["live"]["points"], 0)
         self.assertEqual(rep["payment_evidence"]["grade"], "agent_card")
-        self.assertEqual(k["freshness"]["points"], 5)
+
+    def test_stored_report_drops_retired_criterion(self):
+        stored = {"kind": "a2a", "score": 84, "grade": "B", "applicable_max": 100,
+                  "checked_at": NOW, "methodology": "Nine criteria", "criteria": [
+                      {"key": "live_jsonrpc", "points": 25, "max_points": 25},
+                      {"key": "uptime", "points": 15, "max_points": 15},
+                      {"key": "freshness", "points": 0, "max_points": 5},
+                      {"key": "security", "points": 2, "max_points": 5}]}
+        rep = L.apply_age_decay(stored, NOW)
+        self.assertEqual([c["key"] for c in rep["criteria"]], ["live_jsonrpc", "uptime", "security"])
+        self.assertEqual(rep["applicable_max"], 45)
+        self.assertEqual(rep["score"], round(42 * 100 / 45, 1))
+        self.assertEqual(rep["methodology"], A.METHODOLOGY)
+        current = L.assess_mcp(mcp_row(), now=NOW)
+        self.assertEqual(L.apply_age_decay(current, NOW)["score"], current["score"])
 
     def test_untagged_tools_cap(self):
         tools = [{"name": "a", "description": "d"}, {"name": "b"}, {"name": "c", "description": ""}]
@@ -158,15 +173,15 @@ class X402Readiness(unittest.TestCase):
         rep = L.assess_x402(x402_row(), uptime_ok=9, uptime_total=9,
                             last_402_at=NOW - DAY, sources=["cdp-bazaar"], now=NOW)
         k = by_key(rep)
-        self.assertEqual(rep["applicable_max"], 85)
+        self.assertEqual(rep["applicable_max"], 80)
         self.assertEqual(k["live"]["state"], "live")
         self.assertEqual(k["protocol_version"]["points"], 10)
         self.assertEqual(k["identity"]["points"], 5)
         self.assertEqual(rep["payment_evidence"]["grade"], "x402_challenge")
         self.assertEqual([e["grade"] for e in rep["payment_evidence"]["evidence"]],
                          ["x402_challenge", "x402_manifest", "bazaar_feed"])
-        # 10+25+10+15+10+5+5 = 80 of 85
-        self.assertEqual(rep["score"], round(80 * 100 / 85, 1))
+        # 10+25+10+15+10+5 = 75 of 80
+        self.assertEqual(rep["score"], round(75 * 100 / 80, 1))
 
     def test_unknown_version_is_na_and_findings(self):
         rep = L.assess_x402(x402_row(resource_samples=None, resource_count=None,
@@ -175,7 +190,7 @@ class X402Readiness(unittest.TestCase):
                             now=NOW)
         k = by_key(rep)
         self.assertFalse(k["protocol_version"]["applicable"])
-        self.assertEqual(rep["applicable_max"], 75)
+        self.assertEqual(rep["applicable_max"], 70)
         self.assertEqual(k["valid_card"]["points"], 7)
         self.assertEqual(len(k["valid_card"]["findings"]), 3)
         self.assertEqual(k["live"]["state"], "seen_before")
@@ -197,7 +212,7 @@ class A2AExtras(unittest.TestCase):
                                          "protocolBinding": "JSONRPC", "protocolVersion": "1.0"}]}
         rep = A.assess(card, "https://d.example/.well-known/agent-card.json",
                        rpc={"state": "live", "latency_ms": 3000, "http_status": 200},
-                       uptime_ok=1, uptime_total=1, owner_verified=False, last_seen=NOW,
+                       uptime_ok=1, uptime_total=1, owner_verified=False,
                        x402_supported=False, now=NOW, sources={"agenstry"})
         self.assertEqual(rep["responsiveness"]["band"], "slow")
         self.assertEqual(rep["payment_evidence"]["grade"], "agent_card")

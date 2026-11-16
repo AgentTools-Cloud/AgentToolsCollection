@@ -1,7 +1,7 @@
 """Readiness score for MCP servers and x402 paid APIs, plus the extras the
 A2A readiness score shares with them.
 
-Same nine criteria and grade bands as the A2A readiness score
+Same eight criteria and grade bands as the A2A readiness score
 (`a2a_readiness`). A criterion with no counterpart for a kind is marked
 not applicable and the remaining points are scaled to 100:
 
@@ -37,7 +37,7 @@ from . import a2a_readiness as A
 VERSION = "1.0"
 WEIGHTS = {
     "valid_card": 10, "live": 25, "protocol_version": 10, "signature": 10,
-    "uptime": 15, "skills": 10, "identity": 10, "freshness": 5, "security": 5,
+    "uptime": 15, "skills": 10, "identity": 10, "security": 5,
 }
 ORDER = tuple(WEIGHTS)
 LABELS = {
@@ -49,7 +49,6 @@ LABELS = {
         "uptime": "Uptime (30 days)",
         "skills": "Tool declaration",
         "identity": "Verified identity",
-        "freshness": "Freshness + modern flags",
         "security": "Auth declaration",
     },
     "x402": {
@@ -60,7 +59,6 @@ LABELS = {
         "uptime": "Uptime (30 days)",
         "skills": "Resource declaration",
         "identity": "Verified identity",
-        "freshness": "Freshness + modern flags",
         "security": "Security declaration",
     },
 }
@@ -75,14 +73,14 @@ DECAY_FLOOR = 0.4
 
 METHODOLOGY = {
     "mcp": (
-        "Nine criteria, the same as the A2A readiness score, read from our daily "
+        "Eight criteria, the same as the A2A readiness score, read from our daily "
         "MCP probe (initialize + tools/list) and 30-day probe history. No MCP "
         "standard defines a signed server descriptor, so that criterion is n/a "
-        "and the other 90 points are scaled to 100. Grades: A>=90, B>=75, C>=60, "
+        "and the other 85 points are scaled to 100. Grades: A>=90, B>=75, C>=60, "
         "D>=40, F<40. Display only: search order uses the quality grade."
     ),
     "x402": (
-        "Nine criteria, the same as the A2A readiness score, read from our daily "
+        "Eight criteria, the same as the A2A readiness score, read from our daily "
         "probe of the paid endpoint, its payment requirements and 30-day probe "
         "history. Signed descriptor and security declaration are n/a for x402 "
         "(payment is the access control), as is an x402 version we have not "
@@ -149,10 +147,26 @@ def finish(criteria: list[dict], *, kind: str, measured_at: int | None, now: int
     return apply_age_decay(report, now)
 
 
+def _drop_retired_criteria(report: dict) -> dict:
+    """A stored report may carry a criterion we no longer score: drop it and rescale."""
+    weights = A.WEIGHTS if report.get("kind") == "a2a" else WEIGHTS
+    crits = [c for c in report["criteria"] if c.get("key") in weights]
+    if len(crits) == len(report["criteria"]):
+        return report
+    got, cap = _total(crits)
+    report = dict(report, criteria=crits, applicable_max=cap)
+    report["score"] = round(got * 100.0 / cap, 1) if cap else 0.0
+    report["grade"] = A.grade(report["score"])
+    if report.get("kind") == "a2a":
+        report["methodology"] = A.METHODOLOGY
+    return report
+
+
 def apply_age_decay(report: dict | None, now: int | None = None) -> dict | None:
     """Scale the live criterion of an old measurement; recompute score/grade."""
     if not isinstance(report, dict) or not report.get("criteria"):
         return report
+    report = _drop_retired_criteria(report)
     now = int(now or time.time())
     checked = report.get("checked_at")
     if not checked:
@@ -264,23 +278,6 @@ def _uptime(kind: str, ok: int, total: int) -> dict:
     c["key"] = "uptime"
     c["label"] = LABELS[kind]["uptime"]
     return c
-
-
-def _freshness(kind: str, last_seen, flag: bool, flag_note: str, now: int) -> dict:
-    pts, notes = 0, []
-    if last_seen:
-        age = now - int(last_seen)
-        if age <= 7 * 86400:
-            pts += 4; notes.append("seen in a source within 7 days")
-        elif age <= 30 * 86400:
-            pts += 2; notes.append("seen within 30 days")
-        else:
-            notes.append("not seen in a source for over 30 days")
-    if flag:
-        pts += 1; notes.append(flag_note)
-    pts = min(5, pts)
-    status = "pass" if pts >= 4 else ("partial" if pts else "fail")
-    return _crit(kind, "freshness", pts, status, ("; ".join(notes) or "no freshness signal") + ".")
 
 
 _NO_PUBLISHER = {
@@ -434,17 +431,14 @@ def assess_mcp(row: dict, *, uptime_ok: int = 0, uptime_total: int = 0,
                       declared_note="Publisher declared (repository, package or homepage)",
                       owner_verified=bool(d.get("owner_verified")), registry_note=registry)
 
-    # 8. freshness
     pricing = d.get("pricing")
     priced = bool(d.get("x402_supported")) or (isinstance(pricing, dict) and bool(pricing)) or (
         isinstance(pricing, str) and pricing.strip() not in ("", "null", "{}"))
-    fresh = _freshness("mcp", d.get("last_seen"), priced,
-                       "declares x402 or machine-readable pricing", now)
 
     criteria = [
         valid, live, proto,
         _na("mcp", "signature", "No MCP standard defines a signed server descriptor."),
-        up, skills, ident, fresh, _mcp_security(d.get("auth_method")),
+        up, skills, ident, _mcp_security(d.get("auth_method")),
     ]
     evidence = None
     if d.get("x402_supported") or sc == 402:
@@ -545,13 +539,10 @@ def assess_x402(row: dict, *, uptime_ok: int = 0, uptime_total: int = 0,
                       declared_note="Publisher descriptor (/.well-known/x402 or OpenAPI) on record",
                       owner_verified=bool(d.get("owner_verified")))
 
-    # 8. freshness
-    fresh = _freshness("x402", d.get("last_seen"), True, "declares x402", now)
-
     criteria = [
         valid, live, proto,
         _na("x402", "signature", "No x402 standard defines a signed descriptor."),
-        up, skills, ident, fresh,
+        up, skills, ident,
         _na("x402", "security", "Payment is the access control for an x402 resource."),
     ]
     evidence = payment_evidence(challenge=bool(d.get("x402_ok")) or sc == 402,

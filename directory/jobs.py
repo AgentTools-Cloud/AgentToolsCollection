@@ -1072,7 +1072,7 @@ def cmd_health_a2a(only_unknown: bool = False, quarantined_only: bool = False) -
             parsed, res.get("card_url") or r["card_url"], rpc=rpc,
             uptime_ok=(ok_prev or 0) + (counted and h == "ok"),
             uptime_total=(n_prev or 0) + counted,
-            owner_verified=bool(r["owner_verified"]), last_seen=r["last_seen"],
+            owner_verified=bool(r["owner_verified"]),
             x402_supported=bool(r["x402_supported"]), fetch_json=_fetch_json, now=now,
             sources=a2a_sources.get(r["id"], ()))
         readiness = (report["score"], report["grade"],

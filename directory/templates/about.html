@@ -238,12 +238,15 @@
 
   <div id="readiness">
     <h2 class="text-lg font-semibold mb-2">Readiness score</h2>
-    <p class="text-sm">Each detail page also shows a <b>readiness</b> score: nine
+    <p class="text-sm">Each detail page also shows a <b>readiness</b> score: eight
       criteria on how fully a listing follows its protocol and how it behaved in our
       probes over 30 days. The criteria follow the public
       <a class="text-blue-600 hover:underline" href="https://agenstry.com/methodology">Agenstry
       conformance methodology</a> so operators see the same levers on both sites; how
-      each one is measured is ours. Grades are fixed thresholds: A&nbsp;&ge;&nbsp;90,
+      each one is measured is ours. We leave out its freshness criterion: all we could
+      measure for it was how recently our own crawler re-read a third-party directory,
+      not the listing. The points that apply to a listing are scaled to 100. Grades are
+      fixed thresholds: A&nbsp;&ge;&nbsp;90,
       B&nbsp;&ge;&nbsp;75, C&nbsp;&ge;&nbsp;60, D&nbsp;&ge;&nbsp;40, F below.</p>
 <div class="overflow-x-auto mt-3">
     <table class="text-sm w-full">
@@ -266,8 +269,6 @@
           <td class="py-1.5 pr-3" colspan="3">&ge;3 full, 1&ndash;2 half; capped at 8 when entries lack descriptions (or, on A2A 1.x, tags).</td></tr>
         <tr class="border-b border-slate-100"><td class="py-1.5 pr-3 font-medium">Identity</td><td class="py-1.5 pr-3 mono">10</td>
           <td class="py-1.5 pr-3" colspan="3">Publisher declared 5; plus a verified claim here 8; MCP Registry namespace proof 7. Company registries are not checked yet, so 8 is the ceiling.</td></tr>
-        <tr class="border-b border-slate-100"><td class="py-1.5 pr-3 font-medium">Freshness</td><td class="py-1.5 pr-3 mono">5</td>
-          <td class="py-1.5 pr-3" colspan="3">Seen in a source within 7 days 4, within 30 days 2; +1 for a payment flag (x402, AP2, MPP&hellip;).</td></tr>
         <tr><td class="py-1.5 pr-3 font-medium">Security declaration</td><td class="py-1.5 pr-3 mono">5</td>
           <td class="py-1.5 pr-3" colspan="2">mTLS 5, OAuth with PKCE 4, any scheme or an explicit &ldquo;public&rdquo; 2</td><td class="py-1.5 text-slate-400">n/a (payment is the access control)</td></tr>
       </tbody>

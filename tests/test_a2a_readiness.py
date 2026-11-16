@@ -80,13 +80,10 @@ class CardCriteria(unittest.TestCase):
         self.assertEqual(R.score_security(v1_card(securitySchemes=oauth))["points"], 4)
         self.assertEqual(R.score_security(v1_card(securitySchemes={"m": {"mtlsSecurityScheme": {}}}))["points"], 5)
 
-    def test_identity_and_freshness(self):
+    def test_identity(self):
         self.assertEqual(R.score_identity(v1_card(), False)["points"], 5)
         self.assertEqual(R.score_identity(v1_card(), True)["points"], 8)
         self.assertEqual(R.score_identity({}, True)["points"], 3)
-        self.assertEqual(R.score_freshness(v1_card(), NOW - 3600, True, NOW)["points"], 5)
-        self.assertEqual(R.score_freshness(v1_card(), NOW - 10 * 86400, False, NOW)["points"], 2)
-        self.assertEqual(R.score_freshness(v1_card(), NOW - 90 * 86400, False, NOW)["points"], 0)
 
 
 class SignatureTests(unittest.TestCase):
@@ -182,12 +179,13 @@ class AssembleTests(unittest.TestCase):
     def test_full_assessment_and_grade(self):
         rep = R.assess(v1_card(securityRequirements=[]), "https://demo.example/.well-known/agent-card.json",
                        rpc={"state": "live", "latency_ms": 200}, uptime_ok=10, uptime_total=10,
-                       owner_verified=True, last_seen=NOW, x402_supported=False, now=NOW)
-        # 10 + 25 + 10 + 0 + 15 + 10 + 8 + 4 + 2
-        self.assertEqual(rep["score"], 84)
+                       owner_verified=True, x402_supported=False, now=NOW)
+        # 10 + 25 + 10 + 0 + 15 + 10 + 8 + 2 = 80 of 95
+        self.assertEqual(rep["score"], round(80 * 100 / 95, 1))
+        self.assertEqual(rep["applicable_max"], 95)
         self.assertEqual(rep["grade"], "B")
         self.assertEqual([c["key"] for c in rep["criteria"]], list(R.WEIGHTS))
-        self.assertEqual(sum(R.WEIGHTS.values()), 100)
+        self.assertEqual(sum(R.WEIGHTS.values()), 95)
         self.assertEqual([R.grade(s) for s in (95, 80, 61, 45, 10)], ["A", "B", "C", "D", "F"])
 
     def test_own_card_scores_card_criteria(self):

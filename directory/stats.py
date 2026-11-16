@@ -626,7 +626,6 @@ def _share_below(qs, value):
 GAP_FIXES = {
     "identity": "Claim the listing and prove control of its domain.",
     "security": "State how to authenticate (an auth scheme, or that none is needed).",
-    "freshness": "Keep the listing current in the registry or source it comes from.",
     "uptime": "Stay reachable in our daily probes.",
     "protocol_version": "Support the current protocol revision.",
     "signature": "Publish a signed descriptor.",
