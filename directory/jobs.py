@@ -508,13 +508,19 @@ def cmd_crawl_code(github_limit: int | None = None, npm_limit: int | None = None
         rows = keep
     else:
         log.warning("code mcp: no classifier model configured; importing unfiltered")
-    added = updated = 0
+    added = updated = unchanged = 0
     errors: list[str] = []
+    same = code_mcp.unchanged_rows(rows)
+    written: list[dict] = []
     for source in code_mcp.OWN_SOURCES:
-        part = []
+        part, originals = [], []
         for r in rows:
             if r["source"] != source:
                 continue
+            if (r["source"], r["source_id"]) in same:
+                unchanged += 1      # stored exactly like this: an upsert is ~60 ms
+                continue
+            originals.append(r)     # upsert rewrites its copy (slug, JSON columns)
             r = dict(r)
             if not r.get("created_at"):
                 r.pop("created_at", None)   # unknown: upsert stamps now
@@ -522,6 +528,10 @@ def cmd_crawl_code(github_limit: int | None = None, npm_limit: int | None = None
         result = _ingest_rows('mcp', source, part, db.upsert_mcp_server)
         added += result['added']; updated += result['updated']
         errors.extend(result['errors'])
+        if not result['errors']:
+            written.extend(originals)
+    code_mcp.remember_rows(written)
+    info["unchanged"] = unchanged
     backdated = _code_backdate(rows)
     attach = info.pop("attach", [])
     info["attached"] = code_sources.attach_packages(attach)
