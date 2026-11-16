@@ -81,21 +81,6 @@ def sentences(kind: str, row: dict, record: dict | None, peer: dict | None) -> l
             out.append(s)
         elif row.get("conformance") == "pass":
             out.append("It completed the MCP initialize handshake when we probed it.")
-        else:
-            from .listing_readiness import credential_test
-            test = credential_test(row)
-            if test:
-                when = time.strftime("%Y-%m-%d", time.gmtime(int(test.get("at") or 0)))
-                rev = f" over MCP protocol revision {test['protocol_version']}" \
-                    if test.get("protocol_version") else ""
-                if test["status"] == "succeeded":
-                    k = int(test.get("tool_count") or 0)
-                    out.append(f"With a credential supplied by a signed-in user on {when}, "
-                               f"initialize answered{rev} and tools/list returned "
-                               f"{k:,} tool{'s' if k != 1 else ''}.")
-                else:
-                    out.append(f"With a credential supplied by a signed-in user on {when}, "
-                               f"initialize answered{rev}; tools/list failed.")
     if kind == "x402":
         payers = row.get("payto_payers_30d")
         if row.get("payto_checked") and payers:

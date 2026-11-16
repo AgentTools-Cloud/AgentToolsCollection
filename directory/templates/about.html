@@ -102,33 +102,6 @@
     <code class="mono bg-slate-100 px-1 rounded">GET /api/v1/services/{slug}</code> under
     <code class="mono">paid_verification</code>. Full schema: <a class="text-blue-600 hover:underline" href="/openapi.json">/openapi.json</a>.</p>
   </div>
-  <div id="mcp-credential-test">
-    <h2 class="text-lg font-semibold mb-2">MCP credential test</h2>
-    <p class="text-sm">Our daily probe is anonymous, so an MCP server that answers it with HTTP 401 never shows us its
-    handshake, protocol revision or tools, and those readiness items score 0. Anyone with an Agent Tools account or API key
-    who has access to such a server can test it from its page with their own credential. We send the credential once, only
-    to the listed endpoint over HTTPS, as the header you name (<span class="mono">Authorization</span> by default; a bare
-    token is sent as <span class="mono">Bearer</span>), and call <span class="mono">initialize</span>,
-    <span class="mono">notifications/initialized</span> and <span class="mono">tools/list</span>, never a tool.
-    Redirects are followed only within the same origin. The credential is not stored or logged.</p>
-    <p class="text-sm mt-2">The latest successful test scores the handshake, protocol revision and tool items of readiness
-    and the conformance and descriptor parts of the quality grade, as our own probe does for an open server; liveness and
-    uptime still come from the daily probe. Every test, failures included, stays on the listing's public record with its
-    date, result, protocol revision, tool count and the header name used. Tool names and descriptions are public, as for
-    open servers, unless the person testing chooses to publish only the count; the score is the same either way.
-    Limits: 6 per minute and 60 per day per IP, 30 per day per account.</p>
-    <p class="text-sm mt-2">For agents and scripts:
-    <code class="mono bg-slate-100 px-1 rounded">POST /api/v1/mcp/servers/{slug}/credential-tests</code> with
-    <code class="mono bg-slate-100 px-1 rounded">{"credential": "…", "header": "Authorization", "publish_tools": true}</code>
-    and your Agent Tools key as <code class="mono bg-slate-100 px-1 rounded">Authorization: Bearer &lt;api_key&gt;</code>;
-    <code class="mono bg-slate-100 px-1 rounded">GET</code> the same path returns every test. Use a credential you are
-    allowed to use, ideally a scoped or short-lived one.</p>
-    <p class="text-sm mt-2">Over MCP (<code class="mono">/mcp-discovery/</code>), the credential never passes through the
-    agent: <code class="mono">get_mcp_credential_test_link(slug)</code> returns this page for the person to open and run the
-    test in their browser, then <code class="mono">list_mcp_credential_tests(slug, since)</code> reads the result. Anything
-    typed into an agent conversation stays in its chat history, client logs and the model provider's records, so agents
-    should never ask for the credential there.</p>
-  </div>
   <div id="grading">
     <h2 class="text-lg font-semibold mb-2">Grading</h2>
     <p class="text-sm">Every listing carries a 0–100 score and a letter grade, built
@@ -283,7 +256,7 @@
         <th class="py-1.5 font-medium">x402</th></tr></thead>
       <tbody class="align-top">
         <tr class="border-b border-slate-100"><td class="py-1.5 pr-3 font-medium">Valid descriptor</td><td class="py-1.5 pr-3 mono">10</td>
-          <td class="py-1.5 pr-3">Agent Card fields; &minus;1 per finding, at most &minus;3</td><td class="py-1.5 pr-3">initialize + tools/list (or the latest <a class="text-blue-600 hover:underline" href="#mcp-credential-test">credential test</a> when it asks for one)</td><td class="py-1.5">payTo, mainnet network, price</td></tr>
+          <td class="py-1.5 pr-3">Agent Card fields; &minus;1 per finding, at most &minus;3</td><td class="py-1.5 pr-3">initialize + tools/list</td><td class="py-1.5">payTo, mainnet network, price</td></tr>
         <tr class="border-b border-slate-100"><td class="py-1.5 pr-3 font-medium">Live endpoint</td><td class="py-1.5 pr-3 mono">25</td>
           <td class="py-1.5 pr-3" colspan="3">Read-only probe (A2A <span class="mono">GetTask</span>, MCP <span class="mono">initialize</span>, x402 HTTP 402). Live 25, auth-gated or rate-limited 15, wrong shape 5. Slow responses lose 1&ndash;3 (&gt;2.5&nbsp;s, &gt;5&nbsp;s, &gt;8&nbsp;s). A result older than 30 days decays to 40% by 120 days.</td></tr>
         <tr class="border-b border-slate-100"><td class="py-1.5 pr-3 font-medium">Protocol version</td><td class="py-1.5 pr-3 mono">10</td>

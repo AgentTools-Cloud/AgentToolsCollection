@@ -64,8 +64,6 @@ register(url, name=None, description=None, mcp_url=None, category=None)
 prepare_paid_verification(slug, payer, api_key=None)
 execute_paid_verification(id, signature, api_key=None)
 get_paid_verification(id, api_key=None)
-get_mcp_credential_test_link(slug)
-list_mcp_credential_tests(slug, since=None)
 claim_service_url(url, method=None)
 verify_service_url(claim_id, token)
 get_owned_listing(kind, slug)
@@ -76,12 +74,6 @@ edit_owned_listing(kind, slug, fields)
 package): pay a listed x402 service once from your own wallet and record the
 result. Needs an API key from `POST /api/v1/keys`. See
 [`/about#paid-verification`](https://agent-tools.cloud/about#paid-verification).
-
-`get_mcp_credential_test_link` / `list_mcp_credential_tests` (remote server only):
-an MCP server that answers 401 can be tested with a person's own credential on its
-page; the tool returns that page so the credential never enters the agent's
-conversation. See
-[`/about#mcp-credential-test`](https://agent-tools.cloud/about#mcp-credential-test).
 
 `search` accepts natural-language intent and ranks by FTS5 + popularity +
 health. Each result carries a `match_reason` and a `confidence` score.
