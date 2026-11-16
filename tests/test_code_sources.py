@@ -224,3 +224,14 @@ class CrawlWithSourcesTests(_TempDB):
             self.assertTrue(fx.call_args.kwargs["baidu"])
             jobs.cmd_crawl_code(baidu=False)
             self.assertFalse(fx.call_args.kwargs["baidu"])
+
+
+class ClassifierModelTests(_TempDB):
+    def test_classify_model_override(self):
+        from directory import code_classify
+        env = {"AGENT_TOOLS_A2A_BASE_URL": "https://gw.example", "AGENT_TOOLS_A2A_API_KEY": "k",
+               "AGENT_TOOLS_A2A_MODEL": "big-model"}
+        with patch.dict("os.environ", env, clear=False):
+            self.assertEqual(code_classify._backend()[2], "big-model")
+            with patch.dict("os.environ", {"AGENT_TOOLS_CLASSIFY_MODEL": "small-model"}):
+                self.assertEqual(code_classify._backend(), ("https://gw.example", "k", "small-model"))

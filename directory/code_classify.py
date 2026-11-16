@@ -44,8 +44,12 @@ Answer ONLY a JSON object {"<id>": "<class>", ...} covering every id."""
 
 
 def _backend():
+    """Same gateway as the A2A analyst; AGENT_TOOLS_CLASSIFY_MODEL picks a
+    cheaper model for this bulk job (100k+ rows on a full crawl)."""
+    import os
     from .a2a_agent import _backend as backend
-    return backend()
+    base, key, model = backend()
+    return base, key, (os.getenv("AGENT_TOOLS_CLASSIFY_MODEL") or "").strip() or model
 
 
 def configured() -> bool:
