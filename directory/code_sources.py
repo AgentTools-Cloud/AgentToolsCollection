@@ -394,7 +394,8 @@ def fetch_baidu(words: list[str], max_requests: int = BAIDU_MAX_REQUESTS,
 # All directories
 # ---------------------------------------------------------------------------
 
-def fetch_extra(baidu: bool = False) -> tuple[dict[str, str], list[dict], dict]:
+def fetch_extra(baidu: bool = False, words: list[str] | None = None
+                ) -> tuple[dict[str, str], list[dict], dict]:
     """(repo hints, package rows, counts) from every directory; one failing
     directory only loses its own share."""
     hints: dict[str, str] = {}
@@ -419,7 +420,7 @@ def fetch_extra(baidu: bool = False) -> tuple[dict[str, str], list[dict], dict]:
     take("modelscope", lambda: modelscope_rows(fetch_modelscope()))
     take("docker", lambda: docker_rows(fetch_docker()))
     if baidu:
-        take("baidu", lambda: (fetch_baidu(baidu_words()), []))
+        take("baidu", lambda: (fetch_baidu(words or baidu_words()), []))
     return hints, rows, info
 
 

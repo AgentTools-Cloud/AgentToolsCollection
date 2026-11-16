@@ -564,22 +564,112 @@ def load_fetch(path: str) -> tuple[list[dict], dict, dict]:
     return rows, info, head.get("meta") or {}
 
 
+# ---------------------------------------------------------------------------
+# Parts fetched on another machine (only public, unauthenticated APIs: GitHub
+# search at 10/min, ecosyste.ms, npm, Registry, Cline, ModelScope, Docker,
+# Baidu). The helper writes parts/<name>.json.gz; the main run waits for it
+# after its own GitHub topics and falls back to fetching it itself.
+# ---------------------------------------------------------------------------
+
+PART_WAIT_SECONDS = 6 * 3600
+PART_MAX_AGE = 6 * 3600     # a part may be started up to 6 h before the main run
+
+
+def parts_dir() -> str:
+    import os
+    return os.path.join(fetch_dir(), "parts")
+
+
+def part_name(part: str) -> str:
+    return re.sub(r"[^a-z0-9.-]+", "_", part.lower())
+
+
+def fetch_part(part: str, *, baidu: bool = False, words: list[str] | None = None):
+    """`github:<topic>`, `packages` or `extra`."""
+    from . import code_sources
+    if part.startswith("github:"):
+        return fetch_github_topics(topics=(part.split(":", 1)[1],))
+    if part == "packages":
+        try:
+            eco = fetch_ecosystems_all()
+        except Exception as e:  # noqa: BLE001 - npm search alone
+            log.warning("code mcp: ecosyste.ms failed (%r); npm search only", e)
+            eco = []
+        return {"eco": eco, "npm": [npm_row(o) for o in fetch_npm()]}
+    if part == "extra":
+        hints, rows, info = code_sources.fetch_extra(baidu=baidu, words=words)
+        return {"hints": hints, "rows": rows, "info": info}
+    raise ValueError(f"unknown part {part!r}")
+
+
+def write_part(part: str, data, out_dir: str | None = None) -> str:
+    import gzip
+    import os
+    d = out_dir or parts_dir()
+    os.makedirs(d, exist_ok=True)
+    path = os.path.join(d, part_name(part) + ".json.gz")
+    with gzip.open(path + ".part", "wt", encoding="utf-8") as f:
+        json.dump({"part": part, "written_at": int(time.time()), "data": data}, f,
+                  ensure_ascii=False)
+    os.replace(path + ".part", path)
+    return path
+
+
+def wait_part(part: str, since: float, timeout: float | None = None):
+    """Data of a part written after `since`, or None after `timeout`."""
+    import gzip
+    import os
+    path = os.path.join(parts_dir(), part_name(part) + ".json.gz")
+    deadline = time.time() + (PART_WAIT_SECONDS if timeout is None else timeout)
+    while True:
+        if os.path.exists(path):
+            try:
+                with gzip.open(path, "rt", encoding="utf-8") as f:
+                    doc = json.load(f)
+                if doc.get("written_at", 0) >= since - PART_MAX_AGE:
+                    log.info("code mcp: part %s loaded from %s", part, path)
+                    return doc["data"]
+            except (OSError, ValueError) as e:
+                log.warning("code mcp: part %s unreadable (%r)", part, e)
+        if time.time() >= deadline:
+            log.warning("code mcp: part %s not delivered; fetching it here", part)
+            return None
+        time.sleep(60)
+
+
 def fetch_all(*, github_limit: int | None = None, npm_limit: int = NPM_MAX,
               min_stars: int = 0, pushed_since: date | None = None,
-              baidu: bool = False) -> tuple[list[dict], dict]:
+              baidu: bool = False, remote_parts: tuple[str, ...] = ()) -> tuple[list[dict], dict]:
     from . import code_sources
-    gh = fetch_github_topics(max_repos=github_limit, min_stars=min_stars,
+    started = time.time()
+    remote = set(remote_parts)
+    local_topics = tuple(t for t in GITHUB_TOPICS if f"github:{t}" not in remote)
+    gh = fetch_github_topics(local_topics, max_repos=github_limit, min_stars=min_stars,
                              pushed_since=pushed_since)
-    try:
-        eco = fetch_ecosystems_all()
-    except Exception as e:  # noqa: BLE001 - fall back to npm search alone
-        log.warning("code mcp: ecosyste.ms failed (%r); npm search only", e)
-        eco = []
+    seen_gh = {(i.get("full_name") or "").lower() for i in gh}
+    for t in GITHUB_TOPICS:
+        if f"github:{t}" not in remote:
+            continue
+        got = wait_part(f"github:{t}", started)
+        if got is None:
+            got = fetch_part(f"github:{t}")
+        for i in got:
+            repo = (i.get("full_name") or "").lower()
+            if repo and repo not in seen_gh:
+                seen_gh.add(repo)
+                gh.append(i)
+    pk = wait_part("packages", started) if "packages" in remote else None
+    if pk is None:
+        pk = fetch_part("packages")
+    eco = pk["eco"]
     have = {(r["package_registry"], r["source_id"]) for r in eco}
     eco_keys = set(have)
-    npm = [npm_row(o) for o in fetch_npm(max_packages=npm_limit)]
+    npm = pk["npm"]
     packages = eco + [r for r in npm if ("npm", r["source_id"]) not in have]
-    hints, extra_rows, extra_info = code_sources.fetch_extra(baidu=baidu)
+    ex = wait_part("extra", started) if "extra" in remote else None
+    if ex is None:
+        ex = fetch_part("extra", baidu=baidu)
+    hints, extra_rows, extra_info = ex["hints"], ex["rows"], ex["info"]
     with db.connect(read_only=True) as c:
         known = known_repos(c)
         stored = stored_repos(c)
