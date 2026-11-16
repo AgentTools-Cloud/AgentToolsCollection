@@ -123,6 +123,11 @@
     and your Agent Tools key as <code class="mono bg-slate-100 px-1 rounded">Authorization: Bearer &lt;api_key&gt;</code>;
     <code class="mono bg-slate-100 px-1 rounded">GET</code> the same path returns every test. Use a credential you are
     allowed to use, ideally a scoped or short-lived one.</p>
+    <p class="text-sm mt-2">Over MCP (<code class="mono">/mcp-discovery/</code>), the credential never passes through the
+    agent: <code class="mono">get_mcp_credential_test_link(slug)</code> returns this page for the person to open and run the
+    test in their browser, then <code class="mono">list_mcp_credential_tests(slug, since)</code> reads the result. Anything
+    typed into an agent conversation stays in its chat history, client logs and the model provider's records, so agents
+    should never ask for the credential there.</p>
   </div>
   <div id="grading">
     <h2 class="text-lg font-semibold mb-2">Grading</h2>

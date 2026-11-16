@@ -16,7 +16,9 @@ import logging
 import os
 import re
 import secrets
+import time
 from typing import Any
+from urllib.parse import quote
 
 from fastapi import HTTPException, Request
 from mcp.server.fastmcp import Context, FastMCP
@@ -30,6 +32,8 @@ from . import cards
 from . import db as directory_db
 from . import jobs as directory_jobs
 from . import limits
+from . import listing_readiness
+from . import mcp_credential_test
 from . import paid_verify
 from . import ownership as directory_ownership
 from . import resources as directory_resources
@@ -67,6 +71,10 @@ _INSTRUCTIONS = (
     "`verify_service_url(claim_id, token)` -> `get_owned_listing` / "
     "`edit_owned_listing`. A claim covers only its exact public HTTPS URL, "
     "not the host or sibling services."
+    "\n  8. An MCP server that answers 401 can be tested with a person's own "
+    "credential: `get_mcp_credential_test_link(slug)` returns a page for them to "
+    "open; never ask for the credential in chat. Read the outcome with "
+    "`list_mcp_credential_tests(slug, since=issued_at)`."
 )
 
 _READ_ONLY = ToolAnnotations(readOnlyHint=True, openWorldHint=False)
@@ -1402,6 +1410,76 @@ async def get_paid_verification(
               args={"outcome": out.get("error") or out.get("status")},
               result_n=0 if out.get("error") else 1)
     return out
+
+
+def _credential_test_listing(conn, slug: str) -> dict | None:
+    if directory_db.find_privacy_suppression_any(conn, "mcp", {"slug": slug}) is not None:
+        return None
+    row = conn.execute("SELECT id, slug, name, endpoint_url, http_status FROM mcp_servers "
+                       "WHERE slug=?", (slug,)).fetchone()
+    return dict(row) if row and (row["endpoint_url"] or "").strip() else None
+
+
+@discover_mcp.tool(annotations=_READ_ONLY)
+async def get_mcp_credential_test_link(slug: str, ctx: Context | None = None) -> dict[str, Any]:
+    """Page where a person tests an MCP server that asks for a credential.
+
+    Never ask the user for the credential in this conversation and never pass one
+    to a tool: anything typed here stays in the chat history, client logs and the
+    model provider's records. Give the user `url` instead. They open it in a
+    browser, sign in, paste the credential and run the test there; it goes only
+    to that server, once, and is not stored. Then read the outcome with
+    `list_mcp_credential_tests(slug, since=issued_at)`.
+
+    Args:
+        slug: MCP server slug as returned by `search_mcp_servers` items.
+
+    Returns:
+        { slug, name, endpoint_url, asks_for_credential, url, issued_at, next } or { error, message }.
+    """
+    with _open() as conn:
+        row = _credential_test_listing(conn, slug)
+    if row is None:
+        _log_call("get_mcp_credential_test_link", ctx=ctx, args={"slug": slug}, result_n=0)
+        return {"error": "not_found", "message": f"No remote MCP server with slug {slug!r}"}
+    _log_call("get_mcp_credential_test_link", ctx=ctx, args={"slug": slug},
+              result_n=1, result_slug=slug)
+    return {"slug": row["slug"], "name": row["name"], "endpoint_url": row["endpoint_url"],
+            "asks_for_credential": row["http_status"] in listing_readiness.AUTH_GATED,
+            "url": f"https://agent-tools.cloud/mcp/servers/{quote(row['slug'])}#credential-test",
+            "issued_at": int(time.time()),
+            "next": ("Send `url` to the user and ask them to run the test there. Do not ask for "
+                     "or accept the credential in this conversation. Then call "
+                     "list_mcp_credential_tests(slug, since=issued_at).")}
+
+
+@discover_mcp.tool(annotations=_READ_ONLY)
+async def list_mcp_credential_tests(slug: str, since: int | None = None,
+                                    ctx: Context | None = None) -> dict[str, Any]:
+    """Credential tests of one MCP server, newest first: its public record.
+
+    Each test has tested_at (unix seconds), status (succeeded | partial |
+    auth_rejected | failed), error, http_status, latency_ms, protocol_version,
+    tool_count, described_count, tools (names and descriptions, or null when the
+    tester published only the count) and the header name used. The latest
+    succeeded or partial test scores the server's readiness and quality grade the
+    way our own probe scores an open server.
+
+    Args:
+        slug: MCP server slug as returned by `search_mcp_servers` items.
+        since: Optional unix time; only tests at or after it, e.g. `issued_at` from `get_mcp_credential_test_link`.
+    """
+    with _open() as conn:
+        row = _credential_test_listing(conn, slug)
+        tests = mcp_credential_test.history(conn, row["id"]) if row else []
+    if row is None:
+        _log_call("list_mcp_credential_tests", ctx=ctx, args={"slug": slug}, result_n=0)
+        return {"error": "not_found", "message": f"No remote MCP server with slug {slug!r}"}
+    if since is not None:
+        tests = [t for t in tests if t["tested_at"] >= int(since)]
+    _log_call("list_mcp_credential_tests", ctx=ctx, args={"slug": slug},
+              result_n=len(tests), result_slug=slug)
+    return {"slug": row["slug"], "count": len(tests), "tests": tests}
 
 
 _ARG_LINE = re.compile(r"^ {8}(\w+): (.*)$")

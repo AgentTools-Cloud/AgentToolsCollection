@@ -2639,6 +2639,20 @@ def well_known():
                          "Settled requires matching Base-USDC AuthorizationUsed and Transfer events; "
                          "evidence is public for 30 days. Signatures and response bodies are not stored.",
             },
+            "mcp_credential_test": {
+                "docs": "https://agent-tools.cloud/about#mcp-credential-test",
+                "page_template": "https://agent-tools.cloud/mcp/servers/{slug}#credential-test",
+                "mcp": {"url": "https://agent-tools.cloud/mcp-discovery/",
+                        "tools": ["get_mcp_credential_test_link", "list_mcp_credential_tests"]},
+                "run": {"method": "POST",
+                        "url_template": "https://agent-tools.cloud/api/v1/mcp/servers/{slug}/credential-tests",
+                        "body": {"credential": "<the server's own credential>",
+                                 "header": "Authorization", "publish_tools": True},
+                        "auth": "Authorization: Bearer <api_key> or a signed-in browser session"},
+                "results": "https://agent-tools.cloud/api/v1/mcp/servers/{slug}/credential-tests",
+                "notes": "initialize + tools/list only, sent once, never stored or logged. Agents should "
+                         "send people the page instead of collecting credentials in chat.",
+            },
             "x402_manifest": "https://agent-tools.cloud/.well-known/x402",
             "openapi": "https://agent-tools.cloud/openapi.json",
         },

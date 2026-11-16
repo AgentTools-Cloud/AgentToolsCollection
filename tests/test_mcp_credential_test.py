@@ -70,8 +70,18 @@ class FakeServer:
         return [(m, (b or {}).get("method")) for m, _u, _h, b in self.calls]
 
 
+_CLIENTS = []
+
+
 def client_for(server):
-    return httpx.Client(transport=httpx.MockTransport(server), follow_redirects=False)
+    client = httpx.Client(transport=httpx.MockTransport(server), follow_redirects=False)
+    _CLIENTS.append(client)
+    return client
+
+
+def tearDownModule():
+    for client in _CLIENTS:
+        client.close()
 
 
 def bearer():
@@ -315,3 +325,54 @@ class RouteTests(CredentialFixture):
         self.assertEqual(self.post(slug="nope").status_code, 404)
         r = self.post(header="Cookie")
         self.assertEqual((r.status_code, r.json()["error"]), (400, "bad_header"))
+
+
+class McpToolTests(CredentialFixture):
+    def setUp(self):
+        super().setUp()
+        import asyncio
+        from directory import mcp_app
+        self.mcp_app = mcp_app
+        self.run_async = asyncio.run
+        self.enterContext(patch.object(mcp_app, "DB_PATH", self.path))
+
+    def test_tools_never_take_a_credential(self):
+        tools = {t.name: t for t in self.run_async(self.mcp_app.discover_mcp.list_tools())}
+        self.assertEqual(set(tools["get_mcp_credential_test_link"].inputSchema["properties"]), {"slug"})
+        self.assertEqual(set(tools["list_mcp_credential_tests"].inputSchema["properties"]), {"slug", "since"})
+        self.assertIn("Never ask the user for the credential", tools["get_mcp_credential_test_link"].description)
+        self.assertTrue(tools["list_mcp_credential_tests"].annotations.readOnlyHint)
+
+    def test_link_then_results(self):
+        link = self.run_async(self.mcp_app.get_mcp_credential_test_link("vendor-mcp"))
+        self.assertEqual(link["url"], "https://agent-tools.cloud/mcp/servers/vendor-mcp#credential-test")
+        self.assertTrue(link["asks_for_credential"])
+        self.assertEqual(self.run_async(self.mcp_app.list_mcp_credential_tests("vendor-mcp"))["count"], 0)
+        self.run_test(publish=False)
+        out = self.run_async(self.mcp_app.list_mcp_credential_tests("vendor-mcp", since=link["issued_at"]))
+        self.assertEqual((out["count"], out["tests"][0]["tool_count"], out["tests"][0]["tools"]), (1, 3, None))
+        later = self.run_async(self.mcp_app.list_mcp_credential_tests("vendor-mcp", since=link["issued_at"] + 3600))
+        self.assertEqual(later["count"], 0)
+        self.assertEqual(self.run_async(self.mcp_app.get_mcp_credential_test_link("nope"))["error"], "not_found")
+
+    def test_public_docs_list_the_tools(self):
+        import importlib.util
+        import os
+        from pathlib import Path
+        root = Path(__file__).resolve().parent.parent
+        spec = importlib.util.spec_from_file_location("server_under_test_credential", root / "server.py")
+        server = importlib.util.module_from_spec(spec)
+        with patch.dict(os.environ, {"SESSION_SECRET": "offline-test-session-secret"}):
+            spec.loader.exec_module(server)
+        client = TestClient(server.app, base_url="https://agent-tools.cloud")
+        names = {t["name"] for t in client.get("/.well-known/mcp.json").json()["tools"]}
+        llms = client.get("/llms.txt").text
+        guidance = client.get("/openapi.json").json()["info"]["x-guidance"]
+        manifest = client.get("/.well-known/agent-tools.json").json()
+        about = (root / "directory/templates/about.html").read_text()
+        readme = (root / "README.md").read_text()
+        for name in ("get_mcp_credential_test_link", "list_mcp_credential_tests"):
+            self.assertIn(name, names)
+            for text in (llms, guidance, about, readme):
+                self.assertIn(name, text)
+            self.assertIn(name, manifest["endpoints"]["mcp_credential_test"]["mcp"]["tools"])
