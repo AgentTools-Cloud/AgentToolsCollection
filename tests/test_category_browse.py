@@ -52,6 +52,8 @@ class CategoryBrowseTests(unittest.TestCase):
         for i in range(151):
             self.assertEqual(sum(f'data-search-q="tag-{i:04d}"' in x for x in bodies), 1)
         self.assertFalse(any('?q=tag-' in x for x in bodies))
+        self.assertIn('/categories?kind=a2a&amp;page=2', bodies[0])
+        self.assertNotIn('q=&amp;', bodies[0])
         self.db.a2a_categories.assert_called_once()
         self.assertEqual(self.conn.close.call_count, 3)
 
