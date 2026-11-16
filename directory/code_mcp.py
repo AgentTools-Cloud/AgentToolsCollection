@@ -690,7 +690,8 @@ def fetch_all(*, github_limit: int | None = None, npm_limit: int = NPM_MAX,
     todo = {r: v for r, v in hints.items()
             if r not in crawled and r not in stored and r not in known[0]}
     if todo:
-        todo = {r: v for r, v in todo.items() if r not in code_sources.recently_checked()}
+        checked = code_sources.recently_checked()   # once: it reads the whole table
+        todo = {r: v for r, v in todo.items() if r not in checked}
     looked = code_sources.lookup_repos(todo) if todo else []
     gh = gh + [i for i in looked if (i.get("full_name") or "").lower() not in crawled]
     have.update((r["package_registry"], r["source_id"]) for r in packages)
