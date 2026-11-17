@@ -189,6 +189,25 @@ class McpReadiness(unittest.TestCase):
             self.assertNotEqual(k["live"]["state"], "auth_discoverable", sc)
             self.assertEqual(k["valid_card"]["points"], 10 if sc == 200 else 0, sc)
 
+    def test_auth_gated_fixes_point_to_the_discovery(self):
+        gated = dict(conformance="fail", http_status=401, tools_json=None, tool_count=None,
+                     protocol_version=None)
+        full = {"challenge": True, "resource_metadata": True, "server_metadata": True}
+        k = by_key(L.assess_mcp(mcp_row(auth_discovery=full, **gated), now=NOW))
+        self.assertNotIn("fix", k["valid_card"])
+        self.assertNotIn("fix", k["live"])
+        k = by_key(L.assess_mcp(mcp_row(auth_discovery={"challenge": True}, **gated), now=NOW))
+        self.assertIn("did not find: protected-resource metadata, authorization-server metadata.",
+                      k["valid_card"]["fix"])
+        self.assertIn("Bearer challenge and protected-resource metadata", k["live"]["fix"])
+        unchecked = by_key(L.assess_mcp(mcp_row(**gated), now=NOW))
+        self.assertIn("we check weekly", unchecked["valid_card"]["fix"])
+        self.assertIn("fix", unchecked["live"])
+        for sc in (402, 403):
+            k = by_key(L.assess_mcp(mcp_row(**dict(gated, http_status=sc)), now=NOW))
+            self.assertNotIn("fix", k["valid_card"], sc)
+            self.assertNotIn("fix", k["live"], sc)
+
     def test_down_and_payment_evidence(self):
         rep = L.assess_mcp(mcp_row(health="down", http_status=None, conformance=None,
                                    x402_supported=1, pricing='{"offers": [1]}'),

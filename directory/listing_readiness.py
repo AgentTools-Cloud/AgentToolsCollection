@@ -360,6 +360,7 @@ def _mcp_security(auth) -> dict:
 _DISCOVERY = (("challenge", 2, "Bearer challenge"),
               ("resource_metadata", 2, "protected-resource metadata"),
               ("server_metadata", 1, "authorization-server metadata"))
+_NO_CREDENTIAL_PART = "initialize and tools/list cannot be measured without credentials."
 
 
 def _discovered_handshake(gate: str, disc: dict) -> dict:
@@ -373,7 +374,10 @@ def _discovered_handshake(gate: str, disc: dict) -> dict:
         text += "; missing " + ", ".join(missing)
     text += (f", {pts} points. initialize and tools/list need credentials, so they "
              "were not measured and score 0.")
-    return _crit("mcp", "valid_card", pts, "partial" if pts else "info", text, auth_gated=True)
+    extra = {"fix": "Add what the MCP authorization spec asks for and our weekly check did not "
+                    f"find: {', '.join(missing)}. {_NO_CREDENTIAL_PART}"} if missing else {}
+    return _crit("mcp", "valid_card", pts, "partial" if pts else "info", text,
+                 auth_gated=True, **extra)
 
 
 def _discovered_security(disc: dict, declared: dict) -> dict:
@@ -418,9 +422,12 @@ def assess_mcp(row: dict, *, uptime_ok: int = 0, uptime_total: int = 0,
     elif gate and disc:
         valid = _discovered_handshake(gate, disc)
     elif gate:
+        extra = {"fix": "Answer anonymous requests as the MCP authorization spec asks (Bearer "
+                        "challenge, protected-resource and authorization-server metadata); we "
+                        f"check weekly. {_NO_CREDENTIAL_PART}"} if sc == 401 else {}
         valid = _crit("mcp", "valid_card", 0, "info",
                       f"{gate}: our anonymous probe could not complete the handshake, "
-                      "so it was not measured and scores 0.", auth_gated=True)
+                      "so it was not measured and scores 0.", auth_gated=True, **extra)
     else:
         valid = _crit("mcp", "valid_card", 0, "fail",
                       "initialize did not answer cleanly" + (f" (HTTP {sc})" if sc else "") + ".")
@@ -441,6 +448,9 @@ def assess_mcp(row: dict, *, uptime_ok: int = 0, uptime_total: int = 0,
         state, text = "unreachable", "Endpoint did not answer"
     latency = d.get("latency_p95_ms") or d.get("latency_ms")
     live = _live("mcp", state, text, latency if h in ("ok", "degraded") else None)
+    if state == "auth_gated" and sc == 401:
+        live["fix"] = ("Answer anonymous requests with a Bearer challenge and protected-resource "
+                       "metadata, as the MCP authorization spec asks; we check weekly.")
 
     # 3. revision
     if gate and not d.get("protocol_version"):
