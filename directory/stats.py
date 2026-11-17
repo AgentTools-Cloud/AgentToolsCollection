@@ -945,6 +945,34 @@ def flatten(snap: dict) -> list[tuple[str, str, float]]:
     return out
 
 
+# Our own crawls, submissions and housekeeping markers are not public sources.
+_INTERNAL_SOURCES = {"submission", "manual", "manual-seed", "owner-migration",
+                     "safety-scan", "mcp-keepalive", "official-remote"}
+
+
+def source_summary(snap: dict | None) -> dict | None:
+    """How many public directories/registries feed the probed index, and the
+    largest share any single one covers of its own kind (x402, MCP, A2A)."""
+    if not snap or not snap.get("sources") or not snap.get("kpis"):
+        return None
+    names, worst = set(), None
+    for kind, block in snap["sources"].items():
+        total = (snap["kpis"].get(kind) or {}).get("indexed") or 0
+        for row in block.get("by_source") or []:
+            src, label = row.get("source") or "", row.get("label") or ""
+            if src in _INTERNAL_SOURCES or label.startswith("own "):
+                continue
+            names.add(src.removesuffix("-paid"))
+            if total:
+                share = 100 * (row.get("listings") or 0) / total
+                if worst is None or share > worst["share"]:
+                    worst = {"share": share, "source": label, "kind": kind}
+    if not names or worst is None:
+        return None
+    return {"count": len(names), "max_share": round(worst["share"]),
+            "max_source": worst["source"], "max_kind": worst["kind"]}
+
+
 # ---------------------------------------------------------------------------
 # Headlines: one finding sentence per section, rebuilt from the numbers.
 # ---------------------------------------------------------------------------
