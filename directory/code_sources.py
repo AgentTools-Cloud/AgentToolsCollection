@@ -433,19 +433,24 @@ def attach_packages(attach: list[tuple[str, str, str]]) -> int:
     for repo, reg, pkg in attach:
         if cm.package_matches_repo(reg, pkg, repo):
             first.setdefault(repo, (reg, pkg))
-    items = [(reg, pkg, repo) for repo, (reg, pkg) in first.items()]
+    if not first:
+        return 0
+    # (source, source_id) has no index: find the targets in one read, then write by id.
+    with db.connect(read_only=True) as c:
+        items = [(*first[sid], rid) for rid, sid in c.execute(
+            "SELECT id, source_id FROM mcp_servers "
+            "WHERE source='github' AND COALESCE(package_name,'')=''") if sid in first]
     n = 0
     for i in range(0, len(items), 500):
         chunk = items[i:i + 500]
 
         def op(chunk=chunk):
             with db.writer() as c:
-                before = c.total_changes
-                c.executemany(
+                # rowcount, not total_changes: the latter also counts trigger writes.
+                return c.executemany(
                     "UPDATE mcp_servers SET package_registry=?, package_name=? "
-                    "WHERE source='github' AND source_id=? AND COALESCE(package_name,'')=''",
-                    chunk)
-                return c.total_changes - before
+                    "WHERE id=? AND source='github' AND COALESCE(package_name,'')=''",
+                    chunk).rowcount
         n += db.with_retry(op, attempts=10, base_delay=1.0)
     return n
 

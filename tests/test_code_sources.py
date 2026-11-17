@@ -480,3 +480,25 @@ class CodeOnlyCleanupTests(_TempDB):
                                      "source_code_url": "https://github.com/someone/else",
                                      "source": "npm", "source_id": "tool-mcp"})
         self.assertEqual(code_sources.drop_duplicate_packages(), {"npm": 1})
+
+    def test_attach_fills_only_stored_github_rows_without_a_package(self):
+        def gh(name, **extra):
+            row = code_mcp.github_row({"full_name": name, "description": "MCP server",
+                                       "stargazers_count": 1, "topics": ["mcp-server"]})
+            row.update(extra)
+            return row
+        empty = gh("acme/tool-mcp")
+        taken = gh("acme/other-mcp", package_registry="npm", package_name="other-mcp")
+        with db.writer() as c:
+            for row in (empty, taken):
+                db.upsert_mcp_server(c, row)
+        attach = [(empty["source_id"], "npm", "@mseep/tool-mcp"),
+                  (empty["source_id"], "npm", "tool-mcp"),
+                  (taken["source_id"], "npm", "other-mcp"),
+                  ("acme/not-stored-mcp", "npm", "not-stored-mcp")]
+        self.assertEqual(code_sources.attach_packages(attach), 1)
+        with closing(db.connect()) as c:
+            got = dict(c.execute("SELECT source_id, package_registry || ':' || package_name "
+                                 "FROM mcp_servers WHERE source='github'").fetchall())
+        self.assertEqual(got, {empty["source_id"]: "npm:tool-mcp",
+                               taken["source_id"]: "npm:other-mcp"})
