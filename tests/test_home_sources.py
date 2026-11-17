@@ -22,6 +22,9 @@ class SourceSummaryTests(unittest.TestCase):
         got = stats.source_summary(snap)
         self.assertEqual(got["count"], 2)            # mcp-registry, agenstry
         self.assertEqual((got["max_share"], got["max_source"], got["max_kind"]), (70, "agenstry", "a2a"))
+        self.assertEqual([(t["name"], t["listings"]) for t in got["top"]],
+                         [("MCP Registry", 60), ("Agenstry", 37)])
+        self.assertEqual(got["more"], 0)
 
     def test_missing_snapshot(self):
         self.assertIsNone(stats.source_summary(None))

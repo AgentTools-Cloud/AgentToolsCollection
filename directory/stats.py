@@ -950,27 +950,60 @@ _INTERNAL_SOURCES = {"submission", "manual", "manual-seed", "owner-migration",
                      "safety-scan", "mcp-keepalive", "official-remote"}
 
 
+# Display name and home page of public sources shown as chips on the home page.
+_SOURCE_LINKS = {
+    "mcp-registry": ("MCP Registry", "https://registry.modelcontextprotocol.io"),
+    "agenstry": ("Agenstry", "https://agenstry.com"),
+    "x402scan": ("x402scan", "https://www.x402scan.com/"),
+    "smithery": ("Smithery", "https://smithery.ai"),
+    "capkey": ("CapKey", "https://capkey.dev/catalog"),
+    "pulsemcp": ("PulseMCP", "https://www.pulsemcp.com"),
+    "cdp-bazaar": ("CDP Bazaar", "https://docs.cdp.coinbase.com/x402"),
+    "chiark": ("Chiark", "https://chiark.ai"),
+    "modelscope": ("ModelScope", "https://modelscope.cn/mcp"),
+    "paygent-discover": ("Paygent Discover", "https://discover.paygent.net"),
+    "a2a-registry": ("Global A2A Registry", "https://www.a2a-registry.org"),
+    "a2aregistry": ("a2aregistry.org", "https://a2aregistry.org"),
+    "apify": ("Apify", "https://apify.com"),
+    "awesome-x402": ("awesome-x402", "https://github.com/Merit-Systems/awesome-x402"),
+    "agentalog": ("agentalog", "https://agentalog.com"),
+    "prowl": ("Prowl", "https://prowl.world"),
+    "localmark": ("LocalMark", "https://localmark.ai"),
+    "docker-mcp": ("Docker MCP catalog", "https://github.com/docker/mcp-registry"),
+    "flows-litprotocol": ("Flows", "https://flows.litprotocol.com"),
+}
+HOME_SOURCE_CHIPS = 10
+
+
 def source_summary(snap: dict | None) -> dict | None:
     """How many public directories/registries feed the probed index, and the
     largest share any single one covers of its own kind (x402, MCP, A2A)."""
     if not snap or not snap.get("sources") or not snap.get("kpis"):
         return None
-    names, worst = set(), None
+    names, worst, sizes = set(), None, {}
     for kind, block in snap["sources"].items():
         total = (snap["kpis"].get(kind) or {}).get("indexed") or 0
         for row in block.get("by_source") or []:
             src, label = row.get("source") or "", row.get("label") or ""
             if src in _INTERNAL_SOURCES or label.startswith("own "):
                 continue
-            names.add(src.removesuffix("-paid"))
+            name = src.removesuffix("-paid")
+            names.add(name)
+            sizes[name] = sizes.get(name, 0) + (row.get("listings") or 0)
             if total:
                 share = 100 * (row.get("listings") or 0) / total
                 if worst is None or share > worst["share"]:
                     worst = {"share": share, "source": label, "kind": kind}
     if not names or worst is None:
         return None
+    def short(v):
+        return f"{v / 1000:.1f}".rstrip("0").rstrip(".") + "k" if v >= 1000 else str(v)
+
+    top = [{"name": _SOURCE_LINKS[n][0], "url": _SOURCE_LINKS[n][1], "listings": v, "short": short(v)}
+           for n, v in sorted(sizes.items(), key=lambda x: -x[1]) if n in _SOURCE_LINKS][:HOME_SOURCE_CHIPS]
     return {"count": len(names), "max_share": round(worst["share"]),
-            "max_source": worst["source"], "max_kind": worst["kind"]}
+            "max_source": worst["source"], "max_kind": worst["kind"],
+            "top": top, "more": len(names) - len(top)}
 
 
 # ---------------------------------------------------------------------------
