@@ -574,7 +574,15 @@ def package_matches_repo(registry: str | None, pkg: str | None, repo: str | None
     if scope_n:
         return (scope_n == owner or _core(f"{scope_n}-{base_n}") == _core(name)
                 or _core(scope_n) == _core(name))
-    return _core(base_n) == _core(name) or base_n == f"{owner}-{name}"
+    if _core(base_n) == _core(name) or base_n == f"{owner}-{name}":
+        return True
+    # Same words in another order / with filler ("blender-mcp" for
+    # "mcp-for-blender", "headroom-ai" for "headroom"); an extra word such as a
+    # mirror's prefix ("mseep-...", "hk-...") or "-dev" / "-lite" is not.
+    filler = {"mcp", "server", "ai", "py", "python", "cli", "js", "ts", "node", "for", "the", "of"}
+    p_words = set(base_n.split("-")) - filler
+    r_words = set(name.split("-")) - filler
+    return bool(p_words) and p_words <= r_words | set(owner.split("-")) and r_words <= p_words
 
 
 def stored_repos(conn) -> set[str]:
