@@ -519,7 +519,9 @@ def cmd_crawl_code(github_limit: int | None = None, npm_limit: int | None = None
     else:
         log.warning("code mcp: no classifier model configured; importing unfiltered")
     try:
-        rows, info["registry_meta"] = code_meta.apply_official(rows)
+        # Not yet read from its registry: held back until it is (we never
+        # store ecosyste.ms metadata, only use it to find packages).
+        rows, info["registry_meta"] = code_meta.apply_official(rows, keep_unread=False)
     except Exception as e:  # noqa: BLE001
         log.warning("code mcp: official registry metadata failed: %r", e)
     added = updated = unchanged = 0
