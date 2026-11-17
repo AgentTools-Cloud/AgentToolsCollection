@@ -1,5 +1,6 @@
 """Extra code-only MCP sources (official Registry, Cline, ModelScope, Docker,
 Baidu MCP World, extra GitHub topics / package ecosystems). Offline."""
+import os
 import urllib.error
 from contextlib import closing
 from unittest.mock import patch
@@ -159,8 +160,9 @@ class CrawlWithSourcesTests(_TempDB):
                 patch.object(code_mcp, "npm_created", return_value={}), \
                 patch.object(code_sources, "fetch_extra",
                              return_value=(dict(hints or {}), list(extra_rows), {"cline_repos": 1})), \
-                patch.object(code_sources, "lookup_repos", return_value=list(looked)) as lk:
-            jobs.cmd_crawl_code(**kw)
+                patch.object(code_sources, "lookup_repos", return_value=list(looked)) as lk, \
+                patch("directory.code_classify.configured", return_value=False):
+            jobs.cmd_crawl_code(**kw)     # never the real model, even with .env loaded
         return lk
 
     def _rows(self):
@@ -257,6 +259,7 @@ class ClassifierModelTests(_TempDB):
         env = {"AGENT_TOOLS_A2A_BASE_URL": "https://gw.example", "AGENT_TOOLS_A2A_API_KEY": "k",
                "AGENT_TOOLS_A2A_MODEL": "big-model"}
         with patch.dict("os.environ", env, clear=False):
+            os.environ.pop("AGENT_TOOLS_CLASSIFY_MODEL", None)   # set on the server
             self.assertEqual(code_classify._backend()[2], "big-model")
             with patch.dict("os.environ", {"AGENT_TOOLS_CLASSIFY_MODEL": "small-model"}):
                 self.assertEqual(code_classify._backend(), ("https://gw.example", "k", "small-model"))
