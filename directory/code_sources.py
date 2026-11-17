@@ -477,8 +477,12 @@ def drop_duplicate_packages() -> dict[str, int]:
     if it has none. Owner-claimed rows are kept."""
     cm = _cm()
     with db.connect(read_only=True) as c:
-        gh = {sid: pkg for sid, pkg in c.execute(
-            "SELECT source_id, package_name FROM mcp_servers WHERE source='github'")}
+        gh, gh_pkgs = {}, set()
+        for sid, reg, pkg in c.execute(
+                "SELECT source_id, package_registry, package_name FROM mcp_servers WHERE source='github'"):
+            gh[sid] = pkg
+            if pkg:
+                gh_pkgs.add(((reg or "").lower(), pkg.lower()))
         pkgs = list(c.execute(
             "SELECT id, source, package_registry, package_name, source_code_url FROM mcp_servers "
             f"WHERE source IN ({','.join('?' * len(cm.PACKAGE_SOURCES))}) "
@@ -487,6 +491,9 @@ def drop_duplicate_packages() -> dict[str, int]:
     drop, attach = [], []
     for rid, src, reg, pkg, url in pkgs:
         repo = cm.github_repo(url)
+        if ((reg or src or "").lower(), (pkg or "").lower()) in gh_pkgs:
+            drop.append((rid, src))     # the same package is already on its GitHub row
+            continue
         if not repo or repo not in gh:
             continue
         drop.append((rid, src))
