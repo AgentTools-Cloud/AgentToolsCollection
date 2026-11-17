@@ -9,6 +9,16 @@ from test_resources_search_and_payto_limit import _TempDB
 from directory import code_mcp, code_sources, db, jobs
 from directory.resources import code_install_hint
 
+_meta = patch("directory.code_meta.fetch", return_value=(0, None))   # registries stay offline
+
+
+def setUpModule():
+    _meta.start()
+
+
+def tearDownModule():
+    _meta.stop()
+
 
 def gh_item(full, desc="An MCP server", created="2025-03-01T00:00:00Z"):
     return {"full_name": full, "name": full.split("/")[1], "html_url": f"https://github.com/{full}",
@@ -301,3 +311,34 @@ class RemotePartTests(_TempDB):
                 patch.object(code_mcp, "npm_created", return_value={}):
             code_mcp.fetch_all(remote_parts=("packages",))
         self.assertTrue(fe.called)
+
+
+class OfficialRegistryMetaTests(_TempDB):
+    def test_registry_metadata_replaces_ecosystems_and_gone_packages_drop(self):
+        from directory import code_meta
+        rows = [code_mcp.eco_row({"ecosystem": "npm", "name": n, "description": "eco text",
+                                  "repository_url": "https://github.com/eco/" + n,
+                                  "licenses": "MIT", "downloads": 99, "keywords_array": ["eco"]})
+                for n in ("kept", "gone", "unread")]
+        rows.append({"source": "npm", "source_id": "other", "package_registry": "npm",
+                     "package_name": "other", "description": "from the MCP Registry"})
+
+        def fake(reg, name):
+            return {"kept": (200, {"description": "npm text", "license": "Apache-2.0",
+                                   "repository": "git+https://github.com/acme/kept.git",
+                                   "homepage": None, "keywords": ["mcp"]}),
+                    "gone": (404, None)}.get(name, (0, None))
+        with patch.object(code_meta, "fetch", side_effect=fake):
+            out, counts = code_meta.apply_official(rows)
+        by = {r["source_id"]: r for r in out}
+        self.assertEqual(set(by), {"kept", "unread", "other"})
+        self.assertEqual((by["kept"]["description"], by["kept"]["license"], by["kept"]["tags"],
+                          by["kept"]["source_code_url"], by["kept"]["package_download_count"]),
+                         ("npm text", "Apache-2.0", ["mcp"], "https://github.com/acme/kept", None))
+        self.assertEqual(by["unread"]["description"], "eco text")       # registry unreadable
+        self.assertEqual(by["other"]["description"], "from the MCP Registry")
+        self.assertEqual((counts["official"], counts["gone"], counts["unread"]), (1, 1, 1))
+        # Cached: a second pass reads nothing, budget=0 never fetches.
+        with patch.object(code_meta, "fetch", side_effect=AssertionError("fetched")):
+            again, _ = code_meta.apply_official(rows, budget=0)
+        self.assertEqual({r["source_id"] for r in again}, {"kept", "unread", "other"})

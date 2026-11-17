@@ -12,14 +12,17 @@ from test_resources_search_and_payto_limit import _TempDB
 from directory import code_mcp, code_sources, db, jobs, routes, stats
 
 _extra = patch.object(code_sources, "fetch_extra", return_value=({}, [], {}))
+_meta = patch("directory.code_meta.fetch", return_value=(0, None))   # registry unread: keep row
 
 
 def setUpModule():
     _extra.start()      # the directories in code_sources are tested offline separately
+    _meta.start()
 
 
 def tearDownModule():
     _extra.stop()
+    _meta.stop()
 
 
 def gh_item(full, stars=50, desc="An MCP server", topics=("mcp-server",), lic="MIT",

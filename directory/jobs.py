@@ -497,6 +497,16 @@ def cmd_crawl_code(github_limit: int | None = None, npm_limit: int | None = None
             log.info("code mcp: fetch saved to %s", path)
         except Exception as e:  # noqa: BLE001 - a resume file is a convenience
             log.warning("code mcp: could not save the fetch: %r", e)
+    # Before classification, so the model judges the text we list.
+    # What we show for an ecosyste.ms-discovered package comes from its own
+    # registry (code_meta); ecosyste.ms data stays only where that failed.
+    from . import code_meta
+    try:
+        # Cached registry answers only: reading every candidate (most are
+        # not servers) would cost hours; new servers are read below.
+        rows, _ = code_meta.apply_official(rows, budget=0)
+    except Exception as e:  # noqa: BLE001 - keep the crawl; metadata is retried next run
+        log.warning("code mcp: official registry metadata failed: %r", e)
     from . import code_classify
     classify_on = code_classify.configured()
     skipped = 0
@@ -508,6 +518,10 @@ def cmd_crawl_code(github_limit: int | None = None, npm_limit: int | None = None
         rows = keep
     else:
         log.warning("code mcp: no classifier model configured; importing unfiltered")
+    try:
+        rows, info["registry_meta"] = code_meta.apply_official(rows)
+    except Exception as e:  # noqa: BLE001
+        log.warning("code mcp: official registry metadata failed: %r", e)
     added = updated = unchanged = 0
     errors: list[str] = []
     same = code_mcp.unchanged_rows(rows)
@@ -537,6 +551,7 @@ def cmd_crawl_code(github_limit: int | None = None, npm_limit: int | None = None
     info["attached"] = code_sources.attach_packages(attach)
     info["dropped_duplicates"] = code_sources.drop_duplicate_packages()
     removed = _code_prune() if classify_on else {}
+    info["registry_gone_removed"] = code_meta.drop_gone()
     _finish_run(run_id, added, updated, errors, status="ok" if not errors else "partial")
     log.info("code mcp (%s): %s added=%d updated=%d backdated=%d skipped_non_server=%d "
              "removed=%s errors=%d",
