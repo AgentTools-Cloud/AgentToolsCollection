@@ -536,6 +536,47 @@ def known_repos(conn) -> tuple[set[str], set[str]]:
     return repos, packages
 
 
+_PLATFORM_PKG = re.compile(r"(^|[-_.])(linux|darwin|macos|win32|windows|arm64|x64|amd64|aarch64|musl|gnu)([-_.]|$)", re.I)
+
+
+def _norm(s: str | None) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", (s or "").lower()).strip("-")
+
+
+def _core(s: str) -> str:
+    s = re.sub(r"^mcp-", "", s)
+    return re.sub(r"(-mcp-server|-mcp|-server)$", "", s) or s
+
+
+def package_matches_repo(registry: str | None, pkg: str | None, repo: str | None) -> bool:
+    """Is `pkg` this repository's own package, not a mirror that copied its
+    repository URL? Re-published packages keep the original URL but use
+    another scope (@mseep/..., @iflow-mcp/...) or a prefixed name, and some
+    packages are per-platform binaries. Go modules must be the repository
+    root (or a /vN major version)."""
+    if not pkg or not repo or "/" not in repo:
+        return False
+    reg = (registry or "").lower()
+    if reg == "go":
+        p, root = pkg.lower().rstrip("/"), "github.com/" + repo.lower()
+        return p == root or re.fullmatch(re.escape(root) + r"/v\d+", p) is not None
+    owner, name = (_norm(x) for x in repo.split("/", 1))
+    scope, base = "", pkg
+    if pkg.startswith("@") and "/" in pkg:
+        scope, base = pkg[1:].split("/", 1)
+    elif reg == "maven" and ":" in pkg:
+        scope, base = pkg.split(":", 1)[0], pkg.split(":")[1]
+    if _PLATFORM_PKG.search(base):
+        return False
+    base_n, scope_n = _norm(base), _norm(scope)
+    if reg == "maven":
+        return owner in scope_n.split("-") or _core(base_n) == _core(name)
+    if scope_n:
+        return (scope_n == owner or _core(f"{scope_n}-{base_n}") == _core(name)
+                or _core(scope_n) == _core(name))
+    return _core(base_n) == _core(name) or base_n == f"{owner}-{name}"
+
+
 def stored_repos(conn) -> set[str]:
     """Repositories we already hold as our own GitHub rows."""
     return {r[0] for r in conn.execute("SELECT source_id FROM mcp_servers WHERE source='github'")}
@@ -554,7 +595,8 @@ def merge(github_items: list[dict], package_rows: list[dict],
     (repo, registry, package)."""
     known_repo, known_pkg = known
     rows: dict[str, dict] = {}
-    skipped = {"linked_elsewhere": 0, "duplicate_package": 0, "stored_repo": 0}
+    skipped = {"linked_elsewhere": 0, "duplicate_package": 0, "stored_repo": 0,
+               "foreign_package": 0}
     for item in github_items:
         row = github_row(item)
         repo = row["source_id"]
@@ -572,14 +614,16 @@ def merge(github_items: list[dict], package_rows: list[dict],
             continue
         if repo and repo in rows:
             gh = rows[repo]
-            if not gh.get("package_name"):
+            if not package_matches_repo(row["package_registry"], row["package_name"], repo):
+                skipped["foreign_package"] += 1     # a mirror of this repository
+            elif not gh.get("package_name"):
                 gh["package_registry"], gh["package_name"] = row["package_registry"], row["package_name"]
             else:
                 skipped["duplicate_package"] += 1
             continue
         if repo and repo in stored:
             skipped["stored_repo"] += 1
-            if attach is not None:
+            if attach is not None and package_matches_repo(row["package_registry"], row["package_name"], repo):
                 attach.append((repo, row["package_registry"], row["package_name"]))
             continue
         key = repo or (row["package_registry"], pkg)
@@ -682,7 +726,8 @@ def wait_part(part: str, since: float, timeout: float | None = None):
     import gzip
     import os
     path = os.path.join(parts_dir(), part_name(part) + ".json.gz")
-    deadline = time.time() + (PART_WAIT_SECONDS if timeout is None else timeout)
+    # One deadline for all parts, counted from the run's start (not per part).
+    deadline = (since + PART_WAIT_SECONDS) if timeout is None else time.time() + timeout
     while True:
         if os.path.exists(path):
             try:

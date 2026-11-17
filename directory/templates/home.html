@@ -111,7 +111,7 @@
     <p class="text-[11px] text-slate-500 mt-3">Merged from {{ sources.count }} public directories and registries plus our own crawling, de-duplicated; no single source covers more than {{ sources.max_share }}% of its category. Every listing is probed daily.</p>
     <ul class="flex flex-wrap gap-1.5 mt-2" aria-label="Largest sources">
       {% for t in sources.top %}
-      <li><a href="{{ t.url }}" rel="noopener nofollow" class="inline-flex items-baseline gap-1 rounded-full border border-slate-200 px-2 py-0.5 text-[11px] text-slate-600 hover:border-slate-400 hover:text-slate-900">{{ t.name }}<span class="text-slate-400 tnum">{{ t.short }}</span></a></li>
+      <li><a href="{{ t.url }}" rel="noopener nofollow" class="inline-flex items-baseline gap-1 rounded-full border border-slate-200 px-2 py-0.5 text-[11px] text-slate-600 hover:border-slate-400 hover:text-slate-900">{{ t.name }} <span class="text-slate-500 tnum">{{ t.short }}<span class="sr-only"> listings</span></span></a></li>
       {% endfor %}
       {% if sources.more > 0 %}<li><a href="/about#sources" class="inline-flex rounded-full px-2 py-0.5 text-[11px] text-blue-600 hover:underline">+{{ sources.more }} more →</a></li>{% endif %}
     </ul>

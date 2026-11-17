@@ -5,18 +5,22 @@ What we show for a package -- description, licence, repository, homepage,
 keywords -- is read from the package's own registry (npm, PyPI, crates.io,
 NuGet, RubyGems; the Go module proxy and Maven Central only confirm that the
 package exists), so it is under that registry's terms, not ecosyste.ms's
-CC BY-SA 4.0 data licence. Packages the registry no longer has are dropped;
-packages whose registry could not be read keep the ecosyste.ms data (and the
-CC BY-SA credit on /mcp/code, /about and /terms).
+CC BY-SA 4.0 data licence. Packages whose registry has not been read yet are
+held back (no ecosyste.ms text is ever stored).
 
-Results are cached in ``code_pkg_meta`` and re-read after REFRESH_DAYS.
+A package counts as gone only after two "not found" answers at least
+GONE_CONFIRM_SECONDS apart; then its rows (from any source) are dropped.
+Failed reads (timeouts, 429, 5xx) are not cached. Results are cached in
+``code_pkg_meta`` and re-read after REFRESH_DAYS (+ a per-package spread).
 """
 from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import time
+import zlib
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -27,10 +31,12 @@ log = logging.getLogger(__name__)
 
 UA = "agent-tools.cloud-crawler/0.1 (+https://agent-tools.cloud)"
 REFRESH_DAYS = 30
+REFRESH_SPREAD_DAYS = 10     # per-package offset so a bulk import does not expire at once
+GONE_CONFIRM_SECONDS = 86400
 RUN_BUDGET = 4000            # registry reads per crawl run (new packages first)
 RATE = {"registry.npmjs.org": 0.25, "pypi.org": 0.1, "crates.io": 1.05,
-        "azuresearch-usnc.nuget.org": 0.2, "rubygems.org": 0.2,
-        "proxy.golang.org": 0.1, "search.maven.org": 0.5}
+        "azuresearch-usnc.nuget.org": 0.2, "api.nuget.org": 0.2, "rubygems.org": 0.2,
+        "proxy.golang.org": 0.1, "repo1.maven.org": 0.3}
 REGISTRIES = ("npm", "pypi", "cargo", "go", "maven", "nuget", "rubygems")
 
 _pace: dict[str, float] = {}
@@ -50,17 +56,22 @@ def _wait(url: str) -> None:
         time.sleep(nxt - now)
 
 
-def _get(url: str, timeout: int = 30) -> tuple[int, dict | None]:
+def _get(url: str, timeout: int = 30, raw: bool = False) -> tuple[int, dict | str | None]:
     req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "application/json"})
     for attempt in range(6):
         _wait(url)
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
-                return r.status, json.load(r)
+                return r.status, (r.read().decode("utf-8", "replace") if raw else json.load(r))
         except urllib.error.HTTPError as e:
             if e.code in (429, 500, 502, 503, 504) and attempt < 5:
                 ra = (e.headers or {}).get("Retry-After")
-                time.sleep(min(120, int(ra)) if ra and ra.isdigit() else 15 * (attempt + 1))
+                pause = min(120, int(ra)) if ra and ra.isdigit() else 15 * (attempt + 1)
+                if e.code == 429:       # the whole host backs off, not just this thread
+                    host = urllib.parse.urlsplit(url).hostname or ""
+                    with _pace_lock:
+                        _pace[host] = max(_pace.get(host, 0.0), time.time() + pause)
+                time.sleep(pause)
                 continue
             return e.code, None
         except Exception:  # noqa: BLE001 - network: retry, then give up
@@ -119,10 +130,16 @@ def _cargo(name):
 
 def _nuget(name):
     st, d = _get("https://azuresearch-usnc.nuget.org/query?" + urllib.parse.urlencode(
-        {"q": f"packageid:{name}", "prerelease": "true", "take": 1}))
+        {"q": f"packageid:{name}", "prerelease": "true", "semVerLevel": "2.0.0", "take": 1}))
     rows = (d or {}).get("data") or []
     if not rows:
-        return (404 if st == 200 else st), None
+        if st != 200:
+            return st, None
+        # Search hides unlisted / not-yet-indexed packages: the flat container
+        # (every published version) is the authority on existence.
+        st2, _ = _get("https://api.nuget.org/v3-flatcontainer/"
+                      + urllib.parse.quote(name.lower()) + "/index.json")
+        return st2, (dict(_EMPTY) if st2 == 200 else None)
     p = rows[0]
     return st, {"description": p.get("description"), "license": None, "repository": None,
                 "homepage": p.get("projectUrl"), "keywords": p.get("tags")}
@@ -132,7 +149,8 @@ def _rubygems(name):
     st, d = _get("https://rubygems.org/api/v1/gems/" + urllib.parse.quote(name) + ".json")
     if not d:
         return st, None
-    return st, {"description": d.get("info"), "license": ", ".join(d.get("licenses") or [])[:80] or None,
+    lic = ", ".join(x for x in (d.get("licenses") or []) if isinstance(x, str))
+    return st, {"description": d.get("info"), "license": lic[:80] or None,
                 "repository": d.get("source_code_uri"), "homepage": d.get("homepage_uri"),
                 "keywords": None}
 
@@ -140,18 +158,44 @@ def _rubygems(name):
 _EMPTY = {"description": None, "license": None, "repository": None, "homepage": None, "keywords": None}
 
 
+def go_escape(path: str) -> str:
+    """Module proxy case-encoding: each upper-case letter becomes '!' + lower."""
+    return re.sub(r"[A-Z]", lambda m: "!" + m.group().lower(), path)
+
+
+_GO_NOT_A_SERVER = re.compile(r"/(test|tests|testdata|example|examples|_examples|fixtures?)(/|$)", re.I)
+
+
 def _go(name):
-    # The module proxy confirms the module exists; Go modules carry no description.
-    st, d = _get("https://proxy.golang.org/" + urllib.parse.quote(name.lower()) + "/@latest")
-    return st, (dict(_EMPTY) if d else None)
+    """The module proxy confirms the module exists; Go modules carry no
+    description. The proxy also serves any repository without a go.mod (a
+    synthesized one with only the module line): that is not a Go package, and
+    neither is a module under a test / example directory -- both count as
+    not found."""
+    if _GO_NOT_A_SERVER.search(name):
+        return 404, None
+    base = "https://proxy.golang.org/" + urllib.parse.quote(go_escape(name), safe="/!")
+    st, d = _get(base + "/@latest")
+    if st != 200 or not isinstance(d, dict) or not d.get("Version"):
+        return st if st != 200 else 0, None
+    st2, mod = _get(base + "/@v/" + urllib.parse.quote(d["Version"], safe="") + ".mod", raw=True)
+    if st2 != 200 or not isinstance(mod, str):
+        return st2 if st2 != 200 else 0, None
+    if not re.search(r"^\s*(go|require)\s", mod, re.M):
+        return 404, None
+    return 200, dict(_EMPTY)
 
 
 def _maven(name):
-    g, _, a = name.partition(":")
-    st, d = _get("https://search.maven.org/solrsearch/select?" + urllib.parse.urlencode(
-        {"q": f'g:"{g}" AND a:"{a}"', "rows": 1, "wt": "json"}))
-    docs = ((d or {}).get("response") or {}).get("docs") or []
-    return (st if docs else (404 if st == 200 else st)), (dict(_EMPTY) if docs else None)
+    # search.maven.org's index stopped following new releases; the repository's
+    # own maven-metadata.xml is the authority on existence.
+    parts = name.split(":")
+    if len(parts) < 2 or not parts[0] or not parts[1]:
+        return 0, None              # not group:artifact -- never call it gone
+    g, a = parts[0], parts[1]
+    st, _ = _get("https://repo1.maven.org/maven2/" + g.replace(".", "/") + "/"
+                 + urllib.parse.quote(a) + "/maven-metadata.xml", raw=True)
+    return st, (dict(_EMPTY) if st == 200 else None)
 
 
 FETCH = {"npm": _npm, "pypi": _pypi, "cargo": _cargo, "nuget": _nuget,
@@ -194,32 +238,84 @@ def store(results: list[tuple[str, str, int, dict | None, int]]) -> None:
                     "VALUES (?,?,?,?,?) ON CONFLICT(registry, name) DO UPDATE SET "
                     "status=excluded.status, meta=excluded.meta, checked_at=excluded.checked_at",
                     chunk)
-        db.with_retry(op)
+        db.with_retry(op, attempts=10, base_delay=1.0)
+
+
+def is_gone(entry) -> bool:
+    """Two "not found" answers at least GONE_CONFIRM_SECONDS apart."""
+    return bool(entry and entry[0] in (404, 410) and (entry[1] or {}).get("confirmed"))
+
+
+def _due(key: tuple[str, str], entry, now: float) -> float | None:
+    """When a cached entry should be read again (None: not cached)."""
+    if entry is None:
+        return None
+    st, meta, ts = entry
+    if st in (404, 410) and not (meta or {}).get("confirmed"):
+        return ts + GONE_CONFIRM_SECONDS
+    spread = zlib.crc32(f"{key[0]}:{key[1]}".encode()) % (REFRESH_SPREAD_DAYS * 86400)
+    return ts + REFRESH_DAYS * 86400 + spread
+
+
+def _record(key, st, meta, prev, now):
+    """The cache entry for a read, or None when the read failed (not cached)."""
+    if st == 200 and meta is not None:
+        return 200, meta
+    if st in (404, 410):
+        first = now
+        if prev and prev[0] in (404, 410):
+            first = (prev[1] or {}).get("first_404") or prev[2]
+        return st, {"first_404": first, "confirmed": now - first >= GONE_CONFIRM_SECONDS}
+    return None
 
 
 def refresh(keys: list[tuple[str, str]], have: dict, *, budget: int = RUN_BUDGET,
             workers: int = 6) -> int:
-    """Read packages missing from the cache (first) or older than
-    REFRESH_DAYS, at most `budget` of them."""
-    from concurrent.futures import ThreadPoolExecutor
-    stale_before = time.time() - REFRESH_DAYS * 86400
-    missing = [k for k in keys if (k[0], k[1].lower()) not in have]
-    stale = sorted((k for k in keys if (k[0], k[1].lower()) in have
-                    and have[(k[0], k[1].lower())][2] < stale_before),
-                   key=lambda k: have[(k[0], k[1].lower())][2])
-    todo = (missing + stale)[:budget]
+    """Read packages missing from the cache (first), then due re-checks of
+    "not found" answers, then entries past their refresh date; at most
+    `budget` reads. Failed reads are not cached (retried next run)."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    now = time.time()
+    seen, missing, due = set(), [], []
+    for k in keys:
+        kk = (k[0], k[1].lower())
+        if kk in seen:
+            continue
+        seen.add(kk)
+        when = _due(kk, have.get(kk), now)
+        if when is None:
+            missing.append(k)
+        elif when <= now:
+            due.append((when, k))
+    todo = (missing + [k for _w, k in sorted(due, key=lambda x: x[0])])[:budget]
     if not todo:
         return 0
 
     def one(k):
-        st, meta = fetch(k[0], k[1])
-        return k[0], k[1], st, meta, int(time.time())
+        try:
+            st, meta = fetch(k[0], k[1])
+        except Exception as e:  # noqa: BLE001 - one odd answer must not sink the batch
+            log.warning("code meta: %s %s: %r", k[0], k[1], e)
+            st, meta = 0, None
+        return k, st, meta
+
+    batch: list = []
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        res = list(pool.map(one, todo))
-    store(res)
-    for r, n, st, m, ts in res:
-        have[(r, n.lower())] = (st, m, ts)
-    return len(res)
+        for fut in as_completed([pool.submit(one, k) for k in todo]):
+            (reg, name), st, meta = fut.result()
+            kk = (reg, name.lower())
+            t = int(time.time())
+            rec = _record(kk, st, meta, have.get(kk), t)
+            if rec is None:
+                continue
+            have[kk] = (rec[0], rec[1], t)
+            batch.append((reg, name, rec[0], rec[1], t))
+            if len(batch) >= 200:
+                store(batch)
+                batch = []
+    if batch:
+        store(batch)
+    return len(todo)
 
 
 # ---------------------------------------------------------------------------
@@ -244,13 +340,16 @@ def apply_official(rows: list[dict], *, budget: int = RUN_BUDGET,
                       budget=budget) if budget > 0 else 0
     out, counts = [], {"official": 0, "gone": 0, "unread": 0, "fetched": fetched}
     for r in rows:
+        key = ((r.get("package_registry") or r.get("source") or "").lower(),
+               (r.get("package_name") or "").lower())
+        entry = have.get(key) if r.get("source") in REGISTRIES and key[1] else None
+        if is_gone(entry):          # from any directory: the package is gone
+            counts["gone"] += 1
+            continue
         if not from_ecosystems(r):
             out.append(r)
             continue
-        st, meta, _ts = have.get((r["package_registry"], r["package_name"].lower()), (0, None, 0))
-        if st == 404 or st == 410:
-            counts["gone"] += 1
-            continue
+        st, meta, _ts = entry or (0, None, 0)
         if st != 200 or meta is None:
             counts["unread"] += 1
             if keep_unread:            # e.g. for classification only
@@ -261,6 +360,8 @@ def apply_official(rows: list[dict], *, budget: int = RUN_BUDGET,
         repo = code_mcp.github_repo(repo_url)
         page = code_mcp.package_page(r["package_registry"], r["package_name"])
         r = dict(r)
+        if not repo and r["package_registry"] == "go":
+            repo = code_mcp.github_repo("https://" + r["package_name"])   # github.com/o/r[/...]
         r["description"] = (meta.get("description") or "").strip()[:1000] or None
         r["license"] = meta.get("license")
         r["source_code_url"] = f"https://github.com/{repo}" if repo else (
@@ -274,12 +375,13 @@ def apply_official(rows: list[dict], *, budget: int = RUN_BUDGET,
 
 
 def drop_gone() -> int:
-    """Delete stored package rows whose registry answered 404 (owner-claimed
-    rows are kept)."""
+    """Delete stored package rows whose package is confirmed gone (two "not
+    found" answers a day apart). Owner-claimed and remote rows are kept."""
     with db.connect(read_only=True) as c:
         try:
-            gone = {(r, n) for r, n in c.execute(
-                "SELECT registry, name FROM code_pkg_meta WHERE status IN (404, 410)")}
+            gone = {(r, n) for r, n, m in c.execute(
+                "SELECT registry, name, meta FROM code_pkg_meta WHERE status IN (404, 410)")
+                if m and json.loads(m).get("confirmed")}
         except Exception:  # noqa: BLE001
             return 0
         ids = [rid for rid, s, pkg in c.execute(
@@ -293,8 +395,9 @@ def drop_gone() -> int:
         def op(chunk=chunk):
             with db.writer() as c:
                 c.executemany("DELETE FROM listing_sources WHERE kind='mcp' AND listing_id=?", chunk)
-                c.executemany("DELETE FROM mcp_servers WHERE id=? AND COALESCE(owner_verified,0)=0", chunk)
-        db.with_retry(op)
+                c.executemany("DELETE FROM mcp_servers WHERE id=? AND COALESCE(owner_verified,0)=0 "
+                              "AND COALESCE(endpoint_url,'')=''", chunk)
+        db.with_retry(op, attempts=10, base_delay=1.0)
     return len(ids)
 
 
