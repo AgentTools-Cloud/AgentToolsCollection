@@ -639,7 +639,7 @@ GAP_FIXES = {
     ("mcp", "valid_card"): "Complete the MCP handshake without errors.",
     ("x402", "valid_card"): "Return complete payment requirements in the 402 challenge.",
     ("a2a", "valid_card"): "Serve an Agent Card that validates against the A2A schema.",
-    "auth_gated": "Not measurable while the endpoint requires credentials; it still scores 0.",
+    "auth_gated": "Not measurable without credentials; the unmeasured part scores 0.",
 }
 
 

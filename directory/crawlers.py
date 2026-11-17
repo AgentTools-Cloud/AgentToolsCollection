@@ -3229,8 +3229,11 @@ def probe_mcp_health(endpoint: str) -> dict:
             if sc >= 500:
                 return {**base, "status": "down", "latency_ms": dt, "http_status": sc}
             if sc in (401, 402, 403):
+                # The challenge is where an anonymous client starts the MCP
+                # authorization discovery (mcp_auth_discovery).
                 return {**base, "status": "ok", "latency_ms": dt,
-                        "http_status": sc, "conformance": "fail"}
+                        "http_status": sc, "conformance": "fail",
+                        "www_authenticate": r.headers.get("www-authenticate")}
             if sc >= 300:
                 # SSE 传输的服务器对基址 POST 本就返回 404/405。
                 if sc in (404, 405, 501) and _probe_mcp_sse(c, endpoint, headers):
