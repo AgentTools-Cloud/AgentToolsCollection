@@ -6,7 +6,8 @@ Type=oneshot
 WorkingDirectory=/opt/mcpserver
 EnvironmentFile=/opt/mcpserver/.env
 Environment="PYTHONPATH=/opt/mcpserver"
-ExecCondition=/bin/sh -c "! systemctl is-active -q agent-tools-crawl.service"
+# A running Type=oneshot unit is "activating", which is-active reports as not active.
+ExecCondition=/bin/sh -c "! systemctl show -p ActiveState --value agent-tools-crawl.service | grep -qxE 'activating|active|deactivating|reloading'"
 ExecStart=/opt/mcpserver/.venv/bin/python -m directory.jobs ownership-pending-recheck
 TimeoutStartSec=20min
 User=root
