@@ -697,6 +697,11 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
                       f"DELETE FROM listing_endpoint_observations WHERE kind='{kind}' AND listing_id=old.id; "
                       f"DELETE FROM listing_endpoint_transitions WHERE kind='{kind}' AND listing_id=old.id; "
                       f"DELETE FROM source_endpoint_warnings WHERE kind='{kind}' AND listing_id=old.id; END")
+        # Every MCP delete path (registry removals, code-only prune, gone
+        # packages) must take the listing's source pointers with it.
+        c.execute("CREATE TRIGGER IF NOT EXISTS mcp_servers_listing_sources_delete "
+                  "AFTER DELETE ON mcp_servers BEGIN DELETE FROM listing_sources "
+                  "WHERE kind='mcp' AND listing_id=old.id; END")
         for kind, table in (('x402', 'services'), ('mcp', 'mcp_servers'), ('a2a', 'a2a_agents')):
             c.execute(f"CREATE TRIGGER IF NOT EXISTS {table}_internal_notice_delete "
                       f"AFTER DELETE ON {table} BEGIN DELETE FROM internal_notices "

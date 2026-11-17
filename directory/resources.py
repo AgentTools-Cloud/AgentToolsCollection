@@ -45,7 +45,7 @@ def _access_model(x402, auth=None, cost_hint=None, price_hint: dict | None = Non
     """Who provisions access + whether/how it costs — the discovery facts an
     agent needs before calling. Mirrors db._access_case() for the tier.
 
-      model: 'open' | 'human_key' | 'agent_pays'
+      model: 'open' | 'human_key' | 'agent_pays' | 'self_hosted' (code-only MCP: no endpoint)
       registration_required: must a human sign up / provision a credential?
       agent_can_self_serve: can an agent use it with no human in the loop?
       paid: True / False / None(unknown)
@@ -166,6 +166,9 @@ _INSTALL_COMMANDS = {
     "rubygems": "gem install {pkg}",
     "smithery": "npx -y @smithery/cli install {pkg}",
 }
+# These commands only install the package (the binary / client config is
+# then run separately); the others start the server directly.
+_INSTALL_ONLY = {"cargo", "rubygems", "smithery"}
 
 
 def code_install_hint(row: dict) -> dict:
@@ -184,6 +187,7 @@ def code_install_hint(row: dict) -> dict:
         "package_registry": registry,
         "package_name": package,
         "command": template.format(pkg=package) if template and package else None,
+        "command_kind": ("install" if registry in _INSTALL_ONLY else "run") if template and package else None,
         "github_stars": row.get("github_stars"),
         "downloads_30d": row.get("package_download_count"),
     }
@@ -229,6 +233,14 @@ def normalize_mcp_server(row: dict, include_sort_meta: bool = False) -> dict:
         # Code-only server: nothing to call remotely; say how to run it.
         item["scope"] = "code"
         item["code"] = code_install_hint(row)
+        # Nothing to call remotely: an agent cannot use it without someone
+        # installing and running it first.
+        item["access"].update({
+            "model": "self_hosted",
+            "label": "Self-hosted — no remote endpoint; install and run it locally first",
+            "registration_required": False,
+            "agent_can_self_serve": False,
+        })
         item["page_url"] = f"https://agent-tools.cloud/mcp/code/{row.get('slug')}"
     if row.get("pricing"):
         summary = mcp_pricing.access_summary(row["pricing"])

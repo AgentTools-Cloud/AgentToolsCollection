@@ -38,9 +38,9 @@
       <dd class="mt-1 mono break-all">{{ m.code.package_registry or "package" }}: {{ m.code.package_name }}</dd></div>
     {% endif %}
     {% if m.code.command %}
-    <div class="sm:col-span-2"><dt class="text-xs text-slate-500">Run (stdio)</dt>
+    <div class="sm:col-span-2"><dt class="text-xs text-slate-500">{% if m.code.command_kind == "install" %}Install{% else %}Run (stdio){% endif %}</dt>
       <dd class="mt-1"><code class="block mono text-[13px] bg-slate-900 text-slate-100 rounded-md px-3 py-2 overflow-x-auto">{{ m.code.command }}</code>
-        <div class="text-[11px] text-slate-400 mt-1">The usual command for this package registry; check the repository README for required settings.</div></dd></div>
+        <div class="text-[11px] text-slate-400 mt-1">{% if m.code.command_kind == "install" %}Installs the package; the repository README says how to start the server and which settings it needs.{% else %}The usual command for this package registry; check the repository README for required settings.{% endif %}</div></dd></div>
     {% endif %}
     <div><dt class="text-xs text-slate-500">License</dt><dd class="mt-1">{{ m.license or "not declared" }}</dd></div>
     <div><dt class="text-xs text-slate-500">Last update</dt><dd class="mt-1">{{ (m.maintenance.pushed_at or "")[:10] or "unknown" }}</dd></div>

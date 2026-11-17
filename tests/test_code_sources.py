@@ -445,3 +445,38 @@ class PackageMatchesRepoTests(_TempDB):
         self.assertEqual(code_sources.detach_foreign_packages(), 1)
         with closing(db.connect()) as c:
             self.assertIsNone(c.execute("SELECT package_name FROM mcp_servers WHERE source='github'").fetchone()[0])
+
+
+class CodeOnlyCleanupTests(_TempDB):
+    def test_self_hosted_access_and_install_wording(self):
+        from directory.resources import normalize_mcp_server
+        row = {"slug": "x", "name": "x", "endpoint_url": None, "source": "cargo",
+               "package_registry": "cargo", "package_name": "x-mcp"}
+        item = normalize_mcp_server(row)
+        self.assertEqual(item["access"]["model"], "self_hosted")
+        self.assertFalse(item["access"]["agent_can_self_serve"])
+        self.assertEqual(item["code"]["command_kind"], "install")
+        row.update(package_registry="npm", source="npm")
+        self.assertEqual(normalize_mcp_server(row)["code"]["command_kind"], "run")
+
+    def test_deleting_a_listing_removes_its_source_pointers(self):
+        with db.writer() as c:
+            db.upsert_mcp_server(c, {"slug": "p", "name": "p", "endpoint_url": None, "kind": "catalog",
+                                     "package_registry": "npm", "package_name": "p",
+                                     "source": "npm", "source_id": "p"})
+        with db.writer() as c:
+            c.execute("DELETE FROM mcp_servers")
+        with closing(db.connect()) as c:
+            self.assertEqual(c.execute("SELECT COUNT(*) FROM listing_sources WHERE kind='mcp'").fetchone()[0], 0)
+
+    def test_package_row_duplicating_a_github_rows_package_is_dropped(self):
+        with db.writer() as c:
+            gh = code_mcp.github_row({"full_name": "acme/tool-mcp", "description": "MCP server",
+                                      "stargazers_count": 1, "topics": ["mcp-server"]})
+            gh.update(package_registry="npm", package_name="tool-mcp")
+            db.upsert_mcp_server(c, gh)
+            db.upsert_mcp_server(c, {"slug": "tool-mcp-npm", "name": "tool-mcp", "endpoint_url": None,
+                                     "kind": "catalog", "package_registry": "npm", "package_name": "tool-mcp",
+                                     "source_code_url": "https://github.com/someone/else",
+                                     "source": "npm", "source_id": "tool-mcp"})
+        self.assertEqual(code_sources.drop_duplicate_packages(), {"npm": 1})
