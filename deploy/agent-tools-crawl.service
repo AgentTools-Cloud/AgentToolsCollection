@@ -8,6 +8,6 @@ WorkingDirectory=/opt/mcpserver
 EnvironmentFile=/opt/mcpserver/.env
 Environment="PYTHONPATH=/opt/mcpserver"
 # Together with a manual code-only full crawl this OOM-killed on 11-16: wait up to 6 h for it.
-ExecStartPre=/usr/bin/timeout 6h /bin/sh -c 'while systemctl is-active --quiet agent-tools-crawl-code-full; do sleep 60; done'
+ExecStartPre=/usr/bin/timeout 6h /bin/sh -c 'while systemctl show -p ActiveState --value agent-tools-crawl-code-full.service | grep -qxE "activating|active|deactivating|reloading"; do sleep 60; done'
 ExecStart=/opt/mcpserver/.venv/bin/python -m directory.jobs crawl
 User=root
