@@ -183,9 +183,13 @@ def home(request: Request):
         snap, history = _stats_payload()
     except Exception:
         snap, history = None, []
-    headlines = band = None
+    headlines = band = sources = None
     if snap:
         from . import stats as stats_mod
+        try:
+            sources = stats_mod.source_summary(snap)
+        except Exception:  # noqa: BLE001 - the line is optional
+            sources = None
         try:
             headlines = stats_mod.headlines(snap)
         except Exception:
@@ -199,7 +203,7 @@ def home(request: Request):
     from . import promo
     return TEMPLATES.TemplateResponse(
         request, "home.html", {"request": request, "latest_articles": latest_articles,
-                               "snap": snap, "headlines": headlines, "band": band,
+                               "snap": snap, "headlines": headlines, "band": band, "sources": sources,
                                "promo": promo.slots("home-after-index", "home-before-blog"),
                                **_home_payload()})
 

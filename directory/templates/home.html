@@ -107,6 +107,9 @@
     {% if k.mcp.code_only %}
     <p class="text-[11px] text-slate-500 mt-5">Plus <a href="/mcp/code" class="text-blue-600 hover:underline">{{ k.mcp.code_only|num }} code-only MCP servers</a> you install and run yourself (not probed, not counted above).</p>
     {% endif %}
+    {% if sources %}
+    <p class="text-[11px] text-slate-500 mt-3">Merged from {{ sources.count }} public directories and registries plus our own crawling, de-duplicated; no single source covers more than {{ sources.max_share }}% of its category. Every listing is probed daily. <a href="/about#sources" class="text-blue-600 hover:underline">All sources →</a></p>
+    {% endif %}
     <p class="text-[11px] text-slate-400 mt-5 mono">As of {{ snap.as_of }}</p>
     {% else %}
     <dl class="grid grid-cols-2 gap-4 mt-5">
