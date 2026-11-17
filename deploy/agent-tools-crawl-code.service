@@ -16,7 +16,7 @@ Environment="PYTHONPATH=/opt/mcpserver"
 # Skip the daily run while a manual full run (systemd-run unit
 # agent-tools-crawl-code-full) is still going: it shares the GitHub quota and
 # memory, and the full run already covers the window.
-ExecCondition=/bin/sh -c '! systemctl is-active --quiet agent-tools-crawl-code-full'
+ExecCondition=/bin/sh -c '! systemctl show -p ActiveState --value agent-tools-crawl-code-full.service | grep -qxE "activating|active|deactivating|reloading"'
 ExecStart=/opt/mcpserver/.venv/bin/python -m directory.jobs crawl-code
 TimeoutStartSec=8h
 Nice=10
