@@ -231,9 +231,12 @@ def from_ecosystems(row: dict) -> bool:
     return row.get("source") in REGISTRIES and "package_download_count" in row
 
 
-def apply_official(rows: list[dict], *, budget: int = RUN_BUDGET) -> tuple[list[dict], dict]:
+def apply_official(rows: list[dict], *, budget: int = RUN_BUDGET,
+                   keep_unread: bool = True) -> tuple[list[dict], dict]:
     """Replace ecosyste.ms metadata with the official registry's; drop packages
-    the registry no longer has. Returns (rows, counts)."""
+    the registry no longer has. With keep_unread=False, packages whose registry
+    has not been read yet are held back (retried next run), so no ecosyste.ms
+    text is ever stored. Returns (rows, counts)."""
     from . import code_mcp
     eco = [r for r in rows if from_ecosystems(r)]
     have = cached()
@@ -249,8 +252,9 @@ def apply_official(rows: list[dict], *, budget: int = RUN_BUDGET) -> tuple[list[
             counts["gone"] += 1
             continue
         if st != 200 or meta is None:
-            counts["unread"] += 1      # keeps the ecosyste.ms data (CC BY-SA 4.0)
-            out.append(r)
+            counts["unread"] += 1
+            if keep_unread:            # e.g. for classification only
+                out.append(r)
             continue
         counts["official"] += 1
         repo_url = meta.get("repository")

@@ -12,7 +12,8 @@ from test_resources_search_and_payto_limit import _TempDB
 from directory import code_mcp, code_sources, db, jobs, routes, stats
 
 _extra = patch.object(code_sources, "fetch_extra", return_value=({}, [], {}))
-_meta = patch("directory.code_meta.fetch", return_value=(0, None))   # registry unread: keep row
+_meta = patch("directory.code_meta.apply_official",                  # tested in test_code_sources
+               side_effect=lambda rows, **k: (rows, {}))
 
 
 def setUpModule():

@@ -335,10 +335,13 @@ class OfficialRegistryMetaTests(_TempDB):
         self.assertEqual((by["kept"]["description"], by["kept"]["license"], by["kept"]["tags"],
                           by["kept"]["source_code_url"], by["kept"]["package_download_count"]),
                          ("npm text", "Apache-2.0", ["mcp"], "https://github.com/acme/kept", None))
-        self.assertEqual(by["unread"]["description"], "eco text")       # registry unreadable
+        self.assertEqual(by["unread"]["description"], "eco text")       # kept for classification
         self.assertEqual(by["other"]["description"], "from the MCP Registry")
         self.assertEqual((counts["official"], counts["gone"], counts["unread"]), (1, 1, 1))
         # Cached: a second pass reads nothing, budget=0 never fetches.
         with patch.object(code_meta, "fetch", side_effect=AssertionError("fetched")):
             again, _ = code_meta.apply_official(rows, budget=0)
         self.assertEqual({r["source_id"] for r in again}, {"kept", "unread", "other"})
+        held, counts = code_meta.apply_official(rows, budget=0, keep_unread=False)
+        self.assertEqual({r["source_id"] for r in held}, {"kept", "other"})
+        self.assertEqual(counts["unread"], 1)
