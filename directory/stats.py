@@ -448,7 +448,7 @@ TOPIC_TOP_PER_KIND = 10   # stored; signed-in callers see all of them
 PUBLIC_TOP_PER_KIND = 3   # shown without an account
 PUBLIC_SEARCH_TERMS = 10  # search terms shown without an account
 FULL_SEARCH_TERMS = 100
-SIGN_IN = {"browser": "https://agent-tools.cloud/auth/github/login",
+SIGN_IN = {"browser": "https://agent-tools.cloud/auth/signin",
            "agent": {"get_a_key": {"method": "POST", "url": "https://agent-tools.cloud/api/v1/keys"},
                      "send": "Authorization: Bearer <key>"}}
 

@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}Sign in — Agent Tools{% endblock %}
+{% block robots %}<meta name="robots" content="noindex,nofollow">{% endblock %}
+{% block content %}
+<div class="max-w-xl space-y-6">
+  <div>
+    <h1 class="text-2xl font-bold text-slate-900">Sign in to claim and edit your listings</h1>
+    <p class="text-sm text-slate-600 mt-2">Any of the options below works for claiming. Edit rights come from
+      verifying control of your service URL or host, not from how you sign in.
+      <a class="text-blue-600 hover:underline" href="/docs/claim">How claiming works</a></p>
+    {% if host %}<p class="text-sm text-slate-600 mt-2">Host to claim: <span class="mono break-all">{{ host }}</span></p>{% endif %}
+  </div>
+
+  {% if error %}<p role="alert" class="text-sm text-red-700 break-words">{{ error }}</p>{% endif %}
+
+  <section class="rounded-lg border border-slate-200 bg-white p-5">
+    <h2 class="font-semibold mb-1">Continue without an account</h2>
+    <p class="text-sm text-slate-600 mb-3">No GitHub, email or password. We set up an account for you
+      and show its access key once. Keep the key: it signs you back in and also works with the API.</p>
+    <form method="post" action="/auth/anonymous">
+      <input type="hidden" name="next" value="{{ next }}">
+      <input type="hidden" name="host" value="{{ host }}">
+      <button class="rounded bg-blue-600 text-white px-4 py-2 text-sm font-medium">Continue without an account</button>
+    </form>
+  </section>
+
+  {% if github %}
+  <section class="rounded-lg border border-slate-200 bg-white p-5">
+    <h2 class="font-semibold mb-1">Sign in with GitHub</h2>
+    <p class="text-sm text-slate-600 mb-3">Reads your public profile and verified primary email; no repository access.
+      If you claimed with GitHub before, use this to see those claims.</p>
+    <a href="/auth/github/login?next={{ next|urlencode }}" rel="nofollow"
+       class="inline-block rounded bg-slate-900 text-white px-4 py-2 text-sm font-medium">Sign in with GitHub</a>
+  </section>
+  {% endif %}
+
+  <section class="rounded-lg border border-slate-200 bg-white p-5">
+    <h2 class="font-semibold mb-1">Sign in with an access key</h2>
+    <p class="text-sm text-slate-600 mb-3">Keys from this page, <code>POST /api/v1/keys</code> or MCP all work.</p>
+    <form method="post" action="/auth/key" class="flex flex-col sm:flex-row gap-2">
+      <input type="hidden" name="next" value="{{ next }}">
+      <input type="password" name="key" required maxlength="200" autocomplete="current-password" spellcheck="false"
+             aria-label="Access key" placeholder="atc_live_…" class="flex-1 min-w-0 rounded border border-slate-300 px-3 py-2 mono text-sm">
+      <button class="shrink-0 rounded border border-slate-300 bg-white px-4 py-2 text-sm font-medium">Sign in</button>
+    </form>
+  </section>
+</div>
+{% endblock %}

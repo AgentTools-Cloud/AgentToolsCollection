@@ -113,7 +113,7 @@
       var r = await fetch(url, {method: 'POST', credentials: 'same-origin',
         headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
       var d = {}; try { d = await r.json(); } catch (e) {}
-      if (r.status === 401) { location.href = '/auth/github/login?next=' + encodeURIComponent(location.pathname + '#paid-verification'); throw new Error('sign in'); }
+      if (r.status === 401) { location.href = '/auth/signin?next=' + encodeURIComponent(location.pathname + '#paid-verification'); throw new Error('sign in'); }
       if (!r.ok) throw new Error(d.message || (d.detail && d.detail.message) || d.detail || ('HTTP ' + r.status));
       return d;
     }

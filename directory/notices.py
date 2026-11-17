@@ -203,7 +203,7 @@ def publish_watchdog(title, problems, *, advisory_only=False):
 def publish_mail_result(purpose, state, event_id):
     """Anonymous fixed-label receipt, not an email-body archive or delivery proof."""
     labels = {'approval': '上架确认邮件', 'rejection': '提交拒绝邮件', 'external': '外部业务邮件',
-              'claim_invitation': '认领邀请邮件'}
+              'claim_invitation': '认领邀请邮件', 'email_confirmation': '邮箱确认邮件'}
     states = {
         'accepted': ('info', 'SMTP 已接收；对方邮箱是否送达尚未验证。'),
         'failed_or_unknown': ('warning', '发送失败或接收状态未知；未自动重发。'),
