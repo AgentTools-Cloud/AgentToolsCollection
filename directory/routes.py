@@ -523,7 +523,7 @@ def _full_access(request: Request, full: bool) -> bool:
         raise HTTPException(status_code=401, detail={
             "error": "account_required",
             "message": "full=1 needs an account. Without it the public lists are returned.",
-            "browser": "https://agent-tools.cloud/auth/github/login",
+            "browser": "https://agent-tools.cloud/auth/signin",
             "get_a_key": {"method": "POST", "url": "https://agent-tools.cloud/api/v1/keys"},
             "send": "Authorization: Bearer <key>"})
     return True

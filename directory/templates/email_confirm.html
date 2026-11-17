@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}Confirm your email — Agent Tools{% endblock %}
+{% block robots %}<meta name="robots" content="noindex,nofollow">{% endblock %}
+{% block content %}
+<div class="max-w-xl">
+  {% if state == 'done' %}
+  <h1 class="text-2xl font-bold text-slate-900 mb-3">Email confirmed</h1>
+  <p class="text-sm text-slate-600">We will write to <span class="mono break-all">{{ email }}</span> only if another
+    account verifies a target this account has claimed.</p>
+  <p class="text-sm mt-3"><a class="text-blue-600 hover:underline" href="/account">Your account</a></p>
+  {% elif state == 'invalid' %}
+  <h1 class="text-2xl font-bold text-slate-900 mb-3">Link unavailable</h1>
+  <p class="text-sm text-slate-600">This confirmation link is invalid or has expired. Request a new one from
+    <a class="text-blue-600 hover:underline" href="/account">your account</a>.</p>
+  {% else %}
+  <h1 class="text-2xl font-bold text-slate-900 mb-3">Confirm your email</h1>
+  <p class="text-sm text-slate-600 mb-4">Confirm this address for notices about your Agent Tools account.</p>
+  <form method="post" action="/account/email/confirm">
+    <input type="hidden" name="token" id="email-confirm-token" value="">
+    <button id="email-confirm-button" disabled
+            class="rounded bg-blue-600 text-white px-4 py-2 text-sm font-medium disabled:opacity-50">Confirm email</button>
+  </form>
+  <p id="email-confirm-missing" class="hidden text-sm text-red-700 mt-3">This link is incomplete. Open it directly from the email.</p>
+  <script>
+  (function () {
+    var token = location.hash.slice(1);
+    if (!token) { document.getElementById("email-confirm-missing").classList.remove("hidden"); return; }
+    document.getElementById("email-confirm-token").value = token;
+    document.getElementById("email-confirm-button").disabled = false;
+    history.replaceState(null, "", location.pathname);
+  })();
+  </script>
+  {% endif %}
+</div>
+{% endblock %}

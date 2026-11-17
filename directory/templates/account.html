@@ -11,11 +11,25 @@
     <div>
       <div class="text-lg font-semibold">{{ user.login }}</div>
       <div class="text-sm text-slate-500">
-        {{ user.email or 'no verified email on file' }} · signed in with GitHub
+        {% if user.email and user.email_verified %}{{ user.email }}{% else %}no verified email on file{% endif %}
+        · {% if user.provider == 'github' %}signed in with GitHub{% else %}access-key account (no GitHub){% endif %}
       </div>
     </div>
     <a href="/auth/logout" class="ml-auto text-sm text-slate-500 hover:text-slate-800">Sign out</a>
   </div>
+
+  {% if new_key %}
+  <div class="rounded-lg border border-blue-300 bg-blue-50 p-5 mb-8" role="status">
+    <h2 class="font-semibold mb-2">Save your access key</h2>
+    <p class="text-sm text-slate-700 mb-3">Shown once; we keep only a hash of it. This browser stays signed in for
+      30 days. To sign in again later or on another device, use the key on the
+      <a class="text-blue-600 hover:underline" href="/auth/signin">sign-in page</a>.</p>
+    <div class="mono text-sm bg-white border border-blue-200 rounded p-2 break-all select-all">{{ new_key.key }}</div>
+    <p class="text-xs text-slate-600 mt-3">The same key works as <code>Authorization: Bearer</code> for the API and MCP.
+      Lost it? Start again and verify again: the most recent verification holds the claim.</p>
+    {% if new_key.next %}<p class="text-sm mt-3"><a class="text-blue-600 hover:underline" href="{{ new_key.next }}">Continue where you were</a></p>{% endif %}
+  </div>
+  {% endif %}
 
   {% if issued %}
   <div class="rounded-lg border border-green-300 bg-green-50 p-5 mb-8">
@@ -143,7 +157,7 @@
   <div class="rounded-lg border border-slate-200 bg-white p-5">
     <h2 class="font-semibold mb-3">Claim a domain</h2>
     <form method="post" action="/account/domains" class="flex flex-col gap-3">
-      <input type="text" name="host" placeholder="api.example.com" required
+      <input type="text" name="host" placeholder="api.example.com" required value="{{ claim_host or '' }}"
              class="rounded border border-slate-300 px-3 py-2 mono text-sm">
       <select name="method" class="rounded border border-slate-300 px-3 py-2 text-sm">
         <option value="auto" selected>Recommended for my listings (x402: /.well-known/x402 · A2A: agent card · MCP: verification file)</option>
@@ -158,6 +172,20 @@
       <a class="text-blue-600 hover:underline" href="/docs/claim">Claim documentation</a>
     </p>
   </div>
+
+  {% if not (user.email and user.email_verified) %}
+  <section class="rounded-lg border border-slate-200 bg-white p-5 mt-8" id="email">
+    <h2 class="font-semibold mb-1">Email for notices <span class="font-normal text-slate-500">(optional)</span></h2>
+    <p class="text-sm text-slate-600 mb-3">We only write if another account verifies a target you have claimed.
+      We send a confirmation link first.</p>
+    {% if email_notice %}<p role="{{ 'status' if email_notice.ok else 'alert' }}" class="text-sm {{ 'text-green-700' if email_notice.ok else 'text-red-700' }} mb-3 break-words">{{ email_notice.text }}</p>{% endif %}
+    <form method="post" action="/account/email" class="flex flex-col sm:flex-row gap-2">
+      <input type="email" name="email" required maxlength="254" autocomplete="email" aria-label="Email"
+             placeholder="you@example.com" class="flex-1 min-w-0 rounded border border-slate-300 px-3 py-2 text-sm">
+      <button class="shrink-0 rounded border border-slate-300 bg-white px-4 py-2 text-sm font-medium">Send confirmation link</button>
+    </form>
+  </section>
+  {% endif %}
 
 </div>
 {% endblock %}

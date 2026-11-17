@@ -1,4 +1,4 @@
-"""GitHub sign-in. Identity only.
+"""Sign-in: GitHub, or an access-key account that needs no GitHub. Identity only.
 
 Logging in proves who you are and enables account-scoped actions such as paid
 verification; it grants no listing edit rights on its own. Edit rights come from
@@ -17,6 +17,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import secrets
 import time
 from urllib.parse import urlencode, urlsplit
@@ -44,6 +45,16 @@ STATE_MAX_AGE = 600
 # Separate audience so a hub-readable credential can never act as a main-site session.
 HUB_COOKIE = "atc_hub"
 HUB_AUDIENCE = "hub.agent-tools.cloud"
+# One-time hand-over of a freshly minted key from the sign-in POST to /account.
+NEW_KEY_COOKIE = "atc_new_key"
+NEW_KEY_AUDIENCE = "new-key"
+EMAIL_AUDIENCE = "email-confirm"
+EMAIL_CONFIRM_MAX_AGE = 86400
+_EMAIL_RE = re.compile(
+    r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]{1,64}@"
+    r"(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}")
+_HOST_RE = re.compile(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?")
+_NO_STORE = {"Cache-Control": "private, no-store"}
 
 _TIMEOUT = httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0)
 
@@ -290,6 +301,106 @@ def logout(next: str = "/"):
     return resp
 
 
+def _claim_host(value: str | None) -> str:
+    value = (value or "").strip().lower()
+    return value if _HOST_RE.fullmatch(value) else ""
+
+
+def _signin_url(next_path: str, host: str = "") -> str:
+    params = {"next": next_path}
+    if host:
+        params["host"] = host
+    return "/auth/signin?" + urlencode(params)
+
+
+def _signin_page(request: Request, next_path: str, host: str = "",
+                 error: str | None = None, status_code: int = 200):
+    from .routes import TEMPLATES
+    return TEMPLATES.TemplateResponse(
+        request, "signin.html",
+        {"request": request, "next": next_path, "host": host, "error": error,
+         "github": configured()},
+        status_code=status_code,
+        headers={**_NO_STORE, "X-Robots-Tag": "noindex, nofollow"})
+
+
+def _start_session(resp, user_id: int) -> None:
+    _set_cookie(resp, SESSION_COOKIE, sign({"uid": user_id}, SESSION_MAX_AGE),
+                SESSION_MAX_AGE)
+    _set_hub_cookie(resp, user_id)
+
+
+@router.get("/auth/signin", include_in_schema=False)
+def signin_page(request: Request, next: str = "/account", host: str = ""):
+    """GitHub, a new access-key account, or an existing key: all equal for claims."""
+    target, host = _safe_next(next), _claim_host(host)
+    if current_user(request) is not None:
+        return RedirectResponse(target, status_code=302, headers=_NO_STORE)
+    if host and target == "/account":
+        target = "/account?" + urlencode({"host": host})
+    return _signin_page(request, target, host)
+
+
+@router.post("/auth/anonymous", include_in_schema=False)
+def anonymous_signin(request: Request, next: str = Form("/account", max_length=2000),
+                     host: str = Form("", max_length=300)):
+    """The browser twin of POST /api/v1/keys: same account type, same IP budget."""
+    from .routes import KEY_MINT_LIMIT_PER_DAY
+    _require_same_origin_write(request, always=True)
+    target, host = _safe_next(next), _claim_host(host)
+    if not os.getenv("SESSION_SECRET"):
+        raise HTTPException(503, "Sign-in is not configured")
+    state = limits.check_ip_limits(limits.client_ip_from_request(request), "mint-key",
+                                   (("day", KEY_MINT_LIMIT_PER_DAY, 86400),))
+    if state:
+        return _signin_page(request, target, host, status_code=429, error=(
+            "Too many accounts were started from this network today. Sign in with "
+            "GitHub, use a key you already have, or try again tomorrow."))
+
+    def op():
+        with db.writer() as conn:
+            puid = secrets.token_hex(16)
+            uid = db.upsert_user(conn, provider="domain", provider_uid=puid,
+                                 login=db.key_user_login(puid))
+            return uid, db.create_api_key(conn, uid, name="web sign-in")
+    uid, key = db.with_retry(op)
+    # Redirect rather than render, so reloading the page cannot mint another account.
+    resp = RedirectResponse("/account" + ("?" + urlencode({"host": host}) if host else ""),
+                            status_code=303, headers=_NO_STORE)
+    _start_session(resp, uid)
+    resp.set_cookie(NEW_KEY_COOKIE,
+                    sign({"aud": NEW_KEY_AUDIENCE, "uid": uid, "key": key,
+                          "next": target}, 600),
+                    max_age=600, path="/account", httponly=True, secure=True,
+                    samesite="lax")
+    return resp
+
+
+@router.post("/auth/key", include_in_schema=False)
+def key_signin(request: Request, key: str = Form("", max_length=200),
+               next: str = Form("/account", max_length=2000)):
+    _require_same_origin_write(request, always=True)
+    target = _safe_next(next)
+    if not os.getenv("SESSION_SECRET"):
+        raise HTTPException(503, "Sign-in is not configured")
+    state = limits.check_ip_limits(limits.client_ip_from_request(request), "key-signin",
+                                   (("hour", 20, 3600), ("day", 60, 86400)))
+    if state:
+        return _signin_page(request, target, status_code=429,
+                            error="Too many sign-in attempts from this network. Try again later.")
+    with db.connect(read_only=True) as conn:
+        row = db.api_key_row(conn, key)
+        user = (conn.execute("SELECT id, status FROM users WHERE id=?",
+                             (row["user_id"],)).fetchone() if row is not None else None)
+    if user is None or user["status"] != "active":
+        return _signin_page(request, target, status_code=401,
+                            error="That key is not valid. Keys start with atc_live_.")
+    db.touch_api_key(row["id"], row["last_used_at"])
+    resp = RedirectResponse(target, status_code=303, headers=_NO_STORE)
+    _start_session(resp, int(user["id"]))
+    return resp
+
+
 # ------------------------------------------------------- account pages
 
 def _require_user(request: Request):
@@ -366,7 +477,8 @@ def _listing_counts(conn, hosts: list[str]) -> dict[str, int]:
     return counts
 
 
-def _account_context(request: Request, user, issued=None, error=None, service_values=None) -> dict:
+def _account_context(request: Request, user, issued=None, error=None, service_values=None,
+                     new_key=None, email_notice=None) -> dict:
     with db.connect(read_only=True) as conn:
         rows = [dict(r) for r in conn.execute(
             "SELECT * FROM domain_ownership WHERE user_id=? "
@@ -406,8 +518,11 @@ def _account_context(request: Request, user, issued=None, error=None, service_va
         "managed_listings": managed,
         "service_listings": service_listings,
         "service_values": service_values or {"url": request.query_params.get("claim_url", "")},
+        "claim_host": _claim_host(request.query_params.get("host")),
         "issued": issued,
         "error": error,
+        "new_key": new_key,
+        "email_notice": email_notice,
     }
 
 
@@ -416,11 +531,94 @@ def account_page(request: Request):
     from .routes import TEMPLATES
     user = current_user(request)
     if user is None:
-        return RedirectResponse("/auth/github/login?next=/account",
-                                status_code=302)
-    return TEMPLATES.TemplateResponse(request, "account.html",
-                                      _account_context(request, user),
+        target = "/account" + ("?" + request.url.query if request.url.query else "")
+        return RedirectResponse(
+            _signin_url(target, _claim_host(request.query_params.get("host"))),
+            status_code=302, headers=_NO_STORE)
+    new_key = None
+    handed = unsign(request.cookies.get(NEW_KEY_COOKIE))
+    if handed and handed.get("aud") == NEW_KEY_AUDIENCE and handed.get("uid") == user["id"]:
+        back = _safe_next(handed.get("next"))
+        new_key = {"key": handed.get("key"),
+                   "next": None if back == "/" or back.startswith("/account") else back}
+    resp = TEMPLATES.TemplateResponse(request, "account.html",
+                                      _account_context(request, user, new_key=new_key),
                                       headers={"Cache-Control": "private, no-store"})
+    if NEW_KEY_COOKIE in request.cookies:
+        resp.delete_cookie(NEW_KEY_COOKIE, path="/account", secure=True, httponly=True)
+    return resp
+
+
+def _email_page(request: Request, state: str, email: str | None = None,
+                status_code: int = 200):
+    from .routes import TEMPLATES
+    return TEMPLATES.TemplateResponse(
+        request, "email_confirm.html",
+        {"request": request, "state": state, "email": email},
+        status_code=status_code,
+        headers={**_NO_STORE, "X-Robots-Tag": "noindex, nofollow",
+                 "Referrer-Policy": "same-origin"})
+
+
+@router.post("/account/email", include_in_schema=False)
+def request_email_confirmation(request: Request, email: str = Form("", max_length=254)):
+    """Optional contact address; used only for the claim-displaced notice."""
+    from . import mailer
+    from .routes import TEMPLATES
+    user = _require_user(request)
+    _require_same_origin_write(request)
+    address = email.strip()
+
+    def page(text, status_code=200):
+        return TEMPLATES.TemplateResponse(
+            request, "account.html",
+            _account_context(request, user, email_notice={"ok": status_code == 200, "text": text}),
+            status_code=status_code, headers={"Cache-Control": "private, no-store"})
+
+    if user["email"] and user["email_verified"]:
+        return page("This account already has a verified email.", 400)
+    if not _EMAIL_RE.fullmatch(address):
+        return page("Enter a valid email address.", 400)
+    recipient = hashlib.sha256(address.lower().encode("utf-8")).hexdigest()[:32]
+    for scope, identity, limit in (
+            ("email-confirm-ip", limits.client_ip_from_request(request), 5),
+            ("email-confirm-user", "user-%d" % int(user["id"]), 3),
+            ("email-confirm-to", recipient, 2),
+            ("email-confirm-all", "all", 200)):
+        if limits.check_ip_limits(identity, scope, (("day", limit, 86400),)):
+            return page("Too many confirmation emails today. Try again tomorrow.", 429)
+    token = sign({"aud": EMAIL_AUDIENCE, "uid": int(user["id"]), "email": address},
+                 EMAIL_CONFIRM_MAX_AGE)
+    # In the fragment, so the token stays out of access logs and Referer headers.
+    link = (os.getenv("PUBLIC_BASE_URL", "https://agent-tools.cloud").rstrip("/")
+            + "/account/email/confirm#" + token)
+    if not mailer.send_email_confirmation(address, link, user["login"]):
+        return page("We could not send the email. Please try again later.", 502)
+    return page("We sent a confirmation link to %s. It works for 24 hours." % address)
+
+
+@router.get("/account/email/confirm", include_in_schema=False)
+def email_confirm_page(request: Request):
+    # A GET never confirms: mail scanners open links on their own.
+    return _email_page(request, "confirm")
+
+
+@router.post("/account/email/confirm", include_in_schema=False)
+def email_confirm(request: Request, token: str = Form("", max_length=2000)):
+    _require_same_origin_write(request, always=True)
+    data = unsign(token) if token.isascii() else None
+    if not data or data.get("aud") != EMAIL_AUDIENCE or not _EMAIL_RE.fullmatch(
+            str(data.get("email") or "")):
+        return _email_page(request, "invalid", status_code=400)
+
+    def op():
+        with db.writer() as conn:
+            return conn.execute(
+                "UPDATE users SET email=?, email_verified=1 WHERE id=? AND status='active'",
+                (data["email"], int(data.get("uid") or 0))).rowcount
+    if not db.with_retry(op):
+        return _email_page(request, "invalid", status_code=400)
+    return _email_page(request, "done", email=data["email"])
 
 
 @router.post("/account/domains", include_in_schema=False)
@@ -579,10 +777,12 @@ _FIELD_LABELS = {
 }
 
 
-def _require_same_origin_write(request: Request) -> None:
+def _require_same_origin_write(request: Request, always: bool = False) -> None:
+    """`always` also covers requests without a session: sign-in forms, so another
+    site cannot sign a visitor into an account it controls (login CSRF)."""
     if request.method in ("GET", "HEAD", "OPTIONS"):
         return
-    if not unsign(request.cookies.get(SESSION_COOKIE)):
+    if not always and not unsign(request.cookies.get(SESSION_COOKIE)):
         return
 
     def origin(value):
@@ -738,8 +938,8 @@ def edit_listing_form(request: Request, kind: str, slug: str):
     user, row, host, _owner = _load_editable(request, kind, slug)
     if user is None:
         return RedirectResponse(
-            "/auth/github/login?next=/listings/%s/%s/edit" % (kind, slug),
-            status_code=302)
+            _signin_url("/listings/%s/%s/edit" % (kind, slug)),
+            status_code=302, headers=_NO_STORE)
     return TEMPLATES.TemplateResponse(
         request, "edit_listing.html",
         _edit_context(request, kind, slug, user, row, host),
@@ -923,7 +1123,7 @@ def manage_listing(request: Request, kind: str, slug: str):
     from .routes import TEMPLATES
     user = current_user(request)
     if user is None:
-        return RedirectResponse("/auth/github/login?next=/listings/%s/%s/manage" % (kind, slug),
+        return RedirectResponse(_signin_url("/listings/%s/%s/manage" % (kind, slug)),
                                 status_code=302, headers={"Cache-Control": "private, no-store"})
     state = lifecycle_state(request, kind, slug, user)
     if "csrf_token" not in state:

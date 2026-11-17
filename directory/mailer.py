@@ -83,6 +83,46 @@ def send_claim_invitation(to_email: str, subject: str, text: str, markup: str,
                     message_id=message_id, expected_sender=CLAIM_INVITE_FROM, before_dispatch=before_dispatch)
 
 
+def email_confirmation_message(confirm_url: str, account: str) -> tuple[str, str, str]:
+    account = " ".join(str(account).split())[:80]
+    subject = "Confirm your email for Agent Tools"
+    text = (
+        "Hi,\n\n"
+        f"Someone, probably you, asked us to use this address for the Agent Tools account {account}.\n\n"
+        "Confirm it here (the link works for 24 hours):\n"
+        f"{confirm_url}\n\n"
+        "We only write to this address if another account verifies a host or service URL "
+        "that this account has claimed. If you did not ask for this, ignore this email "
+        "and nothing changes.\n\n"
+        "Agent Tools\ncontact@agent-tools.cloud\n")
+    markup = (
+        '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width,initial-scale=1"></head>'
+        f'<body style="margin:0;padding:24px 12px;background:{LIGHT};color:{INK};'
+        'font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;line-height:1.6;">'
+        f'<main style="max-width:560px;margin:auto;background:#fff;border:1px solid {BORDER};'
+        'border-radius:8px;padding:24px;overflow-wrap:anywhere;">'
+        '<h1 style="margin:0 0 16px;font-size:22px;line-height:1.3;">Confirm your email</h1>'
+        '<p>Someone, probably you, asked us to use this address for the Agent Tools account '
+        f'<b>{html.escape(account)}</b>.</p>'
+        f'<p><a href="{html.escape(confirm_url, quote=True)}" style="display:inline-block;'
+        f'padding:10px 16px;background:{BLUE};color:#fff;border-radius:6px;text-decoration:none;">'
+        'Confirm email</a></p>'
+        f'<p style="font-size:13px;color:{SLATE};">The link works for 24 hours.</p>'
+        '<p>We only write to this address if another account verifies a host or service URL '
+        'that this account has claimed. If you did not ask for this, ignore this email and '
+        'nothing changes.</p>'
+        f'<p style="font-size:13px;color:{SLATE};">Agent Tools<br>contact@agent-tools.cloud</p>'
+        '</main></body></html>')
+    return subject, text, markup
+
+
+def send_email_confirmation(to_email: str, confirm_url: str, account: str) -> bool:
+    subject, text, markup = email_confirmation_message(confirm_url, account)
+    return _deliver_external(to_email, subject, text, markup,
+                             purpose="email_confirmation")["status"] == "accepted"
+
+
 def _deliver_external(to_email: str, subject: str, text: str, markup: str,
                       *, purpose: str | None = None, message_id: str | None = None,
                       expected_sender: str | None = None, before_dispatch=None) -> dict:
@@ -303,8 +343,9 @@ def claim_invitation_message(
         f'We found "{name}" in {source} and added it to Agent Tools:\n'
         f"{listing_url}\n\n"
         f"{readiness_line}"
-        "Claiming is free and takes a few minutes: sign in with GitHub, then publish "
-        "the token we give you as a small file on your site or as a DNS TXT record. "
+        "Claiming is free and takes a few minutes. Sign in with GitHub or continue without "
+        "an account, then publish the token we give you as a small file on your site or as "
+        "a DNS TXT record. "
         "After verifying control of your host, you can correct your listing and maintain its API details:\n"
         f"{claim_url}\n"
         f"How claiming works: {docs_url}\n\n"
@@ -331,7 +372,7 @@ def claim_invitation_message(
   <p>We found your service in {safe_source} and added it to Agent Tools.</p>
   <p><a href="{safe_listing}" style="color:{BLUE};">View your listing</a></p>
   {readiness_html}
-  <p>Claiming is free and takes a few minutes: sign in with GitHub, then publish the token we give you as a small file on your site or as a DNS TXT record. After verifying control of your host, you can correct your listing and maintain its API details.</p>
+  <p>Claiming is free and takes a few minutes. Sign in with GitHub or continue without an account, then publish the token we give you as a small file on your site or as a DNS TXT record. After verifying control of your host, you can correct your listing and maintain its API details.</p>
   <p><a href="{claim_url}" style="display:inline-block;padding:10px 16px;background:{BLUE};color:#fff;border-radius:6px;text-decoration:none;">Claim your host</a></p>
   <p style="font-size:13px;"><a href="{docs_url}" style="color:{BLUE};">How claiming works</a></p>
   <p>Your listing stays up whether or not you claim it.</p>
