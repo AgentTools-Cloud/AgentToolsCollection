@@ -211,6 +211,9 @@ class StatsSnapshotTests(unittest.TestCase):
         gaps = {g["key"]: g for g in stats.peer_position(snap, "mcp", r)["biggest_gaps"]}
         self.assertEqual(gaps["skills"]["fix"], stats.GAP_FIXES["auth_gated"])
         self.assertEqual(gaps["protocol_version"]["fix"], stats.GAP_FIXES["protocol_version"])
+        r["criteria"][0]["fix"] = "Publish the metadata."
+        gaps = {g["key"]: g for g in stats.peer_position(snap, "mcp", r)["biggest_gaps"]}
+        self.assertEqual(gaps["skills"]["fix"], "Publish the metadata.")
 
 
     def test_topic_page_and_monthly_report(self):

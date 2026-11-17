@@ -2565,7 +2565,7 @@ def well_known():
                 "terms": "https://agent-tools.cloud/terms#data",
             },
             "listing_detail_fields": {
-                "readiness": "9-criterion readiness score + grade on every detail endpoint; "
+                "readiness": "8-criterion readiness score + grade on every detail endpoint; "
                              "feeds up to 15 of 100 quality points for x402 and A2A, "
                              "display only for MCP",
                 "popularity": "GitHub stars/last push, npm 30-day downloads, Tranco site rank "

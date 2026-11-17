@@ -11,7 +11,7 @@ from . import a2a_readiness as A
 from . import db
 from . import listing_readiness as L
 
-VERSION = "2026-11-11"
+VERSION = "2026-11-17"
 SITE = "https://agent-tools.cloud"
 
 QUALITY_COMPONENTS = {
@@ -79,6 +79,10 @@ def build() -> dict:
                            "statistics": f"{SITE}/stats#method"},
         "probing": {
             "schedule": "Every listing is probed once a day from one server, starting 21:30 UTC.",
+            "mcp_auth_discovery": "An MCP server that answers HTTP 401 is also checked once a week, "
+                                  "without credentials, for its MCP authorization discovery: the "
+                                  "Bearer challenge, protected-resource metadata and "
+                                  "authorization-server metadata (GET requests only).",
             "refused_probes": "Probes a host refused (HTTP 429, or a 403 that kept us out) are left "
                               "out of uptime.",
             "history_days": {"x402": 90, "mcp": 30, "a2a": 120},
