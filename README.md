@@ -112,7 +112,11 @@ systemd units live in [`deploy/`](deploy/):
 - `mcpserver.service` — the ASGI app (uvicorn, 127.0.0.1:9100)
 - `mcpserver-b.service` — second instance on 127.0.0.1:9101; nginx upstream `agent_tools_app` uses both, so deploy with `agent-tools-rolling-restart` instead of `systemctl restart mcpserver`
 - `agent-tools-crawl.{service,timer}` — daily directory crawler at 00:30
-- `agent-tools-health.{service,timer}` — daily endpoint health checks at 05:30
+- `agent-tools-health.{service,timer}` — daily endpoint health checks, queued from 05:30 until the crawls finish
+
+The heavy jobs (crawl, code crawl, health, quarantine, reverify) run one at a time:
+each waits for the earlier ones through `After=` in its
+`deploy/live/etc/systemd/system/<unit>.service.d/queue.conf`.
 
 ## Config
 
