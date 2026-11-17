@@ -76,7 +76,13 @@ METHODOLOGY = {
         "Eight criteria, the same as the A2A readiness score, read from our daily "
         "MCP probe (initialize + tools/list) and 30-day probe history. No MCP "
         "standard defines a signed server descriptor, so that criterion is n/a "
-        "and the other 85 points are scaled to 100. Grades: A>=90, B>=75, C>=60, "
+        "and the other 85 points are scaled to 100. For a server that answers "
+        "HTTP 401 we also check weekly, without credentials, the MCP "
+        "authorization discovery (Bearer challenge, protected-resource and "
+        "authorization-server metadata, PKCE, client registration): it earns up "
+        "to 5 handshake points, the full live points and up to 5 auth points; "
+        "initialize, the protocol revision and tools need credentials and score "
+        "0. Grades: A>=90, B>=75, C>=60, "
         "D>=40, F<40. Display only: search order uses the quality grade."
     ),
     "x402": (
@@ -303,13 +309,14 @@ def _identity(kind: str, *, declared: bool, declared_note: str, owner_verified: 
 
 
 def _live(kind: str, state: str, detail: str, latency_ms) -> dict:
-    pts = {"live": 25, "seen_before": 20, "auth_gated": 15, "refused": 15,
-           "wrong_shape": 5, "unreachable": 0}.get(state, 0)
+    pts = {"live": 25, "auth_discoverable": 25, "seen_before": 20, "auth_gated": 15,
+           "refused": 15, "wrong_shape": 5, "unreachable": 0}.get(state, 0)
     band = responsiveness(latency_ms)
     pen = band["penalty"] if pts else 0
     pts = max(0, pts - pen)
-    status = {"live": "pass", "seen_before": "partial", "auth_gated": "partial",
-              "refused": "partial", "wrong_shape": "partial"}.get(state, "fail")
+    status = {"live": "pass", "auth_discoverable": "pass", "seen_before": "partial",
+              "auth_gated": "partial", "refused": "partial",
+              "wrong_shape": "partial"}.get(state, "fail")
     if latency_ms is not None:
         detail += f" ({int(latency_ms)} ms)"
     if pen:
@@ -348,6 +355,39 @@ def _mcp_security(auth) -> dict:
     return _crit("mcp", "security", 2, "partial", f"Declares credential scheme: {auth}.")
 
 
+# What an anonymous client can check of a 401 server (mcp_auth_discovery), and
+# the handshake points each earns; initialize and tools/list are the other 5.
+_DISCOVERY = (("challenge", 2, "Bearer challenge"),
+              ("resource_metadata", 2, "protected-resource metadata"),
+              ("server_metadata", 1, "authorization-server metadata"))
+
+
+def _discovered_handshake(gate: str, disc: dict) -> dict:
+    passed = [(pts, name) for key, pts, name in _DISCOVERY if disc.get(key)]
+    missing = [name for key, _, name in _DISCOVERY if not disc.get(key)]
+    pts = sum(p for p, _ in passed)
+    text = f"{gate}: authorization discovery {len(passed)} of {len(_DISCOVERY)} checks passed"
+    if passed:
+        text += " (" + ", ".join(name for _, name in passed) + ")"
+    if missing:
+        text += "; missing " + ", ".join(missing)
+    text += (f", {pts} points. initialize and tools/list need credentials, so they "
+             "were not measured and score 0.")
+    return _crit("mcp", "valid_card", pts, "partial" if pts else "info", text, auth_gated=True)
+
+
+def _discovered_security(disc: dict, declared: dict) -> dict:
+    if not (disc.get("server_metadata") and disc.get("pkce")):
+        return declared
+    pts = 5 if disc.get("registration") else 4
+    if pts < declared["points"]:
+        return declared
+    return _crit("mcp", "security", pts, "pass",
+                 "Checked: the authorization server supports OAuth with PKCE (S256)"
+                 + (" and automatic client registration." if pts == 5 else
+                    "; no automatic client registration."))
+
+
 def assess_mcp(row: dict, *, uptime_ok: int = 0, uptime_total: int = 0,
                sources=(), now: int | None = None) -> dict:
     now = int(now or time.time())
@@ -358,6 +398,14 @@ def assess_mcp(row: dict, *, uptime_ok: int = 0, uptime_total: int = 0,
     gate = None
     if h != "down" and conf and conf not in ("pass", "partial") and sc in AUTH_GATED:
         gate = f"Requires {'payment' if sc == 402 else 'authentication'} (HTTP {sc})"
+    # Weekly anonymous authorization discovery, scored only while the server answers 401.
+    disc = None
+    if gate and sc == 401:
+        disc = d.get("auth_discovery")
+        if disc is None:
+            disc = _json(d.get("auth_discovery_json"))
+        if not isinstance(disc, dict):
+            disc = None
 
     # 1. handshake
     if h == "down" or not conf:
@@ -367,6 +415,8 @@ def assess_mcp(row: dict, *, uptime_ok: int = 0, uptime_total: int = 0,
     elif conf == "partial":
         valid = _crit("mcp", "valid_card", 7, "partial", "initialize answered; tools/list failed.",
                       findings=["tools/list did not return a tools array"])
+    elif gate and disc:
+        valid = _discovered_handshake(gate, disc)
     elif gate:
         valid = _crit("mcp", "valid_card", 0, "info",
                       f"{gate}: our anonymous probe could not complete the handshake, "
@@ -376,7 +426,10 @@ def assess_mcp(row: dict, *, uptime_ok: int = 0, uptime_total: int = 0,
                       "initialize did not answer cleanly" + (f" (HTTP {sc})" if sc else "") + ".")
 
     # 2. live
-    if h == "ok" and sc in AUTH_GATED:
+    if h == "ok" and disc and disc.get("challenge") and disc.get("resource_metadata"):
+        state, text = ("auth_discoverable", "Endpoint answers anonymous clients with the "
+                       "MCP authorization challenge and protected-resource metadata")
+    elif h == "ok" and sc in AUTH_GATED:
         state, text = "auth_gated", "Endpoint requires authentication or payment"
     elif h == "ok":
         state, text = "live", "Endpoint answers the MCP initialize handshake"
@@ -435,10 +488,13 @@ def assess_mcp(row: dict, *, uptime_ok: int = 0, uptime_total: int = 0,
     priced = bool(d.get("x402_supported")) or (isinstance(pricing, dict) and bool(pricing)) or (
         isinstance(pricing, str) and pricing.strip() not in ("", "null", "{}"))
 
+    security = _mcp_security(d.get("auth_method"))
+    if disc:
+        security = _discovered_security(disc, security)
     criteria = [
         valid, live, proto,
         _na("mcp", "signature", "No MCP standard defines a signed server descriptor."),
-        up, skills, ident, _mcp_security(d.get("auth_method")),
+        up, skills, ident, security,
     ]
     evidence = None
     if d.get("x402_supported") or sc == 402:

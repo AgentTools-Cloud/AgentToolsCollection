@@ -38,7 +38,7 @@ from . import directories as directories_mod
 from . import prowl as prowl_mod
 from . import wellknown as wellknown_mod
 from . import peers as peers_mod
-from . import mcp_safety
+from . import mcp_auth_discovery, mcp_safety
 
 # agenstry.com reverse-crawl: register its MCP page crawler as a source so
 # `python -m directory.jobs crawl-mcp agenstry` works like any other source.
@@ -972,7 +972,7 @@ def cmd_readiness(kinds=("mcp", "x402")) -> int:
                 "id, health, http_status, conformance, latency_ms, latency_p95_ms, "
                 "protocol_version, tools_json, tool_count, source_code_url, package_name, "
                 "homepage_url, owner_verified, last_seen, x402_supported, pricing, "
-                "auth_method, health_checked"),
+                "auth_method, health_checked, auth_discovery_json"),
         "x402": ("services", listing_readiness.history_x402, listing_readiness.assess_x402,
                  "id, health, http_status, x402_ok, latency_ms, payment, resource_count, "
                  "resource_samples, well_known_url, openapi_url, descriptor_checked_at, "
@@ -1220,8 +1220,8 @@ def _wait_for_host(url) -> None:
 def cmd_health_mcp(only_unknown: bool = False, quarantined_only: bool = False) -> int:
     """Liveness-probe indexed MCP servers via an `initialize` request."""
     _qc = int(time.time()) - QUARANTINE_DAYS * 86400
-    sql = ("SELECT id, endpoint_url, name, description, tools_text FROM mcp_servers "
-           "WHERE endpoint_url IS NOT NULL AND endpoint_url != ''")
+    sql = ("SELECT id, endpoint_url, name, description, tools_text, auth_discovery_checked "
+           "FROM mcp_servers WHERE endpoint_url IS NOT NULL AND endpoint_url != ''")
     if quarantined_only:
         sql += f" AND (down_since IS NOT NULL AND down_since <= {_qc})"
     else:
@@ -1264,10 +1264,22 @@ def cmd_health_mcp(only_unknown: bool = False, quarantined_only: bool = False) -
             tools_text=(tools_text if tools_text is not None else (r["tools_text"] or "")),
         )
         safety_reasons = json.dumps(scan.to_dict()["reasons"], ensure_ascii=False)
+        # Behind a 401 an anonymous client can still read the authorization
+        # discovery; re-read weekly, the last result is kept in between.
+        disc = disc_at = None
+        if res["http_status"] == 401 and mcp_auth_discovery.due(
+                r["auth_discovery_checked"], r["id"], now):
+            try:
+                _wait_for_host(r["endpoint_url"])
+                disc = json.dumps(mcp_auth_discovery.check(
+                    r["endpoint_url"], res.get("www_authenticate"), 401))
+                disc_at = now
+            except Exception:  # noqa: BLE001 - never stop the health run
+                log.exception("mcp auth discovery failed for id=%s", r["id"])
         upd = (h, now, res["latency_ms"], res["http_status"],
                conf, res.get("tool_count"), tools_json, tools_text,
                scan.verdict, scan.score, safety_reasons,
-               res.get("protocol_version"), last_ok, r["id"])
+               res.get("protocol_version"), last_ok, disc, disc_at, r["id"])
         return r["id"], h, conf, (res["latency_ms"], res["http_status"]), scan, upd
 
     # Concurrent probes (network-I/O bound). 16 workers keeps this VPS — which
@@ -1299,7 +1311,9 @@ def cmd_health_mcp(only_unknown: bool = False, quarantined_only: bool = False) -
                     "tools_text=COALESCE(?, tools_text), "
                     "safety_verdict=?, safety_score=?, safety_reasons=?, "
                     "protocol_version=COALESCE(?, protocol_version), "
-                    "last_success_at=COALESCE(?, last_success_at) WHERE id=?",
+                    "last_success_at=COALESCE(?, last_success_at), "
+                    "auth_discovery_json=COALESCE(?, auth_discovery_json), "
+                    "auth_discovery_checked=COALESCE(?, auth_discovery_checked) WHERE id=?",
                     updates,
                 )
                 c.executemany(

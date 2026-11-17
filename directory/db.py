@@ -815,6 +815,9 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
             "ALTER TABLE mcp_servers ADD COLUMN license TEXT",
             "ALTER TABLE mcp_servers ADD COLUMN repo_pushed_at TEXT",
             "ALTER TABLE a2a_agents ADD COLUMN owner_edited TEXT",
+            # Anonymous MCP authorization discovery of 401 servers (weekly).
+            "ALTER TABLE mcp_servers ADD COLUMN auth_discovery_json TEXT",
+            "ALTER TABLE mcp_servers ADD COLUMN auth_discovery_checked INTEGER",
         ):
             try:
                 c.execute(ddl)
@@ -3854,6 +3857,12 @@ def mcp_row_to_dict(row) -> dict:
     if _sf:
         d["safety"] = _sf
     d.pop("tools_text", None)
+    if "auth_discovery_json" in d:
+        raw = d.pop("auth_discovery_json")
+        try:
+            d["auth_discovery"] = json.loads(raw) if raw else None
+        except (TypeError, json.JSONDecodeError):
+            d["auth_discovery"] = None
     # Column left in existing databases by the removed MCP credential test.
     d.pop("credential_test_json", None)
     if _is_code_only(d):

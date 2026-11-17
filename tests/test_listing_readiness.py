@@ -139,6 +139,56 @@ class McpReadiness(unittest.TestCase):
         self.assertEqual(broken["skills"]["detail"], "No tools listed by tools/list.")
         self.assertNotIn("auth_gated", broken["protocol_version"])
 
+    def test_auth_discovery_scores_what_an_anonymous_client_can_check(self):
+        gated = dict(conformance="fail", http_status=401, tools_json=None, tool_count=None,
+                     protocol_version=None, auth_method=None)
+        full = {"challenge": True, "resource_metadata": True, "server_metadata": True,
+                "pkce": True, "registration": True, "v": 1}
+        rep = L.assess_mcp(mcp_row(auth_discovery_json=json.dumps(full), **gated),
+                           uptime_ok=10, uptime_total=10, now=NOW)
+        k = by_key(rep)
+        self.assertEqual((k["valid_card"]["points"], k["valid_card"]["status"]), (5, "partial"))
+        self.assertTrue(k["valid_card"]["auth_gated"])
+        self.assertIn("3 of 3 checks passed", k["valid_card"]["detail"])
+        self.assertIn("initialize and tools/list need credentials", k["valid_card"]["detail"])
+        self.assertEqual((k["live"]["state"], k["live"]["points"], k["live"]["status"]),
+                         ("auth_discoverable", 25, "pass"))
+        self.assertEqual((k["security"]["points"], k["security"]["status"]), (5, "pass"))
+        for key in ("protocol_version", "skills"):
+            self.assertEqual(k[key]["points"], 0)
+            self.assertTrue(k[key]["auth_gated"])
+        # 5 + 25 + 0 + 15 + 0 + 8 + 5 = 58 of 85
+        self.assertEqual(rep["score"], round(58 * 100 / 85, 1))
+        # db.mcp_row_to_dict hands over the parsed form
+        parsed = L.assess_mcp(mcp_row(auth_discovery=full, **gated), uptime_ok=10,
+                              uptime_total=10, now=NOW)
+        self.assertEqual(parsed["score"], rep["score"])
+
+        k = by_key(L.assess_mcp(mcp_row(auth_discovery_json=json.dumps(
+            {"challenge": True, "server_metadata": True, "pkce": True}), **gated), now=NOW))
+        self.assertEqual(k["valid_card"]["points"], 3)
+        self.assertIn("2 of 3 checks passed (Bearer challenge, authorization-server metadata); "
+                      "missing protected-resource metadata", k["valid_card"]["detail"])
+        self.assertEqual((k["live"]["state"], k["live"]["points"]), ("auth_gated", 15))
+        self.assertEqual(k["security"]["points"], 4)
+        self.assertIn("no automatic client registration", k["security"]["detail"])
+
+        nothing = by_key(L.assess_mcp(mcp_row(auth_discovery_json=json.dumps(
+            {"challenge": False}), **gated), now=NOW))
+        self.assertEqual((nothing["valid_card"]["points"], nothing["valid_card"]["status"]),
+                         (0, "info"))
+        self.assertEqual(nothing["security"]["points"], 0)
+        declared = by_key(L.assess_mcp(mcp_row(auth_discovery_json=json.dumps(full),
+                                               **dict(gated, auth_method="mtls")), now=NOW))
+        self.assertEqual(declared["security"]["points"], 5)
+        # Only a 401 is scored on discovery; an old result is ignored once the server opens up.
+        for sc, conf in ((403, "fail"), (402, "fail"), (200, "pass")):
+            k = by_key(L.assess_mcp(mcp_row(auth_discovery_json=json.dumps(full),
+                                            **dict(gated, http_status=sc, conformance=conf)),
+                                    now=NOW))
+            self.assertNotEqual(k["live"]["state"], "auth_discoverable", sc)
+            self.assertEqual(k["valid_card"]["points"], 10 if sc == 200 else 0, sc)
+
     def test_down_and_payment_evidence(self):
         rep = L.assess_mcp(mcp_row(health="down", http_status=None, conformance=None,
                                    x402_supported=1, pricing='{"offers": [1]}'),
