@@ -206,7 +206,7 @@ class CrawlWithSourcesTests(_TempDB):
             self.assertIn("mcp-server", [c.args[0] for c in fe.call_args_list])
 
     def test_hinted_repos_are_looked_up_dated_and_packages_deduplicated(self):
-        eco = [{"ecosystem": "cargo", "name": "tool-mcp", "description": "MCP",
+        eco = [{"ecosystem": "cargo", "name": "hinted-mcp", "description": "MCP",
                 "repository_url": "https://github.com/acme/hinted",
                 "first_release_published_at": "2025-05-01T00:00:00Z"}]
         lk = self._run([gh_item("acme/topic")], eco=eco,
@@ -215,8 +215,8 @@ class CrawlWithSourcesTests(_TempDB):
         self.assertEqual(list(lk.call_args.args[0]), ["acme/hinted"])   # topic repo not looked up
         rows = self._rows()
         self.assertEqual(rows[("github", "acme/hinted")],
-                         ("tool-mcp", code_mcp._epoch("2025-04-01T00:00:00Z")))
-        self.assertNotIn(("cargo", "tool-mcp"), rows)
+                         ("hinted-mcp", code_mcp._epoch("2025-04-01T00:00:00Z")))
+        self.assertNotIn(("cargo", "hinted-mcp"), rows)
 
     def test_incremental_run_does_not_duplicate_stored_repos(self):
         self._run([gh_item("acme/old")])
@@ -314,34 +314,134 @@ class RemotePartTests(_TempDB):
 
 
 class OfficialRegistryMetaTests(_TempDB):
-    def test_registry_metadata_replaces_ecosystems_and_gone_packages_drop(self):
-        from directory import code_meta
+    def _rows(self):
         rows = [code_mcp.eco_row({"ecosystem": "npm", "name": n, "description": "eco text",
                                   "repository_url": "https://github.com/eco/" + n,
                                   "licenses": "MIT", "downloads": 99, "keywords_array": ["eco"]})
                 for n in ("kept", "gone", "unread")]
         rows.append({"source": "npm", "source_id": "other", "package_registry": "npm",
                      "package_name": "other", "description": "from the MCP Registry"})
+        rows.append({"source": "npm", "source_id": "gone-reg", "package_registry": "npm",
+                     "package_name": "gone", "description": "registry row of a gone package"})
+        return rows
 
-        def fake(reg, name):
-            return {"kept": (200, {"description": "npm text", "license": "Apache-2.0",
-                                   "repository": "git+https://github.com/acme/kept.git",
-                                   "homepage": None, "keywords": ["mcp"]}),
-                    "gone": (404, None)}.get(name, (0, None))
-        with patch.object(code_meta, "fetch", side_effect=fake):
+    @staticmethod
+    def _fake(reg, name):
+        return {"kept": (200, {"description": "npm text", "license": "Apache-2.0",
+                               "repository": "git+https://github.com/acme/kept.git",
+                               "homepage": None, "keywords": ["mcp"]}),
+                "gone": (404, None)}.get(name, (0, None))
+
+    def test_registry_metadata_replaces_ecosystems(self):
+        from directory import code_meta
+        rows = self._rows()
+        with patch.object(code_meta, "fetch", side_effect=self._fake):
             out, counts = code_meta.apply_official(rows)
         by = {r["source_id"]: r for r in out}
-        self.assertEqual(set(by), {"kept", "unread", "other"})
         self.assertEqual((by["kept"]["description"], by["kept"]["license"], by["kept"]["tags"],
                           by["kept"]["source_code_url"], by["kept"]["package_download_count"]),
                          ("npm text", "Apache-2.0", ["mcp"], "https://github.com/acme/kept", None))
         self.assertEqual(by["unread"]["description"], "eco text")       # kept for classification
         self.assertEqual(by["other"]["description"], "from the MCP Registry")
-        self.assertEqual((counts["official"], counts["gone"], counts["unread"]), (1, 1, 1))
-        # Cached: a second pass reads nothing, budget=0 never fetches.
-        with patch.object(code_meta, "fetch", side_effect=AssertionError("fetched")):
-            again, _ = code_meta.apply_official(rows, budget=0)
-        self.assertEqual({r["source_id"] for r in again}, {"kept", "unread", "other"})
+        # One "not found" is not enough: the package is only held back.
+        self.assertIn("gone", by)
+        self.assertEqual((counts["official"], counts["gone"]), (1, 0))
         held, counts = code_meta.apply_official(rows, budget=0, keep_unread=False)
-        self.assertEqual({r["source_id"] for r in held}, {"kept", "other"})
-        self.assertEqual(counts["unread"], 1)
+        self.assertEqual({r["source_id"] for r in held}, {"kept", "other", "gone-reg"})
+        # A failed read (status 0) is not cached; the 404 is.
+        cache = code_meta.cached()
+        self.assertNotIn(("npm", "unread"), cache)
+        self.assertEqual(cache[("npm", "gone")][0], 404)
+        self.assertFalse(cache[("npm", "gone")][1]["confirmed"])
+        self.assertEqual(code_meta.drop_gone(), 0)
+
+    def test_gone_needs_two_answers_a_day_apart_then_drops_every_source(self):
+        from directory import code_meta
+        rows = self._rows()
+        with patch.object(code_meta, "fetch", side_effect=self._fake):
+            code_meta.apply_official(rows)
+        # Re-checked too early: nothing read again.
+        with patch.object(code_meta, "fetch", side_effect=AssertionError("fetched")):
+            code_meta.apply_official(rows, budget=10)
+        real = code_meta.time.time
+        with patch.object(code_meta.time, "time", side_effect=lambda: real() + 2 * 86400), \
+                patch.object(code_meta, "fetch", side_effect=self._fake):
+            out, counts = code_meta.apply_official(rows, keep_unread=False)
+        self.assertTrue(code_meta.cached()[("npm", "gone")][1]["confirmed"])
+        self.assertNotIn("gone", {r["source_id"] for r in out})
+        self.assertNotIn("gone-reg", {r["source_id"] for r in out})   # any directory's row
+        self.assertEqual(counts["gone"], 2)
+
+    def test_one_odd_answer_does_not_sink_the_batch(self):
+        from directory import code_meta
+
+        def fake(reg, name):
+            if name == "unread":
+                raise TypeError("odd json")
+            return self._fake(reg, name)
+        with patch.object(code_meta, "fetch", side_effect=fake):
+            out, counts = code_meta.apply_official(self._rows(), keep_unread=False)
+        self.assertEqual(counts["official"], 1)
+        self.assertIn(("npm", "kept"), code_meta.cached())
+
+    def test_fetchers(self):
+        from directory import code_meta
+        self.assertEqual(code_meta.go_escape("github.com/Kong/MCP-x"), "github.com/!kong/!m!c!p-x")
+        self.assertEqual(code_meta._maven("no-colon"), (0, None))       # never "gone"
+        self.assertEqual(code_meta._go("github.com/o/r/test/repos/go/x"), (404, None))
+        calls = []
+
+        def get(url, timeout=30, raw=False):
+            calls.append(url)
+            if "azuresearch" in url:
+                return 200, {"data": []}
+            return 200, '{"versions": ["1.0.0-preview.97"]}'
+        with patch.object(code_meta, "_get", side_effect=get):
+            st, meta = code_meta._nuget("Some.Package")
+        self.assertEqual(st, 200)
+        self.assertIn("semVerLevel=2.0.0", calls[0])
+        self.assertIn("v3-flatcontainer/some.package/index.json", calls[1])
+
+        def go_get(url, timeout=30, raw=False):
+            if url.endswith("/@latest"):
+                return 200, {"Version": "v0.0.0-2024"}
+            return 200, "module github.com/o/pyproject\n"       # synthesized: no go.mod
+        with patch.object(code_meta, "_get", side_effect=go_get):
+            self.assertEqual(code_meta._go("github.com/o/pyproject")[0], 404)
+
+
+class PackageMatchesRepoTests(_TempDB):
+    def test_mirrors_and_platform_binaries_are_not_the_repos_package(self):
+        m = code_mcp.package_matches_repo
+        for reg, pkg, repo, want in [
+                ("npm", "@flemist/playwright-mcp", "microsoft/playwright-mcp", False),
+                ("npm", "@playwright/mcp", "microsoft/playwright-mcp", True),
+                ("npm", "@iflow-mcp/n8n-mcp", "czlonkowski/n8n-mcp", False),
+                ("npm", "n8n-mcp", "czlonkowski/n8n-mcp", True),
+                ("npm", "@upstash/context7-mcp", "upstash/context7", True),
+                ("npm", "firecrawl-mcp", "mendableai/firecrawl-mcp-server", True),
+                ("pypi", "webcam-mcp", "modelcontextprotocol/servers", False),
+                ("pypi", "dungngo-ida-pro-mcp", "mrexodia/ida-pro-mcp", False),
+                ("npm", "@dbx-app/mcp-linux-arm64-gnu", "dbx-app/dbx", False),
+                ("go", "github.com/oraios/serena/test/resources/repos/go/test_repo", "oraios/serena", False),
+                ("go", "github.com/Kong/mcp-konnect", "Kong/mcp-konnect", True),
+                ("maven", "io.modelcontextprotocol.sdk:mcp", "modelcontextprotocol/java-sdk", True)]:
+            self.assertEqual(m(reg, pkg, repo), want, (reg, pkg, repo))
+
+    def test_merge_skips_mirror_and_detach_clears_stored_ones(self):
+        gh = [{"full_name": "acme/tool-mcp", "html_url": "https://github.com/acme/tool-mcp",
+               "description": "MCP server", "stargazers_count": 5, "topics": ["mcp-server"],
+               "created_at": "2025-01-01T00:00:00Z", "pushed_at": "2025-02-01T00:00:00Z"}]
+        mirror = code_mcp.eco_row({"ecosystem": "npm", "name": "@mseep/tool-mcp",
+                                   "repository_url": "https://github.com/acme/tool-mcp"})
+        rows, skipped = code_mcp.merge(gh, [mirror], (set(), set()))
+        self.assertEqual(skipped["foreign_package"], 1)
+        self.assertFalse(rows[0].get("package_name"))
+        with closing(db.connect()) as c:
+            row = code_mcp.github_row(gh[0])
+            row.update(package_registry="npm", package_name="@mseep/tool-mcp")
+            db.upsert_mcp_server(c, row)
+            c.commit()
+        self.assertEqual(code_sources.detach_foreign_packages(), 1)
+        with closing(db.connect()) as c:
+            self.assertIsNone(c.execute("SELECT package_name FROM mcp_servers WHERE source='github'").fetchone()[0])

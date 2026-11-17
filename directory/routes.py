@@ -712,7 +712,13 @@ def stats_kind_page(request: Request, kind: str, period: int = Query(default=7))
 
 @router.get("/about", response_class=HTMLResponse, include_in_schema=False)
 def about_page(request: Request):
-    return TEMPLATES.TemplateResponse(request, "about.html", {"request": request})
+    sources = None
+    try:
+        from . import stats as stats_mod
+        sources = stats_mod.source_summary(_stats_payload()[0])
+    except Exception:  # noqa: BLE001 - the generated list is optional
+        sources = None
+    return TEMPLATES.TemplateResponse(request, "about.html", {"request": request, "sources": sources})
 
 
 @router.get("/docs/claim", response_class=HTMLResponse, include_in_schema=False)

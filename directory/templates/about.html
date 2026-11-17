@@ -9,7 +9,7 @@
 <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
   <div class="svc-card p-6">
     <h2 class="text-lg font-semibold mb-2">Directory</h2>
-    <p class="text-sm text-slate-600">A public, agent-readable index of three kinds of callable resources — <span class="font-medium">x402 paid APIs</span>, <span class="font-medium">MCP servers</span>, and <span class="font-medium">A2A agents</span>. Crawled from Smithery, the official MCP registry, Apify, Agenstry, Prowl, awesome-x402, x402scan, CDP Bazaar and manual submissions; exposed through search, service cards and MCP tools. No signup, no API key, open data.</p>
+    <p class="text-sm text-slate-600">A public, agent-readable index of three kinds of callable resources — <span class="font-medium">x402 paid APIs</span>, <span class="font-medium">MCP servers</span>, and <span class="font-medium">A2A agents</span>. Crawled from {% if sources %}{{ sources.count }} {% endif %}public directories and registries — the official MCP registry, Agenstry, x402scan, Smithery, CDP Bazaar and <a class="text-blue-600 hover:underline" href="#sources">others</a> — plus our own crawling and provider submissions; exposed through search, service cards and MCP tools. No signup, no API key, open data.</p>
   </div>
   <div class="svc-card p-6">
     <h2 class="text-lg font-semibold mb-2">Ask + service cards</h2>
@@ -350,6 +350,10 @@
       <li>· Discovery leads from other directories — the <a class="text-blue-600 hover:underline" href="https://huggingface.co/datasets/csoai/mcp-remote-census">CSOAI remote MCP census</a> (councilof.ai, CC BY 4.0), <a class="text-blue-600 hover:underline" href="https://agentalog.com">agentalog</a>, <a class="text-blue-600 hover:underline" href="https://assay-207908449630.us-central1.run.app">Assay Observatory</a>, <a class="text-blue-600 hover:underline" href="https://agents.traderszone.net">AgentIndex</a> (CC BY 4.0) and <a class="text-blue-600 hover:underline" href="https://x402lint.dev">x402lint</a>. We take only the endpoint, card or domain they point to; every listing is then fetched and probed by us.</li>
       <li>· Manual submissions (<a class="text-blue-600 hover:underline" href="/submit">/submit</a>)</li>
     </ul>
+    {% if sources and sources.all %}
+    <p class="text-sm text-slate-600 mt-3">All {{ sources.count }} public directories and registries in today's index of remote listings, by number of listings:
+      {% for t in sources.all %}{% if t.url %}<a class="text-blue-600 hover:underline" href="{{ t.url }}" rel="noopener nofollow">{{ t.name }}</a>{% else %}{{ t.name }}{% endif %} ({{ t.listings|num }}){% if not loop.last %}, {% endif %}{% endfor %}.</p>
+    {% endif %}
   </div>
   <div>
     <h2 class="text-lg font-semibold mb-2">Retired paid relay</h2>

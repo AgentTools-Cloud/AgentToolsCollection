@@ -980,6 +980,7 @@ def source_summary(snap: dict | None) -> dict | None:
     largest share any single one covers of its own kind (x402, MCP, A2A)."""
     if not snap or not snap.get("sources") or not snap.get("kpis"):
         return None
+    import math
     names, worst, sizes = set(), None, {}
     for kind, block in snap["sources"].items():
         total = (snap["kpis"].get(kind) or {}).get("indexed") or 0
@@ -1001,7 +1002,9 @@ def source_summary(snap: dict | None) -> dict | None:
 
     top = [{"name": _SOURCE_LINKS[n][0], "url": _SOURCE_LINKS[n][1], "listings": v, "short": short(v)}
            for n, v in sorted(sizes.items(), key=lambda x: -x[1]) if n in _SOURCE_LINKS][:HOME_SOURCE_CHIPS]
-    return {"count": len(names), "max_share": round(worst["share"]),
+    every = [{"name": _SOURCE_LINKS.get(n, (n, None))[0], "url": _SOURCE_LINKS.get(n, (n, None))[1],
+              "listings": v} for n, v in sorted(sizes.items(), key=lambda x: (-x[1], x[0]))]
+    return {"count": len(names), "max_share": min(100, math.ceil(worst["share"])), "all": every,
             "max_source": worst["source"], "max_kind": worst["kind"],
             "top": top, "more": len(names) - len(top)}
 

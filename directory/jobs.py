@@ -524,6 +524,19 @@ def cmd_crawl_code(github_limit: int | None = None, npm_limit: int | None = None
         rows, info["registry_meta"] = code_meta.apply_official(rows, keep_unread=False)
     except Exception as e:  # noqa: BLE001
         log.warning("code mcp: official registry metadata failed: %r", e)
+        # Never store ecosyste.ms text: hold all its packages back this run.
+        rows = [r for r in rows if not code_meta.from_ecosystems(r)]
+    if classify_on:
+        # Packages newly read from their registry now carry different text:
+        # judge that text before storing (cached verdicts cost nothing).
+        try:
+            classes = code_classify.classify(rows)
+            keep = [r for r in rows
+                    if classes.get((r["source"], r["source_id"]), "server") in code_classify.KEEP]
+            skipped += len(rows) - len(keep)
+            rows = keep
+        except Exception as e:  # noqa: BLE001 - the earlier verdicts stand
+            log.warning("code mcp: re-classification failed: %r", e)
     added = updated = unchanged = 0
     errors: list[str] = []
     same = code_mcp.unchanged_rows(rows)
@@ -546,14 +559,25 @@ def cmd_crawl_code(github_limit: int | None = None, npm_limit: int | None = None
         errors.extend(result['errors'])
         if not result['errors']:
             written.extend(originals)
-    code_mcp.remember_rows(written)
     info["unchanged"] = unchanged
-    backdated = _code_backdate(rows)
     attach = info.pop("attach", [])
-    info["attached"] = code_sources.attach_packages(attach)
-    info["dropped_duplicates"] = code_sources.drop_duplicate_packages()
-    removed = _code_prune() if classify_on else {}
-    info["registry_gone_removed"] = code_meta.drop_gone()
+    backdated, removed = 0, {}
+
+    def step(name, fn, default=None):
+        # Each clean-up step on its own: one failure must not lose the run.
+        try:
+            return fn()
+        except Exception as e:  # noqa: BLE001
+            log.warning("code mcp: %s failed: %r", name, e)
+            errors.append(f"{name} failed: {e!r}")
+            return default
+    step("remember_rows", lambda: code_mcp.remember_rows(written))
+    backdated = step("backdate", lambda: _code_backdate(rows), 0)
+    removed = (step("prune", _code_prune, {}) if classify_on else {}) or {}
+    info["attached"] = step("attach", lambda: code_sources.attach_packages(attach), 0)
+    info["dropped_duplicates"] = step("drop_duplicates", code_sources.drop_duplicate_packages, {})
+    info["detached_foreign"] = step("detach_foreign", code_sources.detach_foreign_packages, 0)
+    info["registry_gone_removed"] = step("drop_gone", code_meta.drop_gone, 0)
     _finish_run(run_id, added, updated, errors, status="ok" if not errors else "partial")
     log.info("code mcp (%s): %s added=%d updated=%d backdated=%d skipped_non_server=%d "
              "removed=%s errors=%d",

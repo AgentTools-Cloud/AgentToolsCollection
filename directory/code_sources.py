@@ -428,9 +428,11 @@ def attach_packages(attach: list[tuple[str, str, str]]) -> int:
     """Give stored GitHub rows without a package the package found for them."""
     if not attach:
         return 0
+    cm = _cm()
     first: dict[str, tuple[str, str]] = {}
     for repo, reg, pkg in attach:
-        first.setdefault(repo, (reg, pkg))
+        if cm.package_matches_repo(reg, pkg, repo):
+            first.setdefault(repo, (reg, pkg))
     items = [(reg, pkg, repo) for repo, (reg, pkg) in first.items()]
     n = 0
     for i in range(0, len(items), 500):
@@ -446,6 +448,27 @@ def attach_packages(attach: list[tuple[str, str, str]]) -> int:
                 return c.total_changes - before
         n += db.with_retry(op, attempts=10, base_delay=1.0)
     return n
+
+
+def detach_foreign_packages() -> int:
+    """Clear packages attached to GitHub rows that are not the repository's
+    own (mirrors that copied its URL, per-platform binaries, sub-modules), so
+    no install command points at somebody else's package."""
+    cm = _cm()
+    with db.connect(read_only=True) as c:
+        bad = [(rid,) for rid, repo, reg, pkg in c.execute(
+            "SELECT id, source_id, package_registry, package_name FROM mcp_servers "
+            "WHERE source='github' AND COALESCE(package_name,'')<>'' AND COALESCE(owner_verified,0)=0")
+            if not cm.package_matches_repo(reg, pkg, repo)]
+    for i in range(0, len(bad), 500):
+        chunk = bad[i:i + 500]
+
+        def op(chunk=chunk):
+            with db.writer() as c:
+                c.executemany("UPDATE mcp_servers SET package_registry=NULL, package_name=NULL "
+                              "WHERE id=? AND COALESCE(owner_verified,0)=0", chunk)
+        db.with_retry(op, attempts=10, base_delay=1.0)
+    return len(bad)
 
 
 def drop_duplicate_packages() -> dict[str, int]:
@@ -467,7 +490,7 @@ def drop_duplicate_packages() -> dict[str, int]:
         if not repo or repo not in gh:
             continue
         drop.append((rid, src))
-        if not gh[repo] and pkg:
+        if not gh[repo] and pkg and cm.package_matches_repo(reg or src, pkg, repo):
             attach.append((repo, reg or src, pkg))
             gh[repo] = pkg
     attach_packages(attach)
