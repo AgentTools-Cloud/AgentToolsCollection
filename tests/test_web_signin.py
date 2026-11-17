@@ -107,6 +107,16 @@ class WebSigninTests(TemporaryDatabaseTestCase):
         response = client.get("/auth/signin?next=/docs/claim", follow_redirects=False)
         self.assertEqual((response.status_code, response.headers["location"]), (302, "/docs/claim"))
 
+    def test_an_account_without_github_opens_claims_on_the_web(self):
+        client, _ = self.signed_in()
+        url = "https://glama.ai/endpoints/profile-123/mcp"
+        response = client.post("/account/service-claims", data={"url": url}, headers=SAME)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIn(url, response.text)
+        self.assertIn("/account/service-claims/", response.text)
+        (claim,) = self.query("SELECT user_id, status FROM domain_ownership")
+        self.assertEqual(claim, {"user_id": self.users()[0]["id"], "status": "pending"})
+
     def test_github_accounts_still_say_so(self):
         with db.writer() as conn:
             uid = db.upsert_user(conn, provider="github", provider_uid="42", login="octo",
