@@ -7,6 +7,8 @@ Type=oneshot
 WorkingDirectory=/opt/mcpserver
 EnvironmentFile=/opt/mcpserver/.env
 Environment="PYTHONPATH=/opt/mcpserver"
+# On 11-17 a code-only crawl's writes starved this job into "database is locked": wait up to 6 h for it.
+ExecStartPre=/usr/bin/timeout 6h /bin/sh -c 'while systemctl is-active --quiet agent-tools-crawl-code agent-tools-crawl-code-full; do sleep 60; done'
 ExecStart=/opt/mcpserver/.venv/bin/python -m directory.jobs health
 ExecStartPost=/opt/mcpserver/.venv/bin/python -m directory.jobs retire-stale-tunnels
 User=root
