@@ -120,7 +120,10 @@ def funnel(conn):
     }
     out = {}
     for kind, items in steps.items():
-        cols = ", ".join(f"SUM(CASE WHEN {cond} THEN 1 ELSE 0 END)" for _l, cond in items)
+        # Cumulative, as the page says: a step counts only listings that also passed every
+        # step above it (readiness can be A or B without the verified step).
+        conds = [" AND ".join(f"({c})" for _l, c in items[:i + 1]) for i in range(len(items))]
+        cols = ", ".join(f"SUM(CASE WHEN {cond} THEN 1 ELSE 0 END)" for cond in conds)
         row = conn.execute(f"SELECT {cols} FROM {TABLE[kind]}").fetchone()
         counts = [int(v or 0) for v in row]
         total = counts[0] or 1
@@ -877,6 +880,19 @@ def code_only(conn, now: int) -> dict:
     return out
 
 
+def headline_kpis(f: dict, grades: dict) -> dict:
+    """Headline numbers per kind. ready counts every listing graded A or B, the readiness
+    totals' number, including those graded so without the funnel's verified step."""
+    kpis = {}
+    for kind in KINDS:
+        steps = f[kind]
+        kpis[kind] = {"indexed": steps[0]["count"], "reachable": steps[2]["count"],
+                      "verified": steps[3]["count"],
+                      "ready": sum(r["count"] for r in grades[kind] if r["label"] in ("A", "B"))}
+    kpis["all"] = {k: sum(kpis[kind][k] for kind in KINDS) for k in ("indexed", "reachable", "verified", "ready")}
+    return kpis
+
+
 def compute(conn, now: int | None = None) -> dict:
     now = int(now or time.time())
     t0 = time.monotonic()
@@ -904,12 +920,8 @@ def compute(conn, now: int | None = None) -> dict:
         snap["adoption"] = popularity.adoption_stats(conn)
     except Exception:  # noqa: BLE001 - optional section
         snap["adoption"] = {"available": False}
-    kpis = {}
-    for kind in KINDS:
-        steps = f[kind]
-        kpis[kind] = {"indexed": steps[0]["count"], "reachable": steps[2]["count"],
-                      "verified": steps[3]["count"], "ready": steps[4]["count"]}
-    kpis["all"] = {k: sum(kpis[kind][k] for kind in KINDS) for k in ("indexed", "reachable", "verified", "ready")}
+    kpis = headline_kpis(f, snap["readiness"])
+    snap["ready_beyond_funnel"] = {kind: kpis[kind]["ready"] - f[kind][4]["count"] for kind in KINDS}
     try:
         snap["code_only"] = {"mcp": code_only(conn, now)}
         kpis["mcp"]["code_only"] = snap["code_only"]["mcp"]["count"]

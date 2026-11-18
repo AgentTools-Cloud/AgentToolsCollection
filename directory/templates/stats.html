@@ -242,6 +242,13 @@
           <a href="/mcp/code" class="text-blue-600 hover:underline">{{ snap.code_only.mcp.count|num }} code-only servers</a>
           (repository or package, no endpoint) are listed separately and not probed.</p>
         {% endif %}
+        {% set beyond = (snap.ready_beyond_funnel or {}).get(kind, 0) %}
+        {% if beyond > 0 %}
+        <p class="text-[11px] text-slate-500 mt-3">Another {{ beyond|num }} grade A or B without
+          {{ {'mcp': 'a full handshake: servers behind OAuth whose authorization discovery checks out, or that answer initialize but not tools/list',
+              'x402': 'a valid 402 challenge in the latest probe', 'a2a': 'a JSON-RPC answer in the latest probe'}[kind] }}.
+          The readiness totals include them; this funnel does not.</p>
+        {% endif %}
       </div>
       {% endfor %}
     </div>
@@ -562,7 +569,7 @@
     <h2 class="text-xl font-bold tracking-tight mt-2">Methodology</h2>
     <div class="text-sm text-slate-600 mt-3 space-y-3 max-w-3xl leading-relaxed">
       <p>Every number is a count over the agent-tools.cloud index at the time shown above, recomputed once a day after our probes run. It is not a census of the whole ecosystem: listings no public source has shown us are missing, and private deployments are invisible to us.</p>
-      <p id="method-funnel"><strong>Funnel.</strong> Reachable means the last probe got a valid answer. Verified means a valid 402 challenge for x402, a full MCP initialize plus tools/list, or an A2A JSON-RPC reply on the declared interface.</p>
+      <p id="method-funnel"><strong>Funnel.</strong> Reachable means the last probe got a valid answer. Verified means a valid 402 challenge for x402, a full MCP initialize plus tools/list, or an A2A JSON-RPC reply on the declared interface. Each step counts only listings that passed every step above it, so the last one is readiness A or B among verified listings; the readiness totals also count listings graded A or B without it, such as MCP servers behind OAuth whose authorization discovery checks out.</p>
       <p id="method-sources"><strong>Sources.</strong> Duplicates across sources are merged by endpoint; each source a listing came from is kept.</p>
       <p id="method-protocols"><strong>Protocols.</strong> Versions are what the listing reports or declares; we do not infer them from behaviour. A2A signatures are verified against the key the card points to on its own site.</p>
       <p id="method-readiness"><strong>Readiness.</strong> Criteria and weights are on the <a href="/about#readiness" class="text-blue-600 hover:underline">About page</a>. Points earned from live probes decay after 30 days without a fresh one.</p>
