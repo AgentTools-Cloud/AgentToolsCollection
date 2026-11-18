@@ -2573,9 +2573,10 @@ def main(argv=None) -> int:
     _load_env_file()
     p = argparse.ArgumentParser(prog="directory.jobs")
     sub = p.add_subparsers(dest="cmd", required=True)
-    from . import claim_invites
+    from . import claim_invites, m8ven_leads
 
     claim_invites.add_cli(sub)
+    m8ven_leads.add_cli(sub)
     sub.add_parser("init")
     p_crawl = sub.add_parser("crawl")
     p_crawl.add_argument("source", nargs="?", default=None)
@@ -2689,6 +2690,8 @@ def main(argv=None) -> int:
 
     if args.cmd == "claim-invites":
         return claim_invites.run_cli(args)
+    if args.cmd == "m8ven-leads":
+        return m8ven_leads.run_cli(args)
     if args.cmd == "init":
         return cmd_init()
     if args.cmd == "crawl":

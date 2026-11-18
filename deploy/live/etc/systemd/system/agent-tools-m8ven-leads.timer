@@ -1,0 +1,10 @@
+[Unit]
+Description=agent-tools M8ven leads (daily, 10:00)
+
+[Timer]
+OnCalendar=*-*-* 10:00:00
+Persistent=true
+Unit=agent-tools-m8ven-leads.service
+
+[Install]
+WantedBy=timers.target
