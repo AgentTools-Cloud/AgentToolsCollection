@@ -28,6 +28,35 @@ def _a2a_readiness(rpc_points, sig_points, security_detail):
     ]})
 
 
+class FunnelNestingTests(unittest.TestCase):
+    def test_each_step_keeps_only_the_one_before_and_ready_counts_every_a_or_b(self):
+        # MCP: B behind OAuth (401) and B with initialize only are ready, not verified.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "t.db")
+            db.init_db(path)
+            c = sqlite3.connect(path)
+            for i, (health, conf, code, grade) in enumerate([
+                    ("ok", "pass", 200, "A"), ("ok", "fail", 401, "B"), ("ok", "partial", 200, "B"),
+                    ("degraded", "fail", 404, "D")], start=1):
+                c.execute("INSERT INTO mcp_servers(id, slug, name, description, endpoint_url, health, conformance, "
+                          "http_status, readiness_grade, created_at, updated_at, source) "
+                          "VALUES (?,?,?,?,?,?,?,?,?,?,?,'t')",
+                          (i, f"m{i}", f"m{i}", "d", f"https://m{i}.example/mcp", health, conf, code, grade, NOW, NOW))
+            for i, (ok, grade) in enumerate([(1, "A"), (0, "B")], start=1):
+                c.execute("INSERT INTO services(id, slug, name, url, description, health, x402_ok, readiness_grade, "
+                          "created_at, updated_at, source) VALUES (?,?,?,?,?,?,?,?,?,?,'t')",
+                          (i, f"s{i}", f"s{i}", f"https://s{i}.example", "d", "ok", ok, grade, NOW, NOW))
+            c.commit()
+            f = stats.funnel(c)
+            kpis = stats.headline_kpis(f, stats.readiness(c))
+            c.close()
+        self.assertEqual([s["count"] for s in f["mcp"]], [4, 4, 3, 1, 1])
+        self.assertEqual([s["count"] for s in f["x402"]], [2, 2, 2, 1, 1])
+        self.assertTrue(all(s["pct_prev"] <= 100 for kind in stats.KINDS for s in f[kind]))
+        self.assertEqual((kpis["mcp"]["verified"], kpis["mcp"]["ready"]), (1, 3))
+        self.assertEqual((kpis["x402"]["ready"], kpis["all"]["ready"]), (2, 5))
+
+
 class StatsSnapshotTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -144,6 +173,16 @@ class StatsSnapshotTests(unittest.TestCase):
             self.assertIn("The state of agent tools", html)
             self.assertIn('"@type": "Dataset"', html)
             self.assertEqual("id=\"x402\"" in html, view in ("all", "x402"))
+            self.assertNotIn("grade A or B without", html)
+        kpis = {m: {"value": self.snap["kpis"]["all"][m], "series": [], "delta": None}
+                for m in ("indexed", "reachable", "verified", "ready")}
+        snap = dict(self.snap, ready_beyond_funnel={"x402": 0, "mcp": 2, "a2a": 0})
+        html = tpl.render(request=Req, snap=snap, view="all", period=30, kpis=kpis,
+                          headlines=stats.headlines(snap, "all"), history_days=1, first_day=None,
+                          kinds=list(stats.KINDS), kind_label=stats.KIND_LABEL)
+        self.assertIn("Another 2 grade A or B without", html)
+        self.assertIn("a full handshake: servers behind OAuth", html)
+        self.assertEqual(html.count("grade A or B without"), 1)
         html = tpl.render(request=Req, snap=None)
         self.assertIn("has not been computed yet", html)
 
