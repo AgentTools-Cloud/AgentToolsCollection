@@ -53,6 +53,8 @@ AGENTALOG_PAGE = 50
 AGENTALOG_MAX_PAGES = 150   # 6,242 agents / 50 = 125 pages, well under 1,000/day
 ASSAY_API = "https://assay-207908449630.us-central1.run.app/api"
 AGENTINDEX_ENDPOINTS = "https://agents.traderszone.net/endpoints"
+AGENTINDEX_PAGE = 200            # the API's largest page (asking for more still returns 200)
+AGENTINDEX_QUOTA_WAIT = 905.0    # RateLimit-Policy: 200;w=900 -- 200 requests per 15 min
 X402LINT_DIRECTORY = "https://api.x402lint.dev/v1/directory"
 
 SOURCE_URLS = {
@@ -83,8 +85,8 @@ def _client() -> httpx.Client:
 
 
 def _get(c: httpx.Client, url: str, *, params: dict | None = None,
-         attempts: int = 3) -> httpx.Response:
-    """GET with a short retry on 429/5xx (honouring Retry-After up to 60 s)."""
+         attempts: int = 3, max_wait: float = 60.0) -> httpx.Response:
+    """GET with a short retry on 429/5xx (honouring Retry-After up to max_wait s)."""
     for attempt in range(attempts):
         try:
             r = c.get(url, params=params)
@@ -97,7 +99,7 @@ def _get(c: httpx.Client, url: str, *, params: dict | None = None,
             if attempt == attempts - 1:
                 r.raise_for_status()
             try:
-                wait = max(0.0, min(60.0, float(r.headers.get("retry-after") or 2 ** attempt)))
+                wait = max(0.0, min(max_wait, float(r.headers.get("retry-after") or 2 ** attempt)))
             except ValueError:
                 wait = 2.0 ** attempt
             time.sleep(wait)
@@ -519,6 +521,16 @@ def fetch_assay_x402() -> list[dict]:
 _agentindex_cache: tuple[float, list[dict]] | None = None
 
 
+def _quota_wait(r: httpx.Response, pause: float, cap: float) -> float:
+    """Crawl delay, or until the window resets once RateLimit-Remaining hits 0."""
+    try:
+        if int(r.headers.get("ratelimit-remaining", "1")) > 0:
+            return pause
+        return min(cap, max(pause, float(r.headers.get("ratelimit-reset") or cap) + 1))
+    except ValueError:
+        return pause
+
+
 def _agentindex_results(pause: float = 1.2) -> list[dict]:
     """All AgentIndex domains (Crawl-delay: 1). Shared by the x402 and A2A
     passes of one nightly crawl, so the directory is paged once a night."""
@@ -529,12 +541,15 @@ def _agentindex_results(pause: float = 1.2) -> list[dict]:
     with _client() as c:
         offset = 0
         while offset < 100_000:
-            d = _get(c, AGENTINDEX_ENDPOINTS, params={"limit": 100, "offset": offset}).json()
-            out.extend(d.get("results") or [])
-            if not d.get("hasMore"):
+            r = _get(c, AGENTINDEX_ENDPOINTS, params={"limit": AGENTINDEX_PAGE, "offset": offset},
+                     max_wait=AGENTINDEX_QUOTA_WAIT)
+            d = r.json()
+            batch = d.get("results") or []
+            out.extend(batch)
+            if not d.get("hasMore") or not batch:
                 break
-            offset += 100
-            time.sleep(pause)
+            offset += len(batch)
+            time.sleep(_quota_wait(r, pause, AGENTINDEX_QUOTA_WAIT))
     _agentindex_cache = (time.time(), out)
     return out
 

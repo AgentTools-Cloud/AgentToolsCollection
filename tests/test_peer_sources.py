@@ -2,6 +2,8 @@ import json
 import unittest
 from unittest.mock import patch
 
+import httpx
+
 from directory import crawlers, peers
 
 
@@ -212,6 +214,38 @@ class PeerGateTests(unittest.TestCase):
         with patch.object(peers.time, "sleep") as sl:
             self.assertEqual(peers._get(C(), "https://x.io").status_code, 200)
         sl.assert_called_with(0.0)
+
+    def test_retry_after_cap_is_per_call(self):
+        def client():
+            req = httpx.Request("GET", "https://x.io")
+            seq = iter([httpx.Response(429, headers={"retry-after": "480"}, request=req),
+                        httpx.Response(200, request=req)])
+            class C:
+                def get(self, url, params=None):
+                    return next(seq)
+            return C()
+        with patch.object(peers.time, "sleep") as sl:
+            peers._get(client(), "https://x.io")
+            peers._get(client(), "https://x.io", max_wait=peers.AGENTINDEX_QUOTA_WAIT)
+        self.assertEqual([c.args[0] for c in sl.call_args_list], [60.0, 480.0])
+
+    def test_agentindex_pages_200_and_waits_out_a_spent_quota(self):
+        pages = [({"results": [{}] * 200, "hasMore": True}, {"ratelimit-remaining": "7"}),
+                 ({"results": [{}] * 200, "hasMore": True},
+                  {"ratelimit-remaining": "0", "ratelimit-reset": "300"}),
+                 ({"results": [{}] * 5, "hasMore": False}, {"ratelimit-remaining": "198"})]
+        calls = []
+        def fake_get(c, url, params=None, max_wait=60.0):
+            calls.append((params["limit"], params["offset"], max_wait))
+            body, headers = pages[len(calls) - 1]
+            return httpx.Response(200, json=body, headers=headers)
+        peers._agentindex_cache = None
+        self.addCleanup(setattr, peers, "_agentindex_cache", None)
+        with patch.object(peers, "_get", side_effect=fake_get), \
+                patch.object(peers.time, "sleep") as sl:
+            self.assertEqual(len(peers._agentindex_results()), 405)
+        self.assertEqual(calls, [(200, 0, 905.0), (200, 200, 905.0), (200, 400, 905.0)])
+        self.assertEqual([c.args[0] for c in sl.call_args_list], [1.2, 301.0])
 
     def test_owner_removed_hosts_are_dropped(self):
         with patch.object(peers, "_owner_removed_hosts", return_value={"gone.io"}):
