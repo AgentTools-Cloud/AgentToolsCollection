@@ -113,11 +113,12 @@ systemd units live in [`deploy/`](deploy/):
 - `mcpserver-b.service` — second instance on 127.0.0.1:9101; nginx upstream `agent_tools_app` uses both, so deploy with `agent-tools-rolling-restart` instead of `systemctl restart mcpserver`
 - `agent-tools-crawl.{service,timer}` — daily directory crawler at 00:30
 - `agent-tools-health.{service,timer}` — daily endpoint health checks, queued from 05:30 until the crawls finish
-- `agent-tools-m8ven-leads.{service,timer}` (in `deploy/live/`) — daily at 10:00, listings new to
-  the M8ven index are re-read from GitHub or from the endpoint itself; only their URLs are kept.
+- `agent-tools-m8ven-leads.{service,timer}` (in `deploy/live/`) — daily, queued after the code
+  crawl and before health: listings new to the M8ven index are re-read from GitHub or from the
+  endpoint itself; only their URLs are kept.
   On only with `AGENT_TOOLS_M8VEN_LEADS=1` in `/etc/agent-tools/m8ven-leads.env`
 
-The heavy jobs (crawl, code crawl, health, quarantine, reverify) run one at a time:
+The heavy jobs (crawl, code crawl, M8ven leads, health, quarantine, reverify) run one at a time:
 each waits for the earlier ones through `After=` in its
 `deploy/live/etc/systemd/system/<unit>.service.d/queue.conf`.
 
