@@ -1,6 +1,6 @@
 [Unit]
 Description=agent-tools M8ven leads: new listings re-read from GitHub or the endpoint itself
-After=network-online.target agent-tools-crawl.service agent-tools-crawl-code.service agent-tools-health.service
+After=network-online.target
 
 [Service]
 Type=oneshot
@@ -12,6 +12,7 @@ Environment="PYTHONPATH=/opt/mcpserver"
 # Shares the GitHub search quota with a manual full code crawl: skip while one runs.
 ExecCondition=/bin/sh -c '! systemctl show -p ActiveState --value agent-tools-crawl-code-full.service | grep -qxE "activating|active|deactivating|reloading"'
 ExecStart=/opt/mcpserver/.venv/bin/python -m directory.jobs m8ven-leads
-TimeoutStartSec=2h
+# Health waits for it in the queue: never hold health longer than this.
+TimeoutStartSec=1h
 Nice=10
 User=root

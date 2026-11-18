@@ -1,8 +1,9 @@
 [Unit]
-Description=agent-tools M8ven leads (daily, 10:00)
+Description=agent-tools M8ven leads (daily, queued after the code crawl)
 
 [Timer]
-OnCalendar=*-*-* 10:00:00
+# Earliest start, as crawl-code's: queue.conf runs it after the code crawl, before health.
+OnCalendar=*-*-* 03:30:00
 Persistent=true
 Unit=agent-tools-m8ven-leads.service
 
