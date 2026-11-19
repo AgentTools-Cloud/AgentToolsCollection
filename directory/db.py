@@ -823,6 +823,9 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
             # Anonymous MCP authorization discovery of 401 servers (weekly).
             "ALTER TABLE mcp_servers ADD COLUMN auth_discovery_json TEXT",
             "ALTER TABLE mcp_servers ADD COLUMN auth_discovery_checked INTEGER",
+            # What the endpoint's own 402 challenge states (daily health probe).
+            "ALTER TABLE services ADD COLUMN x402_version INTEGER",
+            "ALTER TABLE services ADD COLUMN challenge_description TEXT",
         ):
             try:
                 c.execute(ddl)

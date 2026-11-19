@@ -795,6 +795,14 @@ def _request_same_origin(client, method: str, url: str, origin: str,
     raise public_http.UnsafeURL("too many descriptor redirects")
 
 
+def _health_ok(r, dt: int) -> dict[str, Any]:
+    out = {"status": "ok", "latency_ms": dt, "http_status": r.status_code,
+           "x402": r.status_code == 402}
+    if r.status_code == 402:
+        out.update(challenge_facts(r))
+    return out
+
+
 def probe_health(url, well_known=None, inspect_payment=True,
                  method_hint: str | None = None, empty_post_probe: bool = False):
     """Probe an endpoint and return a structured callability signal.
@@ -804,6 +812,7 @@ def probe_health(url, well_known=None, inspect_payment=True,
       latency_ms  -> int | None   (round-trip of the deciding request)
       http_status -> int | None   (status code that decided the verdict)
       x402        -> bool         (endpoint answered with a proper HTTP 402)
+      x402_version, description -> what that 402 challenge states, when it does
     """
     parsed = urlparse(url)
     origin = f"{parsed.scheme}://{parsed.netloc}"
@@ -826,8 +835,7 @@ def probe_health(url, well_known=None, inspect_payment=True,
                 dt = int((time.monotonic() - t0) * 1000)
                 sc = r.status_code
                 if sc < 400 or sc == 402:
-                    return {"status": "ok", "latency_ms": dt,
-                            "http_status": sc, "x402": sc == 402}
+                    return _health_ok(r, dt)
                 if sc in (401, 403, 429):
                     return {"status": "degraded", "latency_ms": dt,
                             "http_status": sc, "x402": False}
@@ -851,8 +859,7 @@ def probe_health(url, well_known=None, inspect_payment=True,
                     return {"status": "degraded", "latency_ms": dt,
                             "http_status": sc, "x402": False}
                 if sc < 400 or sc == 402:
-                    return {"status": "ok", "latency_ms": dt,
-                            "http_status": sc, "x402": sc == 402}
+                    return _health_ok(r, dt)
                 if sc in (401, 403, 429, 404, 405, 501):
                     return {"status": "degraded", "latency_ms": dt,
                             "http_status": sc, "x402": False}
@@ -890,8 +897,7 @@ def probe_health(url, well_known=None, inspect_payment=True,
                             last = {"status": "ok", "latency_ms": dt,
                                 "http_status": sc, "x402": False}
                             continue
-                        return {"status": "ok", "latency_ms": dt,
-                                "http_status": sc, "x402": sc == 402}
+                        return _health_ok(r, dt)
                     if sc in (401, 403, 429):
                         last = {"status": "degraded", "latency_ms": dt,
                                 "http_status": sc, "x402": False}
@@ -965,8 +971,7 @@ def probe_health(url, well_known=None, inspect_payment=True,
                     dt = int((time.monotonic() - t0) * 1000)
                     sc = r.status_code
                     if sc == 402:
-                        return {"status": "ok", "latency_ms": dt,
-                                "http_status": sc, "x402": True}
+                        return _health_ok(r, dt)
                     if sc < 400:
                         return {"status": "ok", "latency_ms": dt,
                                 "http_status": sc, "x402": False}
@@ -2109,6 +2114,37 @@ def _challenge_payment(response, url: str) -> dict[str, Any] | None:
     body_payment = _extract_payment(body) if body is not None else None
     return (body_payment if _valid_payment(body_payment)
             and _challenge_matches_url(body, url) else None)
+
+
+def challenge_facts(response) -> dict[str, Any]:
+    """The x402 version and resource description a 402 challenge states: the v2
+    PAYMENT-REQUIRED header first, then a JSON body (v2 `resource.description`,
+    v1 `accepts[].description`). Keys are present only when stated."""
+    facts: dict[str, Any] = {}
+    try:
+        header = _decode_payment_required_header(getattr(response, "headers", None))
+        content = getattr(response, "content", None) or b""
+        body = _parse_json_body(content) if content else None
+    except Exception:  # noqa: BLE001 - an extra on a health verdict, never its cause
+        return facts
+    for obj in (header, body):
+        if not isinstance(obj, dict):
+            continue
+        version = obj.get("x402Version")
+        if isinstance(version, str) and version.strip().isdigit():
+            version = int(version)
+        if "x402_version" not in facts and type(version) is int and 1 <= version <= 9:
+            facts["x402_version"] = version
+        resource = obj.get("resource")
+        text = resource.get("description") if isinstance(resource, dict) else None
+        if not (isinstance(text, str) and text.strip()):
+            accepts = obj.get("accepts") if isinstance(obj.get("accepts"), list) else []
+            text = next((a["description"] for a in accepts if isinstance(a, dict)
+                         and isinstance(a.get("description"), str)
+                         and a["description"].strip()), None)
+        if "description" not in facts and isinstance(text, str) and text.strip():
+            facts["description"] = text.strip()[:600]
+    return facts
 
 
 def _challenge_matches_url(obj: Any, url: str) -> bool:
