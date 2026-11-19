@@ -569,8 +569,9 @@ def assess_x402(row: dict, *, uptime_ok: int = 0, uptime_total: int = 0,
     latency = d.get("latency_ms") if h in ("ok", "degraded") else None
     live = _live("x402", state, text, latency)
 
-    # 3. x402 version
+    # 3. x402 version: catalog samples, or what our own probe saw in the 402 challenge
     versions = {s.get("x402_version") for s in _samples(d.get("resource_samples"))}
+    versions.add(d.get("x402_version"))
     versions = {int(v) for v in versions if isinstance(v, int) or (isinstance(v, str) and v.isdigit())}
     if not versions:
         proto = _na("x402", "protocol_version", "x402 version not observed yet.")
@@ -590,7 +591,11 @@ def assess_x402(row: dict, *, uptime_ok: int = 0, uptime_total: int = 0,
         skills = _crit("x402", "skills", 0, "fail", "No paid resource declared.")
     else:
         pts = 10 if n >= 3 else 5
-        bare = [s for s in paid if not str(s.get("description") or "").strip()]
+        # The listing's own resource is described when its 402 challenge says what it is.
+        stated = str(d.get("challenge_description") or "").strip()
+        primary = _db._exact_endpoint(d.get("url") or "") if stated else ""
+        bare = [s for s in paid if not str(s.get("description") or "").strip()
+                and not (primary and _db._exact_endpoint(s.get("url") or "") == primary)]
         if bare and pts > 8:
             skills = _crit("x402", "skills", 8, "partial",
                            f"{n} paid resources; {len(bare)} sampled lack a description.")

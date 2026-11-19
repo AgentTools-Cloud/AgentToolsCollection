@@ -814,7 +814,8 @@ def cmd_health(only_unknown: bool = False, quarantined_only: bool = False) -> in
         h = res["status"]
         now = int(time.time())
         return (h,
-                (h, now, res["latency_ms"], res["http_status"], x, conf, r["id"]),
+                (h, now, res["latency_ms"], res["http_status"], x, conf,
+                 res.get("x402_version"), res.get("description"), r["id"]),
                 (r["id"], now, h, res["latency_ms"], res["http_status"], x))
 
     # Concurrent probes (network-I/O bound). 16 workers keeps this shared VPS
@@ -849,7 +850,9 @@ def cmd_health(only_unknown: bool = False, quarantined_only: bool = False) -> in
                 c.executemany(
                     "UPDATE services SET health=?, health_checked=?, latency_ms=?, "
                     "http_status=?, x402_ok=max(COALESCE(x402_ok,0), ?), "
-                    "conformance=COALESCE(?, conformance) WHERE id=?",
+                    "conformance=COALESCE(?, conformance), "
+                    "x402_version=COALESCE(?, x402_version), "
+                    "challenge_description=COALESCE(?, challenge_description) WHERE id=?",
                     [update for update in updates if update[-1] in accepted],
                 )
                 c.executemany(
@@ -1002,7 +1005,8 @@ def cmd_readiness(kinds=("mcp", "x402")) -> int:
         "x402": ("services", listing_readiness.history_x402, listing_readiness.assess_x402,
                  "id, health, http_status, x402_ok, latency_ms, payment, resource_count, "
                  "resource_samples, well_known_url, openapi_url, descriptor_checked_at, "
-                 "owner_verified, owner_declaration, last_seen, health_checked"),
+                 "owner_verified, owner_declaration, last_seen, health_checked, "
+                 "url, x402_version, challenge_description"),
     }
     for kind in kinds:
         table, history_fn, assess_fn, cols = specs[kind]

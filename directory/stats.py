@@ -215,14 +215,15 @@ def protocols(conn):
     a2a_rows = [(k, a2a.get(k, 0)) for k in ("1.x", "0.3", "0.2 and older", "Other", "Not declared")]
 
     x402 = Counter()
-    for (samples,) in _q(conn, "SELECT resource_samples FROM services WHERE health='ok' AND x402_ok=1"):
+    for (samples, observed) in _q(conn, "SELECT resource_samples, x402_version FROM services "
+                                        "WHERE health='ok' AND x402_ok=1"):
         try:
             items = json.loads(samples) if samples else []
         except (TypeError, ValueError):
             items = []
         if isinstance(items, dict):
             items = items.get("resource_samples") or []
-        versions = {s.get("x402_version") for s in items if isinstance(s, dict)}
+        versions = {s.get("x402_version") for s in items if isinstance(s, dict)} | {observed}
         versions = {int(v) for v in versions if isinstance(v, int) or (isinstance(v, str) and v.isdigit())}
         x402["v2" if versions and max(versions) >= 2 else ("v1" if versions else "Not recorded")] += 1
     x402_rows = [(k, x402.get(k, 0)) for k in ("v2", "v1", "Not recorded")]
