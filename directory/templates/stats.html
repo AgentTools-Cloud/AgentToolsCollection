@@ -212,7 +212,8 @@
       <a href="#topics">09 Topics</a>
       <a href="#growth">10 Growth</a>
       {% if snap.adoption and snap.adoption.available %}<a href="#adoption">11 Adoption</a>{% endif %}
-      {% if view == 'all' %}<a href="#searches">12 Searches</a>{% endif %}
+      {% if view in ('all', 'mcp') and snap.code_only and snap.code_only.mcp and snap.code_only.mcp.by_source %}<a href="#code-only">12 Code-only</a>{% endif %}
+      {% if view == 'all' %}<a href="#searches">13 Searches</a>{% endif %}
       <a href="/stats/reports">Monthly reports</a>
       <a href="#method">Methodology</a>
       <a href="#cite">Cite</a>
@@ -519,11 +520,74 @@
   </section>
   {% endif %}
 
+  {# 12 Code-only #}
+  {% set co = (snap.code_only or {}).get('mcp') or {} %}
+  {% if view in ('all', 'mcp') and co.by_source %}
+  <section id="code-only">
+    {{ section_head('12', 'Code-only MCP', headlines.code_only, 'MCP servers published as a repository or package with no remote endpoint: you run them yourself. We do not run them, so they have no probe, safety scan or readiness grade; the figures are what GitHub and the package registries reported.') }}
+    <div class="grid grid-cols-1 gap-4 mt-5 md:grid-cols-2">
+      <div class="svc-card p-5">
+        <h3 class="text-sm font-semibold text-slate-800">Where they come from</h3>
+        <dl class="grid grid-cols-3 gap-2 mt-2 mb-3 text-sm">
+          <div><dt class="text-xs text-slate-500">Listed</dt><dd class="font-bold mono"><a href="/mcp/code" class="hover:text-blue-600">{{ co.count|num }}</a></dd></div>
+          <div><dt class="text-xs text-slate-500">GitHub repo</dt><dd class="font-bold mono">{{ co.with_repo_pct }}%</dd></div>
+          <div><dt class="text-xs text-slate-500">Published package</dt><dd class="font-bold mono">{{ co.with_package_pct }}%</dd></div>
+        </dl>
+        {{ bar_table(co.by_source, 'Primary source', '#64748b') }}
+        {% if co.packages %}
+        <h3 class="text-sm font-semibold text-slate-800 mt-5 mb-2">Package registries</h3>
+        {{ bar_table(co.packages, 'Registry', '#2563eb') }}
+        {% endif %}
+      </div>
+      <div class="svc-card p-5">
+        <h3 class="text-sm font-semibold text-slate-800">Created per month</h3>
+        <p class="text-xs text-slate-500 mt-1">Repository creation or first package release. {{ co.created_earlier|num }} were created before November 2024 and became MCP servers later. The latest months fill in as GitHub search and the registries catch up.</p>
+        {% set series = co.created_monthly %}
+        {% set top = (series|map(attribute=1)|max) or 1 %}
+        <svg viewBox="0 0 {{ series|length * 10 }} 60" class="w-full h-24 mt-3" preserveAspectRatio="none" role="img" aria-label="Code-only MCP servers created per month">
+          {% for m, n in series %}<rect x="{{ loop.index0 * 10 }}" y="{{ 60 - 60 * n / top }}" width="8" height="{{ 60 * n / top }}" fill="#2563eb"><title>{{ m }}: {{ n|num }}</title></rect>{% endfor %}
+        </svg>
+        <div class="flex justify-between text-[11px] text-slate-400 mono mt-1"><span>{{ series[0][0] }}</span><span>{{ series[-1][0] }}</span></div>
+        <dl class="grid grid-cols-2 gap-2 mt-3 text-sm">
+          <div><dt class="text-xs text-slate-500">Created in 7 days</dt><dd class="font-bold mono">{{ co.new_7d|num }}</dd></div>
+          <div><dt class="text-xs text-slate-500">Created in 30 days</dt><dd class="font-bold mono">{{ co.new_30d|num }}</dd></div>
+        </dl>
+      </div>
+      <div class="svc-card p-5">
+        <h3 class="text-sm font-semibold text-slate-800 mb-2">GitHub stars ({{ (co.count - co.no_github_data)|num }} with GitHub data)</h3>
+        {{ bar_table(co.star_bands, 'Stars', '#ca8a04') }}
+        <h3 class="text-sm font-semibold text-slate-800 mt-5 mb-2">Last push or release</h3>
+        {{ bar_table(co.activity, 'When', '#059669') }}
+      </div>
+      <div class="svc-card p-5">
+        <h3 class="text-sm font-semibold text-slate-800 mb-2">What they do</h3>
+        {{ bar_table(co.topics.rows[:12], 'Topic', '#7c3aed') }}
+        <h3 class="text-sm font-semibold text-slate-800 mt-5 mb-2">License</h3>
+        {{ bar_table(co.licenses, 'License', '#475569') }}
+      </div>
+      {% if co.top_repos %}
+      <div class="svc-card p-5 md:col-span-2">
+        <h3 class="text-sm font-semibold text-slate-800 mb-2">Most-starred code-only servers</h3>
+        <table class="st-table w-full text-sm table-fixed">
+          <tbody>
+          {% for r in co.top_repos %}
+            <tr><td class="min-w-0"><a href="/mcp/code/{{ r.slug }}" class="hover:text-blue-600 block truncate">{{ r.name }}</a><div class="text-xs text-slate-400 mono truncate">{{ r.repo }}</div></td><td class="num mono w-24">★ {{ r.stars|num }}</td></tr>
+          {% endfor %}
+          </tbody>
+        </table>
+        <p class="text-xs text-slate-500 mt-3"><a href="/mcp/code" class="text-blue-600 hover:underline">Browse all {{ co.count|num }} code-only servers</a></p>
+      </div>
+      {% endif %}
+    </div>
+    {{ card_foot('Measured ' ~ snap.as_of ~ ' from each listing\'s last crawl; not probed.', 'code-only') }}
+  </section>
+  {% endif %}
+
   {# Methodology #}
   {% if view == 'all' %}
   {% set sd = snap.search_demand or {} %}
   <section id="searches">
-    {{ section_head('12', 'Searches', ('People searched ' ~ (sd.searches|num) ~ ' times over the last ' ~ (sd.days or 30) ~ ' days.') if sd.searches else 'Search counting started on 11 November 2026; the first terms appear once each has been searched at least five times.', 'What visitors, API clients and agents type into our search, counted in aggregate. A term is shown only after at least ' ~ (sd.min_searches or 5) ~ ' searches; no IP, account or session is stored with it.') }}
+    {{ section_head('13', 'Searches', ('People searched ' ~ (sd.searches|num) ~ ' times over the last ' ~ (sd.days or 30) ~ ' days.') if sd.searches else 'Search counting started on 11 November 2026; the first terms appear once each has been searched at least five times.', 'What visitors, API clients and agents type into our search, counted in aggregate. A term is shown only after at least ' ~ (sd.min_searches or 5) ~ ' searches; no IP, account or session is stored with it.') }}
     <div class="grid grid-cols-1 gap-4 mt-5 md:grid-cols-2">
       <div class="svc-card p-5">
         <h3 class="text-sm font-semibold text-slate-800">Most searched</h3>
@@ -580,6 +644,7 @@
       <p id="method-topics"><strong>Topics.</strong> Whole-word match of a fixed word list on name and description. Listings whose text names more than five topics (gateway catalogues) are left out{% if snap.topics.skipped_catalogue %}: {% for k, n in snap.topics.skipped_catalogue.items() %}{{ n|num }} {{ kind_label[k] }}{{ ', ' if not loop.last }}{% endfor %}{% endif %}.</p>
       <p id="method-growth"><strong>Growth.</strong> Earliest first-seen date across a listing's sources.</p>
       <p id="method-adoption"><strong>Adoption.</strong> GitHub stars and last push from the GitHub REST API for the repository a listing links as its source; npm downloads over 30 days from the npm downloads API for packages published on npm; site rank from the <a href="https://tranco-list.eu" class="text-blue-600 hover:underline" rel="noopener" target="_blank">Tranco</a> research list (registrable domain). Several listings can share one repository. These are attention signals, not measures of quality, and are not used for ranking.</p>
+      <p id="method-code-only"><strong>Code-only MCP.</strong> Repositories and packages that implement an MCP server and publish no remote endpoint: GitHub repositories with MCP topics, packages with MCP keywords on npm, PyPI, Cargo, Go, Maven, NuGet and RubyGems, and directories that point at them. A repository that a remote listing already links is counted with that listing instead. Nothing is run or probed. Stars and last push come from GitHub; for a package, its latest release counts as activity. Created is the repository's creation date or the package's first release. License is what GitHub or the registry reports; Unrecognised means GitHub could not identify it. Topics use the word list above.</p>
     </div>
   </section>
 
