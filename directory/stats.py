@@ -866,19 +866,103 @@ def monthly_report(conn, month: str, now=None):
             "license": "CC BY 4.0"}
 
 
+CODE_SOURCE_LABELS = {
+    "github": "GitHub repositories", "npm": "npm", "pypi": "PyPI", "cargo": "Cargo",
+    "go": "Go", "maven": "Maven", "nuget": "NuGet", "rubygems": "RubyGems",
+    "oci": "OCI images", "mcpb": "MCPB bundles", "smithery": "Smithery",
+}
+CODE_ACTIVITY = ((30, "Last 30 days"), (90, "31–90 days"), (365, "91–365 days"), (None, "Over a year"))
+CODE_FIRST_MONTH = "2024-11"  # MCP was published in November 2024
+CODE_TOP_REPOS = 10
+
+
+def _month_range(first: str, last: str) -> list[str]:
+    y, m = map(int, first.split("-"))
+    end = tuple(map(int, last.split("-")))
+    out = []
+    while (y, m) <= end:
+        out.append(f"{y:04d}-{m:02d}")
+        y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+    return out
+
+
 def code_only(conn, now: int) -> dict:
     """The code-only MCP sub-directory: repositories / packages with no remote
-    endpoint. Not part of the funnel or any reachable / verified / ready KPI."""
-    base = "FROM mcp_servers WHERE COALESCE(endpoint_url,'')=''"
-    out = {
-        "count": int(_one(conn, f"SELECT COUNT(*) {base}") or 0),
-        "with_repo": int(_one(conn, f"SELECT COUNT(*) {base} AND "
-                              "(source_code_url LIKE '%github.com/%' OR homepage_url LIKE '%github.com/%')") or 0),
-        "stars_100": int(_one(conn, f"SELECT COUNT(*) {base} AND github_stars >= 100") or 0),
-        "new_7d": int(_one(conn, f"SELECT COUNT(*) {base} AND created_at >= ?", (now - 7 * 86400,)) or 0),
+    endpoint. Not part of the funnel or any reachable / verified / ready KPI.
+
+    Nothing here is run or probed: the figures are what GitHub and the package
+    registries reported at each listing's last crawl. created_at is the
+    repository's creation or the package's first release (code_mcp), so the
+    monthly series counts creation, not the day we first saw a listing."""
+    from .popularity import STAR_BANDS
+    asof = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))
+    src, reg, stars, active, lic, month, topic = (Counter() for _ in range(7))
+    n = with_repo = with_package = stars_100 = new_7d = new_30d = counted = skipped = 0
+    best = []
+    cur = conn.execute(
+        "SELECT slug, name, description, source, package_registry, github_stars, "
+        "julianday(?) - julianday(repo_pushed_at), license, created_at, source_code_url, homepage_url "
+        "FROM mcp_servers WHERE COALESCE(endpoint_url,'')=''", (asof,))
+    for slug, name, desc, source, registry, st, age, licence, created, code_url, home in cur:
+        n += 1
+        src[CODE_SOURCE_LABELS.get(source) or "Other"] += 1
+        repo = next((u for u in (code_url, home) if u and "github.com/" in u.lower()), None)
+        with_repo += repo is not None
+        if registry:
+            with_package += 1
+            reg[CODE_SOURCE_LABELS.get(registry) or registry] += 1
+        if st is not None:
+            stars[next(label for hi, label in STAR_BANDS if hi is None or st <= hi)] += 1
+            stars_100 += st >= 100
+            if slug:
+                best.append((-st, (name or slug).lower(), slug, name or slug, repo or ""))
+        active["Unknown" if age is None else
+               next(label for days, label in CODE_ACTIVITY if days is None or age <= days)] += 1
+        licence = (licence or "").strip()
+        lic["Not stated" if not licence else "Unrecognised" if licence == "NOASSERTION" else licence] += 1
+        if created:
+            new_7d += created >= now - 7 * 86400
+            new_30d += created >= now - 30 * 86400
+            month[time.strftime("%Y-%m", time.gmtime(created))] += 1
+        text = f"{name or ''} {desc or ''}".lower()
+        hits = [t for t, rx in _TOPIC_RE.items() if rx.search(text)]
+        if len(hits) > CATALOGUE_TOPICS:
+            skipped += 1
+        else:
+            counted += 1
+            topic.update(hits)
+    top, seen = [], set()
+    for neg, _key, slug, name, repo in sorted(best):
+        key = repo.lower() or slug
+        if key in seen:
+            continue
+        seen.add(key)
+        short = "/".join(repo.split("github.com/", 1)[-1].split("/")[:2]) if repo else ""
+        top.append({"slug": slug, "name": name[:80], "repo": short, "stars": -neg})
+        if len(top) >= CODE_TOP_REPOS:
+            break
+    active_90d = active["Last 30 days"] + active["31–90 days"]
+    return {
+        "count": n,
+        "with_repo": with_repo, "with_repo_pct": _pct(with_repo, n),
+        "with_package": with_package, "with_package_pct": _pct(with_package, n),
+        "stars_100": stars_100,
+        "new_7d": new_7d, "new_30d": new_30d,
+        "active_90d": active_90d, "active_90d_pct": _pct(active_90d, n),
+        "by_source": _rows(_fold(src, 7)),
+        "packages": _rows(_fold(reg, 6)),
+        "star_bands": _rows([(label, stars[label]) for _hi, label in STAR_BANDS]),
+        "no_github_data": n - sum(stars.values()),
+        "activity": _rows([(label, active[label]) for _d, label in CODE_ACTIVITY]
+                          + [("Unknown", active["Unknown"])]),
+        "licenses": _rows(_fold(lic, 6)),
+        "created_monthly": [[m, month[m]] for m in _month_range(
+            CODE_FIRST_MONTH, time.strftime("%Y-%m", time.gmtime(now)))],
+        "created_earlier": sum(v for m, v in month.items() if m < CODE_FIRST_MONTH),
+        "topics": {"counted": counted, "skipped_catalogue": skipped,
+                   "rows": [{"label": t, "count": c, "pct": _pct(c, counted)} for t, c in topic.most_common()]},
+        "top_repos": top,
     }
-    out["with_repo_pct"] = _pct(out["with_repo"], out["count"])
-    return out
 
 
 def headline_kpis(f: dict, grades: dict) -> dict:
@@ -951,6 +1035,10 @@ def flatten(snap: dict) -> list[tuple[str, str, float]]:
         for metric in ("new_7d", "went_down_7d"):
             if metric in g:
                 out.append((kind, metric, g[metric]))
+    co = (snap.get("code_only") or {}).get("mcp") or {}
+    for metric in ("with_repo", "with_package", "stars_100", "active_90d", "new_7d", "new_30d"):
+        if metric in co:
+            out.append(("mcp_code", metric, co[metric]))
     x = snap.get("x402", {})
     for k, v in (x.get("price_quantiles") or {}).items():
         if v is not None:
@@ -1039,6 +1127,7 @@ def headlines(snap: dict, kind: str = "all") -> dict:
     q = x["price_quantiles"]
     multi = snap["sources"]["mcp"]["multi_source_pct"]
     gaps = snap["topics"]["gaps"]
+    co = (snap.get("code_only") or {}).get("mcp") or {}
     out = {
         "funnel": (f"Only {mcp[3]['pct_total']}% of indexed MCP servers complete a full handshake, "
                    f"and {a2a[3]['pct_total']}% of A2A agents answer JSON-RPC."),
@@ -1062,6 +1151,9 @@ def headlines(snap: dict, kind: str = "all") -> dict:
         "growth": (f"{snap['growth']['mcp']['new_7d'] + snap['growth']['x402']['new_7d'] + snap['growth']['a2a']['new_7d']:,} "
                    "listings were first seen in the last 7 days."),
         "adoption": _adoption_headline(snap.get("adoption") or {}),
+        "code_only": (f"{co['count']:,} MCP servers are published only as code, to run yourself; "
+                      f"{co['active_90d_pct']}% had a push or release in the last 90 days."
+                      if co.get("by_source") else "No code-only MCP servers yet."),
     }
     if kind in KINDS:
         out.update(_kind_headlines(snap, kind))

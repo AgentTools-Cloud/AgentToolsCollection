@@ -1,4 +1,5 @@
 """Public /stats snapshot: counts, CSV rows, headlines and page rendering."""
+import calendar
 import json
 import os
 import sqlite3
@@ -55,6 +56,113 @@ class FunnelNestingTests(unittest.TestCase):
         self.assertTrue(all(s["pct_prev"] <= 100 for kind in stats.KINDS for s in f[kind]))
         self.assertEqual((kpis["mcp"]["verified"], kpis["mcp"]["ready"]), (1, 3))
         self.assertEqual((kpis["x402"]["ready"], kpis["all"]["ready"]), (2, 5))
+
+
+class CodeOnlyTests(unittest.TestCase):
+    """Code-only MCP (no remote endpoint): profile figures and the /stats section."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        path = os.path.join(cls.tmp.name, "t.db")
+        db.init_db(path)
+        c = sqlite3.connect(path)
+
+        def pushed(days):
+            return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(NOW - days * DAY))
+        rows = [
+            ("big", "Big Server", "github code search", "github", None, 1500, pushed(3), "MIT",
+             NOW - 2 * DAY, "https://github.com/acme/big"),
+            ("mid", "Mid Server", "weather data", "npm", "npm", 150, pushed(60), "Apache-2.0",
+             NOW - 20 * DAY, "https://github.com/acme/mid"),
+            ("small", "Small", "pdf tools", "pypi", "pypi", 0, pushed(400), "", NOW - 40 * DAY, None),
+            ("old", "Old repo", "email calendar", "github", None, 5, pushed(200), "NOASSERTION",
+             calendar.timegm((2023, 5, 1, 0, 0, 0)), "https://github.com/acme/old"),
+            # Names more than five topics: a catalogue, left out of the topic shares.
+            ("cat", "Catalogue", "search web data database finance payment", "cargo", "cargo", None, None,
+             "MIT", NOW - 100 * DAY, None),
+        ]
+        for i, (slug, name, desc, source, reg, stars, pushed_at, lic, created, url) in enumerate(rows, start=1):
+            c.execute("INSERT INTO mcp_servers(id, slug, name, description, source, source_id, package_registry, "
+                      "github_stars, repo_pushed_at, license, created_at, updated_at, source_code_url, kind) "
+                      "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'catalog')",
+                      (i, slug, name, desc, source, slug, reg, stars, pushed_at, lic, created, NOW, url))
+        c.execute("INSERT INTO mcp_servers(id, slug, name, description, endpoint_url, health, conformance, github_stars, "
+                  "created_at, updated_at, source) VALUES (9, 'remote', 'Remote', 'search', 'https://r.example/mcp', "
+                  "'ok', 'pass', 99999, ?, ?, 't')", (NOW, NOW))
+        c.commit()
+        c.row_factory = sqlite3.Row
+        cls.co = stats.code_only(c, NOW)
+        cls.snap = stats.compute(c, NOW)
+        c.close()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_profile(self):
+        co = self.co
+        as_map = lambda rows: {r["label"]: r["count"] for r in rows}  # noqa: E731
+        self.assertEqual(co["count"], 5)
+        self.assertEqual(as_map(co["by_source"]), {"GitHub repositories": 2, "npm": 1, "PyPI": 1, "Cargo": 1})
+        self.assertEqual((co["with_repo"], co["with_repo_pct"]), (3, 60.0))
+        self.assertEqual(as_map(co["packages"]), {"npm": 1, "PyPI": 1, "Cargo": 1})
+        self.assertEqual(as_map(co["star_bands"]),
+                         {"0": 1, "1–9": 1, "10–99": 0, "100–999": 1, "1k–9.9k": 1, "10k+": 0})
+        self.assertEqual((co["no_github_data"], co["stars_100"]), (1, 2))
+        self.assertEqual(as_map(co["activity"]),
+                         {"Last 30 days": 1, "31–90 days": 1, "91–365 days": 1, "Over a year": 1, "Unknown": 1})
+        self.assertEqual((co["active_90d"], co["active_90d_pct"]), (2, 40.0))
+        self.assertEqual(as_map(co["licenses"]), {"MIT": 2, "Apache-2.0": 1, "Not stated": 1, "Unrecognised": 1})
+        self.assertEqual((co["new_7d"], co["new_30d"], co["created_earlier"]), (1, 2, 1))
+        months = co["created_monthly"]
+        self.assertEqual((months[0][0], months[-1][0]), ("2024-11", time.strftime("%Y-%m", time.gmtime(NOW))))
+        self.assertEqual(sum(n for _m, n in months), 4)
+        t = co["topics"]
+        self.assertEqual((t["counted"], t["skipped_catalogue"]), (4, 1))
+        self.assertEqual(as_map(t["rows"])["search"], 1)
+        self.assertNotIn("database", as_map(t["rows"]))
+        self.assertEqual([r["slug"] for r in co["top_repos"]], ["big", "mid", "old", "small"])
+        self.assertEqual(co["top_repos"][0], {"slug": "big", "name": "Big Server", "repo": "acme/big", "stars": 1500})
+
+    def test_snapshot_csv_and_headline(self):
+        self.assertEqual(self.snap["kpis"]["mcp"]["code_only"], 5)
+        self.assertEqual(self.snap["code_only"]["mcp"]["with_package"], 3)
+        self.assertIn(("mcp_code", "with_package", 3), stats.flatten(self.snap))
+        self.assertEqual(stats.headlines(self.snap)["code_only"],
+                         "5 MCP servers are published only as code, to run yourself; "
+                         "40.0% had a push or release in the last 90 days.")
+        json.dumps(self.snap)
+
+    def test_section_renders_for_all_and_mcp(self):
+        env = Environment(loader=FileSystemLoader(str(ROOT / "directory/templates")), autoescape=True)
+        env.globals.update(build_version="t", current_user=lambda r: None,
+                           may_edit_listing=lambda *a: False, url_host=lambda u: u)
+        env.filters["num"] = lambda v: f"{v:,}" if isinstance(v, int) else v
+        tpl = env.get_template("stats.html")
+
+        class Req:
+            class url:
+                path = "/stats"
+
+        def render(snap, view):
+            kpis = {m: {"value": snap["kpis"][view][m], "series": [], "delta": None}
+                    for m in ("indexed", "reachable", "verified", "ready")}
+            return tpl.render(request=Req, snap=snap, view=view, period=30, kpis=kpis,
+                              headlines=stats.headlines(snap, view), history_days=1, first_day=None,
+                              kinds=[k for k in stats.KINDS if view in ("all", k)], kind_label=stats.KIND_LABEL)
+        for view in ("all", "mcp", "x402", "a2a"):
+            html = render(self.snap, view)
+            self.assertEqual('id="code-only"' in html, view in ("all", "mcp"), view)
+        html = render(self.snap, "all")
+        self.assertIn("5 MCP servers are published only as code", html)
+        self.assertIn('href="/mcp/code/big"', html)
+        self.assertIn('href="#code-only">12 Code-only', html)
+        self.assertIn('href="#searches">13 Searches', html)
+        self.assertIn('id="method-code-only"', html)
+        empty = dict(self.snap, code_only={"mcp": {"count": 0}})
+        self.assertNotIn('id="code-only"', render(empty, "all"))
+        self.assertNotIn("12 Code-only", render(empty, "all"))
 
 
 class StatsSnapshotTests(unittest.TestCase):
