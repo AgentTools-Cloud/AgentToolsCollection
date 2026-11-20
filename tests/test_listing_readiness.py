@@ -105,6 +105,16 @@ class McpReadiness(unittest.TestCase):
         self.assertEqual(rep["score"], round(82 * 100 / 85, 1))
         self.assertEqual(rep["grade"], "A")
 
+    def test_declared_open_auth(self):
+        # "none" is the owner edit form's value for a server that needs no credentials.
+        for auth in ("none", "None ", "open", "public", "public-discovery"):
+            k = by_key(L.assess_mcp(mcp_row(auth_method=auth), now=NOW))
+            self.assertEqual((k["security"]["points"], k["security"]["status"]), (2, "partial"), auth)
+            self.assertIn("Declared open", k["security"]["detail"])
+        for auth in (None, "", "null", "unknown"):
+            k = by_key(L.assess_mcp(mcp_row(auth_method=auth), now=NOW))
+            self.assertEqual((k["security"]["points"], k["security"]["status"]), (0, "info"), auth)
+
     def test_auth_gated_and_old_revision(self):
         rep = L.assess_mcp(mcp_row(conformance="fail", http_status=401, tools_json=None,
                                    tool_count=None, protocol_version="2025-06-18",
