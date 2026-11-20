@@ -4203,7 +4203,11 @@ def mcp_search_keys(conn, q=None, chain=None, health=None,
     if scope_sql:
         mcp_where.append(scope_sql)
     if fts_query is not None:
-        mcp_sql += " JOIN mcp_fts ON mcp_fts.rowid = m.id"
+        # Full-text match first (CROSS JOIN fixes the order). With health= the
+        # planner otherwise walks idx_mcp_health and probes mcp_fts once per
+        # row: 15 s for any term on the production catalogue.
+        mcp_sql = ("SELECT m.endpoint_url, m.slug FROM mcp_fts "
+                   "CROSS JOIN mcp_servers m ON m.id = mcp_fts.rowid")
         mcp_where.append("mcp_fts MATCH ?")
         mcp_params.append(fts_query)
     if health:
@@ -4219,7 +4223,8 @@ def mcp_search_keys(conn, q=None, chain=None, health=None,
         where = ["s.mcp_url IS NOT NULL AND s.mcp_url != ''"]
         params = []
         if match_query is not None:
-            sql += " JOIN services_fts ON services_fts.rowid = s.id"
+            sql = ("SELECT s.mcp_url, s.url, s.slug FROM services_fts "
+                   "CROSS JOIN services s ON s.id = services_fts.rowid")
             where.append("services_fts MATCH ?")
             params.append(match_query)
         if chain:

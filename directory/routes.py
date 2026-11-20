@@ -1256,7 +1256,9 @@ def api_mcp_search(
         if effective_sort == "default" and len(servers) >= pull:
             service_target = 0
         service_count = service_offset = 0
-        chunk = max(pull, 50)
+        # Each call ranks every match again; most top-ranked services are also
+        # MCP listings and skipped, so take big pages (q=search: 25 calls, 8 s at 50).
+        chunk = max(pull, 500)
         while service_count < service_target:
             rows = db.search(c, q=q, chain=chain, health=health,
                              has_mcp=True, sort=effective_sort,

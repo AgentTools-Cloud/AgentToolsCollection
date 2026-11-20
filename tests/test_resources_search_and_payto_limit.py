@@ -165,6 +165,24 @@ class MCPKeywordSearch(_TempDB):
                          ["tender-directory"])
         self.assertEqual(body["total_matched"], 1)
 
+    def test_match_counting_reads_the_full_text_index_first(self):
+        # With health= the planner walked idx_mcp_health and probed the full-text
+        # table once per row: 15 s per MCP search on the production catalogue.
+        self.add_mcp("translator", "Translator", description="Translate text")
+        self.add_mcp("weather", "Weather")
+        seen = []
+        with closing(db.connect(read_only=True)) as c:
+            c.set_trace_callback(seen.append)
+            keys, services = db.mcp_search_keys(c, q="translate", health="ok")
+            c.set_trace_callback(None)
+            plans = [[r[3] for r in c.execute("EXPLAIN QUERY PLAN " + sql)]
+                     for sql in seen if " MATCH " in sql and sql.lstrip().startswith("SELECT")
+                     and "_docsize" not in sql]
+        self.assertEqual((keys, services), ({"https://translator.example/mcp"}, set()))
+        self.assertGreaterEqual(len(plans), 2)   # MCP listings, then x402 services with an mcp_url
+        for plan in plans:
+            self.assertRegex(plan[0], r"^SCAN (mcp|services)_fts VIRTUAL TABLE", plans)
+
     def test_title_hit_outranks_repeated_tool_text(self):
         self.add_mcp("procurement-title", "Procurement directory",
                      tools_text="utility " * 1000)
