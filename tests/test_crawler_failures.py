@@ -289,6 +289,63 @@ class CrawlerFailureTests(unittest.TestCase):
         self.assertEqual(rows[0]["url"], paid_urls[0])
         self.assertNotEqual(rows[0]["url"], origin)
 
+    @staticmethod
+    def _x402scan_origin(i):
+        url = f"https://o{i}.example.test"
+        return {"id": f"origin-{i}", "origin": url, "resources": [{
+            "resource": url + "/paid",
+            "accepts": [{
+                "scheme": "exact",
+                "network": "eip155:8453",
+                "maxAmountRequired": "1000000",
+                "asset": "0x" + "1" * 40,
+                "payTo": "0x" + "2" * 40,
+            }],
+        }]}
+
+    def test_x402scan_builds_rows_batch_by_batch(self):
+        listed = _Response(200, {"result": {"data": {"json": [
+            {"id": "origin-1"}, {"id": "origin-2"}]}}})
+        client = _Client([listed] + [
+            _Response(200, {"result": {"data": {"json": [self._x402scan_origin(i)]}}})
+            for i in (1, 2)])
+        events = []
+        real_get, real_accepts = client.get, crawlers._resource_accepts
+
+        def get(*args, **kwargs):
+            events.append("get")
+            return real_get(*args, **kwargs)
+
+        def accepts(res):
+            events.append(res["resource"])
+            return real_accepts(res)
+
+        client.get = get
+        with patch.object(crawlers.httpx, "Client", return_value=client), \
+                patch.object(crawlers, "X402SCAN_ID_BATCH", 1), \
+                patch.object(crawlers, "_resource_accepts", side_effect=accepts):
+            rows = crawlers.fetch_x402scan()
+
+        self.assertEqual([row["url"] for row in rows],
+                         ["https://o1.example.test/paid", "https://o2.example.test/paid"])
+        self.assertEqual(events, ["get", "get", "https://o1.example.test/paid",
+                                  "get", "https://o2.example.test/paid"])
+
+    def test_x402scan_dropped_batch_keeps_other_rows(self):
+        listed = _Response(200, {"result": {"data": {"json": [
+            {"id": "origin-1"}, {"id": "origin-2"}]}}})
+        client = _Client([listed] + [OSError("batch down")] * 3 + [
+            _Response(200, {"result": {"data": {"json": [self._x402scan_origin(2)]}}})])
+        with patch.object(crawlers.httpx, "Client", return_value=client), \
+                patch.object(crawlers, "X402SCAN_ID_BATCH", 1), \
+                patch.object(crawlers.time, "sleep"):
+            with self.assertRaises(crawlers.PartialCrawl) as caught:
+                crawlers.fetch_x402scan()
+
+        self.assertEqual([row["url"] for row in caught.exception.items],
+                         ["https://o2.example.test/paid"])
+        self.assertIn("1 origin(s) dropped", caught.exception.reason)
+
     def test_registry_required_bearer_header_maps_to_api_key(self):
         remote = {
             "headers": [{

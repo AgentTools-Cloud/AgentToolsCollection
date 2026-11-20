@@ -507,38 +507,43 @@ def fetch_x402scan() -> list:
             raise RuntimeError("x402scan returned an unexpected payload shape")
         return body.get("result", {}).get("data", {}).get("json")
 
-    origins: list = []
     dropped = 0
-    headers = {"User-Agent": UA, "Accept": "application/json"}
-    try:
-        with httpx.Client(timeout=TIMEOUT, headers=headers) as c:
-            listed = _query(c, X402SCAN_ORIGINS_URL, {})
-            if not isinstance(listed, list):
-                raise RuntimeError(
-                    "x402scan returned an unexpected payload shape")
-            ids = [o.get("id") for o in listed
-                   if isinstance(o, dict) and o.get("id")]
-            for start in range(0, len(ids), X402SCAN_ID_BATCH):
-                chunk = ids[start:start + X402SCAN_ID_BATCH]
-                for attempt in range(3):
-                    try:
-                        batch = _query(c, X402SCAN_TRPC_URL,
-                                       {"originIds": chunk})
-                        if isinstance(batch, list):
-                            origins.extend(batch)
-                        break
-                    except Exception as e:
-                        if attempt == 2:
-                            dropped += len(chunk)
-                            log.warning("x402scan batch at %d dropped: %r",
-                                        start, e)
-                        else:
-                            time.sleep(2 ** attempt)
-    except Exception as e:
-        raise RuntimeError(f"x402scan tRPC fetch failed: {e!r}") from e
+
+    def _origins():
+        # Stream batch by batch: holding the whole raw feed (every resource and
+        # its 402 response) drove the 3.4 GB production host deep into swap.
+        nonlocal dropped
+        headers = {"User-Agent": UA, "Accept": "application/json"}
+        try:
+            with httpx.Client(timeout=TIMEOUT, headers=headers) as c:
+                listed = _query(c, X402SCAN_ORIGINS_URL, {})
+                if not isinstance(listed, list):
+                    raise RuntimeError(
+                        "x402scan returned an unexpected payload shape")
+                ids = [o.get("id") for o in listed
+                       if isinstance(o, dict) and o.get("id")]
+                for start in range(0, len(ids), X402SCAN_ID_BATCH):
+                    chunk = ids[start:start + X402SCAN_ID_BATCH]
+                    batch = None
+                    for attempt in range(3):
+                        try:
+                            batch = _query(c, X402SCAN_TRPC_URL,
+                                           {"originIds": chunk})
+                            break
+                        except Exception as e:
+                            if attempt == 2:
+                                dropped += len(chunk)
+                                log.warning("x402scan batch at %d dropped: %r",
+                                            start, e)
+                            else:
+                                time.sleep(2 ** attempt)
+                    if isinstance(batch, list):
+                        yield from batch
+        except Exception as e:
+            raise RuntimeError(f"x402scan tRPC fetch failed: {e!r}") from e
 
     rows = []
-    for origin in origins:
+    for origin in _origins():
         if not isinstance(origin, dict):
             continue
         origin_url = origin.get("origin")
