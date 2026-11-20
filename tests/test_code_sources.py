@@ -205,6 +205,22 @@ class CrawlWithSourcesTests(_TempDB):
             self.assertNotIn("mcp", [c.args[0] for c in fe.call_args_list])
             self.assertIn("mcp-server", [c.args[0] for c in fe.call_args_list])
 
+    def test_repositories_of_hosted_listings_are_looked_up_a_capped_number_a_run(self):
+        with db.writer() as c:
+            for i in (1, 2, 3):
+                db.upsert_mcp_server(c, {"slug": f"h{i}", "name": f"H{i}",
+                                         "endpoint_url": f"https://h{i}.example/mcp",
+                                         "source_code_url": f"https://github.com/acme/h{i}",
+                                         "source": "mcp-registry", "source_id": f"h{i}"})
+        with patch.object(code_mcp, "HOSTED_LOOKUPS", 2):
+            lk = self._run([gh_item("acme/h3")], looked=[gh_item("acme/h1")])
+        # h3 came from the topic crawl; h1 and h2 fill this run's cap
+        self.assertEqual(lk.call_args.args[0], {"acme/h1": "hosted-listing", "acme/h2": "hosted-listing"})
+        rows = self._rows()
+        self.assertIn(("github", "acme/h1"), rows)    # listed as code beside its hosted listing
+        self.assertIn(("github", "acme/h3"), rows)
+        self.assertEqual(len([k for k in rows if k[0] == "mcp-registry"]), 3)
+
     def test_hinted_repos_are_looked_up_dated_and_packages_deduplicated(self):
         eco = [{"ecosystem": "cargo", "name": "hinted-mcp", "description": "MCP",
                 "repository_url": "https://github.com/acme/hinted",

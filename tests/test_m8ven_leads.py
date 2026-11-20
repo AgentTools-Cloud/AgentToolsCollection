@@ -163,8 +163,11 @@ class Runs(_TempDB):
         with db.writer() as c:
             db.upsert_mcp_server(c, {"slug": "known", "name": "Known",
                                      "endpoint_url": "https://known.example/mcp",
-                                     "source_code_url": "https://github.com/acme/listed-mcp",
                                      "source": "mcp-registry", "source_id": "known"})
+            db.upsert_mcp_server(c, {"slug": "listed", "name": "Listed", "endpoint_url": None,
+                                     "kind": "catalog",
+                                     "source_code_url": "https://github.com/acme/listed-mcp",
+                                     "source": "cline", "source_id": "listed"})
         L.record_baseline([BASE + "seed"])
         site = FakeM8ven([BASE + "seed", BASE + "acme/listed-mcp", BASE + "acme/weather-app",
                           BASE + "acme/forked-mcp", BASE + "acme/sdk-mcp", BASE + "smithery-one",
@@ -181,8 +184,24 @@ class Runs(_TempDB):
         self.assertEqual((out["errors"], out["added"]), ([], 0))
         self.assertNotIn("acme/listed-mcp", self.searches)
         self.assertEqual(self.probed, ["https://silent.example/mcp"])
-        self.assertEqual(len(self.q("SELECT 1 FROM mcp_servers")), 1)
+        self.assertEqual(len(self.q("SELECT 1 FROM mcp_servers")), 2)
         self.assertEqual([L._pending(k) for k in ("listing", "repo", "endpoint")], [[], [], []])
+
+    def test_a_repository_only_a_hosted_listing_links_is_read_and_listed_as_code_too(self):
+        with db.writer() as c:
+            db.upsert_mcp_server(c, {"slug": "hosted", "name": "Hosted",
+                                     "endpoint_url": "https://hosted.example/mcp",
+                                     "source_code_url": "https://github.com/acme/hosted-mcp",
+                                     "source": "mcp-registry", "source_id": "hosted"})
+        L.record_baseline([BASE + "seed"])
+        site = FakeM8ven([BASE + "seed", BASE + "acme/hosted-mcp"])
+        self.repos = {"acme/hosted-mcp": gh_item("acme/hosted-mcp")}
+        out = self.run_once(site)
+        self.assertEqual((out["errors"], out["added"]), ([], 1))
+        self.assertEqual(self.searches, ["acme/hosted-mcp"])
+        self.assertEqual(sorted((r["source"], r["endpoint_url"] or "") for r in self.q(
+            "SELECT source, endpoint_url FROM mcp_servers")),
+            [("github", ""), ("mcp-registry", "https://hosted.example/mcp")])
 
     def test_a_429_stops_reading_and_the_rest_waits_for_the_next_run(self):
         L.record_baseline([BASE + "seed"])

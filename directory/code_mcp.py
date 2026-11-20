@@ -16,9 +16,10 @@ Public sources, merged by GitHub repository before ingestion:
 
 Every row is ``kind='catalog'`` with ``endpoint_url=None``: it belongs to the
 code-only sub-directory (/mcp/code), is never probed and never counted in the
-remote MCP statistics. A repository that any remote listing already links
-(source_code_url or homepage) is skipped -- the remote listing owns it -- and
-so is one that another directory already lists as code-only.
+remote MCP statistics. A server that also has a hosted endpoint keeps both
+listings: the remote one for the endpoint, this one for the code. Repositories
+that remote listings link are looked up too (HOSTED_LOOKUPS a run). Only a
+repository or package another directory already lists as code-only is skipped.
 """
 from __future__ import annotations
 
@@ -63,6 +64,9 @@ SEARCH_CAP = 1000          # GitHub search returns at most 1,000 results per que
 GITHUB_FIRST_DAY = date(2024, 11, 1)   # MCP was announced 2024-11-25
 NPM_PAGE = 250
 NPM_MAX = 20000
+# Repositories linked by hosted listings, looked up per run (30 per GitHub
+# search request): the ~16,500 at the switch take three nights, then a few a day.
+HOSTED_LOOKUPS = 6000
 
 
 class CodeCrawlError(RuntimeError):
@@ -518,15 +522,18 @@ def remember_rows(rows: list[dict]) -> None:
 
 
 def known_repos(conn) -> tuple[set[str], set[str]]:
-    """(repos owned by another listing, (registry, package) owned by another listing).
+    """(repos another directory lists as code-only, (registry, package) another
+    directory lists as code-only).
 
     Rows from our own code crawlers are excluded so their re-crawl updates
-    them instead of skipping them."""
+    them instead of skipping them. Hosted listings are excluded too: a server
+    with both an endpoint and code is listed in both sub-directories."""
     repos, packages = set(), set()
     placeholders = ",".join("?" * len(OWN_SOURCES))
     for hp, sc, reg, pkg in conn.execute(
             "SELECT homepage_url, source_code_url, package_registry, package_name "
-            f"FROM mcp_servers WHERE COALESCE(source,'') NOT IN ({placeholders})", OWN_SOURCES):
+            f"FROM mcp_servers WHERE COALESCE(source,'') NOT IN ({placeholders}) "
+            "AND COALESCE(endpoint_url,'')=''", OWN_SOURCES):
         for u in (sc, hp):
             r = github_repo(u)
             if r:
@@ -534,6 +541,15 @@ def known_repos(conn) -> tuple[set[str], set[str]]:
         if pkg and (reg or "").lower() in PACKAGE_SOURCES:
             packages.add(((reg or "").lower(), pkg.lower()))
     return repos, packages
+
+
+def hosted_repos(conn) -> set[str]:
+    """GitHub repositories that hosted (remote) listings link."""
+    repos = set()
+    for urls in conn.execute("SELECT source_code_url, homepage_url FROM mcp_servers "
+                             "WHERE COALESCE(endpoint_url,'')!=''"):
+        repos.update(r for r in map(github_repo, urls) if r)
+    return repos
 
 
 _PLATFORM_PKG = re.compile(r"(^|[-_.])(linux|darwin|macos|win32|windows|arm64|x64|amd64|aarch64|musl|gnu)([-_.]|$)", re.I)
@@ -791,16 +807,24 @@ def fetch_all(*, github_limit: int | None = None, npm_limit: int = NPM_MAX,
     with db.connect(read_only=True) as c:
         known = known_repos(c)
         stored = stored_repos(c)
+        hosted = hosted_repos(c)
         have_npm = {r[0] for r in c.execute(
             "SELECT source_id FROM mcp_servers WHERE source='npm'")}
     # Repositories other directories list as MCP servers that we do not hold:
     # fetch them from GitHub (a few hundred a day once the backlog is done).
+    # Repositories hosted listings link go the same way, HOSTED_LOOKUPS a run;
+    # the classifier keeps the ones that are a server's code.
     crawled = {(i.get("full_name") or "").lower() for i in gh}
     todo = {r: v for r, v in hints.items()
             if r not in crawled and r not in stored and r not in known[0]}
-    if todo:
+    hosted -= crawled | stored | known[0] | set(hints)
+    hosted_todo = 0
+    if todo or hosted:
         checked = code_sources.recently_checked()   # once: it reads the whole table
         todo = {r: v for r, v in todo.items() if r not in checked}
+        more = sorted(hosted - checked)[:HOSTED_LOOKUPS]
+        todo.update(dict.fromkeys(more, "hosted-listing"))
+        hosted_todo = len(more)
     looked = code_sources.lookup_repos(todo) if todo else []
     gh = gh + [i for i in looked if (i.get("full_name") or "").lower() not in crawled]
     have.update((r["package_registry"], r["source_id"]) for r in packages)
@@ -820,7 +844,8 @@ def fetch_all(*, github_limit: int | None = None, npm_limit: int = NPM_MAX,
             "rows": len(rows), "min_stars": min_stars,
             "pushed_since": pushed_since.isoformat() if pushed_since else None,
             "npm_created_lookups": len(need), "hinted_repos": len(hints),
-            "hint_lookups": len(todo), "hint_found": len(looked), **extra_info, **skipped}
+            "hint_lookups": len(todo), "hosted_lookups": hosted_todo, "hint_found": len(looked),
+            **extra_info, **skipped}
     log.info("code mcp merged: %s", info)
     info["attach"] = attach
     return rows, info

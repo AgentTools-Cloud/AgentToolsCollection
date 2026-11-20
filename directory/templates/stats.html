@@ -524,8 +524,8 @@
   {% set co = (snap.code_only or {}).get('mcp') or {} %}
   {% if view in ('all', 'mcp') and co.by_source %}
   <section id="code-only">
-    {{ section_head('12', 'Code-only MCP', headlines.code_only, 'MCP servers published as a repository or package with no remote endpoint: you run them yourself. We do not run them, so they have no probe, safety scan or readiness grade; the figures are what GitHub and the package registries reported.') }}
-    <div class="grid grid-cols-1 gap-4 mt-5 md:grid-cols-2">
+    {{ section_head('12', 'Code-only MCP', headlines.code_only, 'MCP servers published as a repository, package or bundle that you install and run yourself. We do not run them, so they have no probe, safety scan or readiness grade; the figures are what GitHub and the package registries reported. A server that also has a hosted endpoint is listed both here and in the remote directory.') }}
+    <div class="grid grid-cols-1 gap-4 mt-5 md:grid-cols-2 items-start">
       <div class="svc-card p-5">
         <h3 class="text-sm font-semibold text-slate-800">Where they come from</h3>
         <dl class="grid grid-cols-3 gap-2 mt-2 mb-3 text-sm">
@@ -533,28 +533,30 @@
           <div><dt class="text-xs text-slate-500">GitHub repo</dt><dd class="font-bold mono">{{ co.with_repo_pct }}%</dd></div>
           <div><dt class="text-xs text-slate-500">Published package</dt><dd class="font-bold mono">{{ co.with_package_pct }}%</dd></div>
         </dl>
+        {% if co.also_hosted %}<p class="text-xs text-slate-500 mb-3">{{ co.also_hosted|num }} of them also have a hosted endpoint, listed separately in the remote directory.</p>{% endif %}
         {{ bar_table(co.by_source, 'Primary source', '#64748b') }}
         {% if co.packages %}
         <h3 class="text-sm font-semibold text-slate-800 mt-5 mb-2">Package registries</h3>
+        <p class="text-xs text-slate-500 mb-2">Every listing that publishes a package, including GitHub listings that also publish one, so a registry can count more here than as a primary source above.</p>
         {{ bar_table(co.packages, 'Registry', '#2563eb') }}
         {% endif %}
       </div>
       <div class="svc-card p-5">
         <h3 class="text-sm font-semibold text-slate-800">Created per month</h3>
-        <p class="text-xs text-slate-500 mt-1">Repository creation or first package release. {{ co.created_earlier|num }} were created before November 2024 and became MCP servers later. The latest months fill in as GitHub search and the registries catch up.</p>
+        <p class="text-xs text-slate-500 mt-1">Repository creation or first package release; the last month is month to date. {{ co.created_earlier|num }} predate MCP (created before November 2024) and added it later.{% if co.created_unknown %} {{ co.created_unknown|num }} have no reliable date and are left out.{% endif %} The latest months fill in as GitHub search and the registries catch up.</p>
         {% set series = co.created_monthly %}
         {% set top = (series|map(attribute=1)|max) or 1 %}
         <svg viewBox="0 0 {{ series|length * 10 }} 60" class="w-full h-24 mt-3" preserveAspectRatio="none" role="img" aria-label="Code-only MCP servers created per month">
-          {% for m, n in series %}<rect x="{{ loop.index0 * 10 }}" y="{{ 60 - 60 * n / top }}" width="8" height="{{ 60 * n / top }}" fill="#2563eb"><title>{{ m }}: {{ n|num }}</title></rect>{% endfor %}
+          {% for m, n in series %}<rect x="{{ loop.index0 * 10 }}" y="{{ 60 - 60 * n / top }}" width="8" height="{{ 60 * n / top }}" fill="#2563eb"><title>{{ m }}{{ ' (to date)' if loop.last }}: {{ n|num }}</title></rect>{% endfor %}
         </svg>
-        <div class="flex justify-between text-[11px] text-slate-400 mono mt-1"><span>{{ series[0][0] }}</span><span>{{ series[-1][0] }}</span></div>
+        <div class="flex justify-between text-[11px] text-slate-400 mono mt-1"><span>{{ series[0][0] }}</span><span>{{ series[-1][0] }} (to date)</span></div>
         <dl class="grid grid-cols-2 gap-2 mt-3 text-sm">
           <div><dt class="text-xs text-slate-500">Created in 7 days</dt><dd class="font-bold mono">{{ co.new_7d|num }}</dd></div>
           <div><dt class="text-xs text-slate-500">Created in 30 days</dt><dd class="font-bold mono">{{ co.new_30d|num }}</dd></div>
         </dl>
       </div>
       <div class="svc-card p-5">
-        <h3 class="text-sm font-semibold text-slate-800 mb-2">GitHub stars ({{ (co.count - co.no_github_data)|num }} with GitHub data)</h3>
+        <h3 class="text-sm font-semibold text-slate-800 mb-2">GitHub stars ({{ (co.with_stars if co.with_stars is defined else co.count - co.no_github_data)|num }}{% if co.with_repo %} of {{ co.with_repo|num }} with a GitHub link{% endif %})</h3>
         {{ bar_table(co.star_bands, 'Stars', '#ca8a04') }}
         <h3 class="text-sm font-semibold text-slate-800 mt-5 mb-2">Last push or release</h3>
         {{ bar_table(co.activity, 'When', '#059669') }}
@@ -641,10 +643,10 @@
       <p id="method-x402"><strong>x402.</strong> Price per API is the lowest amount its payment terms ask for one call, in USD (USDC read at par). The x402 version is counted only where our resource probe recorded it. Settlement network falls back to the chains a listing declares when the challenge does not name one.</p>
       <p id="method-access"><strong>Access.</strong> Declared by the listing or its card; not tested with credentials.</p>
       <p id="method-safety"><strong>Safety.</strong> Pattern rules over tool metadata only; no code is executed.</p>
-      <p id="method-topics"><strong>Topics.</strong> Whole-word match of a fixed word list on name and description. Listings whose text names more than five topics (gateway catalogues) are left out{% if snap.topics.skipped_catalogue %}: {% for k, n in snap.topics.skipped_catalogue.items() %}{{ n|num }} {{ kind_label[k] }}{{ ', ' if not loop.last }}{% endfor %}{% endif %}.</p>
+      <p id="method-topics"><strong>Topics.</strong> Whole-word match of a fixed word list on name and description. Client names (Claude Code, VS Code, GitHub Copilot and the like) and generic phrases such as AI assistant or AI agents are removed first, so a server that only says which client it works with is not counted under code, github or ai. Listings whose text names more than five topics (gateway catalogues) are left out{% if snap.topics.skipped_catalogue %}: {% for k, n in snap.topics.skipped_catalogue.items() %}{{ n|num }} {{ kind_label[k] }}{{ ', ' if not loop.last }}{% endfor %}{% endif %}.</p>
       <p id="method-growth"><strong>Growth.</strong> Earliest first-seen date across a listing's sources.</p>
       <p id="method-adoption"><strong>Adoption.</strong> GitHub stars and last push from the GitHub REST API for the repository a listing links as its source; npm downloads over 30 days from the npm downloads API for packages published on npm; site rank from the <a href="https://tranco-list.eu" class="text-blue-600 hover:underline" rel="noopener" target="_blank">Tranco</a> research list (registrable domain). Several listings can share one repository. These are attention signals, not measures of quality, and are not used for ranking.</p>
-      <p id="method-code-only"><strong>Code-only MCP.</strong> Repositories and packages that implement an MCP server and publish no remote endpoint: GitHub repositories with MCP topics, packages with MCP keywords on npm, PyPI, Cargo, Go, Maven, NuGet and RubyGems, and directories that point at them. A repository that a remote listing already links is counted with that listing instead. Nothing is run or probed. Stars and last push come from GitHub; for a package, its latest release counts as activity. Created is the repository's creation date or the package's first release. License is what GitHub or the registry reports; Unrecognised means GitHub could not identify it. Topics use the word list above.</p>
+      <p id="method-code-only"><strong>Code-only MCP.</strong> Repositories, packages and bundles that implement an MCP server for you to install and run: GitHub repositories with MCP topics; packages with MCP keywords on npm, PyPI, Cargo, Go, Maven, NuGet and RubyGems; container images (OCI) and MCPB bundles from Docker's MCP catalog and the official MCP Registry; Smithery's local servers; and the repositories other directories point at. A server that also has a hosted endpoint is listed twice, once here and once in the remote directory. Nothing is run or probed. Stars come from GitHub; a package takes the stars of its own repository when we track that repository, not those of a repository a re-published copy links. Last push is the repository's; for a package, its latest release. Created is the repository's creation date or the package's first release; where a source gives no date, or a placeholder before 2000, the date counts as unknown and is left out of the monthly series. Licenses are folded to SPDX identifiers (MIT License, mit and a pasted MIT text are all MIT; -only and -or-later count with their base license); Unrecognised means GitHub could not identify it. Topics use the word list above.</p>
     </div>
   </section>
 

@@ -39,6 +39,17 @@ TOPICS = (
 )
 CATALOGUE_TOPICS = 5
 _TOPIC_RE = {t: re.compile(r"\b" + re.escape(t) + r"s?\b") for t in TOPICS}
+# Client names and generic phrases say nothing about what a server does: "an
+# MCP server for Claude Code" is not a coding tool, "lets AI agents ..." not an
+# AI one. They are removed before the topic words are matched.
+_TOPIC_NOISE = re.compile(
+    r"\b(?:claude|vs|visual studio|roo|kilo|qwen)[- ]code\b|\bgithub copilot\b"
+    r"|\bai[- ](?:coding assistant|assistant|agent|model|client|app|application|tool|ide|system)s?\b")
+
+
+def _topic_hits(name, desc) -> list[str]:
+    text = _TOPIC_NOISE.sub(" ", f"{name or ''} {desc or ''}".lower())
+    return [t for t, rx in _TOPIC_RE.items() if rx.search(text)]
 CHAIN_NAMES = {
     "eip155:8453": "Base", "base": "Base", "eip155:1": "Ethereum", "ethereum": "Ethereum",
     "eip155:137": "Polygon", "polygon": "Polygon", "eip155:42161": "Arbitrum",
@@ -486,8 +497,7 @@ def topics(conn):
     skipped = Counter()
     for kind, sql in sources.items():
         for slug, name, desc, grade, score, latency in _q(conn, sql):
-            text = f"{name or ''} {desc or ''}".lower()
-            hits = [t for t, rx in _TOPIC_RE.items() if rx.search(text)]
+            hits = _topic_hits(name, desc)
             # Gateway descriptions that list every category (one host had over
             # a thousand paths sharing one such text) say nothing about topic.
             if len(hits) > CATALOGUE_TOPICS:
@@ -867,13 +877,60 @@ def monthly_report(conn, month: str, now=None):
 
 
 CODE_SOURCE_LABELS = {
-    "github": "GitHub repositories", "npm": "npm", "pypi": "PyPI", "cargo": "Cargo",
+    "github": "GitHub", "npm": "npm", "pypi": "PyPI", "cargo": "Cargo",
     "go": "Go", "maven": "Maven", "nuget": "NuGet", "rubygems": "RubyGems",
     "oci": "OCI images", "mcpb": "MCPB bundles", "smithery": "Smithery",
 }
 CODE_ACTIVITY = ((30, "Last 30 days"), (90, "31–90 days"), (365, "91–365 days"), (None, "Over a year"))
 CODE_FIRST_MONTH = "2024-11"  # MCP was published in November 2024
 CODE_TOP_REPOS = 10
+# Earlier dates are registry placeholders (NuGet reports 1900-01-01).
+CODE_DATE_FLOOR, CODE_DATE_FLOOR_ISO = 946684800, "2000"
+# A creation date this close to the day we first saw the listing is that day:
+# the source gave none and the row was stamped when it was stored.
+CODE_INGEST_STAMP = 60
+_LICENCE_ALIASES = {
+    "mit license": "MIT", "the mit license": "MIT", "mit licence": "MIT", "expat": "MIT",
+    "apache 2.0": "Apache-2.0", "apache license 2.0": "Apache-2.0", "apache-2": "Apache-2.0",
+    "apache2": "Apache-2.0", "apache": "Apache-2.0", "apache software license": "Apache-2.0",
+    "apache license, version 2.0": "Apache-2.0", "apache license version 2.0": "Apache-2.0",
+    "gnu affero general public license v3": "AGPL-3.0", "gplv3": "GPL-3.0",
+    "proprietary": "Proprietary", "licenseref-proprietary": "Proprietary",
+    "other/proprietary license": "Proprietary", "commercial": "Proprietary",
+    "noassertion": "Unrecognised", "other": "Unrecognised", "non-standard": "Unrecognised",
+    "none": "Not stated", "未指定": "Not stated",
+}
+# SPDX identifiers are case-insensitive; the registries send any case.
+_SPDX = {s.lower(): s for s in (
+    "MIT", "MIT-0", "Apache-2.0", "ISC", "AGPL-3.0", "GPL-3.0", "GPL-2.0", "LGPL-3.0", "LGPL-2.1",
+    "BSD-3-Clause", "BSD-2-Clause", "0BSD", "MPL-2.0", "Unlicense", "UNLICENSED", "CC0-1.0",
+    "CC-BY-4.0", "BUSL-1.1", "EPL-2.0", "EUPL-1.2", "WTFPL", "Zlib", "BSL-1.0")}
+
+
+def _licence(raw: str | None) -> str:
+    """One label per licence: SPDX case, common spellings and pasted licence
+    texts folded in, -only / -or-later counted with their base licence. UNLICENSED
+    (npm: no licence granted) stays apart from Unlicense (public domain)."""
+    s = (raw or "").strip()
+    if not s:
+        return "Not stated"
+    low = " ".join(s.lower().split())
+    if len(low) > 60:          # the whole licence text pasted into the field
+        if low.startswith("mit license") or "permission is hereby granted, free of charge" in low:
+            return "MIT"
+        if low.startswith("apache license"):
+            return "Apache-2.0"
+        if low.startswith("gnu affero general public license"):
+            return "AGPL-3.0"
+        return "Other"
+    if low.startswith(("see license", "see eula")):
+        return "See license file"
+    if " or " in low:
+        parts = sorted({_licence(p) for p in re.split(r"\s+or\s+", s.strip("()"), flags=re.I)},
+                       key=lambda p: (p != "MIT", p))
+        return " OR ".join(parts)
+    low = re.sub(r"-(?:only|or-later)$", "", low)
+    return _LICENCE_ALIASES.get(low) or _SPDX.get(low) or s
 
 
 def _month_range(first: str, last: str) -> list[str]:
@@ -893,51 +950,73 @@ def code_only(conn, now: int) -> dict:
     Nothing here is run or probed: the figures are what GitHub and the package
     registries reported at each listing's last crawl. created_at is the
     repository's creation or the package's first release (code_mcp), so the
-    monthly series counts creation, not the day we first saw a listing."""
-    from .popularity import STAR_BANDS
+    monthly series counts creation, not the day we first saw a listing; where a
+    source gave no date (the row carries the day it was stored) or a placeholder,
+    the date is unknown. Stars are the listing's own, else its GitHub
+    repository's from the adoption crawl (ext_github_repos) -- for a package
+    only when it is that repository's own, not a re-published copy."""
+    from .code_mcp import package_matches_repo
+    from .popularity import STAR_BANDS, github_repo
     asof = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))
+    ext = {}
+    if _one(conn, "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ext_github_repos'"):
+        ext = dict(_q(conn, "SELECT repo, stars FROM ext_github_repos WHERE status='ok' AND stars IS NOT NULL"))
+    hosted = set()
+    for urls in _q(conn, "SELECT source_code_url, homepage_url FROM mcp_servers "
+                         "WHERE COALESCE(endpoint_url,'')!=''"):
+        hosted.update(r for r in map(github_repo, urls) if r)
     src, reg, stars, active, lic, month, topic = (Counter() for _ in range(7))
-    n = with_repo = with_package = stars_100 = new_7d = new_30d = counted = skipped = 0
+    n = with_repo = with_package = with_stars = stars_100 = also_hosted = 0
+    new_7d = new_30d = undated = counted = skipped = 0
     best = []
     cur = conn.execute(
-        "SELECT slug, name, description, source, package_registry, github_stars, "
-        "julianday(?) - julianday(repo_pushed_at), license, created_at, source_code_url, homepage_url "
-        "FROM mcp_servers WHERE COALESCE(endpoint_url,'')=''", (asof,))
-    for slug, name, desc, source, registry, st, age, licence, created, code_url, home in cur:
+        "SELECT slug, name, description, source, package_registry, package_name, github_stars, "
+        "CASE WHEN repo_pushed_at >= ? THEN julianday(?) - julianday(repo_pushed_at) END, "
+        "license, created_at, source_code_url, homepage_url, "
+        "(SELECT MIN(first_seen) FROM listing_sources s WHERE s.kind='mcp' AND s.listing_id=m.id) "
+        "FROM mcp_servers m WHERE COALESCE(endpoint_url,'')=''", (CODE_DATE_FLOOR_ISO, asof))
+    for (slug, name, desc, source, registry, package, st, age, licence, created, code_url, home,
+         first_seen) in cur:
         n += 1
         src[CODE_SOURCE_LABELS.get(source) or "Other"] += 1
-        repo = next((u for u in (code_url, home) if u and "github.com/" in u.lower()), None)
+        url = next((u for u in (code_url, home) if github_repo(u)), "")
+        repo = github_repo(url) if url else None
         with_repo += repo is not None
+        also_hosted += repo in hosted
         if registry:
             with_package += 1
             reg[CODE_SOURCE_LABELS.get(registry) or registry] += 1
+        if st is None and (not registry or package_matches_repo(registry, package, repo)):
+            st = ext.get(repo)
         if st is not None:
+            with_stars += 1
             stars[next(label for hi, label in STAR_BANDS if hi is None or st <= hi)] += 1
             stars_100 += st >= 100
             if slug:
-                best.append((-st, (name or slug).lower(), slug, name or slug, repo or ""))
+                best.append((-st, (name or slug).lower(), slug, name or slug, repo or "", url))
         active["Unknown" if age is None else
                next(label for days, label in CODE_ACTIVITY if days is None or age <= days)] += 1
-        licence = (licence or "").strip()
-        lic["Not stated" if not licence else "Unrecognised" if licence == "NOASSERTION" else licence] += 1
-        if created:
+        lic[_licence(licence)] += 1
+        if (not created or created < CODE_DATE_FLOOR or created > now
+                or (first_seen is not None and abs(created - first_seen) <= CODE_INGEST_STAMP)):
+            undated += 1
+        else:
             new_7d += created >= now - 7 * 86400
             new_30d += created >= now - 30 * 86400
             month[time.strftime("%Y-%m", time.gmtime(created))] += 1
-        text = f"{name or ''} {desc or ''}".lower()
-        hits = [t for t, rx in _TOPIC_RE.items() if rx.search(text)]
+        hits = _topic_hits(name, desc)
         if len(hits) > CATALOGUE_TOPICS:
             skipped += 1
         else:
             counted += 1
             topic.update(hits)
     top, seen = [], set()
-    for neg, _key, slug, name, repo in sorted(best):
-        key = repo.lower() or slug
+    for neg, _key, slug, name, repo, url in sorted(best):
+        key = repo or slug
         if key in seen:
             continue
         seen.add(key)
-        short = "/".join(repo.split("github.com/", 1)[-1].split("/")[:2]) if repo else ""
+        short = "/".join(url.split("github.com/", 1)[-1].split("/")[:2]).removesuffix(".git") if repo else ""
         top.append({"slug": slug, "name": name[:80], "repo": short, "stars": -neg})
         if len(top) >= CODE_TOP_REPOS:
             break
@@ -946,13 +1025,15 @@ def code_only(conn, now: int) -> dict:
         "count": n,
         "with_repo": with_repo, "with_repo_pct": _pct(with_repo, n),
         "with_package": with_package, "with_package_pct": _pct(with_package, n),
+        "also_hosted": also_hosted,
         "stars_100": stars_100,
-        "new_7d": new_7d, "new_30d": new_30d,
+        "new_7d": new_7d, "new_30d": new_30d, "created_unknown": undated,
         "active_90d": active_90d, "active_90d_pct": _pct(active_90d, n),
         "by_source": _rows(_fold(src, 7)),
         "packages": _rows(_fold(reg, 6)),
         "star_bands": _rows([(label, stars[label]) for _hi, label in STAR_BANDS]),
-        "no_github_data": n - sum(stars.values()),
+        "with_stars": with_stars,
+        "no_github_data": n - with_stars,
         "activity": _rows([(label, active[label]) for _d, label in CODE_ACTIVITY]
                           + [("Unknown", active["Unknown"])]),
         "licenses": _rows(_fold(lic, 6)),
@@ -1151,7 +1232,7 @@ def headlines(snap: dict, kind: str = "all") -> dict:
         "growth": (f"{snap['growth']['mcp']['new_7d'] + snap['growth']['x402']['new_7d'] + snap['growth']['a2a']['new_7d']:,} "
                    "listings were first seen in the last 7 days."),
         "adoption": _adoption_headline(snap.get("adoption") or {}),
-        "code_only": (f"{co['count']:,} MCP servers are published only as code, to run yourself; "
+        "code_only": (f"{co['count']:,} MCP servers are published as code you install and run yourself; "
                       f"{co['active_90d_pct']}% had a push or release in the last 90 days."
                       if co.get("by_source") else "No code-only MCP servers yet."),
     }

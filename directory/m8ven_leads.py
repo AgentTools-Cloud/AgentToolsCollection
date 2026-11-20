@@ -227,10 +227,14 @@ def _endpoint_lead(lead: dict) -> str | None:
 # ---------------------------------------------------------------------------
 
 def _listed_repos(c) -> set[str]:
+    """Repositories already listed as code. One that only a hosted listing
+    links is still read: a server with both is listed in both sub-directories."""
     repos = set()
     for (value,) in c.execute(
             "SELECT source_code_url FROM mcp_servers WHERE source_code_url LIKE '%github.com/%' "
-            "UNION SELECT homepage_url FROM mcp_servers WHERE homepage_url LIKE '%github.com/%'"):
+            "AND COALESCE(endpoint_url,'')='' "
+            "UNION SELECT homepage_url FROM mcp_servers WHERE homepage_url LIKE '%github.com/%' "
+            "AND COALESCE(endpoint_url,'')=''"):
         r = github_repo(value)
         if r:
             repos.add(r)
