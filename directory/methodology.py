@@ -11,7 +11,7 @@ from . import a2a_readiness as A
 from . import db
 from . import listing_readiness as L
 
-VERSION = "2026-11-17"
+VERSION = "2026-11-20"
 SITE = "https://agent-tools.cloud"
 
 QUALITY_COMPONENTS = {
@@ -116,8 +116,21 @@ def build() -> dict:
                             "JSON-RPC reply (A2A)",
                 "ready": "readiness grade A or B",
             },
-            "topics": "Whole-word match of a fixed word list on name and description; listings naming "
-                      "more than five topics (gateway catalogues) are left out.",
+            "topics": "Whole-word match of a fixed word list on name and description, after removing "
+                      "client names (Claude Code, VS Code, GitHub Copilot) and generic phrases such as "
+                      "'AI assistant' or 'AI agents'; listings naming more than five topics (gateway "
+                      "catalogues) are left out.",
+            "code_only": "MCP servers published as a repository, package or bundle you install and "
+                         "run yourself; never probed or graded, counted in their own section. A server "
+                         "that also has a hosted endpoint is listed both there and in the remote "
+                         "directory. Created is the repository's creation or the package's first "
+                         "release; a missing date or a placeholder before 2000 counts as unknown. A "
+                         "package takes the GitHub stars of its own repository, not of one a "
+                         "re-published copy links. Licenses are folded to SPDX identifiers.",
+            "adoption": "GitHub stars and last push (REST API) for the repository a listing links, "
+                        "refreshed every 14 days for listings with an endpoint and every 30 days for "
+                        "code-only ones without stars of their own; npm downloads over 30 days; Tranco "
+                        "site rank, daily. Display only, never used for ranking.",
             "x402_prices": "Cheapest call each reachable API advertises, in USD (USDC at par).",
             "license": "CC BY 4.0",
         },
