@@ -7,7 +7,8 @@ leaderboards keep using the quality score.
 
 - GitHub: REST `GET /repos/{owner}/{repo}` authenticated with the site's GitHub
   OAuth App client credentials (5,000 requests/hour for public data). Paced to
-  stay well under that, refreshed weekly.
+  stay well under that; repositories of remote listings first (every 14 days),
+  then code listings with no stars of their own (every 30 days).
 - npm: the public downloads API (last 30 days), bulk for unscoped names.
 - Tranco: the daily research top-1M list (https://tranco-list.eu), stored only
   for domains we index. A domain fronting many listings (a hosting platform or
@@ -35,6 +36,9 @@ log = logging.getLogger("directory.popularity")
 UA = "agent-tools.cloud popularity (+https://agent-tools.cloud/about)"
 STALE_SECONDS = 7 * 86400
 GITHUB_PER_HOUR = 3000
+# Refresh age per wanted_repos() tier: 3,000 a day keeps ~17k remote repositories
+# within 14 days and leaves ~1,800 a day for the code listings.
+GITHUB_TIER_STALE = (14 * 86400, 30 * 86400, 30 * 86400)
 SHARED_DOMAIN_LISTINGS = 20   # a domain behind more listings is a platform
 TRANCO_LATEST = "https://tranco-list.eu/api/lists/date/latest"
 
@@ -175,21 +179,33 @@ def _github_auth() -> str | None:
 # GitHub
 # ---------------------------------------------------------------------------
 
-def wanted_repos(conn) -> set[str]:
-    repos = set()
-    for src, home in conn.execute("SELECT source_code_url, homepage_url FROM mcp_servers"):
-        for u in (src, home):
-            r = github_repo(u)
-            if r:
-                repos.add(r)
-                break
-    return repos
+def wanted_repos(conn) -> dict[str, int]:
+    """repo -> tier, fetched in tier order: 0 linked by a remote listing; 1 by a
+    code listing with no stars of its own (a package only when it is that
+    repository's own); 2 the rest -- GitHub rows, whose stars the code crawl
+    keeps, and re-published copies."""
+    from .code_mcp import package_matches_repo
+    tiers: dict[str, int] = {}
+    for src, home, endpoint, stars, reg, pkg in conn.execute(
+            "SELECT source_code_url, homepage_url, endpoint_url, github_stars, package_registry, "
+            "package_name FROM mcp_servers"):
+        repo = github_repo(src) or github_repo(home)
+        if not repo:
+            continue
+        if endpoint:
+            tier = 0
+        elif stars is None and (not pkg or package_matches_repo(reg, pkg, repo)):
+            tier = 1
+        else:
+            tier = 2
+        tiers[repo] = min(tier, tiers.get(repo, 2))
+    return tiers
 
 
 def refresh_github(conn_factory, writer_factory, *, budget: int = GITHUB_PER_HOUR,
                    per_hour: int = GITHUB_PER_HOUR, now: int | None = None,
                    http: Callable = _http, sleep: Callable = time.sleep) -> dict:
-    """Fetch stale or missing repos, oldest first, at most `budget` requests."""
+    """Fetch stale or missing repos, by tier then oldest first, at most `budget` requests."""
     now = int(now or time.time())
     auth = _github_auth()
     if not auth:
@@ -199,8 +215,8 @@ def refresh_github(conn_factory, writer_factory, *, budget: int = GITHUB_PER_HOU
     with closing(conn_factory()) as c:
         repos = wanted_repos(c)
         fetched = dict(c.execute("SELECT repo, fetched_at FROM ext_github_repos").fetchall())
-    todo = sorted((r for r in repos if now - fetched.get(r, 0) >= STALE_SECONDS),
-                  key=lambda r: fetched.get(r, 0))[:budget]
+    todo = sorted((r for r, t in repos.items() if now - fetched.get(r, 0) >= GITHUB_TIER_STALE[t]),
+                  key=lambda r: (repos[r], fetched.get(r, 0)))[:budget]
     gap = 3600.0 / max(per_hour, 1)
     done = {"ok": 0, "not_found": 0, "error": 0}
     rows = []
@@ -232,6 +248,7 @@ def refresh_github(conn_factory, writer_factory, *, budget: int = GITHUB_PER_HOU
     if rows:
         _write_github(writer_factory, rows)
     done["wanted"], done["queued"] = len(repos), len(todo)
+    done["queued_by_tier"] = [sum(1 for r in todo if repos[r] == t) for t in range(len(GITHUB_TIER_STALE))]
     return done
 
 

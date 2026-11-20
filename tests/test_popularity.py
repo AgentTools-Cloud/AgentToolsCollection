@@ -143,6 +143,30 @@ class JobAndReadTests(unittest.TestCase):
         with patch.dict(os.environ, {"GITHUB_OAUTH_CLIENT_ID": "", "GITHUB_OAUTH_CLIENT_SECRET": ""}):
             self.assertIn("skipped", P.refresh_github(self.read, self.writer, http=self.fake_http))
 
+    def test_github_fetches_remote_repos_first_then_code_listings_without_stars(self):
+        c = sqlite3.connect(self.path)
+        for i, slug, source, url, reg, pkg, stars in [
+                (300, "gh-row", "github", "https://github.com/acme/starred", None, None, 40),
+                (301, "own-pkg", "npm", "https://github.com/acme/widget", "npm", "widget-mcp", None),
+                (302, "copy-pkg", "npm", "https://github.com/acme/famous", "npm", "@mirror/famous-copy", None)]:
+            c.execute("INSERT INTO mcp_servers(id, slug, name, source_code_url, package_registry, package_name, "
+                      "github_stars, kind, source, source_id, created_at, updated_at) "
+                      "VALUES (?,?,?,?,?,?,?,'catalog',?,?,?,?)", (i, slug, slug, url, reg, pkg, stars, source, slug,
+                                                                 NOW, NOW))
+        c.commit()
+        c.close()
+        c = self.read()
+        # the GitHub row keeps its own stars; the copy only links someone else's repository
+        self.assertEqual(P.wanted_repos(c), {"acme/tool": 0, "acme/gone": 0, "acme/widget": 1,
+                                             "acme/starred": 2, "acme/famous": 2})
+        c.close()
+        self.calls = []
+        with patch.dict(os.environ, {"GITHUB_OAUTH_CLIENT_ID": "id", "GITHUB_OAUTH_CLIENT_SECRET": "secret"}):
+            gh = P.refresh_github(self.read, self.writer, budget=3, http=self.fake_http, sleep=lambda s: None)
+        fetched = [u.rsplit("/repos/", 1)[1] for u in self.calls if "api.github.com" in u]
+        self.assertEqual((sorted(fetched[:2]), fetched[2:]), (["acme/gone", "acme/tool"], ["acme/widget"]))
+        self.assertEqual(gh["queued_by_tier"], [2, 1, 0])
+
     def test_read_side_without_tables(self):
         c = sqlite3.connect(":memory:")
         self.assertIsNone(P.for_listing(c, "x402", {"url": "https://example.com"}))
