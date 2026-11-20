@@ -84,55 +84,136 @@ def test_mcp_submission_completes_source_and_payment_classification(
         assert conn.execute("SELECT COUNT(*) FROM services").fetchone()[0] == 0
 
 
-def test_mcp_submission_rolls_back_source_when_paid_target_is_owner_locked(
+def _seed_owned_paid_listing(paid_url):
+    with routes.db.writer(immediate=True) as conn:
+        _, service_id = db.upsert_service(conn, {
+            "slug": "owned-paid", "name": "Owned paid",
+            "url": paid_url, "source": "owner", "source_id": "owned",
+        })
+        conn.execute(
+            "UPDATE services SET owner_verified=1 WHERE id=?", (service_id,)
+        )
+    return service_id
+
+
+def _verified_elsewhere(paid_url):
+    return lambda _url: {
+        "status": "verified", "verified_url": paid_url,
+        "payment": {
+            "scheme": "exact", "network": "eip155:8453",
+            "networks": ["eip155:8453"], "amount_raw": "1000000",
+            "max_amount_usdc": 1.0,
+            "asset": "0x" + "1" * 40,
+            "pay_to": "0x" + "2" * 40,
+        },
+    }
+
+
+def _assert_owned_paid_listing_untouched(conn, service_id):
+    assert conn.execute("SELECT COUNT(*) FROM services").fetchone()[0] == 1
+    assert conn.execute(
+        "SELECT name FROM services WHERE id=?", (service_id,)
+    ).fetchone()["name"] == "Owned paid"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM listing_sources "
+        "WHERE kind='x402' AND listing_id=? AND source='submission'",
+        (service_id,),
+    ).fetchone()[0] == 0
+
+
+def test_mcp_submission_lists_server_when_paid_target_is_owner_locked(
         tmp_path, monkeypatch):
+    # brainiac.software, 11-20: the host's x402 descriptor led to a paid
+    # resource its owner had verified, and every new MCP URL there got 409.
     database = tmp_path / "directory.db"
     paid_url = "https://owned.example.test/pay"
     with _route_database(monkeypatch, database) as real_connect:
-        with routes.db.writer(immediate=True) as conn:
-            _, service_id = db.upsert_service(conn, {
-                "slug": "owned-paid", "name": "Owned paid",
-                "url": paid_url, "source": "owner", "source_id": "owned",
-            })
-            conn.execute(
-                "UPDATE services SET owner_verified=1 WHERE id=?", (service_id,)
-            )
-        monkeypatch.setattr(routes, "_require_public_url", _noop_public_url)
+        service_id = _seed_owned_paid_listing(paid_url)
+        notification = _mock_mcp_submission(monkeypatch)
         monkeypatch.setattr(routes, "_enforce_submit_limit", lambda *_args: None)
         monkeypatch.setattr(
-            routes.directory_crawlers, "url_retired", lambda _url: False
-        )
-        monkeypatch.setattr(
-            routes.directory_crawlers, "probe_mcp_health",
-            lambda _url: {"status": "ok", "latency_ms": 5, "http_status": 200},
-        )
-        monkeypatch.setattr(
-            routes.directory_crawlers, "verify_x402",
-            lambda _url: {
-                "status": "verified", "verified_url": paid_url,
-                "payment": {
-                    "scheme": "exact", "network": "eip155:8453",
-                    "networks": ["eip155:8453"], "amount_raw": "1000000",
-                    "max_amount_usdc": 1.0,
-                    "asset": "0x" + "1" * 40,
-                    "pay_to": "0x" + "2" * 40,
-                },
-            },
+            routes.directory_crawlers, "verify_x402", _verified_elsewhere(paid_url)
         )
 
         response = _client().post("/api/v1/mcp/submit", json={
-            "url": "https://submit.example.test/mcp",
+            "url": "https://owned.example.test/mcp/audit",
             "contact": "operator@example.test",
         })
 
-        assert response.status_code == 409, response.text
-        with real_connect(str(database), read_only=True) as conn:
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["status"] == "listed"
+        assert body["x402"] is False
+        assert body["x402_service_slug"] == "owned-paid"
+        notification.assert_called_once()
+        with closing(real_connect(str(database), read_only=True)) as conn:
+            row = conn.execute(
+                "SELECT endpoint_url,x402_supported FROM mcp_servers"
+            ).fetchall()
+            assert [tuple(r) for r in row] == [
+                ("https://owned.example.test/mcp/audit", 0)]
+            _assert_owned_paid_listing_untouched(conn, service_id)
+
+
+def test_a2a_submission_lists_agent_when_paid_target_is_owner_locked(
+        tmp_path, monkeypatch):
+    database = tmp_path / "directory.db"
+    paid_url = "https://owned.example.test/pay"
+    endpoint = "https://owned.example.test/a2a"
+    card_url = "https://owned.example.test/.well-known/agent-card.json"
+    with _route_database(monkeypatch, database) as real_connect:
+        service_id = _seed_owned_paid_listing(paid_url)
+        _mock_mcp_submission(monkeypatch)
+        monkeypatch.setattr(routes, "_enforce_submit_limit", lambda *_args: None)
+        monkeypatch.setattr(
+            routes.directory_crawlers, "verify_x402", _verified_elsewhere(paid_url)
+        )
+        monkeypatch.setattr(
+            routes.directory_a2a, "fetch_agent_card",
+            lambda *_args: ({"name": "Fixture"}, card_url))
+        monkeypatch.setattr(routes.directory_a2a, "card_to_row", lambda *_args, **_kwargs: {
+            "slug": "fixture-agent", "name": "Fixture", "endpoint_url": endpoint,
+            "card_url": card_url, "source": "submission", "source_id": card_url,
+        })
+
+        response = _client().post("/api/v1/a2a/submit", json={
+            "url": endpoint, "contact": "operator@example.test",
+        })
+
+        assert response.status_code == 200, response.text
+        with closing(real_connect(str(database), read_only=True)) as conn:
             assert conn.execute(
-                "SELECT COUNT(*) FROM mcp_servers"
-            ).fetchone()[0] == 0
-            assert conn.execute(
-                "SELECT COUNT(*) FROM services"
+                "SELECT COUNT(*) FROM a2a_agents"
             ).fetchone()[0] == 1
+            _assert_owned_paid_listing_untouched(conn, service_id)
+
+
+def test_mcp_submission_still_refuses_an_owner_verified_server(
+        tmp_path, monkeypatch):
+    database = tmp_path / "directory.db"
+    endpoint = "https://owned.example.test/mcp"
+    with _route_database(monkeypatch, database) as real_connect:
+        with routes.db.writer(immediate=True) as conn:
+            _, server_id = db.upsert_mcp_server(conn, {
+                "slug": "owned-mcp", "name": "Owned MCP",
+                "endpoint_url": endpoint, "source": "owner", "source_id": "owned-mcp",
+            })
+            conn.execute(
+                "UPDATE mcp_servers SET owner_verified=1 WHERE id=?", (server_id,)
+            )
+        _mock_mcp_submission(monkeypatch)
+        monkeypatch.setattr(routes, "_enforce_submit_limit", lambda *_args: None)
+
+        response = _client().post("/api/v1/mcp/submit", json={
+            "url": endpoint, "name": "Replaced", "contact": "operator@example.test",
+        })
+
+        assert response.status_code == 409, response.text
+        assert response.json()["detail"]["error"] == "owner_verified"
+        with closing(real_connect(str(database), read_only=True)) as conn:
+            assert conn.execute(
+                "SELECT name FROM mcp_servers WHERE id=?", (server_id,)
+            ).fetchone()["name"] == "Owned MCP"
 
 
 async def _noop_public_url(_url):

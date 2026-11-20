@@ -449,6 +449,8 @@ def verify_and_mirror(endpoint: str, *, slug: str, name: str | None = None,
         out["owner_locked"] = True
         out["locked_listing"] = mirrored["owner_locked"]
         out["locked_kind"] = mirrored.get("locked_kind")
+        if out["locked_kind"] == "x402":
+            out["service_slug"] = mirrored["owner_locked"].get("slug") or out["service_slug"]
         return out
     if mirrored.get("identity_conflict"):
         out["identity_conflict"] = True

@@ -2278,10 +2278,12 @@ async def api_submit_mcp(request: Request, payload: McpSubmissionPayload):
             protect_owner_kind="mcp", protect_owner_slug=slug,
             protect_owner_url=endpoint,
         )
-        if x402.get("owner_locked"):
+        locked_kind = x402.get("locked_kind") or "x402"
+        # A paid resource under a verified x402 owner stays theirs; it must not block this listing.
+        if x402.get("owner_locked") and locked_kind != "x402":
             locked = x402.get("locked_listing")
             if locked:
-                raise _owner_locked(x402.get("locked_kind") or "x402", locked)
+                raise _owner_locked(locked_kind, locked)
             raise HTTPException(status_code=409, detail={"error": "owner_verified"})
         if x402.get("identity_conflict"):
             raise HTTPException(status_code=409, detail={
@@ -2403,10 +2405,12 @@ async def api_submit_a2a(request: Request, payload: A2ASubmissionPayload):
             protect_owner_url=card_url,
             protect_owner_alternate_url=row.get("endpoint_url"),
         )
-        if x402.get("owner_locked"):
+        locked_kind = x402.get("locked_kind") or "x402"
+        # A paid resource under a verified x402 owner stays theirs; it must not block this listing.
+        if x402.get("owner_locked") and locked_kind != "x402":
             locked = x402.get("locked_listing")
             if locked:
-                raise _owner_locked(x402.get("locked_kind") or "x402", locked)
+                raise _owner_locked(locked_kind, locked)
             raise HTTPException(status_code=409, detail={"error": "owner_verified"})
         if x402.get("identity_conflict"):
             raise HTTPException(status_code=409, detail={
