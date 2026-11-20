@@ -22,6 +22,7 @@ class MethodologyTests(unittest.TestCase):
         json.dumps(self.m)
         self.assertEqual(set(self.m["quality_score"]["components"]), {"x402", "mcp", "a2a"})
         self.assertEqual(set(self.m["readiness_score"]["criteria"]), {"x402", "mcp", "a2a"})
+        self.assertLessEqual({"topics", "code_only", "adoption"}, set(self.m["statistics"]))
 
     def test_quality_components_match_about_page(self):
         for kind, parts in self.m["quality_score"]["components"].items():

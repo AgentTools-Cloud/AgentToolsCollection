@@ -28,7 +28,7 @@ Also listed on [Smithery](https://smithery.ai/servers/kangletian/agent-tools-x40
 | `GET /api/v1/methodology` | free | How quality grades, readiness scores and statistics are computed |
 | `GET /api/v1/blog`, `/api/v1/blog/{slug}` | free | Published Blog articles (list; full Markdown) |
 | `GET /llms.txt` | free | Plain-text guide for LLM agents |
-| `GET /api/v1/mcp/search` | free | MCP servers. `scope=remote` (default: has an endpoint, probed and graded), `scope=code` (code-only: repository / package you run yourself, never probed or counted in the stats; pages under `/mcp/code`), `scope=all` |
+| `GET /api/v1/mcp/search` | free | MCP servers. `scope=remote` (default: has an endpoint, probed and graded), `scope=code` (code-only: repository / package you run yourself, never probed or graded and counted only in the separate code-only section of `/stats`; a server that also has an endpoint is listed in both scopes; pages under `/mcp/code`), `scope=all` |
 | `POST /api/v1/submit` | free, rate-limited | Pending service submission with dedupe |
 | `POST /api/v1/keys` | free | Mint an API key (no signup) for account-scoped actions |
 | `POST /api/v1/services/{slug}/paid-verifications` | API key | Sponsored paid verification: quote, then `/api/v1/paid-verifications/{id}/execute` |
