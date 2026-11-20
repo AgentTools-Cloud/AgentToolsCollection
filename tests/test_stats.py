@@ -75,21 +75,40 @@ class CodeOnlyTests(unittest.TestCase):
              NOW - 2 * DAY, "https://github.com/acme/big"),
             ("mid", "Mid Server", "weather data", "npm", "npm", 150, pushed(60), "Apache-2.0",
              NOW - 20 * DAY, "https://github.com/acme/mid"),
-            ("small", "Small", "pdf tools", "pypi", "pypi", 0, pushed(400), "", NOW - 40 * DAY, None),
+            ("small", "Small", "pdf tools", "pypi", "pypi", None, pushed(400), "", NOW - 40 * DAY, None),
             ("old", "Old repo", "email calendar", "github", None, 5, pushed(200), "NOASSERTION",
              calendar.timegm((2023, 5, 1, 0, 0, 0)), "https://github.com/acme/old"),
             # Names more than five topics: a catalogue, left out of the topic shares.
             ("cat", "Catalogue", "search web data database finance payment", "cargo", "cargo", None, None,
-             "MIT", NOW - 100 * DAY, None),
+             "MIT", NOW - 100 * DAY, "https://github.com/acme/cat"),
+            # No date from the source: created_at is the moment it was stored (first_seen below).
+            ("ingest", "Ingest Stamp", "for Claude Code and AI agents", "smithery", None, None, None,
+             "MIT License", NOW - 3 * DAY, None),
+            # NuGet placeholders (1900); stars from the adoption crawl of its repository.
+            ("nuget", "NuGet One", "data tools", "nuget", "nuget", None, "1900-01-01T00:00:00Z", "mit",
+             calendar.timegm((1900, 1, 1, 0, 0, 0)), "https://github.com/Acme/NuGet-One"),
         ]
+        packages = {"mid": "@acme/mid", "small": "small", "cat": "copycat-tools", "nuget": "Acme.NuGet-One"}
         for i, (slug, name, desc, source, reg, stars, pushed_at, lic, created, url) in enumerate(rows, start=1):
             c.execute("INSERT INTO mcp_servers(id, slug, name, description, source, source_id, package_registry, "
-                      "github_stars, repo_pushed_at, license, created_at, updated_at, source_code_url, kind) "
-                      "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'catalog')",
-                      (i, slug, name, desc, source, slug, reg, stars, pushed_at, lic, created, NOW, url))
+                      "package_name, github_stars, repo_pushed_at, license, created_at, updated_at, source_code_url, "
+                      "kind) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'catalog')",
+                      (i, slug, name, desc, source, slug, reg, packages.get(slug), stars, pushed_at, lic, created,
+                       NOW, url))
+        c.execute("INSERT INTO listing_sources(kind, listing_id, source, first_seen, last_seen) "
+                  "VALUES ('mcp', 6, 'smithery', ?, ?)", (NOW - 3 * DAY, NOW))
+        c.execute("INSERT INTO listing_sources(kind, listing_id, source, first_seen, last_seen) "
+                  "VALUES ('mcp', 1, 'github', ?, ?)", (NOW - DAY, NOW))
+        # The NuGet package is its repository's own and takes its stars; the Cargo
+        # package only copies acme/cat's URL and does not.
+        c.execute("INSERT INTO ext_github_repos(repo, full_name, stars, status, fetched_at) "
+                  "VALUES ('acme/nuget-one', 'Acme/NuGet-One', 42, 'ok', ?), ('acme/cat', 'acme/cat', 7, 'ok', ?)",
+                  (NOW, NOW))
+        # A hosted listing of the same server as "big": both are listed.
         c.execute("INSERT INTO mcp_servers(id, slug, name, description, endpoint_url, health, conformance, github_stars, "
-                  "created_at, updated_at, source) VALUES (9, 'remote', 'Remote', 'search', 'https://r.example/mcp', "
-                  "'ok', 'pass', 99999, ?, ?, 't')", (NOW, NOW))
+                  "created_at, updated_at, source, source_code_url) VALUES (9, 'remote', 'Remote', 'search', "
+                  "'https://r.example/mcp', 'ok', 'pass', 99999, ?, ?, 't', 'https://github.com/acme/big')",
+                  (NOW, NOW))
         c.commit()
         c.row_factory = sqlite3.Row
         cls.co = stats.code_only(c, NOW)
@@ -103,35 +122,57 @@ class CodeOnlyTests(unittest.TestCase):
     def test_profile(self):
         co = self.co
         as_map = lambda rows: {r["label"]: r["count"] for r in rows}  # noqa: E731
-        self.assertEqual(co["count"], 5)
-        self.assertEqual(as_map(co["by_source"]), {"GitHub repositories": 2, "npm": 1, "PyPI": 1, "Cargo": 1})
-        self.assertEqual((co["with_repo"], co["with_repo_pct"]), (3, 60.0))
-        self.assertEqual(as_map(co["packages"]), {"npm": 1, "PyPI": 1, "Cargo": 1})
+        self.assertEqual(co["count"], 7)
+        self.assertEqual(as_map(co["by_source"]),
+                         {"GitHub": 2, "npm": 1, "PyPI": 1, "Cargo": 1, "Smithery": 1, "NuGet": 1})
+        self.assertEqual((co["with_repo"], co["with_repo_pct"], co["also_hosted"]), (5, 71.4, 1))
+        self.assertEqual(as_map(co["packages"]), {"npm": 1, "PyPI": 1, "Cargo": 1, "NuGet": 1})
         self.assertEqual(as_map(co["star_bands"]),
-                         {"0": 1, "1–9": 1, "10–99": 0, "100–999": 1, "1k–9.9k": 1, "10k+": 0})
-        self.assertEqual((co["no_github_data"], co["stars_100"]), (1, 2))
+                         {"0": 0, "1–9": 1, "10–99": 1, "100–999": 1, "1k–9.9k": 1, "10k+": 0})
+        self.assertEqual((co["with_stars"], co["no_github_data"], co["stars_100"]), (4, 3, 2))
+        # 1900 push dates are placeholders: unknown, not "over a year".
         self.assertEqual(as_map(co["activity"]),
-                         {"Last 30 days": 1, "31–90 days": 1, "91–365 days": 1, "Over a year": 1, "Unknown": 1})
-        self.assertEqual((co["active_90d"], co["active_90d_pct"]), (2, 40.0))
-        self.assertEqual(as_map(co["licenses"]), {"MIT": 2, "Apache-2.0": 1, "Not stated": 1, "Unrecognised": 1})
-        self.assertEqual((co["new_7d"], co["new_30d"], co["created_earlier"]), (1, 2, 1))
+                         {"Last 30 days": 1, "31–90 days": 1, "91–365 days": 1, "Over a year": 1, "Unknown": 3})
+        self.assertEqual((co["active_90d"], co["active_90d_pct"]), (2, 28.6))
+        self.assertEqual(as_map(co["licenses"]), {"MIT": 4, "Apache-2.0": 1, "Not stated": 1, "Unrecognised": 1})
+        # The stored-moment date (3 days ago) and the 1900 placeholder are neither new nor old.
+        self.assertEqual((co["new_7d"], co["new_30d"], co["created_earlier"], co["created_unknown"]),
+                         (1, 2, 1, 2))
         months = co["created_monthly"]
         self.assertEqual((months[0][0], months[-1][0]), ("2024-11", time.strftime("%Y-%m", time.gmtime(NOW))))
         self.assertEqual(sum(n for _m, n in months), 4)
         t = co["topics"]
-        self.assertEqual((t["counted"], t["skipped_catalogue"]), (4, 1))
-        self.assertEqual(as_map(t["rows"])["search"], 1)
+        self.assertEqual((t["counted"], t["skipped_catalogue"]), (6, 1))
+        self.assertEqual((as_map(t["rows"])["search"], as_map(t["rows"])["code"]), (1, 1))
         self.assertNotIn("database", as_map(t["rows"]))
-        self.assertEqual([r["slug"] for r in co["top_repos"]], ["big", "mid", "old", "small"])
+        self.assertNotIn("ai", as_map(t["rows"]))          # "Claude Code and AI agents" names no topic
+        self.assertEqual([r["slug"] for r in co["top_repos"]], ["big", "mid", "nuget", "old"])
         self.assertEqual(co["top_repos"][0], {"slug": "big", "name": "Big Server", "repo": "acme/big", "stars": 1500})
+        self.assertEqual(co["top_repos"][2]["repo"], "Acme/NuGet-One")
+
+    def test_licence_labels_and_topic_noise(self):
+        text = ("MIT License\n\nCopyright (c) 2025 X\n\nPermission is hereby granted, free of charge, "
+                "to any person obtaining a copy")
+        for raw, want in [("MIT License", "MIT"), ("mit", "MIT"), (text, "MIT"), ("apache-2.0", "Apache-2.0"),
+                          ("Apache Software License", "Apache-2.0"), ("AGPL-3.0-or-later", "AGPL-3.0"),
+                          ("GPL-3.0-only", "GPL-3.0"), ("Apache-2.0 OR MIT", "MIT OR Apache-2.0"),
+                          ("(MIT OR Apache-2.0)", "MIT OR Apache-2.0"), ("PROPRIETARY", "Proprietary"),
+                          ("UNLICENSED", "UNLICENSED"), ("unlicense", "Unlicense"), ("NOASSERTION", "Unrecognised"),
+                          ("SEE LICENSE IN LICENSE.md", "See license file"), ("", "Not stated"), (None, "Not stated"),
+                          ("CC-BY-NC-4.0", "CC-BY-NC-4.0")]:
+            self.assertEqual(stats._licence(raw), want, raw)
+        self.assertEqual(stats._topic_hits("Notes", "An MCP server for Claude Code and VS Code"), [])
+        self.assertEqual(stats._topic_hits("Repo tools", "Lets AI agents search GitHub issues"), ["search", "github"])
+        self.assertEqual(stats._topic_hits("Helper", "Works with GitHub Copilot"), [])
+        self.assertEqual(stats._topic_hits("Code review", "AI-powered code review"), ["code", "ai"])
 
     def test_snapshot_csv_and_headline(self):
-        self.assertEqual(self.snap["kpis"]["mcp"]["code_only"], 5)
-        self.assertEqual(self.snap["code_only"]["mcp"]["with_package"], 3)
-        self.assertIn(("mcp_code", "with_package", 3), stats.flatten(self.snap))
+        self.assertEqual(self.snap["kpis"]["mcp"]["code_only"], 7)
+        self.assertEqual(self.snap["code_only"]["mcp"]["with_package"], 4)
+        self.assertIn(("mcp_code", "with_package", 4), stats.flatten(self.snap))
         self.assertEqual(stats.headlines(self.snap)["code_only"],
-                         "5 MCP servers are published only as code, to run yourself; "
-                         "40.0% had a push or release in the last 90 days.")
+                         "7 MCP servers are published as code you install and run yourself; "
+                         "28.6% had a push or release in the last 90 days.")
         json.dumps(self.snap)
 
     def test_section_renders_for_all_and_mcp(self):
@@ -155,7 +196,11 @@ class CodeOnlyTests(unittest.TestCase):
             html = render(self.snap, view)
             self.assertEqual('id="code-only"' in html, view in ("all", "mcp"), view)
         html = render(self.snap, "all")
-        self.assertIn("5 MCP servers are published only as code", html)
+        self.assertIn("7 MCP servers are published as code you install and run yourself", html)
+        self.assertIn("1 of them also have a hosted endpoint", html)
+        self.assertIn("GitHub stars (4 of 5 with a GitHub link)", html)
+        self.assertIn("2 have no reliable date and are left out", html)
+        self.assertIn(time.strftime("%Y-%m", time.gmtime(NOW)) + " (to date)", html)
         self.assertIn('href="/mcp/code/big"', html)
         self.assertIn('href="#code-only">12 Code-only', html)
         self.assertIn('href="#searches">13 Searches', html)

@@ -60,23 +60,33 @@ class MergeTests(_TempDB):
         self.assertEqual(by_id["solo-mcp"]["source"], "npm")
         self.assertEqual(skipped["duplicate_package"], 1)
 
-    def test_repositories_owned_by_other_listings_are_skipped(self):
+    def test_only_code_listings_of_other_directories_are_skipped(self):
         with db.writer() as c:
             db.upsert_mcp_server(c, {"slug": "remote", "name": "Remote",
                                      "endpoint_url": "https://r.example/mcp",
                                      "source_code_url": "https://github.com/acme/remote",
+                                     "package_registry": "npm", "package_name": "remote-mcp",
                                      "source": "mcp-registry", "source_id": "r"})
+            db.upsert_mcp_server(c, {"slug": "listed", "name": "Listed", "endpoint_url": None,
+                                     "kind": "catalog",
+                                     "source_code_url": "https://github.com/acme/listed",
+                                     "source": "cline", "source_id": "listed"})
             db.upsert_mcp_server(c, {"slug": "own", "name": "Own", "endpoint_url": None,
                                      "kind": "catalog",
                                      "source_code_url": "https://github.com/acme/own",
                                      "source": "github", "source_id": "acme/own"})
         with closing(db.connect(read_only=True)) as c:
             known = code_mcp.known_repos(c)
-        self.assertIn("acme/remote", known[0])
-        self.assertNotIn("acme/own", known[0])   # our own rows are refreshed, not skipped
-        rows, skipped = code_mcp.merge([gh_item("acme/remote"), gh_item("acme/own")],
-                                       [npm_obj("x", repo="acme/remote")], known)
-        self.assertEqual([r["source_id"] for r in rows], ["acme/own"])
+            hosted = code_mcp.hosted_repos(c)
+        # our own rows are refreshed, not skipped; a hosted listing does not own its code
+        self.assertEqual(known, ({"acme/listed"}, set()))
+        self.assertEqual(hosted, {"acme/remote"})
+        rows, skipped = code_mcp.merge([gh_item("acme/remote"), gh_item("acme/own"), gh_item("acme/listed")],
+                                       [npm_obj("remote-mcp", repo="acme/remote"),
+                                        npm_obj("x", repo="acme/listed")], known)
+        by_id = {r["source_id"]: r for r in rows}
+        self.assertEqual(sorted(by_id), ["acme/own", "acme/remote"])
+        self.assertEqual(by_id["acme/remote"]["package_name"], "remote-mcp")
         self.assertEqual(skipped["linked_elsewhere"], 2)
 
     def test_date_ranges_split_until_under_the_search_cap(self):
