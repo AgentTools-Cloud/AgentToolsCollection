@@ -343,14 +343,15 @@ def mcp_revision_points(rev) -> tuple[int, str, str]:
 
 def _mcp_security(auth) -> dict:
     a = str(auth or "").strip().lower()
-    if not a or a in ("none", "null", "unknown"):
+    if not a or a in ("null", "unknown"):
         return _crit("mcp", "security", 0, "info", "How to authenticate is not stated.")
     if "mtls" in a or "mutual" in a:
         return _crit("mcp", "security", 5, "pass", "Declares mutual TLS.")
     if "oauth" in a:
         # OAuth 2.1 with PKCE is mandatory in the MCP authorization spec.
         return _crit("mcp", "security", 4, "pass", "Declares OAuth (MCP authorization requires PKCE).")
-    if a in ("open", "public"):
+    # "none" is what the owner edit form stores for "no credentials" (mcp_pricing.AUTH_CHOICES).
+    if a in ("open", "public", "none", "public-discovery"):
         return _crit("mcp", "security", 2, "partial", "Declared open: no credentials needed.")
     return _crit("mcp", "security", 2, "partial", f"Declares credential scheme: {auth}.")
 
