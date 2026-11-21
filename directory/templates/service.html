@@ -252,23 +252,4 @@
   </div>
 </section>
 
-{% if svc.sources %}
-<section class="svc-card p-6 mb-6">
-  <h2 class="text-base font-semibold mb-1">Listed in</h2>
-  <p class="text-xs text-slate-500 mb-4">Directories this entry was found in.</p>
-  <div class="flex flex-wrap gap-2">
-    {% for s in svc.sources %}
-      {% if s.source_url %}
-      <a href="{{ s.source_url }}" target="_blank" rel="noopener" title="first seen {{ s.first_seen|ymd }}"
-         class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-slate-200 bg-slate-50 hover:bg-slate-100 text-sm mono text-slate-700">
-        {{ s.source }}{% if s.first_seen %} <span class="text-xs text-slate-400">since {{ s.first_seen|ymd }}</span>{% endif %}
-        <span class="text-slate-400">&#8599;</span>
-      </a>
-      {% else %}
-      <span class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-slate-200 bg-slate-50 text-sm mono text-slate-700">{{ s.source }}{% if s.first_seen %} <span class="text-xs text-slate-400">since {{ s.first_seen|ymd }}</span>{% endif %}</span>
-      {% endif %}
-    {% endfor %}
-  </div>
-</section>
-{% endif %}
 {% endblock %}
