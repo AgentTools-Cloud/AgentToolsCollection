@@ -120,6 +120,11 @@ def _build_service(t: dict, verdict: dict) -> dict:
                     else "https://" + (paid_url or "")).hostname or ""
     origin_src = t.get("source") or t["delivery"]
     origin_sid = t.get("source_id") or t.get("slug")
+    # Label it MCP/A2A only when the paid resource is that endpoint itself, not
+    # another paid path the site's descriptor led us to.
+    channel = t["delivery"]
+    if channel in _CATEGORY and _endpoint_key(paid_url) != _endpoint_key(t["endpoint"]):
+        channel = None
     amount = pay.get("max_amount_usdc")
     fac = pay.get("facilitator")
     if isinstance(fac, dict):
@@ -131,7 +136,7 @@ def _build_service(t: dict, verdict: dict) -> dict:
         "name": t.get("name") or host,
         "url": paid_url,
         "description": t.get("description"),
-        "category": t.get("category") or _CATEGORY.get(t["delivery"], t["delivery"]),
+        "category": t.get("category") or (_CATEGORY.get(channel, channel) if channel else "general"),
         "chains": _chain_from_payment(pay),
         "price_min": amount,
         "price_max": amount,
@@ -141,7 +146,7 @@ def _build_service(t: dict, verdict: dict) -> dict:
         "well_known_url": (f"https://{host}/.well-known/x402" if host else None),
         "source": t["delivery"],            # "mcp" or "a2a"
         "source_id": f"{origin_src}:{origin_sid}",
-        "tags": [t["delivery"], "x402"],
+        "tags": [channel, "x402"] if channel else ["x402"],
         "region": "global",
         "payment": pay or None,
         "confidence": 0.8,                  # machine-verified
@@ -430,8 +435,7 @@ def verify_and_mirror(endpoint: str, *, slug: str, name: str | None = None,
 
     t = {"slug": slug, "name": name, "description": description,
          "endpoint": endpoint, "homepage": homepage, "delivery": delivery,
-         "source": source, "source_id": source_id,
-         "category": _CATEGORY.get(delivery, delivery)}
+         "source": source, "source_id": source_id}
     service = _build_service(t, verdict)
     out["service_slug"] = service["slug"]
     protect_owner = None
@@ -475,7 +479,6 @@ def _gather(conn, targets, limit, only_unverified):
                 "table": "mcp_servers", "id": r["id"], "slug": r["slug"],
                 "name": r["name"], "description": r["description"],
                 "endpoint": r["endpoint_url"], "homepage": r["homepage_url"],
-                "category": "model-context-protocol-mcp",
                 "source": r["source"], "source_id": r["source_id"],
                 "delivery": "mcp", "was": r["x402_supported"] or 0,
             })
@@ -490,7 +493,6 @@ def _gather(conn, targets, limit, only_unverified):
                 "table": "a2a_agents", "id": r["id"], "slug": r["slug"],
                 "name": r["name"], "description": r["description"],
                 "endpoint": r["endpoint_url"], "homepage": r["homepage_url"],
-                "category": "a2a-agent",
                 "source": r["source"], "source_id": r["source_id"],
                 "delivery": "a2a", "was": r["x402_supported"] or 0,
             })
