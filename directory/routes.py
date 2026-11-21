@@ -1018,7 +1018,6 @@ def api_search(
         services = db.search(c, q=q, category=category, chain=chain,
                              region=region, health=health, sort=sort,
                              limit=limit, offset=offset)
-        db.attach_sources(c, "x402", services)
         exact_name_groups = directory_resources.exact_name_groups(
             c, q, (item.get("name") for item in services))
     if not offset:
@@ -1372,7 +1371,6 @@ def api_export(
         rows = db.export_listings(c, kind, after_id=after_id, limit=limit)
     items: list[dict] = []
     for row in rows:
-        sources = row.get("sources")
         if kind == "a2a":
             item = directory_a2a.public_agent(row)
         elif kind == "mcp":
@@ -1384,8 +1382,6 @@ def api_export(
             if item.get("slug"):
                 item["service_card_url"] = f"/api/v1/services/{item['slug']}"
         item["id"] = row["id"]
-        if sources is not None:
-            item["sources"] = sources
         items.append(item)
     return {
         "kind": kind,
@@ -2527,7 +2523,7 @@ def well_known():
                 "method": "GET",
                 "url": "https://agent-tools.cloud/api/v1/export",
                 "query": ["kind", "after_id", "limit"],
-                "returns": "keyset-paginated bulk catalogue rows with provenance",
+                "returns": "keyset-paginated bulk catalogue rows",
             },
             "ask": {
                 "method": "POST",

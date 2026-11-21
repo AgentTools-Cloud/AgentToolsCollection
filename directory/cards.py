@@ -159,11 +159,9 @@ def public_service_row(row: dict[str, Any]) -> dict[str, Any]:
 def build_service_card(row: dict[str, Any]) -> dict[str, Any]:
     """Build an agent-readable card while preserving legacy top-level fields."""
     base = public_service_row(row)
-    # Provenance is public (2026-08-18): keep the aggregated `sources` list and
-    # drop only the internal dedup keys.
+    # Per-listing provenance is not published (2026-11-21): it only covered directories we crawl.
     base.pop("source", None)
     base.pop("source_id", None)
-    base["sources"] = row.get("sources") or []
     payment = row.get("payment") if isinstance(row.get("payment"), dict) else {}
     call_info = dict(row.get("call_info")) if isinstance(row.get("call_info"), dict) else {}
     call_info.pop("owner_declaration_revision", None)

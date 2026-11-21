@@ -1162,14 +1162,6 @@ def listing_sources(conn: sqlite3.Connection, kind: str, listing_id: int) -> lis
             for r in rows]
 
 
-def attach_sources(conn: sqlite3.Connection, kind: str, rows: list) -> list:
-    """Attach the public `sources` list to each row (listing provenance)."""
-    for row in rows:
-        if isinstance(row, dict) and row.get("id"):
-            row["sources"] = listing_sources(conn, kind, int(row["id"]))
-    return rows
-
-
 def _as_int(value):
     """int(value) or None -- upstream sends counts as str, float and None."""
     try:
@@ -1803,7 +1795,6 @@ def get_by_slug(conn, slug):
     if not row:
         return None
     out = row_to_dict(row)
-    out["sources"] = listing_sources(conn, "x402", int(out["id"]))
     _attach_readiness(conn, "x402", out)
     _attach_peer(conn, "x402", out)
     _attach_measured(conn, "x402", out)
@@ -3684,7 +3675,6 @@ def get_a2a_by_slug(conn, slug):
     if not row:
         return None
     out = a2a_row_to_dict(row)
-    out["sources"] = listing_sources(conn, "a2a", int(out["id"]))
     _attach_peer(conn, "a2a", out)
     _attach_measured(conn, "a2a", out)
     _attach_popularity(conn, "a2a", out)
@@ -4258,7 +4248,6 @@ def get_mcp_by_slug(conn, slug):
     if not row:
         return None
     out = mcp_row_to_dict(row)
-    out["sources"] = listing_sources(conn, "mcp", int(out["id"]))
     if not _is_code_only(out):
         _attach_readiness(conn, "mcp", out)
         _attach_peer(conn, "mcp", out)
@@ -4838,7 +4827,7 @@ _EXPORT_SPECS = {
 
 
 def export_listings(conn: sqlite3.Connection, kind: str, after_id: int = 0,
-                    limit: int = 500, with_sources: bool = True) -> list[dict]:
+                    limit: int = 500) -> list[dict]:
     """Keyset-paginated bulk export ordered by id.
 
     search() ranks rows with a multi-tier ORDER BY that no index can satisfy,
@@ -4854,10 +4843,7 @@ def export_listings(conn: sqlite3.Connection, kind: str, after_id: int = 0,
         f"SELECT * FROM {table} WHERE id > ? ORDER BY id LIMIT ?",
         (int(after_id), int(limit)),
     ).fetchall()
-    out = [to_dict(r) for r in rows]
-    if with_sources and out:
-        attach_sources(conn, kind, out)
-    return out
+    return [to_dict(r) for r in rows]
 
 
 def record_service_paytos(conn: sqlite3.Connection, observed: dict,
