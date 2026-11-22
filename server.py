@@ -23,6 +23,8 @@ from directory import db as directory_db
 from directory import log_redact
 
 log_redact.install()
+# Requests write ahead of crawls and other jobs; see directory.db.writer.
+directory_db.set_write_priority("foreground")
 from directory.routes import TEMPLATES, router as directory_router
 from directory.auth import router as auth_router
 from directory.articles import ArticleStore

@@ -8,8 +8,11 @@ from __future__ import annotations
 
 import json
 import os
+import fcntl
+import logging
 import math
 import sqlite3
+import threading
 import time
 import random
 import secrets
@@ -17,7 +20,8 @@ import hashlib
 import hmac
 import idna
 import re
-from contextlib import closing, contextmanager
+import traceback
+from contextlib import ExitStack, closing, contextmanager
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Callable
 from urllib.parse import urlparse
@@ -671,6 +675,26 @@ def with_retry(fn: Callable[[], Any], *, attempts: int = 6, base_delay: float = 
         raise last
 
 
+def write_batches(items: list, maximum: int = 100, target: float = 1.0) -> Iterator[list]:
+    """Consecutive slices of items, sized so writing one takes about `target` s.
+
+    A waiting request gets the lock when the current background transaction
+    ends (see writer), so short transactions mean short waits. A fixed 100 rows
+    took up to ~10 s per batch for some sources.
+    """
+    size, start = maximum, 0
+    while start < len(items):
+        batch = items[start:start + size]
+        began = time.monotonic()
+        yield batch
+        took = time.monotonic() - began
+        start += len(batch)
+        if took > target and size > 1:
+            size = max(1, size // 2)
+        elif took < target / 4 and size < maximum:
+            size = min(maximum, size * 2)
+
+
 def ensure_ownership_verification_revision(conn: sqlite3.Connection) -> None:
     columns = {column[1] for column in conn.execute('PRAGMA table_info(domain_ownership)')}
     if 'verification_revision' not in columns:
@@ -1022,20 +1046,110 @@ def resources_text(entries, limit: int = 120000) -> str | None:
     return "\n".join(parts) if parts else None
 
 
+# Request handlers ("foreground") write ahead of crawls and other jobs
+# ("background"). SQLite has no writer priority and its busy handler polls, so a
+# job committing batch after batch wins almost every race against a request
+# waiting for the lock: user writes failed with 503 every night. A foreground
+# writer holds a shared flock on a file beside the database while it waits and
+# writes; a background writer passes an exclusive flock on that file before each
+# transaction, so it starts none while a request is waiting.
+_log = logging.getLogger(__name__)
+_WRITE_PRIORITY = os.environ.get("AGENT_TOOLS_WRITE_PRIORITY", "background")
+BACKGROUND_YIELD_MAX = 60.0
+SLOW_BACKGROUND_WRITE = 5.0
+_writer_state = threading.local()
+
+
+def set_write_priority(mode: str) -> None:
+    """Priority of this process's writes; the web app sets "foreground"."""
+    global _WRITE_PRIORITY
+    if mode not in ("foreground", "background"):
+        raise ValueError(f"unknown write priority {mode!r}")
+    _WRITE_PRIORITY = mode
+
+
+def _priority_fd(db_path: str) -> int | None:
+    try:
+        return os.open(db_path + ".write-priority", os.O_RDWR | os.O_CREAT, 0o600)
+    except OSError:
+        return None  # no lock file, no priority; the write itself still works
+
+
+@contextmanager
+def foreground_write(db_path: str | None = None) -> Iterator[None]:
+    """Hold off new background write transactions until this block ends.
+
+    Wrap a whole retry loop in it, not each attempt: between attempts a job
+    would otherwise start its next transaction first.
+    """
+    fd = _priority_fd(db_path or DEFAULT_DB_PATH)
+    _writer_state.foreground = getattr(_writer_state, "foreground", 0) + 1
+    try:
+        if fd is not None:
+            fcntl.flock(fd, fcntl.LOCK_SH)
+        yield
+    finally:
+        _writer_state.foreground -= 1
+        if fd is not None:
+            os.close(fd)
+
+
+def _yield_to_foreground(db_path: str) -> None:
+    fd = _priority_fd(db_path)
+    if fd is None:
+        return
+    try:
+        deadline = time.monotonic() + BACKGROUND_YIELD_MAX
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return  # closing the descriptor releases it at once
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    _log.warning("write priority: foreground writers held on for %.0fs; "
+                                 "writing anyway", BACKGROUND_YIELD_MAX)
+                    return
+                time.sleep(0.02)
+    finally:
+        os.close(fd)
+
+
 @contextmanager
 def writer(db_path: str = DEFAULT_DB_PATH,
-        immediate: bool = False, *, timeout: float | None = None) -> Iterator[sqlite3.Connection]:
-    conn = connect(db_path) if timeout is None else connect(db_path, timeout=timeout)
-    try:
-        if immediate:
-            conn.execute("BEGIN IMMEDIATE")
-        yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
+        immediate: bool = False, *, timeout: float | None = None,
+        priority: str | None = None) -> Iterator[sqlite3.Connection]:
+    if priority is None:
+        priority = ("foreground" if getattr(_writer_state, "foreground", 0)
+                    else _WRITE_PRIORITY)
+    depth = getattr(_writer_state, "depth", 0)
+    held = getattr(_writer_state, "foreground", 0)
+    with ExitStack() as stack:
+        if priority == "foreground" and not held:
+            stack.enter_context(foreground_write(db_path))
+        elif priority == "background" and not depth and not held:
+            _yield_to_foreground(db_path)
+        _writer_state.depth = depth + 1
+        began = time.monotonic()
+        try:
+            conn = connect(db_path) if timeout is None else connect(db_path, timeout=timeout)
+            try:
+                if immediate:
+                    conn.execute("BEGIN IMMEDIATE")
+                yield conn
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+        finally:
+            _writer_state.depth = depth
+            held_for = time.monotonic() - began
+            if priority == "background" and held_for > SLOW_BACKGROUND_WRITE:
+                caller = next((f"{frame.name} ({Path(frame.filename).name}:{frame.lineno})"
+                               for frame in reversed(traceback.extract_stack()[:-2])
+                               if not frame.filename.endswith(("contextlib.py", "db.py"))), "?")
+                _log.warning("background write transaction took %.1fs: %s", held_for, caller)
 
 
 def _to_json(value: Any) -> str | None:
@@ -4899,6 +5013,32 @@ def update_payto_shared(conn, now: int | None = None) -> int:
     return len(ups)
 
 
+def _scored(row, score) -> tuple:
+    d = dict(row)
+    old = d.pop("quality_score")
+    return score(d), d["id"], old
+
+
+def _service_scores(conn) -> list[tuple]:
+    rows = conn.execute(
+        "SELECT id, health, x402_ok, well_known_url, payment, tx_30d, "
+        "payto_tx_30d, payto_payers_30d, payto_checked, payto_shared, "
+        "latency_ms, readiness_score, owner_verified, quality_score FROM services").fetchall()
+    return [_scored(r, _score_x402) for r in rows]
+
+
+def _a2a_scores(conn) -> list[tuple]:
+    return [_scored(r, _score_a2a) for r in conn.execute("SELECT * FROM a2a_agents")]
+
+
+def _mcp_scores(conn) -> list[tuple]:
+    rows = conn.execute(
+        "SELECT id, health, conformance, latency_p95_ms, tool_count, tools_json, "
+        "source_code_url, package_name, transport, safety_verdict, "
+        "owner_verified, quality_score FROM mcp_servers").fetchall()
+    return [_scored(r, mcp_quality_score) for r in rows]
+
+
 def rescore_services(conn) -> int:
     """Recompute and store services.quality_score.
 
@@ -4906,11 +5046,7 @@ def rescore_services(conn) -> int:
     re-deriving the formula in SQL, which is how the two used to drift apart.
     """
     update_payto_shared(conn)
-    rows = conn.execute(
-        "SELECT id, health, x402_ok, well_known_url, payment, tx_30d, "
-        "payto_tx_30d, payto_payers_30d, payto_checked, payto_shared, "
-        "latency_ms, readiness_score, owner_verified FROM services").fetchall()
-    updates = [(_score_x402(dict(r)), r["id"]) for r in rows]
+    updates = [(score, id_) for score, id_, _ in _service_scores(conn)]
     for start in range(0, len(updates), 1000):
         conn.executemany("UPDATE services SET quality_score=? WHERE id=?",
                          updates[start:start + 1000])
@@ -4918,8 +5054,7 @@ def rescore_services(conn) -> int:
 
 
 def rescore_a2a(conn) -> int:
-    rows = conn.execute("SELECT * FROM a2a_agents").fetchall()
-    ups = [(_score_a2a(dict(r)), r["id"]) for r in rows]
+    ups = [(score, id_) for score, id_, _ in _a2a_scores(conn)]
     for i in range(0, len(ups), 1000):
         conn.executemany("UPDATE a2a_agents SET quality_score=? WHERE id=?",
                          ups[i:i + 1000])
@@ -4927,15 +5062,31 @@ def rescore_a2a(conn) -> int:
 
 
 def rescore_mcp(conn) -> int:
-    rows = conn.execute(
-        "SELECT id, health, conformance, latency_p95_ms, tool_count, tools_json, "
-        "source_code_url, package_name, transport, safety_verdict, "
-        "owner_verified FROM mcp_servers").fetchall()
-    ups = [(mcp_quality_score(dict(r)), r["id"]) for r in rows]
+    ups = [(score, id_) for score, id_, _ in _mcp_scores(conn)]
     for i in range(0, len(ups), 1000):
         conn.executemany("UPDATE mcp_servers SET quality_score=? WHERE id=?",
                          ups[i:i + 1000])
     return len(ups)
+
+
+SCORE_TABLES = (("services", _service_scores), ("mcp_servers", _mcp_scores),
+                ("a2a_agents", _a2a_scores))
+
+
+def rescore_changed(table: str, scores, *, chunk: int = 2000) -> tuple[int, int]:
+    """Score on a read connection, then write only changed scores, a chunk per
+    transaction. Returns (rows scored, rows written); a row whose score changed
+    meanwhile keeps the newer value."""
+    with closing(connect(read_only=True)) as conn:
+        scored = scores(conn)
+    changed = [row for row in scored if row[0] != row[2]]
+    for start in range(0, len(changed), chunk):
+        def op(part=changed[start:start + chunk]):
+            with writer() as conn:
+                conn.executemany(f"UPDATE {table} SET quality_score=? "
+                                 "WHERE id=? AND quality_score IS ?", part)
+        with_retry(op)
+    return len(scored), len(changed)
 
 
 def attach_ratings(kind: str, rows: list) -> list:

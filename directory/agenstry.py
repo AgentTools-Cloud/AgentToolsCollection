@@ -160,8 +160,7 @@ def crawl_agenstry_a2a(max_hosts: int = 8000, workers: int = 12,
         if domains and not rows:
             errors.append(f"agenstry a2a: no live cards resolved from {len(domains)} candidates")
 
-        for offset in range(0, len(rows), _A2A_WRITE_BATCH):
-            batch = rows[offset:offset + _A2A_WRITE_BATCH]
+        for batch in db.write_batches(rows, _A2A_WRITE_BATCH):
             result = db.with_retry(lambda batch=batch: _write_a2a_batch(batch))
             inserted += result["added"]
             updated += result["updated"]

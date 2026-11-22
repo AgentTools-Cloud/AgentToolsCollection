@@ -240,6 +240,7 @@ def _mock_mcp_submission(monkeypatch):
 def test_mcp_submission_main_lock_is_retryable_and_atomic(tmp_path, monkeypatch):
     database = tmp_path / "directory.db"
     monkeypatch.setenv("PRIVACY_SUPPRESSION_KEY", "privacy-test-key")
+    monkeypatch.setattr(routes, "SUBMISSION_WRITE_WAIT", 0.5)
     with _route_database(monkeypatch, database) as real_connect:
         notification = _mock_mcp_submission(monkeypatch)
         limits.activate_rate_limit_store(str(database))
@@ -272,6 +273,7 @@ def test_mcp_submission_main_lock_is_retryable_and_atomic(tmp_path, monkeypatch)
 def test_rest_submission_main_lock_is_retryable(tmp_path, monkeypatch):
     database = tmp_path / "directory.db"
     monkeypatch.setenv("PRIVACY_SUPPRESSION_KEY", "privacy-test-key")
+    monkeypatch.setattr(routes, "SUBMISSION_WRITE_WAIT", 0.5)
     with _route_database(monkeypatch, database) as real_connect:
         _mock_mcp_submission(monkeypatch)
         review = Mock(return_value={"status": "pending"})
@@ -305,6 +307,7 @@ def test_rest_submission_main_lock_is_retryable(tmp_path, monkeypatch):
 def test_a2a_submission_main_lock_is_retryable(tmp_path, monkeypatch):
     database = tmp_path / "directory.db"
     monkeypatch.setenv("PRIVACY_SUPPRESSION_KEY", "privacy-test-key")
+    monkeypatch.setattr(routes, "SUBMISSION_WRITE_WAIT", 0.5)
     with _route_database(monkeypatch, database) as real_connect:
         notification = _mock_mcp_submission(monkeypatch)
         endpoint = "https://submit.example.test/a2a"

@@ -1039,7 +1039,8 @@ class ClaimVerificationContentionTests(OwnershipFixture):
 
     def test_claim_write_lock_returns_retryable_503_without_changes(self):
         before = self.claim_row()
-        with closing(db.connect()) as blocker:
+        with closing(db.connect()) as blocker, \
+                patch.object(routes, "SUBMISSION_WRITE_WAIT", 0.5):
             blocker.execute("BEGIN IMMEDIATE")
             started = time.monotonic()
             try:
@@ -1074,7 +1075,8 @@ class ClaimVerificationContentionTests(OwnershipFixture):
 
     def test_browser_claim_lock_returns_retryable_503_without_changes(self):
         before = self.claim_row()
-        with closing(db.connect()) as blocker:
+        with closing(db.connect()) as blocker, \
+                patch.object(routes, "SUBMISSION_WRITE_WAIT", 0.5):
             blocker.execute("BEGIN IMMEDIATE")
             started = time.monotonic()
             try:

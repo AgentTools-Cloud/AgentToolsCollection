@@ -1683,19 +1683,25 @@ def _enforce_submit_limit(request: Request, scope: str) -> str:
     return client_ip
 
 
+# How long a request waits for the write lock. Jobs start no new transaction
+# while a request waits (db.foreground_write), so this covers the one running.
+SUBMISSION_WRITE_WAIT = 20.0
+
+
 def _submission_write(operation, *, busy_error="submission_busy"):
-    deadline = time.monotonic() + 2.5
+    deadline = time.monotonic() + SUBMISSION_WRITE_WAIT
     last_error = None
-    while time.monotonic() < deadline:
-        timeout = min(0.25, max(0.0, deadline - time.monotonic()) / 3)
-        try:
-            with db.writer(immediate=True, timeout=timeout) as conn:
-                return operation(conn)
-        except sqlite3.OperationalError as exc:
-            if not db.is_locked_error(exc):
-                raise
-            last_error = exc
-            time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+    with db.foreground_write():
+        while time.monotonic() < deadline:
+            timeout = min(1.0, max(0.0, deadline - time.monotonic()))
+            try:
+                with db.writer(immediate=True, timeout=timeout) as conn:
+                    return operation(conn)
+            except sqlite3.OperationalError as exc:
+                if not db.is_locked_error(exc):
+                    raise
+                last_error = exc
+                time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
     raise HTTPException(
         status_code=503,
         detail={"error": busy_error, "message": "Please retry shortly."},
@@ -1938,7 +1944,8 @@ async def api_open_service_claim(request: Request, payload: ServiceClaimRequest)
         def persist(conn):
             return directory_ownership.issue_url(conn, int(user["id"]), target, method)
 
-        claim_id, token = _submission_write(persist, busy_error="claim_busy")
+        claim_id, token = await run_in_threadpool(
+            _submission_write, persist, busy_error="claim_busy")
     except directory_ownership.ClaimError as exc:
         raise HTTPException(422, {"error": "claim_refused", "message": str(exc)}) from None
     return JSONResponse({

@@ -971,8 +971,8 @@ def crawl_a2a_registry_global(page_size: int = 100, max_pages: int = 60) -> dict
                                           db.upsert_a2a_agent)
 
     inserted = updated = rejected = 0
-    for i in range(0, len(rows), 100):
-        res = db.with_retry(lambda b=rows[i:i + 100]: write(b))
+    for batch in db.write_batches(rows):
+        res = db.with_retry(lambda b=batch: write(b))
         inserted += res["added"]; updated += res["updated"]; rejected += res["rejected"]
     result = {"candidates": len(seen), "resolved": len(rows),
               "inserted": inserted, "updated": updated, "rejected": rejected}
@@ -1114,8 +1114,8 @@ def crawl_card_leads(source: str, leads: list[dict],
                                           db.upsert_a2a_agent)
 
     inserted = updated = rejected = 0
-    for i in range(0, len(rows), 100):
-        res = db.with_retry(lambda b=rows[i:i + 100]: write(b))
+    for batch in db.write_batches(rows):
+        res = db.with_retry(lambda b=batch: write(b))
         inserted += res["added"]; updated += res["updated"]; rejected += res["rejected"]
     return {"candidates": len(leads), "resolved": len(rows),
             "inserted": inserted, "updated": updated, "rejected": rejected}

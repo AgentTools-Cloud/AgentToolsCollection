@@ -197,8 +197,9 @@ def cmd_health_quarantined() -> int:
 def _ingest_rows(kind, source, items, upsert, batch_size=100):
     from .ingestion import ingest_batch
     total = dict(added=0, updated=0, rejected=0, errors=[])
-    for start in range(0, len(items), batch_size):
-        batch = items[start:start + batch_size]
+    for n, batch in enumerate(db.write_batches(items, batch_size)):
+        if n:
+            time.sleep(0.05)
         def op(batch=batch):
             with db.writer(immediate=True) as conn:
                 return ingest_batch(conn, kind, source, batch, upsert)
@@ -217,8 +218,6 @@ def _ingest_rows(kind, source, items, upsert, batch_size=100):
             log.warning('source endpoint mismatch: kind=%s source=%s new_pairs=%d; current primary retained',
                         kind, source, result['warnings'])
         total['errors'].extend(result['errors'])
-        if start + len(batch) < len(items):
-            time.sleep(0.05)
     log.info('ingestion %s: added=%d updated=%d rejected=%d errors=%d', source,
              total['added'], total['updated'], total['rejected'], len(total['errors']))
     return total
@@ -1690,12 +1689,20 @@ def cmd_ownership_pending_recheck() -> int:
 
 
 def cmd_rescore() -> int:
-    """Recompute the stored quality_score for all three resource types."""
-    def op():
+    """Recompute the stored quality_score for all three resource types.
+
+    Scored on a read connection and only changed scores written, a chunk per
+    transaction: as one transaction this held the write lock for minutes every
+    night while user writes failed with 503.
+    """
+    def payto():
         with db.writer() as c:
-            return (db.rescore_services(c), db.rescore_mcp(c), db.rescore_a2a(c))
-    x, m, a = db.with_retry(op)
-    log.info("rescore: %d services, %d mcp, %d a2a", x, m, a)
+            db.update_payto_shared(c)
+    db.with_retry(payto)
+    (x, xc), (m, mc), (a, ac) = (db.rescore_changed(table, scores)
+                                 for table, scores in db.SCORE_TABLES)
+    log.info("rescore: %d services, %d mcp, %d a2a (changed %d, %d, %d)",
+             x, m, a, xc, mc, ac)
     return 0
 
 
