@@ -133,6 +133,17 @@ class PaytoSharedTests(unittest.TestCase):
         self.c.execute("UPDATE services SET payto_shared=9")
         self.assertIsNone(self.shared()[1])
 
+    def test_changes_list_only_rows_that_differ(self):
+        self.add(1, "ok", "0xaa")
+        self.add(2, "ok", "0xaa")
+        self.add(3, "ok", "0xbb")
+        self.shared()
+        self.assertEqual(db.payto_shared_changes(self.c, now=self.now), ([], 2))
+        self.c.execute("UPDATE services SET payto_shared=5 WHERE id IN (1, 3)")
+        changes, shared = db.payto_shared_changes(self.c, now=self.now)
+        self.assertEqual(sorted(changes, key=lambda c: c[1]), [(2, 1), (None, 3)])
+        self.assertEqual(shared, 2)
+
 
 class McpP95Tests(unittest.TestCase):
     def p95(self, latencies, status="ok", age_days=0):

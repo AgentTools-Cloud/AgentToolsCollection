@@ -675,14 +675,16 @@ def with_retry(fn: Callable[[], Any], *, attempts: int = 6, base_delay: float = 
         raise last
 
 
-def write_batches(items: list, maximum: int = 100, target: float = 1.0) -> Iterator[list]:
+def write_batches(items: list, maximum: int = 100, target: float = 1.0,
+                  initial: int = 4) -> Iterator[list]:
     """Consecutive slices of items, sized so writing one takes about `target` s.
 
     A waiting request gets the lock when the current background transaction
-    ends (see writer), so short transactions mean short waits. A fixed 100 rows
-    took up to ~10 s per batch for some sources.
+    ends (see writer), so short transactions mean short waits. Starts small and
+    doubles while fast, because per-row cost is unknown up front: a first batch
+    of 100 MCP Registry rows (~0.3 s each) held the lock 27.7 s.
     """
-    size, start = maximum, 0
+    size, start = max(1, min(initial, maximum)), 0
     while start < len(items):
         batch = items[start:start + size]
         began = time.monotonic()
@@ -690,9 +692,29 @@ def write_batches(items: list, maximum: int = 100, target: float = 1.0) -> Itera
         took = time.monotonic() - began
         start += len(batch)
         if took > target and size > 1:
-            size = max(1, size // 2)
+            size = max(1, min(size // 2, int(size * target / took)))
         elif took < target / 4 and size < maximum:
             size = min(maximum, size * 2)
+
+
+def delete_older(table: str, column: str, cutoff: int, chunk: int = 2000) -> int:
+    """Delete rows whose `column` < cutoff: rowids found on a read connection,
+    then deleted a chunk per transaction, so the scan never holds the write lock."""
+    total = 0
+    while True:
+        with closing(connect(read_only=True)) as conn:
+            ids = [(r[0],) for r in conn.execute(
+                f"SELECT rowid FROM {table} WHERE {column} < ? LIMIT ?", (cutoff, chunk))]
+        if not ids:
+            return total
+
+        def op(ids=ids):
+            with writer() as conn:
+                conn.executemany(f"DELETE FROM {table} WHERE rowid=?", ids)
+        with_retry(op)
+        total += len(ids)
+        if len(ids) < chunk:
+            return total
 
 
 def ensure_ownership_verification_revision(conn: sqlite3.Connection) -> None:
@@ -4993,6 +5015,17 @@ def update_payto_shared(conn, now: int | None = None) -> int:
     wallet with 2 live listings and 127 dead ones must split by 2, not 129.
     Only EVM hex addresses are case-folded; base58 (Solana) is case-sensitive.
     """
+    changes, shared = payto_shared_changes(conn, now)
+    for i in range(0, len(changes), 1000):
+        conn.executemany("UPDATE services SET payto_shared=? WHERE id=?",
+                         changes[i:i + 1000])
+    return shared
+
+
+def payto_shared_changes(conn, now: int | None = None) -> tuple[list[tuple], int]:
+    """(new payto_shared, id) for each service whose value differs from what
+    update_payto_shared would store, and how many services share a wallet.
+    Only reads, so the aggregate can run off the write lock."""
     since = int(now or time.time()) - _PAYTO_SHARED_WINDOW
     key = "CASE WHEN {0} LIKE '0x%' THEN lower({0}) ELSE {0} END"
     rows = conn.execute(
@@ -5004,13 +5037,12 @@ def update_payto_shared(conn, now: int | None = None) -> int:
         " GROUP BY 1, 2"
         ") c ON c.chain=p.chain AND c.a=" + key.format("p.address") + " "
         "WHERE p.last_seen>=? GROUP BY p.service_id", (since, since)).fetchall()
-    conn.execute("UPDATE services SET payto_shared=NULL "
-                 "WHERE payto_shared IS NOT NULL")
-    ups = [(int(r["n"]), r["sid"]) for r in rows if (r["n"] or 0) > 1]
-    for i in range(0, len(ups), 1000):
-        conn.executemany("UPDATE services SET payto_shared=? WHERE id=?",
-                         ups[i:i + 1000])
-    return len(ups)
+    want = {r["sid"]: int(r["n"]) for r in rows if (r["n"] or 0) > 1}
+    have = {r[0]: r[1] for r in conn.execute(
+        "SELECT id, payto_shared FROM services WHERE payto_shared IS NOT NULL")}
+    changes = [(n, sid) for sid, n in want.items() if have.get(sid) != n]
+    changes += [(None, sid) for sid in have if sid not in want]
+    return changes, len(want)
 
 
 def _scored(row, score) -> tuple:

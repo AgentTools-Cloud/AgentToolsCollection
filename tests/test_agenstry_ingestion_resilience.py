@@ -199,18 +199,21 @@ class AgenstryIngestionResilienceTest(unittest.TestCase):
     def test_batches_commit_independently_and_updates_remain_counted(self):
         size = agenstry._A2A_WRITE_BATCH
         self.assertEqual(size, 100)
-        visible = []
+        real_write = agenstry._write_a2a_batch
+        visible, sizes = [], []
 
-        def upsert(conn, row):
-            index = int(row["source_id"].split(".")[0].split("-")[1])
-            if index % size == 0:
-                visible.append(len(self.sources()))
-            return self.real_upsert(conn, row)
+        def write(rows):
+            visible.append(len(self.sources()))
+            sizes.append(len(rows))
+            return real_write(rows)
 
         cards = self.cards(size * 2 + 1)
-        with patch.object(db, "upsert_a2a_agent", side_effect=upsert):
+        with patch.object(agenstry, "_write_a2a_batch", side_effect=write):
             first = self.crawl(cards)
-        self.assertEqual(visible, [0, size, size * 2])
+        # Every batch starts with all earlier batches already committed.
+        self.assertGreater(len(sizes), 2)
+        self.assertLessEqual(max(sizes), size)
+        self.assertEqual(visible, [sum(sizes[:n]) for n in range(len(sizes))])
         self.assertEqual(first["inserted"], len(cards))
         self.assert_result_run(first)
         second = self.crawl(cards)
@@ -239,16 +242,23 @@ class AgenstryIngestionResilienceTest(unittest.TestCase):
 
         with patch.object(agenstry.ingestion, "ingest_batch", side_effect=ingest):
             result = self.crawl(self.cards(201))
-        self.assertEqual(batch_sizes, [100, 100, 1])
+        self.assertGreater(len(batch_sizes), 2)
+        self.assertLessEqual(max(batch_sizes), agenstry._A2A_WRITE_BATCH)
+        self.assertEqual(sum(batch_sizes), 201)
         self.assertEqual(result["inserted"], 201)
         self.assertEqual(result["errors"], [
-            "fixture batch 1 issue", "fixture batch 2 issue", "fixture batch 3 issue",
+            f"fixture batch {n} issue" for n in range(1, len(batch_sizes) + 1)
         ])
         self.assert_result_run(result)
 
     def test_unexpected_operational_error_propagates_preserving_prior_batch(self):
         size = agenstry._A2A_WRITE_BATCH
-        calls = []
+        real_ingest = agenstry.ingestion.ingest_batch
+        calls, sizes = [], []
+
+        def ingest(conn, kind, source, rows, upsert):
+            sizes.append(len(rows))
+            return real_ingest(conn, kind, source, rows, upsert)
 
         def upsert(conn, row):
             calls.append(row["source_id"])
@@ -257,14 +267,19 @@ class AgenstryIngestionResilienceTest(unittest.TestCase):
                 conn.execute("SELECT * FROM nonexistent_resilience_table")
             return result
 
-        with patch.object(db, "upsert_a2a_agent", side_effect=upsert):
+        with (
+            patch.object(db, "upsert_a2a_agent", side_effect=upsert),
+            patch.object(agenstry.ingestion, "ingest_batch", side_effect=ingest),
+        ):
             with self.assertRaisesRegex(sqlite3.OperationalError, "no such table"):
                 self.crawl(self.cards(size + 3))
         self.assertEqual(len(calls), size + 3)  # Non-lock errors are not retried.
-        self.assertEqual(set(self.sources()), set(self.cards(size)))
+        committed = sum(sizes[:-1])  # every batch before the failing one
+        self.assertGreater(committed, 0)
+        self.assertEqual(set(self.sources()), set(self.cards(committed)))
         run = self.latest_run()
         self.assertEqual(run["status"], "error")
-        self.assertEqual(run["added"], size)
+        self.assertEqual(run["added"], committed)
         self.assertEqual(run["updated"], 0)
         self.assertIsNotNone(run["finished_at"])
         self.assertIn("OperationalError", run["errors"])

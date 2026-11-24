@@ -124,11 +124,26 @@ class WriteBatches(unittest.TestCase):
 
     def test_slow_rows_shrink_the_batch_to_about_a_second(self):
         sizes = self.sizes(0.03)
-        self.assertEqual(sizes[:3], [100, 50, 25])
-        self.assertTrue(all(size * 0.03 <= 1.0 for size in sizes[2:]))
+        self.assertEqual(sizes[:3], [4, 8, 16])
+        self.assertTrue(all(size * 0.03 <= 1.0 for size in sizes))
 
-    def test_fast_rows_keep_full_batches(self):
-        self.assertEqual(set(self.sizes(0.001)), {100})
+    def test_very_slow_rows_never_hold_the_lock_much_over_a_second(self):
+        sizes = self.sizes(0.3, n=40)
+        self.assertEqual(sizes[:2], [4, 2])
+        self.assertLessEqual(max(sizes) * 0.3, 1.2)
+
+    def test_fast_rows_grow_to_full_batches(self):
+        self.assertEqual(self.sizes(0.001), [4, 8, 16, 32, 64, 100, 100, 76])
+
+
+class DeleteOlder(_TempDB):
+    def test_deletes_old_rows_in_chunks_and_keeps_recent_ones(self):
+        with db.writer() as c:
+            c.executemany("INSERT INTO a2a_health_history(agent_id, checked_at, status) VALUES(?,?,?)",
+                          [(i, 100 + i, "ok") for i in range(5)] + [(i, 1000 + i, "ok") for i in range(3)])
+        self.assertEqual(db.delete_older("a2a_health_history", "checked_at", 500, chunk=2), 5)
+        self.assertEqual(len(self.q("SELECT 1 FROM a2a_health_history")), 3)
+        self.assertEqual(db.delete_older("a2a_health_history", "checked_at", 500, chunk=2), 0)
 
 
 class Rescore(_TempDB):

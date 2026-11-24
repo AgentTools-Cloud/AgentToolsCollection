@@ -48,19 +48,27 @@ CARD_PATHS = (
 
 
 def _upsert_rows(rows: list[dict]) -> tuple[int, int]:
-    """Write a batch while treating operator-retired agents as normal skips."""
+    """Write in short transactions while treating operator-retired agents as normal skips."""
     inserted = updated = 0
     warnings = 0
-    with db.writer() as conn:
-        for row in rows:
-            try:
-                is_new, _ = db.upsert_a2a_agent(conn, row)
-            except db.RetiredListingError:
-                log.info("skip retired A2A listing: %s", row.get("slug"))
-                continue
-            inserted += int(is_new)
-            updated += int(not is_new)
-            warnings += row.get('_stale_warning_count', 0)
+    for batch in db.write_batches(rows):
+        def op(batch=batch):
+            counts = [0, 0, 0]
+            with db.writer() as conn:
+                for row in batch:
+                    try:
+                        is_new, _ = db.upsert_a2a_agent(conn, row)
+                    except db.RetiredListingError:
+                        log.info("skip retired A2A listing: %s", row.get("slug"))
+                        continue
+                    counts[0] += int(is_new)
+                    counts[1] += int(not is_new)
+                    counts[2] += row.get('_stale_warning_count', 0)
+            return counts
+        ins, upd, warn = db.with_retry(op)
+        inserted += ins
+        updated += upd
+        warnings += warn
     if warnings:
         log.warning('source endpoint mismatch: %d new endpoint pair(s); current primary retained', warnings)
     return inserted, updated
@@ -682,7 +690,7 @@ def crawl_seeds(seed_path: str) -> dict:
         client.close()
 
     if rows:
-        inserted, updated = db.with_retry(lambda: _upsert_rows(rows))
+        inserted, updated = _upsert_rows(rows)
     return {
         "seen": len(entries),
         "inserted": inserted,
@@ -775,7 +783,7 @@ def crawl_directories(max_hosts: int = 80) -> dict:
 
     inserted = updated = 0
     if rows:
-        inserted, updated = db.with_retry(lambda: _upsert_rows(rows))
+        inserted, updated = _upsert_rows(rows)
     return {
         "candidates": len(candidates),
         "resolved": len(rows),
@@ -877,7 +885,7 @@ def crawl_a2aregistry(page_size: int = 100, max_pages: int = 20) -> dict:
 
     inserted = updated = 0
     if rows:
-        inserted, updated = db.with_retry(lambda: _upsert_rows(rows))
+        inserted, updated = _upsert_rows(rows)
     result = {"candidates": len(rows), "resolved": len(rows),
               "inserted": inserted, "updated": updated}
     if partial_error:
@@ -1197,7 +1205,7 @@ def crawl_github_topic(topic: str = "a2a-protocol", max_repos: int = 100,
 
     inserted = updated = 0
     if rows:
-        inserted, updated = db.with_retry(lambda: _upsert_rows(rows))
+        inserted, updated = _upsert_rows(rows)
     return {"candidates": len(homepages), "resolved": len(rows),
             "inserted": inserted, "updated": updated}
 

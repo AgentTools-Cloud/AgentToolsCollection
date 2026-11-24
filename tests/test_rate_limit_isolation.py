@@ -156,7 +156,7 @@ class RateLimitIsolationTests(unittest.TestCase):
         mode = stat.S_IMODE(Path(limits.rate_limit_db_path(self.path)).stat().st_mode)
         self.assertEqual(mode, 0o600)
 
-    def test_batches_stay_100_and_pause_after_connection_close(self):
+    def test_batches_start_small_stay_within_100_and_pause_after_connection_close(self):
         from directory import ingestion, jobs
 
         real_writer = db.writer
@@ -186,6 +186,8 @@ class RateLimitIsolationTests(unittest.TestCase):
              patch.object(jobs.time, "sleep", side_effect=pause):
             result = jobs._ingest_rows("mcp", "fixture", list(range(150)), None)
 
-        self.assertEqual(sizes, [100, 50])
-        self.assertEqual(pauses, [0.05])
+        self.assertEqual(sizes[0], 4)  # per-row cost is unknown up front
+        self.assertLessEqual(max(sizes), 100)
+        self.assertEqual(sum(sizes), 150)
+        self.assertEqual(pauses, [0.05] * (len(sizes) - 1))
         self.assertEqual(result["updated"], 150)

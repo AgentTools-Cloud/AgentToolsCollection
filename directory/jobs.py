@@ -373,14 +373,12 @@ def cmd_crawl_mcp(only=None, *, probe_new=True) -> int:
                     max_updated = u
             del_ids = [it["source_id"] for it in items
                        if it.get("_status") and it["_status"] != "active"]
-            if del_ids:
-                def _del(ids=del_ids):
-                    n = 0
+            for ids in db.write_batches(del_ids):
+                def _del(ids=ids):
                     with db.writer() as c:
-                        for sid in ids:
-                            n += db.delete_mcp_by_source(c, "mcp-registry", sid)
-                    return n
-                deleted = db.with_retry(_del)
+                        return sum(db.delete_mcp_by_source(c, "mcp-registry", sid)
+                                   for sid in ids)
+                deleted += db.with_retry(_del)
             items = [it for it in items
                      if not (it.get("_status") and it["_status"] != "active")]
         upsert = (lambda conn, row: _upsert_wellknown_listing(conn, 'mcp', row)) if name == 'wellknown' else db.upsert_mcp_server
@@ -1154,27 +1152,27 @@ def cmd_health_a2a(only_unknown: bool = False, quarantined_only: bool = False) -
             n_ok += h == "ok"; n_deg += h == "degraded"; n_down += h == "down"
             n_conf += conf == "pass"
 
-    def op():
-        with db.writer() as c:
-            c.executemany(
-                "UPDATE a2a_agents SET health=?, health_checked=?, latency_ms=?, "
-                "conformance=?, last_success_at=COALESCE(?, last_success_at), "
-                "card_url=? WHERE id=?",
-                updates,
-            )
-            c.executemany(
-                "UPDATE a2a_agents SET readiness_score=?, readiness_grade=?, "
-                "readiness_json=?, readiness_checked=? WHERE id=?",
-                readiness_rows,
-            )
-            c.executemany(
-                "INSERT INTO a2a_health_history(agent_id, checked_at, status, rpc_state, "
-                "latency_ms, http_status) VALUES(?,?,?,?,?,?)",
-                history_rows,
-            )
-            c.execute("DELETE FROM a2a_health_history WHERE checked_at < ?",
-                      (now - 120 * 86400,))
-    db.with_retry(op)
+    for idx in db.write_batches(range(len(updates)), 500):
+        def op(idx=idx):
+            with db.writer() as c:
+                c.executemany(
+                    "UPDATE a2a_agents SET health=?, health_checked=?, latency_ms=?, "
+                    "conformance=?, last_success_at=COALESCE(?, last_success_at), "
+                    "card_url=? WHERE id=?",
+                    [updates[i] for i in idx],
+                )
+                c.executemany(
+                    "UPDATE a2a_agents SET readiness_score=?, readiness_grade=?, "
+                    "readiness_json=?, readiness_checked=? WHERE id=?",
+                    [readiness_rows[i] for i in idx],
+                )
+                c.executemany(
+                    "INSERT INTO a2a_health_history(agent_id, checked_at, status, rpc_state, "
+                    "latency_ms, http_status) VALUES(?,?,?,?,?,?)",
+                    [history_rows[i] for i in idx],
+                )
+        db.with_retry(op)
+    db.delete_older("a2a_health_history", "checked_at", now - 120 * 86400)
     log.info("a2a readiness: scored=%d", len(readiness_rows))
     _maintain_down_since("a2a_agents")
     log.info("a2a health: ok=%d degraded=%d down=%d conformant=%d",
@@ -1693,12 +1691,15 @@ def cmd_rescore() -> int:
 
     Scored on a read connection and only changed scores written, a chunk per
     transaction: as one transaction this held the write lock for minutes every
-    night while user writes failed with 503.
+    night while user writes failed with 503. payto_shared likewise.
     """
-    def payto():
-        with db.writer() as c:
-            db.update_payto_shared(c)
-    db.with_retry(payto)
+    with closing(db.connect(read_only=True)) as c:
+        changes, _ = db.payto_shared_changes(c)
+    for chunk in db.write_batches(changes, 1000):
+        def payto(chunk=chunk):
+            with db.writer() as c:
+                c.executemany("UPDATE services SET payto_shared=? WHERE id=?", chunk)
+        db.with_retry(payto)
     (x, xc), (m, mc), (a, ac) = (db.rescore_changed(table, scores)
                                  for table, scores in db.SCORE_TABLES)
     log.info("rescore: %d services, %d mcp, %d a2a (changed %d, %d, %d)",

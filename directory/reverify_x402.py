@@ -678,8 +678,7 @@ def reverify(targets=("mcp", "a2a"), workers=24, limit=None,
     for table, ups in flag_updates.items():
         if not ups:
             continue
-        for start in range(0, len(ups), 500):
-            chunk = ups[start:start + 500]
+        for chunk in db.write_batches(ups, 500):
 
             def op(chunk=chunk, table=table):
                 with db.writer() as c:
@@ -692,8 +691,7 @@ def reverify(targets=("mcp", "a2a"), workers=24, limit=None,
           f"a2a={len(flag_updates['a2a_agents'])}", flush=True)
 
     # 1b. native x402 services: sticky x402_ok=1 on verified (set-only)
-    for start in range(0, len(service_ok_rows), 500):
-        chunk = service_ok_rows[start:start + 500]
+    for chunk in db.write_batches(service_ok_rows, 500):
 
         def op(chunk=chunk):
             with db.writer() as c:
@@ -707,8 +705,7 @@ def reverify(targets=("mcp", "a2a"), workers=24, limit=None,
 
     # 1b2. descriptor resource counts, independent of payment. Gating this
     # on a payTo left most listings frozen at whatever the first crawl saw.
-    for start in range(0, len(service_resources), 500):
-        chunk = service_resources[start:start + 500]
+    for chunk in db.write_batches(service_resources, 500):
 
         def op(chunk=chunk):
             with db.writer() as c:
@@ -729,8 +726,7 @@ def reverify(targets=("mcp", "a2a"), workers=24, limit=None,
         db.with_retry(op)
     probed_services = [(int(time.time()), t["id"], t["endpoint"]) for t in tasks
                        if t["table"] == "services"]
-    for start in range(0, len(probed_services), 500):
-        chunk = probed_services[start:start + 500]
+    for chunk in db.write_batches(probed_services, 500):
 
         def op(chunk=chunk):
             with db.writer() as c:
@@ -746,8 +742,7 @@ def reverify(targets=("mcp", "a2a"), workers=24, limit=None,
     # 1c. write back what the descriptor says now. This refreshes rather than
     # fills: a listing approved with a mistyped price kept showing it forever,
     # because nothing ever re-read the manifest that contradicted it.
-    for start in range(0, len(service_payments), 500):
-        chunk = service_payments[start:start + 500]
+    for chunk in db.write_batches(service_payments, 500):
 
         def op(chunk=chunk):
             with db.writer() as c:
