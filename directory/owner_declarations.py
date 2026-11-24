@@ -368,9 +368,13 @@ def observe(row):
             primary_key = exact_endpoint(primary_url)
             entry = advertised.get(primary_key) or {}
             operation = (operations.get(primary_key) or {}).get(primary_method.lower()) or {}
+            # A descriptor may state once, at its root, that an empty JSON POST to any
+            # resource it lists is an unpaid 402 probe (brainiac.software does).
+            root_probe = (isinstance(descriptor, dict) and descriptor.get('emptyJsonProbe') is True
+                          and descriptor.get('emptyJsonProbePaid') is not True and primary_key in advertised)
             if primary_method == 'POST' and not (
                     str(entry.get('method') or '').upper() == 'POST' and entry.get('probe_body') == {}
-                    or operation and _empty_probe(operation, openapi or {})):
+                    or operation and _empty_probe(operation, openapi or {}) or root_probe):
                 raise VerificationBlocked('post_probe_not_advertised')
             samples = fields.get('resources')
             if samples:
