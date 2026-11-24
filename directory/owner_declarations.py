@@ -282,12 +282,15 @@ def _empty_probe(operation, document):
                                   'description', 'default', 'examples', '$comment'})
 
 
-def _advertised(descriptor, openapi, primary_url):
+def _advertised(descriptor, openapi, primary_url, client=None):
     from . import crawlers
     origin = primary_url.split('/', 3)[:3]
     origin = '/'.join(origin)
     resources_by_key = {}
-    for entry in crawlers._advertised_entries(descriptor or {}):
+    entries = crawlers._advertised_entries(descriptor or {})
+    if not entries and client is not None:
+        entries = crawlers._group_entries(client, descriptor, origin)
+    for entry in entries:
         entry = {'url': entry} if isinstance(entry, str) else entry
         if not isinstance(entry, dict):
             continue
@@ -357,7 +360,11 @@ def observe(row):
                                 follow_redirects=False, headers={'Accept': 'application/json', 'User-Agent': crawlers.UA}) as client:
             descriptor = _document(client, descriptor_url, primary_url, deadline, bool(fields.get('well_known_url')))
             openapi = _document(client, openapi_url, primary_url, deadline, bool(fields.get('openapi_url')))
-            advertised, operations = _advertised(descriptor, openapi, primary_url)
+            # A grouped descriptor (brainiac.software: 152 group documents) has its own
+            # budget in crawlers; it must not use up the primary payment probe's deadline.
+            reading = time.monotonic()
+            advertised, operations = _advertised(descriptor, openapi, primary_url, client)
+            deadline += time.monotonic() - reading
             primary_key = exact_endpoint(primary_url)
             entry = advertised.get(primary_key) or {}
             operation = (operations.get(primary_key) or {}).get(primary_method.lower()) or {}
