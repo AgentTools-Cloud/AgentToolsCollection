@@ -648,50 +648,6 @@ class SubmissionPriceTests(unittest.TestCase):
         self.assertTrue(resources["descriptor_observed"])
         self.assertEqual(resources["resource_count"], 1)
 
-    def test_resource_discovery_reads_grouped_descriptor(self):
-        origin = "https://safe.example.test"
-        wk = origin + "/.well-known/x402"
-        client = _RoutingClient({
-            ("GET", wk): _Response(200, {"x402Version": 2, "groups": [
-                {"id": "a", "resources": wk + "/a"},
-                {"id": "b", "resources": "/.well-known/x402/b"},
-                {"id": "c", "resources": [origin + "/c1"]},
-                {"id": "x", "resources": "https://attacker.example.test/x402"},
-            ]}),
-            ("GET", wk + "/a"): _Response(200, {
-                "resources": [origin + "/a1", origin + "/a2"]}),
-            ("GET", wk + "/b"): _Response(200, {"resources": [origin + "/b1"]}),
-        })
-        requested = []
-        route = client.get
-        client.get = lambda url, **kw: requested.append(url) or route(url, **kw)
-        crawlers._WK_CACHE.clear()
-        with patch.object(crawlers.httpx, "Client", return_value=client):
-            resources = crawlers.fetch_wellknown_resources(origin + "/a1")
-        self.assertTrue(resources["descriptor_observed"])
-        self.assertEqual(resources["well_known_url"], wk)
-        self.assertEqual(resources["resource_count"], 4)
-        self.assertEqual(
-            {item["url"] for item in resources["resource_samples"]},
-            {origin + "/a1", origin + "/a2", origin + "/b1", origin + "/c1"},
-        )
-        self.assertFalse([u for u in requested if "attacker" in u])
-
-    def test_grouped_descriptor_fetches_are_capped(self):
-        origin = "https://safe.example.test"
-        wk = origin + "/.well-known/x402"
-        responses = {("GET", wk): _Response(200, {"groups": [
-            {"resources": f"{wk}/{n}"} for n in range(3)]})}
-        for n in range(3):
-            responses[("GET", f"{wk}/{n}")] = _Response(
-                200, {"resources": [f"{origin}/r{n}"]})
-        crawlers._WK_CACHE.clear()
-        with patch.object(crawlers.httpx, "Client",
-                          return_value=_RoutingClient(responses)), \
-                patch.object(crawlers, "_MAX_DESCRIPTOR_GROUPS", 2):
-            resources = crawlers.fetch_wellknown_resources(origin + "/r0")
-        self.assertEqual(resources["resource_count"], 2)
-
     def test_verifier_uses_explicit_same_origin_probe_body(self):
         origin = "https://safe.example.test"
         endpoint = origin + "/paid"

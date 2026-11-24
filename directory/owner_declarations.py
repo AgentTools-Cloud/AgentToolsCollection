@@ -282,15 +282,12 @@ def _empty_probe(operation, document):
                                   'description', 'default', 'examples', '$comment'})
 
 
-def _advertised(descriptor, openapi, primary_url, client=None):
+def _advertised(descriptor, openapi, primary_url):
     from . import crawlers
     origin = primary_url.split('/', 3)[:3]
     origin = '/'.join(origin)
     resources_by_key = {}
-    entries = crawlers._advertised_entries(descriptor or {})
-    if not entries and client is not None:
-        entries = crawlers._group_entries(client, descriptor, origin)
-    for entry in entries:
+    for entry in crawlers._advertised_entries(descriptor or {}):
         entry = {'url': entry} if isinstance(entry, str) else entry
         if not isinstance(entry, dict):
             continue
@@ -360,21 +357,13 @@ def observe(row):
                                 follow_redirects=False, headers={'Accept': 'application/json', 'User-Agent': crawlers.UA}) as client:
             descriptor = _document(client, descriptor_url, primary_url, deadline, bool(fields.get('well_known_url')))
             openapi = _document(client, openapi_url, primary_url, deadline, bool(fields.get('openapi_url')))
-            # A grouped descriptor (brainiac.software: 152 group documents) has its own
-            # budget in crawlers; it must not use up the primary payment probe's deadline.
-            reading = time.monotonic()
-            advertised, operations = _advertised(descriptor, openapi, primary_url, client)
-            deadline += time.monotonic() - reading
+            advertised, operations = _advertised(descriptor, openapi, primary_url)
             primary_key = exact_endpoint(primary_url)
             entry = advertised.get(primary_key) or {}
             operation = (operations.get(primary_key) or {}).get(primary_method.lower()) or {}
-            # A descriptor may state once, at its root, that an empty JSON POST to any
-            # resource it lists is an unpaid 402 probe (brainiac.software does).
-            root_probe = (isinstance(descriptor, dict) and descriptor.get('emptyJsonProbe') is True
-                          and descriptor.get('emptyJsonProbePaid') is not True and primary_key in advertised)
             if primary_method == 'POST' and not (
                     str(entry.get('method') or '').upper() == 'POST' and entry.get('probe_body') == {}
-                    or operation and _empty_probe(operation, openapi or {}) or root_probe):
+                    or operation and _empty_probe(operation, openapi or {})):
                 raise VerificationBlocked('post_probe_not_advertised')
             samples = fields.get('resources')
             if samples:

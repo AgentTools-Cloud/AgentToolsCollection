@@ -1975,41 +1975,6 @@ def _advertised_entries(doc: Any) -> list:
     return out
 
 
-# Large catalogs split the descriptor: `groups` entries point at (or inline)
-# sub-descriptors with their own resources. brainiac.software: 152 groups,
-# 1,189 resources, 25 s to read sequentially.
-_MAX_DESCRIPTOR_GROUPS = 300
-_GROUP_FETCH_SECONDS = 60.0
-
-
-def _group_entries(client, doc: Any, origin: str) -> list:
-    """Resource entries of a descriptor's `groups`, one level deep, same origin."""
-    groups = doc.get("groups") if isinstance(doc, dict) else None
-    if not isinstance(groups, list):
-        return []
-    out: list = []
-    deadline = time.monotonic() + _GROUP_FETCH_SECONDS
-    for group in groups[:_MAX_DESCRIPTOR_GROUPS]:
-        ref = group.get("resources") if isinstance(group, dict) else None
-        if isinstance(ref, list):
-            out.extend(ref)
-            continue
-        if not isinstance(ref, str) or time.monotonic() > deadline:
-            continue
-        ref = ref.strip()
-        if ref.startswith("/"):
-            ref = origin + ref
-        if not _same_origin(ref, origin):
-            continue
-        try:
-            status, sub = fetch_well_known(client, ref, expected_origin=origin)
-        except public_http.UnsafeURL:
-            continue
-        if status == 200 and isinstance(sub, dict):
-            out.extend(_advertised_entries(sub))
-    return out
-
-
 def _extract_payment(obj: Any) -> dict[str, Any] | None:
     """Pull asset/network/amount/payTo out of an accepts[] / requirements body."""
     accepts = None
@@ -2219,9 +2184,8 @@ def fetch_wellknown_resources(url: str, well_known: str | None = None) -> dict[s
 
     Submitters register one URL, but a manifest routinely advertises several paid
     endpoints. Handles the shapes seen in the wild: `resources` as bare URL
-    strings, as objects (`url`/`resource` + optional `method`/`accepts`),
-    catalogs split into `groups` of sub-descriptors, and manifests with no
-    resource list at all (falls back to the submitted URL).
+    strings, as objects (`url`/`resource` + optional `method`/`accepts`), and
+    manifests with no resource list at all (falls back to the submitted URL).
 
     Returns {"well_known_url", "resource_count", "resource_samples"}.
     """
@@ -2235,7 +2199,6 @@ def fetch_wellknown_resources(url: str, well_known: str | None = None) -> dict[s
 
     doc = None
     wk_url = None
-    advertised: list = []
     seen = set()
     try:
         with public_http.client(
@@ -2246,14 +2209,13 @@ def fetch_wellknown_resources(url: str, well_known: str | None = None) -> dict[s
                     continue
                 seen.add(wk)
                 _st, obj = fetch_well_known(c, wk, expected_origin=origin)
-                if _st != 200 or not isinstance(obj, (dict, list)):
+                if _st != 200 or obj is None:
                     continue
-                entries = _advertised_entries(obj) or _group_entries(c, obj, origin)
-                if entries:
-                    doc, wk_url, advertised = obj, wk, entries
+                if isinstance(obj, (dict, list)) and _advertised_entries(obj):
+                    doc, wk_url = obj, wk
                     break
     except Exception:  # noqa: BLE001 - provenance extras never break a listing
-        doc, advertised = None, []
+        doc = None
 
     samples: list[dict[str, Any]] = []
     text_entries: list[dict[str, Any]] = []
@@ -2265,6 +2227,7 @@ def fetch_wellknown_resources(url: str, well_known: str | None = None) -> dict[s
     doc_base = str(_meta.get("baseUrl") or "").strip() or origin
     if not _same_origin(doc_base, origin):
         doc_base = origin
+    advertised = _advertised_entries(doc)
     advertised_total = 0
     for res in advertised:
         if isinstance(res, str):

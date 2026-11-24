@@ -300,64 +300,6 @@ class OwnerDeclarationTests(TemporaryDatabaseTestCase):
         self.assertEqual(len(result['resource_samples']), declarations.MAX_RESOURCES)
         self.assertEqual(result['resource_count'], 121)
 
-    def observe_docs(self, docs):
-        requested = []
-
-        def handler(request):
-            requested.append(request.url.host)
-            if request.url.path in docs:
-                return httpx.Response(200, json=docs[request.url.path])
-            if request.url.path == '/openapi.json':
-                return httpx.Response(404)
-            if request.url.path == '/v1/ping':
-                return httpx.Response(402, json={'x402Version': 2,
-                    'resource': {'url': 'https://owned.example/v1/ping'},
-                    'accepts': [{'scheme': 'exact', 'network': 'eip155:8453', 'amount': '2000',
-                                 'asset': '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913',
-                                 'payTo': '0x1111111111111111111111111111111111111111'}]})
-            raise AssertionError('unexpected verification URL')
-        jobs.crawlers._WK_CACHE.clear()
-        with patch.object(declarations.public_http, 'client', side_effect=lambda **kwargs:
-                httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=False)):
-            return declarations.observe(self.row()), requested
-
-    def test_grouped_descriptor_resources_count_and_verify(self):
-        self.edit({'method': 'POST', 'price_usdc': 0.002})
-        result, requested = self.observe_docs({
-            '/.well-known/x402': {'groups': [
-                {'id': 'a', 'resources': 'https://owned.example/.well-known/x402/a'},
-                {'id': 'b', 'resources': '/.well-known/x402/b'},
-                {'id': 'x', 'resources': 'https://elsewhere.example/.well-known/x402/x'}]},
-            '/.well-known/x402/a': {'resources': [
-                {'url': 'https://owned.example/v1/ping', 'method': 'POST', 'probe_body': {}},
-                'https://owned.example/v1/a1']},
-            '/.well-known/x402/b': {'resources': ['https://owned.example/v1/b1', 'https://owned.example/v1/b2']},
-        })
-        self.assertEqual(result['status'], 'verified', result)
-        self.assertEqual(result['resource_count'], 4)
-        self.assertNotIn('elsewhere.example', requested)
-        self.assertEqual({s['url'] for s in result['resource_samples']}, {
-            'https://owned.example/v1/ping', 'https://owned.example/v1/a1',
-            'https://owned.example/v1/b1', 'https://owned.example/v1/b2'})
-
-    def test_root_empty_json_probe_declares_the_post_primary(self):
-        self.edit({'method': 'POST', 'price_usdc': 0.002})
-        docs = {
-            '/.well-known/x402': {'emptyJsonProbe': True, 'emptyJsonProbePaid': False, 'groups': [
-                {'id': 'a', 'resources': '/.well-known/x402/a'}]},
-            '/.well-known/x402/a': {'resources': [
-                {'url': 'https://owned.example/v1/ping', 'method': 'POST'}, 'https://owned.example/v1/a1']},
-        }
-        result, _ = self.observe_docs(docs)
-        self.assertEqual(result['status'], 'verified', result)
-        self.assertEqual(result['resource_count'], 2)
-        docs['/.well-known/x402']['emptyJsonProbePaid'] = True
-        result, _ = self.observe_docs(docs)
-        self.assertEqual(result['blocker'], 'post_probe_not_advertised')
-        docs['/.well-known/x402'].update(emptyJsonProbePaid=False, groups=[])
-        result, _ = self.observe_docs(docs)
-        self.assertEqual(result['blocker'], 'post_probe_not_advertised')
-
     def test_openapi_between_512kb_and_2mb_is_accepted(self):
         self.edit({'method': 'POST', 'price_usdc': 0.002})
         result = self.observe(openapi={'openapi': '3.0.0', 'paths': {}, 'x-pad': 'x' * (800 * 1024)})
