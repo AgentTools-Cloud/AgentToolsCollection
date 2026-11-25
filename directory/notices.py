@@ -258,9 +258,9 @@ def publish_disk_report(used_pct, free_gb, candidate_gb, candidate_items, tmp_co
     summary = (f'磁盘已用 {vals["used_pct"]}%，剩余 {vals["free_gb"]} GB；'
                f'可清理候选 {vals["candidate_items"]} 项约 {vals["candidate_gb"]} GB'
                f'（其中测试遗留库副本 {vals["tmp_copies"]} 份）；异地日备最近成功 {backup}。'
-               '清单见 directory-host 的 /var/lib/agent-tools-disk-reminder/latest.txt；'
+               '清单见主机上的 /var/lib/agent-tools-disk-reminder/latest.txt；'
                '只提醒不自动删除，旧快照先归档 NFS 并核对哈希再删。')
-    return store('disk', 'warning' if warn else 'info', 'directory-host 磁盘清理提醒', summary,
+    return store('disk', 'warning' if warn else 'info', '主机磁盘清理提醒', summary,
                  event_key=routine_day_key('disk-report'), data=vals)
 
 

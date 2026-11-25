@@ -1,4 +1,4 @@
-# Live server configuration mirror (directory-host)
+# Live server configuration mirror
 
 Copied from the production host on 2026-11-15 so the repo holds what actually runs:
 

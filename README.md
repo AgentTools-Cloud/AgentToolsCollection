@@ -1,18 +1,17 @@
 # mcpserver — agent-tools.cloud directory + MCP discovery
 
-[![smithery badge](https://smithery.ai/badge/kangletian/agent-tools-x402-directory)](https://smithery.ai/servers/kangletian/agent-tools-x402-directory)
+[![Listed on mcpservers.org](https://mcpservers.org/badge.svg)](https://mcpservers.org/servers/github-com-agenttools-cloud-agenttoolscollection-tree-main-agent-tools-mcp)
 
 The server that powers [agent-tools.cloud](https://agent-tools.cloud) — an open,
 agent-readable directory of **x402 paid APIs, MCP servers and A2A agents**, probed
 daily, graded and safety-scanned, with a free MCP discovery endpoint and an A2A agent.
 Everything on the site (listings, daily statistics, scoring methodology, Blog) is
 available as JSON and through MCP tools.
-Also listed on [Smithery](https://smithery.ai/servers/kangletian/agent-tools-x402-directory).
 
 > **Note (2026-05-25):** the previously hosted paid Qwen3.6 relay and the paid
 > vertical endpoints (signal / onchain / defi / portfolio) were retired after
 > 30 days of zero external conversions. This repository now serves the
-> directory site and the free MCP discovery server only.
+> directory site, the free MCP discovery server and the A2A research agent.
 
 ## What this serves today
 
@@ -41,38 +40,39 @@ Also listed on [Smithery](https://smithery.ai/servers/kangletian/agent-tools-x40
 
 The MCP discovery server is also published as a standalone PyPI package:
 [`agent-tools-mcp`](https://pypi.org/project/agent-tools-mcp/)
-([repo](https://github.com/JoursBleu/agent-tools-mcp)).
+(source in [`agent-tools-mcp/`](agent-tools-mcp/)).
 
 ## MCP discovery tools
 
 ```
-search(intent, top_k=5, category=None, max_price_usd=None, has_mcp=None)
-ask_services(intent, top_k=5, category=None, max_price_usd=None, use_llm=True)
+search(intent=None, top_k=5, max_price_usd=None, category=None, chain=None, min_confidence=None, has_mcp=False)
+ask_services(intent, top_k=5, max_price_usd=None, category=None, chain=None, require_healthy=True, min_confidence=None, has_mcp=False, use_llm=True)
 get(slug)
 list_categories()
 stats()
-directory_stats(view="all")
 get_methodology()
 list_articles(query="", tag="", page=1)
 get_article(slug)
-search_mcp_servers(intent, top_k=5, chain=None, require_healthy=False)
+directory_stats(view="all", topic=None, month=None, api_key=None)
+search_mcp_servers(intent=None, top_k=5, chain=None, require_healthy=False, scope="remote")
 get_mcp_server(slug)
-search_a2a_agents(intent, top_k=5, x402_only=False)
-search_resources(intent, protocol=None, top_k=10)
+search_a2a_agents(intent=None, top_k=5, x402_only=False)
+search_resources(intent=None, protocol=None, top_k=10)
+register(url, name=None, description=None, mcp_url=None, category=None, chains=None, price_min_usdc=None, price_max_usdc=None, contact=None)
 scan_mcp_safety(endpoint_url, name="", description="", tools_text="")
-register(url, name=None, description=None, mcp_url=None, category=None)
-prepare_paid_verification(slug, payer, api_key=None)
-execute_paid_verification(id, signature, api_key=None)
-get_paid_verification(id, api_key=None)
 claim_service_url(url, method=None)
 verify_service_url(claim_id, token)
 get_owned_listing(kind, slug)
 edit_owned_listing(kind, slug, fields)
+create_api_key(name=None)
+prepare_paid_verification(slug, payer, api_key=None)
+execute_paid_verification(id, signature, api_key=None)
+get_paid_verification(id, api_key=None)
 ```
 
-`*_paid_verification` (remote server only, not in the `agent-tools-mcp`
-package): pay a listed x402 service once from your own wallet and record the
-result. Needs an API key from `POST /api/v1/keys`. See
+`*_paid_verification`: pay a listed x402 service once from your own wallet and
+record the result. Needs a free API key from `create_api_key` or
+`POST /api/v1/keys`. See
 [`/about#paid-verification`](https://agent-tools.cloud/about#paid-verification).
 
 `search` accepts natural-language intent and ranks by FTS5 + popularity +
@@ -94,8 +94,9 @@ Source-code-oriented rules (SQL/command/code injection) are intentionally not
 applied to natural-language descriptions to avoid false positives. Each live
 call also runs a frontier-LLM second opinion as an advisory dimension.
 Safety scans are MCP-only; the A2A agent on `POST /a2a` is an LLM research analyst (questions and reports from our data). The hosted server carries the
-full tool set above; the stdio `agent-tools-mcp` PyPI package ships the core
-search tools only.
+full tool set above; the stdio `agent-tools-mcp` PyPI package ships 16 tools
+(search, details, statistics, recommendations, paid verification and API keys,
+but no safety scans or listing claims) — see its [README](agent-tools-mcp/README.md).
 
 ## Deploy
 
@@ -103,8 +104,8 @@ Runs behind nginx as a systemd service (see `deploy/`).
 
 ```bash
 cd <install-dir>
-sudo git pull
-sudo systemctl restart mcpserver
+sudo git pull --ff-only
+sudo agent-tools-rolling-restart   # restarts the two app instances one at a time
 ```
 
 systemd units live in [`deploy/`](deploy/):
@@ -126,7 +127,8 @@ each waits for the earlier ones through `After=` in its
 
 See [`.env.example`](.env.example). Required:
 
-- `UPSTREAM_BASE_URL` / `UPSTREAM_API_KEY` — used by `/v1/models`
+- `PRIVACY_SUPPRESSION_KEY` — stable secret for the privacy-suppression digests; required, and it must stay the same for an existing database
+- `UPSTREAM_BASE_URL` / `UPSTREAM_API_KEY` — optional fallback LLM backend for `/api/v1/ask` and the safety scan
 - `AGENT_TOOLS_ASK_BASE_URL` / `AGENT_TOOLS_ASK_API_KEY` / `AGENT_TOOLS_ASK_MODEL` — LLM backend for `/api/v1/ask`
 - `AGENT_TOOLS_SAFETY_BASE_URL` / `AGENT_TOOLS_SAFETY_API_KEY` / `AGENT_TOOLS_SAFETY_MODEL` — optional override for the `scan_mcp_safety` advisory LLM (falls back to the `AGENT_TOOLS_ASK_*` backend)
 - `AGENT_TOOLS_DB_PATH` — SQLite path for the directory

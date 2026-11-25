@@ -1,5 +1,5 @@
 [Unit]
-Description=Retry encrypted Agent Tools main+Hub backups to verified NFS target
+Description=Retry encrypted Agent Tools main+Hub backups to the verified NFS target
 After=network-online.target
 Wants=network-online.target
 

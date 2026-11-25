@@ -1,5 +1,6 @@
 # agent-tools-mcp
 
+[![Listed on mcpservers.org](https://mcpservers.org/badge.svg)](https://mcpservers.org/servers/github-com-agenttools-cloud-agenttoolscollection-tree-main-agent-tools-mcp)
 [![MCP](https://img.shields.io/badge/MCP-Server-blue)](https://modelcontextprotocol.io)
 [![PyPI](https://img.shields.io/pypi/v/agent-tools-mcp)](https://pypi.org/project/agent-tools-mcp/)
 [![License](https://img.shields.io/badge/License-Apache_2.0-green.svg)](https://opensource.org/licenses/Apache-2.0)
@@ -52,8 +53,9 @@ go straight to the protocol-specific search (`search` / `search_mcp_servers` /
 `search()` / `get()` return a normalised service record: endpoint URL, method, price range,
 settlement network/asset, `payTo`, health and quality signals, plus whatever call metadata
 the provider publishes (x402 v2 `extensions.bazaar` input/output schema, OpenAPI, or an
-MCP `tools/list`). Entries come from the provider's own `/.well-known/x402`, x402scan,
-x402.org, the MCP Registry, PulseMCP and public A2A agent-cards; agent-tools.cloud
+MCP `tools/list`). Entries come from the official MCP Registry, Smithery, x402scan, the
+Coinbase CDP Bazaar, awesome-x402, public A2A registries, our own crawl of providers'
+`/.well-known` files and direct submissions; agent-tools.cloud
 re-probes them and adds health, latency and on-chain activity, but does not proxy or
 host the paid endpoints.
 

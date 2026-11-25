@@ -143,7 +143,7 @@ BUILD_VERSION = "2026-06-04.17"
 # Detail pages are stable, numerous (10k+ MCP/A2A/x402 cards) and hammered by
 # crawlers one-by-one — let the CDN cache them. Landing/list pages change with
 # the live catalogue and are the real-visitor entry points, so keep them
-# no-cache (full revalidate → counted by traffic stats).
+# no-cache (every visit revalidates with the origin).
 _CACHEABLE_DETAIL = ("/mcp/servers/", "/a2a/agents/", "/services/")
 
 
@@ -338,9 +338,7 @@ a { color: #2c7be5; }
 
 <h2>Source</h2>
 <p>
-  <a href="https://github.com/JoursBleu/mcpserver" target="_blank" rel="noopener">github.com/JoursBleu/mcpserver</a>
-  &middot;
-  <a href="https://smithery.ai/servers/kangletian/agent-tools-x402-directory" target="_blank" rel="noopener">smithery.ai listing</a>
+  <a href="https://github.com/AgentTools-Cloud/AgentToolsCollection" target="_blank" rel="noopener">github.com/AgentTools-Cloud/AgentToolsCollection</a>
 </p>
 <p class="muted">Last paid call: 2026-05-23. 30-day window showed 0 settled payments &mdash; retiring the paid stack to keep the directory layer clean.</p>
 </body>
@@ -377,7 +375,7 @@ def well_known_x402(request: Request) -> dict[str, Any]:
             {"path": "/healthz", "method": "GET", "kind": "info", "gated": False},
         ],
         "models": sorted(ALLOWED_MODELS),
-        "source": "https://github.com/JoursBleu/mcpserver",
+        "source": "https://github.com/AgentTools-Cloud/AgentToolsCollection",
     }
     # What every listed operator does to prove they control the host:
     # publish the token we issued inside the descriptor they already serve.

@@ -9,7 +9,7 @@ description = "Discover x402 paid services, MCP servers and A2A agents from any 
 readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.10"
-authors = [{ name = "JoursBleu", email = "kangletian@hotmail.com" }]
+authors = [{ name = "AgentTools-Cloud", email = "contact@agent-tools.cloud" }]
 keywords = ["mcp", "model-context-protocol", "x402", "agent-tools", "agent", "crypto", "web3", "directory"]
 classifiers = [
   "Development Status :: 4 - Beta",

@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Daily disk report for directory-host (agent-tools.cloud). Never deletes anything.
+"""Daily disk report for the directory host. Never deletes anything.
 
 Runs from agent-tools-disk-reminder.timer (daily 09:15). Writes the full list to
-REPORT and publishes counts to the Agent Tools Notice feed (category ``disk``),
-shown on the stats page (Agent Tools -> Notice).
+REPORT and publishes counts to the Agent Tools Notice feed (category ``disk``).
 The Notice row stays active while there is something to clean, the disk is at
 least ALERT_PCT full, or the off-site backup is older than 30 hours.
 """
@@ -21,7 +20,7 @@ GB = 1024 ** 3
 REPORT = Path("/var/lib/agent-tools-disk-reminder/latest.txt")
 LAST_SUCCESS = Path("/var/backups/agent-tools/last-success.json")
 # (directory, glob patterns, label). Only one-off snapshots and scratch copies;
-# working trees such as /root/codes are not cleanup candidates.
+# source checkouts are not cleanup candidates.
 SCAN = [
     ("/tmp", ["*.db"], "测试/脚本遗留的线上库副本"),
     ("/opt/mcpserver/backups", ["*"], "部署前快照"),
@@ -116,7 +115,7 @@ def collect():
 
 
 def render(du, pct, backup_age, archive, sections, total) -> str:
-    out = [f"directory-host 磁盘：已用 {pct}%（{human(du.used)} / {human(du.total)}），剩余 {human(du.free)}。",
+    out = [f"磁盘：已用 {pct}%（{human(du.used)} / {human(du.total)}），剩余 {human(du.free)}。",
            "本报告只列清单，不删除任何文件。删除前逐项确认用途；旧快照先归档到 NFS 并核对哈希，再删本地。", ""]
     if backup_age is None:
         out.append("异地日备：读不到 last-success.json。")
