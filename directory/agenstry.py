@@ -41,7 +41,7 @@ log = logging.getLogger("directory.agenstry")
 
 SITEMAP = "https://agenstry.com/sitemap.xml"
 API_BASE = "https://agenstry.com/api"
-UA = "agent-tools.cloud-crawler/0.1 (+https://agent-tools.cloud)"
+UA = "agent-tools.cloud-crawler/0.1 (+https://agent-tools.cloud/bot)"
 TIMEOUT = httpx.Timeout(connect=10.0, read=20.0, write=10.0, pool=10.0)
 
 # Anonymous clients are limited to 50 rows; larger pages require an API key.

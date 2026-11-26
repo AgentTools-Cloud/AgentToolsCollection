@@ -18,7 +18,7 @@ log = logging.getLogger("directory.wellknown")
 
 API_URL = "https://wellknown.network/api/v1/agents"
 SITE_URL = "https://wellknown.network"
-UA = "agent-tools.cloud-crawler/0.1 (+https://agent-tools.cloud)"
+UA = "agent-tools.cloud-crawler/0.1 (+https://agent-tools.cloud/bot)"
 TIMEOUT = httpx.Timeout(connect=10.0, read=60.0, write=10.0, pool=10.0)
 PAGE_LIMIT = 500
 PAGE_DELAY = 2.1

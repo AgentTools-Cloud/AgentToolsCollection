@@ -37,7 +37,7 @@ from . import db
 
 log = logging.getLogger(__name__)
 
-UA = "agent-tools.cloud-verifier/0.1 (+https://agent-tools.cloud)"
+UA = "agent-tools.cloud-verifier/0.1 (+https://agent-tools.cloud/bot)"
 _CONNECT_TIMEOUT = 5.0
 _READ_TIMEOUT = 10.0
 _MAX_BODY = 64 * 1024

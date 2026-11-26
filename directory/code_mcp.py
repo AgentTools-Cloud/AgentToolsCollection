@@ -38,7 +38,7 @@ from .popularity import _github_auth, github_repo as _github_repo
 
 log = logging.getLogger(__name__)
 
-UA = "agent-tools.cloud-crawler/0.1 (+https://agent-tools.cloud)"
+UA = "agent-tools.cloud-crawler/0.1 (+https://agent-tools.cloud/bot)"
 GITHUB_TOPIC = "mcp-server"
 GITHUB_TOPICS = ("mcp-server", "model-context-protocol", "modelcontextprotocol",
                  "mcp-tools", "mcp")

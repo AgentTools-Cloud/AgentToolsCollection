@@ -19,6 +19,15 @@ def _clean(value: Any) -> Any:
     return value
 
 
+def x402_payment_header(row: dict[str, Any]) -> str | None:
+    """Header that carries the signed payment for the x402 version the probe saw."""
+    try:
+        version = int(row.get("x402_version"))
+    except (TypeError, ValueError):
+        return None
+    return {2: "PAYMENT-SIGNATURE", 1: "X-PAYMENT"}.get(version)
+
+
 def primary_http_request(row: dict[str, Any]) -> dict[str, Any]:
     info = row.get('call_info') if isinstance(row.get('call_info'), dict) else {}
     samples = row.get('resource_samples') or info.get('resource_samples') or []
@@ -112,16 +121,21 @@ def build_call_template(row: dict[str, Any]) -> dict[str, Any]:
              else f"(about ${price_min}/call)") if price_min is not None
             else "(price advertised in the 402 response)"
         )
+        header = x402_payment_header(row)
         out["http_x402"] = {
             "url": url,
             "method": primary_method,
             "method_hint": (f"Use the {primary_method} method advertised for the primary endpoint." if method_known
                             else "No unambiguous primary method is recorded; GET is a fallback. Check the linked request schema."),
             "flow": [
-                f"1. Probe {url} and expect HTTP 402 + accepts[] if it is gated.",
+                f"1. Probe {url} and expect HTTP 402 + accepts[] if it is gated"
+                + (" (x402 v2 sends them base64-encoded in the `PAYMENT-REQUIRED` header)."
+                   if header == "PAYMENT-SIGNATURE" else "."),
                 "2. Pick an accepts[] option matching your network and budget.",
                 "3. Sign the required x402 payment payload.",
-                "4. Retry with header `X-PAYMENT: <base64 payload>`.",
+                (f"4. Retry with header `{header}: <base64 payload>`." if header
+                 else "4. Retry with header `PAYMENT-SIGNATURE: <base64 payload>` if the 402 says "
+                      "x402Version 2, or `X-PAYMENT: <base64 payload>` for version 1."),
                 "5. Parse the service response; if the probe returned docs-only JSON, follow its request schema.",
             ],
             "curl_probe": (

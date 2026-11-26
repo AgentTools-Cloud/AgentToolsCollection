@@ -16,6 +16,7 @@ agent (or a later automated facade) can settle via the facilitator.
 
 from __future__ import annotations
 
+import json
 import math
 from typing import Any
 
@@ -193,6 +194,23 @@ def code_install_hint(row: dict) -> dict:
     }
 
 
+def _mcp_auth(row: dict):
+    """Stated auth method, else what the anonymous probe saw: 401/403 means a credential is needed."""
+    auth = row.get("auth_method")
+    if (auth and str(auth).strip().lower() not in ("null", "unknown")) \
+            or row.get("http_status") not in (401, 403):
+        return auth
+    disc = row.get("auth_discovery")
+    if disc is None and row.get("auth_discovery_json"):
+        try:
+            disc = json.loads(row["auth_discovery_json"])
+        except (TypeError, ValueError):
+            disc = None
+    if isinstance(disc, dict) and (disc.get("server_metadata") or disc.get("resource_metadata")):
+        return "oauth"
+    return "required"
+
+
 def normalize_mcp_server(row: dict, include_sort_meta: bool = False) -> dict:
     """Normalise a standalone mcp_servers row into the unified shape."""
     from . import mcp_pricing
@@ -200,12 +218,13 @@ def normalize_mcp_server(row: dict, include_sort_meta: bool = False) -> dict:
     if row.get("x402_supported"):
         protocols.append("x402")
     endpoint = row.get("endpoint_url")
+    auth = _mcp_auth(row)
     call_hint: dict[str, Any] = {}
     if endpoint:
         call_hint["mcp"] = {
             "transport": row.get("transport") or "streamable-http",
             "url": endpoint,
-            "auth": row.get("auth_method"),
+            "auth": auth,
             "cost": row.get("cost_hint"),
             # Revision the server settled on when we offered it the newest one
             # we know; null when we have not completed a handshake with it.
@@ -220,7 +239,7 @@ def normalize_mcp_server(row: dict, include_sort_meta: bool = False) -> dict:
         "endpoint_url": endpoint,
         "price_hint": None,
         "access": _access_model(row.get("x402_supported"),
-                                auth=row.get("auth_method"),
+                                auth=auth,
                                 cost_hint=row.get("cost_hint")),
         "pricing": row.get("pricing"),
         "kind": row.get("kind") or ("callable" if endpoint else "catalog"),
@@ -610,7 +629,10 @@ def broker_recommend(conn, q: str, max_price_usd: float | None = None,
                 "flow": (
                     "Probe endpoint -> expect HTTP 402 + accepts[] -> pick an "
                     "accepts option for your chain/budget -> sign payload -> "
-                    "retry with header X-PAYMENT -> parse response."
+                    "retry with header "
+                    + (cards.x402_payment_header(row)
+                       or "PAYMENT-SIGNATURE (x402 v2) or X-PAYMENT (v1)")
+                    + " -> parse response."
                 ),
             },
             "detail_url": f"https://agent-tools.cloud/api/v1/services/{row.get('slug')}",

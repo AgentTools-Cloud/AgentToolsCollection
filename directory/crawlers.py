@@ -24,7 +24,7 @@ from .url_identity import exact_endpoint
 
 log = logging.getLogger("directory.crawlers")
 
-UA = "agent-tools.cloud-crawler/0.1 (+https://agent-tools.cloud)"
+UA = "agent-tools.cloud-crawler/0.1 (+https://agent-tools.cloud/bot)"
 TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=10.0)
 
 
@@ -3204,6 +3204,31 @@ def _summarize_tools(tools: list) -> list:
 
 
 MCP_LATEST_REVISION = "2026-07-28"
+_MCP_REVISION_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def _mcp_meta(revision: str) -> dict:
+    return {"io.modelcontextprotocol/protocolVersion": revision,
+            "io.modelcontextprotocol/clientCapabilities": {}}
+
+
+def _mcp_discover_revision(client, endpoint: str, headers: dict) -> str | None:
+    """Newest revision a server lists in ``server/discover`` (2026-07-28 has no initialize)."""
+    body = {"jsonrpc": "2.0", "id": 3, "method": "server/discover",
+            "params": {"_meta": _mcp_meta(MCP_LATEST_REVISION)}}
+    hdr = {**headers, "MCP-Protocol-Version": MCP_LATEST_REVISION, "Mcp-Method": "server/discover"}
+    try:
+        r = client.post(endpoint, json=body, headers=hdr)
+        parsed = _mcp_parse_response(r) if r.status_code < 300 else None
+    except public_http.UnsafeURL:
+        raise
+    except Exception:
+        return None
+    result = parsed.get("result") if isinstance(parsed, dict) else None
+    versions = result.get("supportedVersions") if isinstance(result, dict) else None
+    known = [v for v in versions if isinstance(v, str) and _MCP_REVISION_RE.fullmatch(v)] \
+        if isinstance(versions, list) else []
+    return max(known) if known else None
 
 
 def _probe_mcp_sse(client, endpoint: str, headers: dict) -> bool:
@@ -3301,6 +3326,10 @@ def probe_mcp_health(endpoint: str) -> dict:
             _result = _init_parsed.get("result")
             server_rev = (_result or {}).get("protocolVersion") \
                 if isinstance(_result, dict) else None
+            modern = None
+            if not server_rev and isinstance(_init_parsed.get("error"), dict):
+                modern = _mcp_discover_revision(c, endpoint, headers)
+                server_rev = modern
             sid = r.headers.get("mcp-session-id") or r.headers.get("Mcp-Session-Id")
             h2 = dict(headers)
             if sid:
@@ -3308,18 +3337,25 @@ def probe_mcp_health(endpoint: str) -> dict:
             conformance = "partial"
             tool_count = None
             try:
-                c.post(endpoint, json={"jsonrpc": "2.0",
-                                       "method": "notifications/initialized"},
-                       headers=h2)
+                if not modern:
+                    c.post(endpoint, json={"jsonrpc": "2.0",
+                                           "method": "notifications/initialized"},
+                           headers=h2)
             except public_http.UnsafeURL:
                 raise
             except Exception:
                 pass
             tool_list = None
             try:
-                rt = c.post(endpoint, json={"jsonrpc": "2.0", "id": 2,
-                                            "method": "tools/list", "params": {}},
-                            headers=h2)
+                if modern:
+                    rt = c.post(endpoint, json={"jsonrpc": "2.0", "id": 2, "method": "tools/list",
+                                                "params": {"_meta": _mcp_meta(modern)}},
+                                headers={**headers, "MCP-Protocol-Version": modern,
+                                         "Mcp-Method": "tools/list"})
+                else:
+                    rt = c.post(endpoint, json={"jsonrpc": "2.0", "id": 2,
+                                                "method": "tools/list", "params": {}},
+                                headers=h2)
                 if rt.status_code < 300:
                     parsed = _mcp_parse_response(rt)
                     if isinstance(parsed, dict) and not parsed.get("error"):

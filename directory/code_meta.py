@@ -29,7 +29,7 @@ from . import db
 
 log = logging.getLogger(__name__)
 
-UA = "agent-tools.cloud-crawler/0.1 (+https://agent-tools.cloud)"
+UA = "agent-tools.cloud-crawler/0.1 (+https://agent-tools.cloud/bot)"
 REFRESH_DAYS = 30
 REFRESH_SPREAD_DAYS = 10     # per-package offset so a bulk import does not expire at once
 GONE_CONFIRM_SECONDS = 86400

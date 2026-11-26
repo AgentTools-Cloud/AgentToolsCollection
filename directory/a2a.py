@@ -34,7 +34,7 @@ PROTOCOL_VERSION = "0.3.0"  # legacy top-level field kept for 0.3 clients
 SUPPORTED_A2A_VERSIONS = ("1.0", "0.3")  # preference order, Major.Minor
 AGENT_VERSION = "0.9.0"
 
-UA = "agent-tools.cloud-a2a/0.1 (+https://agent-tools.cloud)"
+UA = "agent-tools.cloud-a2a/0.1 (+https://agent-tools.cloud/bot)"
 TIMEOUT = httpx.Timeout(connect=10.0, read=20.0, write=10.0, pool=10.0)
 
 # Card path variants seen across A2A directories / frameworks. Tried in order

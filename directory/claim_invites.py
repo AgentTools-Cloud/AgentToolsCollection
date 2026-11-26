@@ -71,6 +71,7 @@ SOURCE_LABELS = {
 TABLES = {"x402": "services", "mcp": "mcp_servers", "a2a": "a2a_agents"}
 VIEW_PATHS = {"x402": "/services/", "mcp": "/mcp/servers/", "a2a": "/a2a/agents/"}
 UNSUBSCRIBE_PATH = "/email/claim-invitations/unsubscribe"
+CONTACT_UA = "AgentTools-ContactReview/1.0 (+https://agent-tools.cloud/bot)"
 _SUFFIXES = tldextract.TLDExtract(
     cache_dir=None, suffix_list_urls=(), include_psl_private_domains=True,
 )
@@ -280,7 +281,7 @@ def fetch_public_contact_page(url: str, *, host: str, http_client=None) -> dict:
     own_client = http_client is None
     http_client = http_client or public_http.client(
         timeout=4.0, follow_redirects=False, trust_env=False,
-        headers={"User-Agent": "AgentTools-ContactReview/1.0 (+https://agent-tools.cloud)",
+        headers={"User-Agent": CONTACT_UA,
                  "Accept": "text/html,application/json,text/plain;q=0.8"},
     )
     started = time.monotonic()

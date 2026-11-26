@@ -126,7 +126,7 @@
       <pre class="bg-slate-900 text-slate-100 text-xs p-3 rounded-lg overflow-x-auto"><code>curl -X POST {{ m.endpoint_url }} \
   -H 'Content-Type: application/json' \
   -H 'Accept: application/json, text/event-stream' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'</code></pre>
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"curl","version":"1.0"}}}'</code></pre>
     </div>
     {% endif %}
     {% if m.homepage_url %}

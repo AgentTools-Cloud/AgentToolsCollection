@@ -726,6 +726,25 @@ def claim_page(request: Request):
     return TEMPLATES.TemplateResponse(request, "claim.html", {"request": request})
 
 
+@router.get("/bot", response_class=HTMLResponse, include_in_schema=False)
+def bot_page(request: Request):
+    from . import a2a, claim_invites, crawlers, ownership, paid_verify
+    agents = [
+        (crawlers.UA, "Discovery and daily checks: reads public directories and "
+         "/.well-known files, opens MCP endpoints (initialize, tools/list) and "
+         "sends x402 endpoints an unpaid request that should answer HTTP 402."),
+        (a2a.UA, "Reads A2A agent cards and checks the endpoint they declare."),
+        (ownership.UA, "Reads the verification token an owner publishes while "
+         "claiming a listing (see /docs/claim)."),
+        (claim_invites.CONTACT_UA, "Reads a listed service's public contact page "
+         "to find the address it publishes for its operator."),
+        (paid_verify.UA, "Only when a user pays a listed x402 service once from "
+         "their own wallet (paid verification)."),
+    ]
+    return TEMPLATES.TemplateResponse(request, "bot.html",
+                                      {"request": request, "agents": agents})
+
+
 # Both were public briefly: /ownership named after the internal table, /claim
 # without saying it is documentation. Redirect straight to the final URL rather
 # than chaining.

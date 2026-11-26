@@ -26,7 +26,7 @@ from . import public_http
 VERSION = 1
 RECHECK_DAYS = 7
 CHECKS = ("challenge", "resource_metadata", "server_metadata", "pkce", "registration")
-UA = "agent-tools.cloud-crawler/0.1 (+https://agent-tools.cloud)"
+UA = "agent-tools.cloud-crawler/0.1 (+https://agent-tools.cloud/bot)"
 _BEARER = re.compile(r"(?:^|,)\s*bearer\b", re.I)
 _RESOURCE_METADATA = re.compile(r'resource_metadata\s*=\s*"?([^",\s]+)', re.I)
 _TIMEOUT = httpx.Timeout(connect=5.0, read=8.0, write=5.0, pool=5.0)

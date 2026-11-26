@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}Crawler — agent-tools.cloud{% endblock %}
+{% block content %}
+<section class="mb-8 max-w-3xl">
+  <h1 class="text-3xl md:text-4xl font-extrabold tracking-tight">Our crawler</h1>
+  <p class="text-slate-500 mt-2">agent-tools.cloud checks the x402 services, MCP servers and A2A agents it lists. These are the user agents it sends and what each one does.</p>
+</section>
+
+<section class="max-w-3xl space-y-4 mb-8">
+  {% for ua, what in agents %}
+  <div class="svc-card p-5">
+    <code class="mono text-sm break-all">{{ ua }}</code>
+    <p class="text-sm text-slate-600 mt-2">{{ what }}</p>
+  </div>
+  {% endfor %}
+</section>
+
+<section class="max-w-3xl text-sm text-slate-600 space-y-3 mb-8">
+  <h2 class="text-lg font-semibold text-slate-900">How it behaves</h2>
+  <p>Listed endpoints are checked about once a day. Checks never sign or send a payment; only the paid-verification client above pays, and only when a user starts it from their own wallet.</p>
+  <p>Identify the crawler by its user agent. We do not publish IP ranges.</p>
+  <h2 class="text-lg font-semibold text-slate-900 pt-2">Stop or change the checks</h2>
+  <p>If you operate a listed service, you can <a class="text-blue-600 hover:underline" href="/docs/claim">claim the listing</a> to edit or retire it. For anything else, email <a class="text-blue-600 hover:underline" href="mailto:contact@agent-tools.cloud">contact@agent-tools.cloud</a>.</p>
+</section>
+{% endblock %}
