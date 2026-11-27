@@ -356,6 +356,26 @@ def _mirror_service_in_tx(conn, service: dict, protect_owner=None,
                      (int(existing["id"]),))
         return {"duplicate": True, "created": False,
                 "listing_id": int(existing["id"]), "slug": existing["slug"]}
+    if by_source is None and existing is None:
+        # Another paid path of an origin already listed with the same payTo is
+        # the same seller: attach the mirror there instead of minting a
+        # "<slug>-x402" row per path. Without this, every directory that lists
+        # a site's root grew a twin row the night reverify found the paid path
+        # (436 such pairs by 2026-11-27, 370 of them since the 11-03 fold).
+        payment = service.get("payment")
+        pay_to = payment.get("pay_to") if isinstance(payment, dict) else None
+        same = db.find_same_origin_service(conn, service.get("url"), pay_to)
+        if same is not None:
+            recorded = db._record_source(conn, "x402", int(same["id"]), (
+                service.get("source"), service.get("source_id"),
+                service.get("source_url"),
+            ))
+            if not recorded:
+                return {"identity_conflict": True, "created": False}
+            conn.execute("UPDATE services SET x402_ok=1 WHERE id=?",
+                         (int(same["id"]),))
+            return {"duplicate": True, "same_origin": True, "created": False,
+                    "listing_id": int(same["id"]), "slug": same["slug"]}
     if (by_source is not None and existing is not None
             and int(by_source["id"]) != int(existing["id"])):
         return {"identity_conflict": True, "created": False}
