@@ -128,6 +128,25 @@ def _set_version(server: Any, version: str) -> None:
         low.version = version
 
 
+def _tool_kwargs(title: str, *, read_only: bool = True, idempotent: bool = True,
+                 destructive: bool = False) -> dict[str, Any]:
+    """`title` and tool annotations, passed only when the installed mcp supports them."""
+    import inspect
+    params = inspect.signature(_Server.tool).parameters
+    kw: dict[str, Any] = {}
+    if "title" in params:
+        kw["title"] = title
+    if "annotations" in params:
+        try:
+            from mcp.types import ToolAnnotations
+        except ImportError:  # pragma: no cover - very old mcp
+            return kw
+        kw["annotations"] = ToolAnnotations(
+            title=title, readOnlyHint=read_only, destructiveHint=destructive,
+            idempotentHint=idempotent, openWorldHint=True)
+    return kw
+
+
 def build_server() -> Any:
     from . import __version__
     mcp = _Server(
@@ -150,16 +169,18 @@ def build_server() -> Any:
     _set_version(mcp, __version__)
 
     # ------------------------------------------------------------------ x402
-    @mcp.tool()
+    @mcp.tool(**_tool_kwargs("Search x402 paid APIs"))
     async def search(
         intent: str,
         top_k: int = 5,
         max_price_usd: float | None = None,
         category: str | None = None,
     ) -> dict[str, Any]:
-        """Find **x402 paid services** matching a natural-language intent.
+        """Search **x402 paid HTTP APIs only** (pay-per-call in USDC) and return a raw ranked list.
 
-        x402 services are HTTP APIs the agent pays for per call (USDC on Base etc.).
+        Pick this when you already know you want an x402 API. For MCP servers use
+        `search_mcp_servers`, for A2A agents `search_agents`, for all three at once
+        `search_all`; for a written recommendation use `ask`. Read-only; never pays.
 
         Args:
             intent: What the agent wants to do, in plain English or Chinese
@@ -167,7 +188,13 @@ def build_server() -> Any:
             top_k: Max number of services to return (default 5, max 25).
             max_price_usd: Hard upper bound on per-call price in USD. Services
                 whose cheapest call exceeds this are filtered out.
-            category: Optional category filter (see `list_categories`).
+            category: Optional category slug from `list_categories` (e.g. "search").
+
+        Returns:
+            `{intent, count, items}`. Each item has `slug`, `name`, `description`,
+            `url`, `category`, `chains`, `price_min`/`price_max` (USD), `health`,
+            `confidence`, `tx_30d` (EIP-3009 USDC payments in 30 days), `payment`
+            and `call_info`. Pass `slug` to `get` for the full call template.
         """
         top_k = max(1, min(int(top_k), 25))
         params: dict[str, Any] = {"q": intent, "limit": top_k}
@@ -191,33 +218,64 @@ def build_server() -> Any:
             "items": items[:top_k],
         }
 
-    @mcp.tool()
+    @mcp.tool(**_tool_kwargs("Get x402 API details"))
     async def get(slug: str) -> dict[str, Any]:
-        """Get full details (URL, price, schema, call template) of an x402 service by slug."""
+        """Get the full record of one **x402 paid API** by its slug.
+
+        Use after `search`, `recommend` or `ask` to learn exactly how to call and
+        pay. For MCP servers use `get_mcp_server`, for A2A agents `get_agent`.
+        Read-only; never pays.
+
+        Args:
+            slug: Service slug from a search result (e.g. "some-weather-api").
+
+        Returns:
+            The service card: `url`, `description`, `price_min`/`price_max`,
+            `chains`, `payment` (scheme, network, asset, `pay_to`, `accepts`),
+            `call` and `call_info` (how to call, sample resources), `health`,
+            `latency_ms`, `quality`, `readiness_grade` and on-chain demand
+            (`payto_payers_30d`, `payto_tx_30d`).
+            A retired listing returns `{"error": "retired", "status": 410}`.
+        """
         return await _get(f"/api/v1/services/{slug}")
 
-    @mcp.tool()
+    @mcp.tool(**_tool_kwargs("List x402 categories"))
     async def list_categories() -> dict[str, Any]:
-        """List all available x402 service categories in the directory."""
+        """List the category slugs used for **x402 paid APIs**, with how many services each has.
+
+        Use it to pick a valid `category` for `search` or `ask`, or to browse
+        what kinds of paid APIs exist. Takes no arguments. Read-only.
+
+        Returns:
+            `{categories: [{category, count}, ...]}`, largest first.
+        """
         return await _get("/api/v1/categories")
 
     # ------------------------------------------------------------------- MCP
-    @mcp.tool()
+    @mcp.tool(**_tool_kwargs("Search MCP servers"))
     async def search_mcp_servers(
         intent: str,
         top_k: int = 5,
         chain: str | None = None,
     ) -> dict[str, Any]:
-        """Find **MCP servers** (tool/context servers) matching an intent.
+        """Search **remote MCP servers only** (tool/context servers you connect to) by intent.
 
-        Use this when the agent wants extra tools or context via the Model
-        Context Protocol, rather than a one-shot paid HTTP call.
+        Use this when the agent wants extra tools via the Model Context Protocol
+        rather than a one-shot paid HTTP call (`search`) or a peer agent
+        (`search_agents`). Only servers with a reachable endpoint that we probe
+        daily are returned. Read-only.
 
         Args:
             intent: What capability the agent is looking for, plain language.
             top_k: Max number of servers to return (default 5, max 25).
             chain: Optional chain filter for x402-capable MCP servers
                 (e.g. "base", "solana").
+
+        Returns:
+            `{intent, count, total_matched, servers}`. Each server has `slug`,
+            `name`, `description`, `endpoint_url`, `access` (open / key / x402),
+            `health_status`, `confidence` and `call_hint`. Pass `slug` to
+            `get_mcp_server` for transport and tool details.
         """
         top_k = max(1, min(int(top_k), 25))
         params: dict[str, Any] = {"q": intent, "limit": top_k}
@@ -232,27 +290,48 @@ def build_server() -> Any:
             "servers": servers[:top_k],
         }
 
-    @mcp.tool()
+    @mcp.tool(**_tool_kwargs("Get MCP server details"))
     async def get_mcp_server(slug: str) -> dict[str, Any]:
-        """Get full details (endpoint URL, transport, capabilities) of an MCP server by slug."""
+        """Get the full record of one **MCP server** by its slug.
+
+        Use after `search_mcp_servers` (or a `search_all` result with protocol
+        "mcp") to decide whether and how to connect. Read-only.
+
+        Args:
+            slug: MCP server slug from a search result.
+
+        Returns:
+            `endpoint_url`, `transport`, `auth_method`, `tools` (names and
+            schemas seen by our probe), `health`, `latency_ms`, `conformance`,
+            `safety_verdict`/`safety_reasons`, `quality`, `readiness_grade`,
+            `license` and source repository.
+            A retired listing returns `{"error": "retired", "status": 410}`.
+        """
         return await _get(f"/api/v1/mcp/servers/{slug}")
 
     # ------------------------------------------------------------------- A2A
-    @mcp.tool()
+    @mcp.tool(**_tool_kwargs("Search A2A agents"))
     async def search_agents(
         intent: str,
         top_k: int = 5,
         x402_only: bool = False,
     ) -> dict[str, Any]:
-        """Find **A2A agents** (peer agents) the agent can delegate a task to.
+        """Search **A2A agents only** (peer agents you can delegate a task to) by intent.
 
-        A2A agents publish an agent-card and an A2A JSON-RPC endpoint; use this
-        when the task is better handed off to another agent than called directly.
+        A2A agents publish an agent card and a JSON-RPC endpoint. Use this when
+        the task is better handed to another agent than done with a single API
+        call (`search`) or an MCP tool (`search_mcp_servers`). Read-only.
 
         Args:
             intent: The task or capability to delegate, plain language.
             top_k: Max number of agents to return (default 5, max 25).
             x402_only: If true, only return agents that accept x402 payment.
+
+        Returns:
+            `{intent, count, agents}`. Each agent has `slug`, `name`,
+            `description`, `endpoint_url`, `card_url`, `skill_names`,
+            `auth_schemes`, `x402_supported`, `health`, `latency_ms` and
+            `conformance`. Pass `slug` to `get_agent` for the full card.
         """
         top_k = max(1, min(int(top_k), 25))
         params: dict[str, Any] = {"q": intent, "limit": top_k}
@@ -266,27 +345,49 @@ def build_server() -> Any:
             "agents": agents[:top_k],
         }
 
-    @mcp.tool()
+    @mcp.tool(**_tool_kwargs("Get A2A agent card"))
     async def get_agent(slug: str) -> dict[str, Any]:
-        """Get the full A2A agent card (endpoint, skills, auth, x402 info) by slug."""
+        """Get the full record of one **A2A agent** by its slug.
+
+        Use after `search_agents` (or a `search_all` result with protocol "a2a")
+        to see how to send it a task. Read-only.
+
+        Args:
+            slug: A2A agent slug from a search result.
+
+        Returns:
+            `endpoint_url`, `card_url`, `protocol_version`, `preferred_transport`,
+            `skills` (id, name, description, input/output modes), `auth_schemes`,
+            x402 payment info (`x402_supported`, `price_hint_usd`, `payto`),
+            latest health, latency and protocol conformance.
+            A retired listing returns `{"error": "retired", "status": 410}`.
+        """
         return await _get(f"/api/v1/a2a/agents/{slug}")
 
     # --------------------------------------------------------------- unified
-    @mcp.tool()
+    @mcp.tool(**_tool_kwargs("Search all resource types"))
     async def search_all(
         intent: str,
         protocol: str | None = None,
         top_k: int = 8,
     ) -> dict[str, Any]:
-        """Unified search across **x402 services, MCP servers and A2A agents**.
+        """Search **x402 APIs, MCP servers and A2A agents together** in one ranked list.
 
-        Use this when you don't yet know which resource type fits best — it
-        ranks all three together and tags each result with its `protocol`.
+        Start here when you don't know which kind of resource fits. If you do,
+        the typed tools (`search`, `search_mcp_servers`, `search_agents`) return
+        richer per-type fields. Returns a list, not a written answer (see `ask`).
+        Read-only.
 
         Args:
             intent: What the agent wants to accomplish, plain language.
             protocol: Optional filter, one of "x402", "mcp", "a2a". Omit for all.
             top_k: Max number of results to return (default 8, max 50).
+
+        Returns:
+            `{query, protocol, count, total_matched, resources}`. Each resource
+            has `type` (x402 / mcp / a2a), `slug`, `name`, `description`,
+            `endpoint_url`, `access`, `price_hint`, `health_status`, `confidence`
+            and `call_hint`. Use `get`, `get_mcp_server` or `get_agent` by type.
         """
         top_k = max(1, min(int(top_k), 50))
         params: dict[str, Any] = {"q": intent, "limit": top_k}
@@ -295,9 +396,21 @@ def build_server() -> Any:
         return await _get("/api/v1/resources/search", params)
 
     # ----------------------------------------------------------------- stats
-    @mcp.tool()
+    @mcp.tool(**_tool_kwargs("Current directory counts"))
     async def stats() -> dict[str, Any]:
-        """Directory-wide stats across all protocols: x402 services, MCP servers, A2A agents."""
+        """Current size of the directory: live counts per protocol, no history or rankings.
+
+        A quick check of how many x402 services, MCP servers and A2A agents are
+        indexed and how many are healthy right now. For daily ecosystem
+        statistics, findings, top searches, topic or monthly reports use
+        `directory_stats` instead. Takes no arguments. Read-only.
+
+        Returns:
+            `{x402, mcp, a2a}`. `x402` has `total`, `healthy`, `by_chain`;
+            `mcp` and `a2a` have `total`, `healthy`, `conformant`,
+            `x402_capable`, `new_7d` and access counts. A part that fails to
+            load is returned as `{"error": ...}` instead of failing the call.
+        """
         out: dict[str, Any] = {}
         try:
             out["x402"] = await _get("/api/v1/stats")
@@ -314,7 +427,7 @@ def build_server() -> Any:
         return out
 
     # ------------------------------------------------------------- guidance
-    @mcp.tool()
+    @mcp.tool(**_tool_kwargs("Ask for a recommendation", idempotent=False))
     async def ask(
         question: str,
         top_k: int = 5,
@@ -324,10 +437,13 @@ def build_server() -> Any:
         require_healthy: bool = True,
         use_llm: bool = True,
     ) -> dict[str, Any]:
-        """Ask in plain language which **x402 / MCP services** best fit a task.
+        """Get a **written answer** on which x402 / MCP services best fit a task.
 
-        Returns a short written `answer` plus the ranked services it is based on.
-        Use this when you want a recommendation, not just a raw search list.
+        The only tool that returns prose: an LLM writes a short `answer` grounded
+        in directory candidates, plus the ranked services it used. Use it when
+        you want advice; use `search` / `search_all` for a plain list, or
+        `recommend` for a scored x402 shortlist with payment hints. Rate-limited;
+        read-only; never pays.
 
         Args:
             question: The task, e.g. "translate a document to Japanese under $0.05".
@@ -337,6 +453,12 @@ def build_server() -> Any:
             category: Optional category filter (see `list_categories`).
             require_healthy: Only consider services whose latest probe was healthy.
             use_llm: Set false for a faster deterministic ranking without the written answer.
+
+        Returns:
+            `{query, answer, recommendations, follow_up_questions, llm_used,
+            candidate_count}`. Each recommendation has `slug`, `name`, `url`,
+            `why`, `confidence`, `next_step` and a `service_card`. `answer` is
+            empty when `use_llm` is false or the LLM is unavailable.
         """
         return await _post("/api/v1/ask", {
             "query": question, "limit": max(1, min(int(top_k), 10)),
@@ -344,7 +466,7 @@ def build_server() -> Any:
             "require_healthy": require_healthy, "use_llm": use_llm,
         })
 
-    @mcp.tool()
+    @mcp.tool(**_tool_kwargs("Shortlist x402 APIs to pay"))
     async def recommend(
         intent: str,
         top_k: int = 5,
@@ -352,10 +474,12 @@ def build_server() -> Any:
         chain: str | None = None,
         require_healthy: bool = True,
     ) -> dict[str, Any]:
-        """Get a **scored shortlist of x402 services** with price and payment hints.
+        """Get a **scored x402 shortlist ready to pay**: score, price and payment hints per API.
 
-        Each recommendation carries a `score`, `price_hint` and `pay_hint`. This is
-        discovery only: nothing is paid; settle with your own x402 client.
+        Use when you intend to call and pay an x402 API next and want the
+        payment details up front. Unlike `search` it adds a `score` and
+        `pay_hint`; unlike `ask` it writes no prose. Discovery only: nothing is
+        paid; settle with your own x402 client. Read-only.
 
         Args:
             intent: What the agent wants to do, plain language.
@@ -363,6 +487,11 @@ def build_server() -> Any:
             max_price_usd: Optional upper bound on per-call price in USD.
             chain: Optional settlement chain filter (e.g. "base").
             require_healthy: Only include services whose latest probe was healthy.
+
+        Returns:
+            `{query, count, settlement, note, recommendations}`. Each has `slug`,
+            `name`, `score`, `price_hint`, `pay_hint` (scheme, chains, price, flow),
+            `call_hint`, `health_status`, `confidence`, `tx_30d` and `chains`.
         """
         return await _get("/api/v1/broker/recommend", {
             "q": intent, "limit": max(1, min(int(top_k), 20)),
@@ -372,7 +501,8 @@ def build_server() -> Any:
 
     # ------------------------------------------------- paid verification
 
-    @mcp.tool()
+    @mcp.tool(**_tool_kwargs("Quote a paid verification", read_only=False,
+                             idempotent=False))
     async def prepare_paid_verification(slug: str, payer: str,
                                         api_key: str | None = None) -> dict[str, Any]:
         """Quote a sponsored paid verification of an x402 service.
@@ -392,7 +522,8 @@ def build_server() -> Any:
         return await _authed("POST", f"/api/v1/services/{slug}/paid-verifications",
                              key, {"payer": payer})
 
-    @mcp.tool()
+    @mcp.tool(**_tool_kwargs("Run a paid verification", read_only=False,
+                             idempotent=False))
     async def execute_paid_verification(id: str, signature: str,
                                         api_key: str | None = None) -> dict[str, Any]:
         """Send the signed payment to the service once and score the result.
@@ -411,13 +542,25 @@ def build_server() -> Any:
         return await _authed("POST", f"/api/v1/paid-verifications/{id}/execute",
                              key, {"signature": signature})
 
-    @mcp.tool()
+    @mcp.tool(**_tool_kwargs("Read a paid verification"))
     async def get_paid_verification(id: str, api_key: str | None = None) -> dict[str, Any]:
-        """Read one of your own paid verifications.
+        """Read the status and result of one of **your own** paid verifications.
+
+        Third step of the paid-verification flow (`prepare_paid_verification` ->
+        `execute_paid_verification` -> this). Use it to re-check a result later,
+        e.g. after an `indeterminate` timeout. Read-only; never pays. Needs the
+        same account API key that created the verification.
 
         Args:
-            id: Verification id.
+            id: The `id` returned by `prepare_paid_verification`.
             api_key: Optional; defaults to AGENT_TOOLS_API_KEY.
+
+        Returns:
+            `status` (prepared, dispatching, succeeded, delivery_failed,
+            payment_rejected, failed_before_dispatch, indeterminate, expired),
+            `amount_usd`, `settled`, `checks` (response and settlement checks)
+            and the resulting score. Without a key returns
+            `{"error": "unauthorized", ...}`.
         """
         key = _api_key(api_key)
         if not key:
@@ -425,7 +568,8 @@ def build_server() -> Any:
         return await _authed("GET", f"/api/v1/paid-verifications/{id}", key)
 
     # ------------------------------------------------------------ account
-    @mcp.tool()
+    @mcp.tool(**_tool_kwargs("Create a free API key", read_only=False,
+                             idempotent=False))
     async def create_api_key(name: str | None = None) -> dict[str, Any]:
         """Create a free agent-tools.cloud account API key. No sign-up needed.
 
@@ -454,21 +598,27 @@ def build_server() -> Any:
                             "to the user or logs. Set AGENT_TOOLS_API_KEY or pass api_key.")}
 
     # ------------------------------------------------------- statistics
-    @mcp.tool()
+    @mcp.tool(**_tool_kwargs("Ecosystem statistics and reports"))
     async def directory_stats(view: str = "all", topic: str | None = None,
                               month: str | None = None,
                               api_key: str | None = None) -> dict[str, Any]:
-        """Daily statistics on the agent-tool ecosystem as seen by our probes.
+        """Daily **ecosystem statistics and reports** from our probes (not live directory counts).
 
-        Counts (indexed, reachable, protocol-verified, ready), findings, probe
-        outcomes and top searches. With an account key the topic and search
-        lists are complete; without one they are shortened.
+        The published daily snapshot: counts (indexed, reachable,
+        protocol-verified, ready), findings, probe outcomes, top searches by
+        distinct searchers; or one topic page; or one monthly report. For a
+        quick live count of listings use `stats`. With an account key the topic
+        and search lists are complete; without one they are shortened. Read-only.
 
         Args:
             view: "all", "mcp", "x402" or "a2a".
             topic: Optional topic word (e.g. "payment", "weather") for that topic instead.
             month: Optional "YYYY-MM" for that monthly report instead.
             api_key: Optional; defaults to AGENT_TOOLS_API_KEY.
+
+        Returns:
+            The summary, topic or monthly report as JSON (CC BY 4.0), with its
+            snapshot date; on an HTTP error `{"error": "http_error", ...}`.
         """
         key = _api_key(api_key)
         if topic:
