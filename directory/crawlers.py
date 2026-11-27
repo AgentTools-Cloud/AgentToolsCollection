@@ -639,6 +639,7 @@ def fetch_x402scan() -> list:
         mcp_server_urls: set = set()
         mcp_resource_urls: set = set()
         paid_resource_urls: set = set()
+        updated_at: int | None = None
         for res in resources:
             if not isinstance(res, dict):
                 continue
@@ -649,6 +650,9 @@ def fetch_x402scan() -> list:
             )]
             if not accepts:
                 continue
+            seen_at = _iso_epoch(res.get("lastUpdated"))
+            if seen_at is not None and (updated_at is None or seen_at > updated_at):
+                updated_at = seen_at
             if res_url.startswith(("http://", "https://")):
                 paid_resource_urls.add(res_url)
             # Heuristic: any resource path ending with /mcp /sse /streamable
@@ -778,12 +782,28 @@ def fetch_x402scan() -> list:
             },
             "source": "x402scan", "source_id": str(origin.get("id") or origin_url),
             "tags": sorted(tag_set), "region": "global",
+            # When x402scan last read these resources; upsert_service keeps a
+            # newer live quote of ours instead (not a column).
+            "source_updated_at": updated_at,
         })
     if dropped:
         # Ingest what came back, but a short answer must not read as a full one.
         raise PartialCrawl(
             rows, "%d origin(s) dropped after retries" % dropped)
     return rows
+
+
+def _iso_epoch(value: Any) -> int | None:
+    """Epoch seconds of an ISO-8601 timestamp (Z or offset); None if unreadable."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        dt = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp())
 
 
 def _same_origin(left: str, right: str) -> bool:
@@ -2281,17 +2301,26 @@ def _decode_payment_required_header(headers: Any) -> dict[str, Any] | None:
     return obj
 
 
-def _challenge_payment(response, url: str) -> dict[str, Any] | None:
+def _challenge_payment(response, url: str,
+                       same_origin: bool = False) -> dict[str, Any] | None:
+    """Payment terms of a 402 challenge for `url`.
+
+    By default the challenge must name `url` itself. With `same_origin` a
+    challenge naming another resource of the same origin also counts: sellers
+    behind one dispatcher answer POST /sentiment with resource
+    /task?task=sentiment. Only used for resources the origin's own descriptor
+    advertises, so a relay naming a foreign host is still refused.
+    """
     header_obj = _decode_payment_required_header(response.headers)
     header_payment = (_extract_payment(header_obj)
                       if header_obj is not None else None)
     if (_valid_payment(header_payment)
-            and _challenge_matches_url(header_obj, url)):
+            and _challenge_matches_url(header_obj, url, same_origin)):
         return header_payment
     body = _parse_json_body(response.content, url)
     body_payment = _extract_payment(body) if body is not None else None
     return (body_payment if _valid_payment(body_payment)
-            and _challenge_matches_url(body, url) else None)
+            and _challenge_matches_url(body, url, same_origin) else None)
 
 
 def challenge_facts(response) -> dict[str, Any]:
@@ -2330,7 +2359,7 @@ def challenge_facts(response) -> dict[str, Any]:
     return facts
 
 
-def _challenge_matches_url(obj: Any, url: str) -> bool:
+def _challenge_matches_url(obj: Any, url: str, same_origin: bool = False) -> bool:
     resources: list[str] = []
 
     def collect(value, depth=0):
@@ -2351,10 +2380,79 @@ def _challenge_matches_url(obj: Any, url: str) -> bool:
                 collect(item, depth + 1)
 
     collect(obj)
+    if same_origin:
+        return not resources or all(
+            _same_origin(urljoin(url, resource), url) for resource in resources
+        )
     return not resources or all(
         _endpoint_url_key(resource) == _endpoint_url_key(url)
         for resource in resources
     )
+
+
+# Live quotes: the 402 an advertised resource answers right now. Many listings
+# share one origin and one descriptor, so a reverify pass would send the same
+# unpaid probes once per listing; within memoised_quotes() they are memoised.
+# Outside it (submissions, owner checks) every probe is fresh.
+_QUOTE_CACHE_TTL = _WK_CACHE_TTL
+_QUOTE_CACHE_MAX = 4096
+# Advertised resources asked per listing. Hermes lists 16; a cap of 10 missed
+# its cheapest task and narrowed the span.
+LIVE_QUOTE_MAX = 30
+_QUOTE_CACHE: dict[str, tuple[float, int, Any, dict | None]] = {}
+_QUOTE_CACHE_LOCK = threading.Lock()
+_QUOTE_CACHE_ON = 0
+
+
+class memoised_quotes:
+    """Context manager: memoise live quotes for the duration (one pass)."""
+
+    def __enter__(self):
+        global _QUOTE_CACHE_ON
+        with _QUOTE_CACHE_LOCK:
+            _QUOTE_CACHE_ON += 1
+        return self
+
+    def __exit__(self, *exc):
+        global _QUOTE_CACHE_ON
+        with _QUOTE_CACHE_LOCK:
+            _QUOTE_CACHE_ON -= 1
+            if not _QUOTE_CACHE_ON:
+                _QUOTE_CACHE.clear()
+        return False
+
+
+def _live_quote(client, method: str, url: str, origin: str,
+                probe_body: Any = None) -> tuple[int, Any, dict | None]:
+    """(status, response or None, payment or None) for one advertised resource.
+
+    Unpaid GET, or POST with the descriptor's own probe_body. Raises like
+    _request_same_origin (UnsafeURL, transport errors); those are not cached.
+    """
+    key = json.dumps([method, url, probe_body], sort_keys=True, default=str)
+    now = time.monotonic()
+    with _QUOTE_CACHE_LOCK:
+        cache_on = _QUOTE_CACHE_ON > 0
+        hit = _QUOTE_CACHE.get(key) if cache_on else None
+        if hit is not None and now - hit[0] <= _QUOTE_CACHE_TTL:
+            return hit[1], hit[2], hit[3]
+    if method == "GET":
+        r = _request_same_origin(client, "GET", url, origin)
+    else:
+        r = _request_same_origin(client, "POST", url, origin, json_body=probe_body)
+    pay = _challenge_payment(r, url, same_origin=True) if r.status_code == 402 else None
+    out = (r.status_code, r, pay if _valid_payment(pay) else None)
+    if not cache_on:
+        return out
+    with _QUOTE_CACHE_LOCK:
+        if len(_QUOTE_CACHE) >= _QUOTE_CACHE_MAX:
+            cutoff = now - _QUOTE_CACHE_TTL
+            for k in [k for k, v in _QUOTE_CACHE.items() if v[0] < cutoff]:
+                _QUOTE_CACHE.pop(k, None)
+            if len(_QUOTE_CACHE) >= _QUOTE_CACHE_MAX:
+                _QUOTE_CACHE.clear()
+        _QUOTE_CACHE[key] = (now, *out)
+    return out
 
 
 def fetch_wellknown_resources(url: str, well_known: str | None = None) -> dict[str, Any]:
@@ -2493,6 +2591,10 @@ def verify_x402(url: str, well_known: str | None = None) -> dict[str, Any]:
     docs_seen: list[Any] = []
     advertised_targets: list[tuple[str, str, dict | None]] = []
     declared: dict[str, dict] = {}
+    live_quotes: list[dict[str, Any]] = []
+    # False when some advertised resource could not be quoted (cap, no
+    # probe_body, network error): the quotes then cover only part of the menu.
+    quotes_complete = True
 
     def note_declared(response, target):
         found = challenge_facts(response).get("bazaar")
@@ -2561,7 +2663,10 @@ def verify_x402(url: str, well_known: str | None = None) -> dict[str, Any]:
         if docs_seen:
             probed_402 = False
             for descriptor in docs_seen:
-                for res in _advertised_entries(descriptor)[:10]:
+                entries = _advertised_entries(descriptor)
+                if len(entries) > LIVE_QUOTE_MAX:
+                    quotes_complete = False
+                for res in entries[:LIVE_QUOTE_MAX]:
                     if isinstance(res, str):
                         res_url, res_method, probe_body = res.strip(), "GET", None
                         parts = res_url.split(None, 1)
@@ -2588,28 +2693,39 @@ def verify_x402(url: str, well_known: str | None = None) -> dict[str, Any]:
                     target = (res_url, res_method, probe_body)
                     if target not in advertised_targets:
                         advertised_targets.append(target)
-            for res_url, res_method, probe_body in advertised_targets:
+            # Every advertised resource is asked for its live quote (up to
+            # LIVE_QUOTE_MAX): a seller pricing per task states the prices only
+            # in these 402s, and they outrank any directory's stored copy.
+            if len(advertised_targets) > LIVE_QUOTE_MAX:
+                quotes_complete = False
+            for res_url, res_method, probe_body in advertised_targets[:LIVE_QUOTE_MAX]:
+                if res_method == "POST" and probe_body is None:
+                    evidence.append(
+                        f"advertised POST resource {res_url} has no safe probe_body"
+                    )
+                    quotes_complete = False
+                    continue
+                if res_method not in ("GET", "POST"):
+                    quotes_complete = False
+                    continue
                 try:
-                    if res_method == "GET":
-                        r = _request_same_origin(c, "GET", res_url, origin)
-                    elif res_method == "POST" and probe_body is not None:
-                        r = _request_same_origin(
-                            c, "POST", res_url, origin, json_body=probe_body,
-                        )
-                    else:
-                        evidence.append(
-                            f"advertised POST resource {res_url} has no safe probe_body"
-                        )
-                        continue
+                    status, r, challenge = _live_quote(
+                        c, res_method, res_url, origin, probe_body)
                 except public_http.UnsafeURL as exc:
                     return unsafe(exc)
                 except Exception:
                     net_error = True
+                    quotes_complete = False
                     continue
-                if r.status_code != 402:
+                if status != 402 or challenge is None:
                     continue
-                challenge = _challenge_payment(r, res_url)
-                if not _valid_payment(challenge):
+                live_quotes.append({
+                    "url": res_url, "method": res_method,
+                    "amount_usdc": challenge.get("max_amount_usdc"),
+                    "pay_to": challenge.get("pay_to"),
+                    "network": challenge.get("network"),
+                })
+                if probed_402:
                     continue
                 payment = challenge
                 note_declared(r, res_url)
@@ -2618,8 +2734,6 @@ def verify_x402(url: str, well_known: str | None = None) -> dict[str, Any]:
                     f"with payment requirements")
                 verified_url = res_url
                 probed_402 = True
-                if probed_402:
-                    break
 
         # --- 2. endpoint 402 challenge ---
         # Direct GET is side-effect free. POST is only attempted above when a
@@ -2667,6 +2781,9 @@ def verify_x402(url: str, well_known: str | None = None) -> dict[str, Any]:
                "verified_url": verified_url}
         if declared:
             out["declared"] = declared
+        if live_quotes:
+            out["live_quotes"] = live_quotes
+            out["live_quotes_complete"] = quotes_complete
         return out
     if net_error:
         return {"status": "uncertain",

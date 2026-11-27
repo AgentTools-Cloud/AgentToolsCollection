@@ -55,6 +55,22 @@ _NETWORKS = {
 _DESCRIPTOR_TTL = int(os.environ.get("AGENT_TOOLS_DESCRIPTOR_TTL", 86400))
 
 
+def _live_span(quotes, pay_to):
+    """(min, max) USD of the live 402 quotes paying `pay_to`; None if none."""
+    target = str(pay_to or "").lower()
+    amounts = []
+    for q in quotes or []:
+        if not isinstance(q, dict) or str(q.get("pay_to") or "").lower() != target:
+            continue
+        try:
+            amount = float(q.get("amount_usdc"))
+        except (TypeError, ValueError):
+            continue
+        if amount > 0:
+            amounts.append(amount)
+    return (min(amounts), max(amounts)) if amounts else None
+
+
 def _price_span(samples):
     """(min, max) USD across a descriptor's advertised resources.
 
@@ -633,7 +649,7 @@ def reverify(targets=("mcp", "a2a"), workers=24, limit=None,
     service_resources = []  # descriptor metadata regardless of payment
     done = 0
     n_ver = 0
-    with ThreadPoolExecutor(max_workers=workers) as ex:
+    with crawlers.memoised_quotes(), ThreadPoolExecutor(max_workers=workers) as ex:
         futs = [ex.submit(_probe, t) for t in tasks]
         for fut in as_completed(futs):
             t = fut.result()
@@ -671,6 +687,17 @@ def reverify(targets=("mcp", "a2a"), workers=24, limit=None,
                         lo, hi = _price_span(res.get("resource_samples"))
                     if observed and lo is None:
                         lo = hi = pay.get("max_amount_usdc")
+                    live = _live_span(t["verdict"].get("live_quotes"),
+                                      pay.get("pay_to"))
+                    if live and not t["verdict"].get("live_quotes_complete"):
+                        # Part of the menu went unquoted: widen, never narrow,
+                        # what the descriptor says about the rest.
+                        lo = min(x for x in (live[0], lo) if x is not None)
+                        hi = max(x for x in (live[1], hi) if x is not None)
+                    elif live:
+                        # The seller's own 402s right now outrank what its
+                        # descriptor text or any directory says.
+                        lo, hi = live
                     service_payments.append((
                         json.dumps(pay, ensure_ascii=False),
                         json.dumps(_chain_from_payment(pay), ensure_ascii=False),
@@ -679,6 +706,7 @@ def reverify(targets=("mcp", "a2a"), workers=24, limit=None,
                         if observed and res.get("resource_samples") else None,
                         lo, hi, pay.get("currency"), observed,
                         bool(t.get("explicit_price")), int(time.time()),
+                        int(time.time()) if live else None,
                         t["id"], t["endpoint"]))
             else:
                 flag_updates[t["table"]].append((
@@ -768,21 +796,24 @@ def reverify(targets=("mcp", "a2a"), workers=24, limit=None,
             with db.writer() as c:
                 for update in chunk:
                     (payment, chains, _count, samples, _lo, _hi, _currency,
-                     _observed, _explicit_price, _updated, _id, _endpoint) = update
+                     _observed, _explicit_price, _updated, _live_at,
+                     _id, _endpoint) = update
                     if _owner_interface_current(c, _id, _endpoint):
                         continue
                     if _privacy_suppressed_metadata(
                             c, payment=payment, chains=chains,
                             resource_samples=samples):
                         continue
-                    if _observed and not _explicit_price:
+                    if (_observed or _live_at) and not _explicit_price:
                         c.execute(
                             "UPDATE services SET payment=?, chains=?, "
                             "resource_count=COALESCE(?, resource_count), "
                             "resource_samples=COALESCE(?, resource_samples), "
                             "price_min=?, price_max=?, currency=?, "
+                            "live_quote_at=COALESCE(?, live_quote_at), "
                             "updated_at=? WHERE id=? AND url=?",
-                            update[:7] + update[9:],
+                            (payment, chains, _count, samples, _lo, _hi,
+                             _currency, _live_at, _updated, _id, _endpoint),
                         )
                     else:
                         c.execute(

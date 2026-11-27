@@ -818,6 +818,9 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
             "ALTER TABLE services ADD COLUMN quality_score REAL",
             "ALTER TABLE services ADD COLUMN conformance TEXT",
             "ALTER TABLE services ADD COLUMN descriptor_checked_at INTEGER",
+            # When reverify last read the seller's own 402 quotes (see
+            # LIVE_QUOTE_FIELDS): older directory copies must not replace them.
+            "ALTER TABLE services ADD COLUMN live_quote_at INTEGER",
             # Seller-declared call interfaces (x402 bazaar extension), keyed by
             # exact URL; written by the CDP crawl and our own 402 probes only.
             "ALTER TABLE services ADD COLUMN declared TEXT",
@@ -1525,6 +1528,7 @@ def upsert_service(conn: sqlite3.Connection, row: dict) -> tuple:
             row["resource_count"] = existing["resource_count"]
             row["resource_samples"] = existing["resource_samples"]
         row["quality"] = _keep_external_quality(row.get("quality"), existing["quality"])
+        _keep_live_quote(row, existing)
         _restore_owner_edits(row, existing)
         _keep_owned_slug(cur, "services", row, existing)
         set_clause = ",".join(f"{c}=?" for c in cols if c != "created_at")
@@ -5611,6 +5615,26 @@ def owner_edit_state(conn, kind, listing_id, user_id, ownership_id):
         raise PermissionError("verified ownership changed before the edit")
     assert_listing_not_retired(conn, kind, dict(current))
     return current, ownership
+
+
+# Fields reverify sets from the seller's live 402 quotes (crawlers.verify_x402
+# live_quotes). A directory's stored copy may only replace them when it is
+# newer than our read; a copy with no date is treated as older.
+LIVE_QUOTE_FIELDS = ("url", "price_min", "price_max", "currency", "payment", "chains")
+
+
+def _keep_live_quote(row: dict, existing) -> None:
+    try:
+        live_at = _as_int(existing["live_quote_at"])
+    except (IndexError, KeyError):
+        return
+    if not live_at:
+        return
+    source_at = _as_int(row.get("source_updated_at"))
+    if source_at is not None and source_at > live_at:
+        return
+    for field in LIVE_QUOTE_FIELDS:
+        row[field] = existing[field]
 
 
 def _restore_owner_edits(row: dict, existing) -> None:
