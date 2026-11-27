@@ -207,6 +207,9 @@ def _bazaar_host(url: str) -> str:
     return h[4:] if h.startswith("www.") else h
 
 
+CDP_BAZAAR_MAX_PAGES = 2000
+
+
 def _bazaar_fetch_raw(page_sleep: float = 0.3, max_pages: int = 400,
                       since_iso: str | None = None, on_page=None) -> list:
     """Page through the public CDP Bazaar v2 discovery feed.
@@ -355,7 +358,11 @@ def fetch_cdp_bazaar() -> list:
 
     truncated = ""
     try:
-        raw = _bazaar_fetch_raw(since_iso=since_iso)
+        # The feed passed 400 pages (40k items) on 2026-11-25 and kept growing
+        # (~890 pages on 11-27); at the cap every run is partial, the watermark
+        # never moves and items past the cap are never seen. 2000 pages only
+        # guards against a runaway; the loop still stops at pagination.total.
+        raw = _bazaar_fetch_raw(since_iso=since_iso, max_pages=CDP_BAZAAR_MAX_PAGES)
     except PartialCrawl as e:
         # The watermark is written below, before anything is upserted; moving it
         # on a short read would skip the offsets we never got to.
