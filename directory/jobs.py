@@ -1157,7 +1157,7 @@ def cmd_health_a2a(only_unknown: bool = False, quarantined_only: bool = False) -
                 res.get("http_status"))
         return h, res.get("conformance"), (h, now, res["latency_ms"],
                                            res.get("conformance"), last_ok,
-                                           card, r["id"]), readiness, hist
+                                           card, res.get("endpoint"), r["id"]), readiness, hist
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
     workers = min(32, max(4, len(rows)))
@@ -1181,7 +1181,10 @@ def cmd_health_a2a(only_unknown: bool = False, quarantined_only: bool = False) -
                 c.executemany(
                     "UPDATE a2a_agents SET health=?, health_checked=?, latency_ms=?, "
                     "conformance=?, last_success_at=COALESCE(?, last_success_at), "
-                    "card_url=? WHERE id=?",
+                    # Fill a missing endpoint only from the live card's own
+                    # declaration; never overwrite a stored one here.
+                    "card_url=?, endpoint_url=COALESCE(NULLIF(endpoint_url, ''), ?) "
+                    "WHERE id=?",
                     [updates[i] for i in idx],
                 )
                 c.executemany(

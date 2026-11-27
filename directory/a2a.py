@@ -656,6 +656,13 @@ def public_agent(row: dict) -> dict:
             if isinstance(s, dict)
         ]
     d["card_view_url"] = f"{SITE}/api/v1/a2a/agents/{d.get('slug')}"
+    # "Card is reachable" is not "callable over A2A": only an endpoint the
+    # agent card itself declares counts; none is ever inferred.
+    d["callable"] = bool(d.get("endpoint_url"))
+    if not d["callable"]:
+        d["call_note"] = ("The agent card does not declare a callable A2A endpoint "
+                          "(url or supportedInterfaces[].url); no call instructions "
+                          "are given.")
     return d
 
 
@@ -1233,8 +1240,11 @@ def _card_candidates(card_url: str | None) -> list[str]:
 def probe_a2a_health(card_url: str | None, endpoint_url: str | None = None) -> dict:
     """Liveness probe for an indexed A2A agent.
 
-    A reachable Agent Card (valid JSON) means the agent is published and
-    discoverable -> 'ok'. A reachable-but-not-a-card response -> 'degraded'.
+    A reachable Agent Card (valid JSON) that declares a callable endpoint
+    (``url`` or ``supportedInterfaces[].url``) -> 'ok'. A card that declares no
+    endpoint is published but not callable -> 'degraded' with conformance
+    'partial' (``callable`` False); we never infer an endpoint from the card or
+    homepage URL. A reachable-but-not-a-card response -> 'degraded'.
     Unreachable card with a reachable endpoint -> 'degraded'. Otherwise down.
 
     Returns the card URL that actually served the card, so callers can correct
@@ -1267,9 +1277,17 @@ def probe_a2a_health(card_url: str | None, endpoint_url: str | None = None) -> d
                                 skills = card.get("skills")
                                 conf = ("pass" if (card.get("name") and isinstance(skills, list) and skills)
                                         else "partial")
+                                endpoint = _card_endpoint(card, t)
+                                if not (isinstance(endpoint, str)
+                                        and endpoint.startswith(("https://", "http://"))):
+                                    return {"status": "degraded", "latency_ms": dt,
+                                            "http_status": sc, "conformance": "partial",
+                                            "card_url": t, "card": card,
+                                            "callable": False, "endpoint": None}
                                 return {"status": "ok", "latency_ms": dt,
                                         "http_status": sc, "conformance": conf,
-                                        "card_url": t, "card": card}
+                                        "card_url": t, "card": card,
+                                        "callable": True, "endpoint": endpoint}
                         except (ValueError, json.JSONDecodeError):
                             pass
                     if sc < 500:

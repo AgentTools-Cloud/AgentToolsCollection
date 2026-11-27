@@ -105,6 +105,9 @@
 <section class="svc-card p-6 mb-6">
   <h2 class="text-base font-semibold mb-4">How to call</h2>
   <div class="space-y-5">
+    {% if not a.endpoint_url %}
+    <p class="text-sm text-amber-800 bg-amber-50 ring-1 ring-amber-200 rounded-md px-3 py-2">The agent card does not declare a callable A2A endpoint (<span class="mono">url</span> or <span class="mono">supportedInterfaces[].url</span>), so there are no call instructions. A reachable card alone is shown as degraded, not healthy.</p>
+    {% endif %}
     {% if a.endpoint_url %}
     <div>
       <div class="text-xs text-slate-500 mb-1.5">A2A endpoint ({{ a.preferred_transport or "JSONRPC" }})</div>
