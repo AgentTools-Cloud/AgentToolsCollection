@@ -97,6 +97,89 @@ def github_repo(url: str | None) -> str | None:
     return f"{owner}/{repo}".lower()
 
 
+# Organisations whose repositories listings cite as a placeholder (the protocol's
+# own registry, SDKs and reference servers); credited only to the org itself.
+PLACEHOLDER_OWNERS = frozenset({"modelcontextprotocol"})
+_NS_GITHUB = re.compile(r"^io\.github\.([A-Za-z0-9-]+)/", re.I)
+_NS_DOMAIN = re.compile(r"^([a-z0-9-]+(?:\.[a-z0-9-]+)+)/", re.I)
+_GENERIC_LABELS = frozenset({"mcp", "api", "www", "app", "apps", "server", "servers", "remote",
+                             "public", "production", "prod", "dev", "staging", "gateway"})
+# Registry namespaces of hosting platforms that publish other people's servers
+# under their own domain (ai.smithery/<owner>-<repo>): they prove nothing about
+# the repository's owner.
+HOSTING_NAMESPACES = frozenset({"smithery"})
+# Words too common to tie a repository to a name on their own.
+_WEAK_WORDS = frozenset({"the", "and", "for", "agent", "agents", "tool", "tools", "data", "kit", "hub",
+                         "bot", "web", "sdk", "plugin", "plugins", "client", "service", "services"})
+
+
+def _squash(s: str | None) -> str:
+    return re.sub(r"[^a-z0-9]", "", (s or "").lower())
+
+
+def _namespace_labels(name: str | None) -> list[str] | None:
+    """Owner labels proved by an MCP Registry style name, or None for a plain name.
+
+    `io.github.<user>/...` is a GitHub account the registry verified;
+    `com.example/...` (reverse DNS) is a domain it verified."""
+    name = (name or "").strip()
+    m = _NS_GITHUB.match(name)
+    if m:
+        return [m.group(1)]
+    m = _NS_DOMAIN.match(name)
+    if m:
+        parts = [p.lower() for p in m.group(1).split(".")[1:]]
+        if any(p in HOSTING_NAMESPACES for p in parts):
+            return None
+        return [p for p in parts if p not in _GENERIC_LABELS] or None
+    return None
+
+
+def _host_labels(url: str | None) -> list[str]:
+    host = urllib.parse.urlsplit(url or "").hostname or ""
+    labels = host.split(".")[:-1]                       # drop the TLD
+    return [l for l in labels if l and l not in _GENERIC_LABELS]
+
+
+def _related(labels: Iterable[str], repo: str) -> bool:
+    """Whether any label shares a name with the repository owner or name: one
+    contains the other, compared whole (`frontendchecklist`) or by word
+    (`htag` of htag-analytics in `htagai`)."""
+    owner, name = repo.split("/", 1)
+    words = re.split(r"[^a-z0-9]+", f"{owner} {name}".lower())
+    targets = {_squash(owner), _squash(name)} | {w for w in words if w not in _WEAK_WORDS}
+    targets = {t for t in targets if len(t) >= 3 and t not in _GENERIC_LABELS}
+    for label in labels:
+        lab = _squash(label)
+        if len(lab) >= 3 and any(lab in t or t in lab for t in targets):
+            return True
+    return False
+
+
+def listing_repo(row: dict) -> str | None:
+    """The GitHub repository a remote MCP listing may be credited with.
+
+    A listing can link any repository -- the project it was forked from, a
+    library it uses, the protocol's own registry -- and would then show that
+    project's stars as its own. The link is kept only when it does not
+    contradict who the listing is: a placeholder org's repository must belong
+    to that org, and a registry name (`io.github.<user>/` or reverse DNS)
+    must relate to the repository owner or name, or the endpoint host must."""
+    repo = github_repo(row.get("source_code_url")) or github_repo(row.get("homepage_url"))
+    if not repo:
+        return None
+    endpoint = row.get("endpoint_url")
+    ns = _namespace_labels(row.get("name"))
+    owner = repo.split("/", 1)[0]
+    if owner in PLACEHOLDER_OWNERS:
+        return repo if _related((ns or []) + _host_labels(endpoint), owner + "/" + owner) else None
+    if ns is not None:
+        server = (row.get("name") or "").split("/", 1)[-1]   # cn.example/<server> often is the repo name
+        if not _related(ns + [server] + _host_labels(endpoint), repo):
+            return None
+    return repo
+
+
 def npm_package(registry: str | None, name: str | None) -> str | None:
     name = (name or "").strip()
     if (registry or "").lower() != "npm" or not _NPM_RE.match(name):
@@ -424,7 +507,7 @@ def for_listing(conn, kind: str, row: dict) -> dict | None:
     """Signals for one listing, or None when there are none to show."""
     out: dict = {}
     if kind == "mcp" and _table_exists(conn, "ext_github_repos"):
-        repo = github_repo(row.get("source_code_url")) or github_repo(row.get("homepage_url"))
+        repo = listing_repo(row)
         if repo:
             g = conn.execute("SELECT full_name, stars, forks, pushed_at, archived, status, fetched_at "
                              "FROM ext_github_repos WHERE repo=?", (repo,)).fetchone()
@@ -460,9 +543,11 @@ def adoption_stats(conn) -> dict:
         "SELECT repo, stars, full_name FROM ext_github_repos WHERE status='ok'")}
     listing_stars, top = [], {}
     with_link = 0
-    for _id, slug, name, src, home in conn.execute(
-            "SELECT id, slug, name, source_code_url, homepage_url FROM mcp_servers WHERE health='ok'"):
-        repo = github_repo(src) or github_repo(home)
+    for _id, slug, name, src, home, endpoint in conn.execute(
+            "SELECT id, slug, name, source_code_url, homepage_url, endpoint_url FROM mcp_servers "
+            "WHERE health='ok'"):
+        repo = listing_repo({"name": name, "source_code_url": src, "homepage_url": home,
+                             "endpoint_url": endpoint})
         with_link += bool(repo)
         if repo in stars_by_repo and stars_by_repo[repo][0] is not None:
             stars = stars_by_repo[repo][0]

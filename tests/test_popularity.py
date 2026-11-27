@@ -23,6 +23,38 @@ class IdentityTests(unittest.TestCase):
         self.assertIsNone(P.github_repo("https://gitlab.com/o/r"))
         self.assertIsNone(P.github_repo(None))
 
+    def test_listing_repo_keeps_own_repositories(self):
+        def repo(name, src, endpoint):
+            return P.listing_repo({"name": name, "source_code_url": src, "endpoint_url": endpoint})
+        self.assertEqual(repo("Fork Tool", "https://github.com/acme/tool", "https://other.example.org/mcp"),
+                         "acme/tool")                                    # plain names are not judged
+        self.assertEqual(repo("io.github.tldraw/tldraw", "https://github.com/tldraw/tldraw",
+                              "https://tldraw-mcp-app.tldraw.workers.dev/mcp"), "tldraw/tldraw")
+        self.assertEqual(repo("com.browser-use/browser-use", "https://github.com/browser-use/browser-use",
+                              "https://api.browser-use.com/mcp"), "browser-use/browser-use")
+        self.assertEqual(repo("com.htagai/htag", "https://github.com/htag-analytics/htag-mcp",
+                              "https://api.htagai.com/mcp"), "htag-analytics/htag-mcp")   # word match
+        self.assertEqual(repo("cn.example/weather-mcp-china", "https://github.com/someone/weather-mcp-china",
+                              "https://example.cn/weather/mcp"), "someone/weather-mcp-china")  # server name
+        self.assertEqual(repo("ai.smithery/acme-widget", "https://github.com/acme/widget",
+                              "https://server.smithery.ai/@acme/widget/mcp"), "acme/widget")  # hosting namespace
+
+    def test_listing_repo_drops_borrowed_repositories(self):
+        def repo(name, src, endpoint):
+            return P.listing_repo({"name": name, "source_code_url": src, "endpoint_url": endpoint})
+        # a verified GitHub namespace that is not the repository's owner
+        self.assertIsNone(repo("io.github.IncorporatedPartners/labelhead-artist-momentum",
+                               "https://github.com/paperclipai/paperclip",
+                               "https://labelhead-mcp-public-production.up.railway.app/mcp"))
+        # a verified domain unrelated to the repository (the app it was built from)
+        self.assertIsNone(repo("com.ainetcafe/ai-netcafe", "https://github.com/ChatGPTNextWeb/NextChat",
+                               "https://ainetcafe.com/mcp"))
+        # the protocol's own registry cited as a placeholder
+        self.assertIsNone(repo("QR Rapido", "https://github.com/modelcontextprotocol/registry",
+                               "https://qrrapido.site/api/mcp"))
+        self.assertEqual(repo("Registry", "https://github.com/modelcontextprotocol/registry",
+                              "https://registry.modelcontextprotocol.io/mcp"), "modelcontextprotocol/registry")
+
     def test_npm_package(self):
         self.assertEqual(P.npm_package("npm", "@scope/pkg"), "@scope/pkg")
         self.assertIsNone(P.npm_package("", "sentry"))          # Smithery names are not npm
