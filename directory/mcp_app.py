@@ -370,12 +370,17 @@ async def search(
 
     Results are ranked by:
         (health=ok AND tx_30d>0) → health=ok → has-quality-signal →
-        confidence → tx_30d → recency.
+        confidence → paying wallets → tx_30d → recency.
     So the highest-quality real-traffic services appear first.
 
     Each item includes (when available):
       - confidence    : 0.0–1.0 x402scan quality score.
-      - tx_30d        : 30-day x402 payment count (proxy for real usage).
+      - tx_30d        : USDC payments to the service's payTo in 30 days that
+                        settled with an EIP-3009 authorization (how x402 pays
+                        on EVM chains); plain transfers are not counted, and
+                        Solana is not measured (null). match_reason also
+                        shows payers_30d, the number of distinct paying
+                        wallets, which is the stronger signal.
       - match_snippet : FTS snippet showing where `intent` hit ([[token]]).
       - match_reason  : list[str] of human-readable ranking signals.
       - mcp_url       : populated when the service exposes an MCP endpoint

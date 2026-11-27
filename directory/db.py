@@ -1809,6 +1809,8 @@ def _match_reason(row: dict, q: str | None) -> list[str]:
         reasons.append("health=ok")
     elif row.get("health"):
         reasons.append(f"health={row['health']}")
+    if row.get("payto_payers_30d"):
+        reasons.append(f"payers_30d={int(row['payto_payers_30d'])}")
     if tx:
         reasons.append(f"tx_30d={int(tx)}")
     conf = row.get("confidence")
@@ -1894,7 +1896,7 @@ def search(conn, q=None, category=None, chain=None, region=None, health=None,
     #   2. healthy at all
     #   3. has a confidence score (means x402scan saw it)
     #   4. confidence value
-    #   5. tx_30d value
+    #   5. distinct EIP-3009 payers, then payments (tx_30d)
     #   6. recency
     service_default_order = (
         "CASE s.health WHEN 'ok' THEN 0 WHEN 'degraded' THEN 1 "
@@ -1902,6 +1904,7 @@ def search(conn, q=None, category=None, chain=None, region=None, health=None,
         "(s.health='ok' AND COALESCE(s.tx_30d,0) > 0) DESC, "
         "(s.confidence IS NOT NULL) DESC, "
         "s.confidence DESC, "
+        "COALESCE(s.payto_payers_30d, 0) DESC, "
         "COALESCE(s.tx_30d, 0) DESC, "
         "s.updated_at DESC"
     )
@@ -4911,8 +4914,11 @@ def score_breakdown(row) -> dict:
     tx = (d.get("payto_tx_30d") if d.get("payto_checked")
           and d.get("payto_tx_30d") is not None
           else d.get("tx_30d") or d.get("payto_tx_30d"))
-    if d.get("payto_checked"):
-        demand_note = (f"{payers or 0} distinct payers, {tx or 0} USDC transfers "
+    if d.get("payto_checked") and d.get("payto_tx_30d") is None:
+        demand_note = ("Not measured: payments on this listing's chain cannot yet be "
+                       "told apart from plain transfers (no EIP-3009)")
+    elif d.get("payto_checked"):
+        demand_note = (f"{payers or 0} distinct payers, {tx or 0} EIP-3009 USDC payments "
                        "in the last 30 days")
         shared = int(d.get("payto_shared") or 1)
         if shared > 1:

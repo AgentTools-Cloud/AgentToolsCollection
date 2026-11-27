@@ -25,9 +25,32 @@ def _fake_clock():
     return mock.MagicMock(side_effect=sleep), (lambda: now[0])
 
 
-def _client_with(handler):
+def _authorizing(handler):
+    """Answer AuthorizationUsed queries as if every queried sender signed an
+    EIP-3009 authorization in the same transaction as its transfer (fixture
+    logs carry no transactionHash, so the empty hash matches)."""
+    import json as _json
+
+    def wrapped(request):
+        if request.method == "POST":
+            try:
+                body = _json.loads(request.content)
+            except ValueError:
+                body = None
+            if isinstance(body, dict) and body.get("method") == "eth_getLogs":
+                topics = body["params"][0].get("topics") or []
+                if topics and topics[0] == crawlers._AUTH_USED_TOPIC:
+                    return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": [
+                        {"topics": [crawlers._AUTH_USED_TOPIC, t, "0x" + "0" * 64]}
+                        for t in topics[1]]})
+        return handler(request)
+    return wrapped
+
+
+def _client_with(handler, authorize=True):
     real = httpx.Client
-    return lambda **kw: real(transport=httpx.MockTransport(handler), **kw)
+    h = _authorizing(handler) if authorize else handler
+    return lambda **kw: real(transport=httpx.MockTransport(h), **kw)
 
 
 class EtherscanPerAddressTests(unittest.TestCase):
@@ -51,16 +74,27 @@ class EtherscanPerAddressTests(unittest.TestCase):
             seen.update(dict(request.url.params))
             now = int(crawlers.time.time())
             return httpx.Response(200, json={"status": "1", "message": "OK", "result": [
-                {"timeStamp": str(now - 60), "to": PAYTO.lower(), "from": PAYER},
-                {"timeStamp": str(now - 120), "to": PAYTO.lower(), "from": PAYER},
-                {"timeStamp": str(now - 180), "to": PAYER, "from": PAYTO.lower()},
+                {"timeStamp": str(now - 60), "to": PAYTO.lower(), "from": PAYER, "methodId": "0xe3ee160e"},
+                {"timeStamp": str(now - 120), "to": PAYTO.lower(), "from": PAYER, "methodId": "0xcf092995"},
+                # A plain transfer() and a Permit2 settle() are not EIP-3009 payments.
+                {"timeStamp": str(now - 130), "to": PAYTO.lower(), "from": "0x" + "9" * 40,
+                 "methodId": "0xa9059cbb"},
+                {"timeStamp": str(now - 140), "to": PAYTO.lower(), "from": "0x" + "8" * 40,
+                 "methodId": "0x13cd3b53"},
+                {"timeStamp": str(now - 180), "to": PAYER, "from": PAYTO.lower(), "methodId": "0xe3ee160e"},
             ]})
 
         result = self.run_fetch(handler)
-        self.assertEqual((result["ok"], result["tx"], result["payers"]), (True, 2, 1))
+        self.assertEqual((result["ok"], result["tx"], result["payers"], result["raw_tx"]), (True, 2, 1, 4))
         self.assertEqual(seen["chainid"], "137")
         self.assertEqual(seen["apikey"], "test-key")
         self.assertEqual(seen["action"], "tokentx")
+
+    def test_rows_without_a_method_id_are_not_guessed(self):
+        now = int(crawlers.time.time())
+        result = self.run_fetch(lambda r: httpx.Response(200, json={"status": "1", "message": "OK", "result": [
+            {"timeStamp": str(now - 60), "to": PAYTO.lower(), "from": PAYER}]}))
+        self.assertFalse(result["ok"])
 
     def test_no_transactions_found_is_a_real_zero(self):
         result = self.run_fetch(lambda r: httpx.Response(200, json={
@@ -92,50 +126,18 @@ class EtherscanPerAddressTests(unittest.TestCase):
         self.assertIn("base", crawlers.BULK_LOG_CHAINS)
 
 
-class HeliusSolanaTests(unittest.TestCase):
+class SolanaUnmeasuredTests(unittest.TestCase):
     SOL = "985iFjbnGQ3dJcwXnfRCMSrH4Jnc3kW1N6msR64B5KX1"
 
-    def setUp(self):
-        crawlers._helius_last_call = 0.0
-        patcher = patch.dict(os.environ, {"HELIUS_API_KEY": "test-helius"})
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        sleeper = patch.object(crawlers.time, "sleep")
-        sleeper.start()
-        self.addCleanup(sleeper.stop)
-
-    def test_counts_incoming_usdc_transfers_and_skips_mints(self):
-        seen = {}
-
+    def test_solana_is_unmeasured_and_not_queried(self):
         def handler(request):
-            import json as _json
-            seen["body"] = _json.loads(request.content)
-            seen["key"] = request.url.params.get("api-key")
-            return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {"data": [
-                {"type": "transfer", "toUserAccount": self.SOL, "fromUserAccount": "PayerA"},
-                {"type": "transfer", "toUserAccount": self.SOL, "fromUserAccount": "PayerB"},
-                {"type": "transfer", "toUserAccount": self.SOL, "fromUserAccount": "PayerA"},
-                {"type": "mint", "toUserAccount": self.SOL, "fromUserAccount": None},
-            ], "paginationToken": None}})
+            raise AssertionError("Solana must not be queried")
 
-        with patch.object(crawlers.httpx, "Client", side_effect=_client_with(handler)):
+        with patch.dict(os.environ, {"HELIUS_API_KEY": "test-helius"}), \
+                patch.object(crawlers.httpx, "Client", side_effect=_client_with(handler)):
             result = crawlers.fetch_payto_activity(self.SOL, chain="solana")
-        self.assertEqual((result["ok"], result["tx"], result["payers"]), (True, 3, 2))
-        cfg = seen["body"]["params"][1]
-        self.assertEqual(seen["body"]["method"], "getTransfersByAddress")
-        self.assertEqual((cfg["mint"], cfg["direction"]), (crawlers.SOLANA_USDC_MINT, "in"))
-        self.assertIn("gte", cfg["filters"]["blockTime"])
-        self.assertEqual(seen["key"], "test-helius")
-
-    def test_rpc_error_is_not_a_zero(self):
-        handler = lambda r: httpx.Response(200, json={"jsonrpc": "2.0", "id": 1,
-                                                      "error": {"code": -32601, "message": "plan"}})
-        with patch.object(crawlers.httpx, "Client", side_effect=_client_with(handler)):
-            self.assertFalse(crawlers.fetch_payto_activity(self.SOL, chain="solana")["ok"])
-
-    def test_without_key_solana_is_skipped(self):
-        with patch.dict(os.environ, {"HELIUS_API_KEY": ""}):
-            self.assertFalse(crawlers.fetch_payto_activity(self.SOL, chain="solana")["ok"])
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["unmeasured"])
 
 
 class ChainMappingTests(unittest.TestCase):
@@ -332,7 +334,8 @@ class HyperEvmBulkTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(results[PAYTO.lower()]["tx"], 1)
         self.assertEqual(len(queries), 3)
-        self.assertEqual([call.args[0] for call in sleeper.call_args_list], [1.0, 1.0])
+        # Three transfer queries plus one AuthorizationUsed query, one pace apart.
+        self.assertEqual([call.args[0] for call in sleeper.call_args_list], [1.0, 1.0, 1.0])
 
     def test_hyperevm_uses_keyless_rpc_and_never_falls_back_to_etherscan(self):
         self.assertNotIn("hyperevm", crawlers.ETHERSCAN_FREE_CHAINS)
@@ -583,3 +586,86 @@ class ThrottleNoSplitTests(unittest.TestCase):
             for _ in range(50):
                 p.ok()
             self.assertEqual(p.interval, 0.5)
+
+
+class Eip3009BulkTests(unittest.TestCase):
+    def test_only_transfers_with_an_authorization_in_the_same_tx_count(self):
+        import json
+        other = "0x" + "7" * 40
+        auth_queries = []
+
+        def handler(request):
+            body = json.loads(request.content)
+            if body["method"] == "eth_blockNumber":
+                return httpx.Response(200, json={"result": hex(999)})
+            if body["method"] == "eth_getBlockByNumber":
+                return httpx.Response(200, json={"result": {"timestamp": "0x0"}})
+            q = body["params"][0]
+            if q["topics"][0] == crawlers._AUTH_USED_TOPIC:
+                auth_queries.append(q)
+                return httpx.Response(200, json={"result": [
+                    # PAYER authorized tx 0xa1 only; `other` authorized something
+                    # in another tx, not its transfer to us.
+                    {"topics": [crawlers._AUTH_USED_TOPIC, crawlers._topic_addr(PAYER), "0x" + "1" * 64],
+                     "transactionHash": "0xA1"},
+                    {"topics": [crawlers._AUTH_USED_TOPIC, crawlers._topic_addr(other), "0x" + "2" * 64],
+                     "transactionHash": "0xb9"},
+                ]})
+            return httpx.Response(200, json={"result": [
+                {"topics": [crawlers._TRANSFER_TOPIC, crawlers._topic_addr(PAYER), crawlers._topic_addr(PAYTO)],
+                 "transactionHash": "0xa1"},
+                {"topics": [crawlers._TRANSFER_TOPIC, crawlers._topic_addr(PAYER), crawlers._topic_addr(PAYTO)],
+                 "transactionHash": "0xa2"},
+                {"topics": [crawlers._TRANSFER_TOPIC, crawlers._topic_addr(other), crawlers._topic_addr(PAYTO)],
+                 "transactionHash": "0xb1"},
+            ]})
+
+        with patch.object(crawlers.httpx, "Client", side_effect=_client_with(handler, authorize=False)), \
+                patch.object(crawlers.time, "sleep"):
+            results, ok = crawlers.fetch_chain_activity_bulk([PAYTO], chain="hyperevm", days=1000 / 86400)
+        self.assertTrue(ok)
+        got = results[PAYTO.lower()]
+        self.assertEqual((got["tx"], got["payers"], got["raw_tx"]), (1, 1, 3))
+        self.assertEqual(len(auth_queries), 1)
+        self.assertEqual(sorted(auth_queries[0]["topics"][1]),
+                         sorted([crawlers._topic_addr(PAYER), crawlers._topic_addr(other)]))
+        self.assertEqual((auth_queries[0]["fromBlock"], auth_queries[0]["toBlock"]), ("0x0", "0x3e7"))
+
+    def test_windows_without_transfers_cost_no_authorization_query(self):
+        import json
+        methods = []
+
+        def handler(request):
+            body = json.loads(request.content)
+            if body["method"] == "eth_blockNumber":
+                return httpx.Response(200, json={"result": hex(999)})
+            if body["method"] == "eth_getBlockByNumber":
+                return httpx.Response(200, json={"result": {"timestamp": "0x0"}})
+            methods.append(body["params"][0]["topics"][0])
+            return httpx.Response(200, json={"result": []})
+
+        with patch.object(crawlers.httpx, "Client", side_effect=_client_with(handler, authorize=False)), \
+                patch.object(crawlers.time, "sleep"):
+            results, ok = crawlers.fetch_chain_activity_bulk([PAYTO], chain="hyperevm", days=1000 / 86400)
+        self.assertTrue(ok)
+        self.assertEqual(methods, [crawlers._TRANSFER_TOPIC])
+        self.assertEqual(results[PAYTO.lower()]["tx"], 0)
+
+
+class SolanaOnlyListingTests(TemporaryDatabaseTestCase):
+    def test_solana_only_listing_gets_null_demand_not_zero(self):
+        import json as _json
+        sol = "985iFjbnGQ3dJcwXnfRCMSrH4Jnc3kW1N6msR64B5KX1"
+        with db.writer() as conn:
+            _, sid = db.upsert_service(conn, dict(slug="on-sol", name="on-sol", url="https://sol.example/x",
+                                                  source="fixture", source_id="on-sol", health="ok"))
+            conn.execute("UPDATE services SET payment=?, payto_tx_30d=99, payto_payers_30d=9, tx_30d=99 "
+                         "WHERE id=?",
+                         (_json.dumps({"accepts": [{"network": "solana", "pay_to": sol}]}), sid))
+        with patch.object(jobs.time, "sleep"), patch.object(jobs, "cmd_rescore"):
+            jobs.cmd_onchain()
+        with closing(db.connect(read_only=True)) as conn:
+            row = conn.execute("SELECT payto_checked, payto_tx_30d, payto_payers_30d, tx_30d "
+                               "FROM services WHERE id=?", (sid,)).fetchone()
+        self.assertIsNotNone(row[0])
+        self.assertEqual(tuple(row[1:]), (None, None, None))

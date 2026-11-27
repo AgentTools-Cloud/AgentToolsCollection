@@ -1256,6 +1256,7 @@ def _etherscan_payto_activity(payto, chain, contract, days, max_pages):
     payto_l = payto.lower()
     cutoff = int(time.time()) - days * 86400
     tx = 0
+    raw = 0
     payers = set()
     capped = False
     try:
@@ -1288,6 +1289,13 @@ def _etherscan_payto_activity(payto, chain, contract, days, max_pages):
                         stop = True
                         break
                     if (row.get("to") or "").lower() == payto_l:
+                        mid = _row_method_id(row)
+                        if mid is None:
+                            # Cannot tell a payment from a plain transfer.
+                            return {"tx": 0, "payers": 0, "ok": False, "capped": False}
+                        raw += 1
+                        if mid not in EIP3009_METHOD_IDS:
+                            continue
                         tx += 1
                         frm = (row.get("from") or "").lower()
                         if frm:
@@ -1296,7 +1304,7 @@ def _etherscan_payto_activity(payto, chain, contract, days, max_pages):
                     break
                 if page == max_pages:
                     capped = True
-        return {"tx": tx, "payers": len(payers), "ok": True,
+        return {"tx": tx, "payers": len(payers), "ok": True, "raw_tx": raw,
                 "capped": capped, "payer_ids": sorted(payers)}
     except Exception as e:
         log.debug("etherscan payto fetch failed for %s on %s: %r", payto, chain, e)
@@ -1312,7 +1320,11 @@ def fetch_payto_activity(payto, chain="base", days=30, max_pages=8):
     instead of recording a false zero.
     """
     if chain == "solana":
-        return _helius_solana_activity(payto, days, max_pages)
+        # Solana has no EIP-3009, and Helius transfer rows do not say who paid
+        # the fee, so an x402 payment cannot be told from a plain transfer.
+        # Reported as unmeasured (NULL), never as zero demand.
+        return {"tx": 0, "payers": 0, "ok": True, "capped": False,
+                "payer_ids": [], "unmeasured": True}
     indexer = EVM_USDC_INDEXERS.get(chain)
     if indexer is None:
         return {"tx": 0, "payers": 0, "ok": False, "capped": False}
@@ -1324,6 +1336,7 @@ def fetch_payto_activity(payto, chain="base", days=30, max_pages=8):
     payto_l = payto.lower()
     cutoff = int(time.time()) - days * 86400
     tx = 0
+    raw = 0
     payers = set()
     capped = False
     try:
@@ -1365,6 +1378,13 @@ def fetch_payto_activity(payto, chain="base", days=30, max_pages=8):
                         stop = True
                         break
                     if (row.get("to") or "").lower() == payto_l:
+                        mid = _row_method_id(row)
+                        if mid is None:
+                            # Cannot tell a payment from a plain transfer.
+                            return {"tx": 0, "payers": 0, "ok": False, "capped": False}
+                        raw += 1
+                        if mid not in EIP3009_METHOD_IDS:
+                            continue
                         tx += 1
                         frm = (row.get("from") or "").lower()
                         if frm:
@@ -1373,7 +1393,7 @@ def fetch_payto_activity(payto, chain="base", days=30, max_pages=8):
                     break
                 if page == max_pages:
                     capped = True
-        return {"tx": tx, "payers": len(payers), "ok": True,
+        return {"tx": tx, "payers": len(payers), "ok": True, "raw_tx": raw,
                 "capped": capped, "payer_ids": sorted(payers)}
     except Exception as e:
         log.debug("payto activity fetch failed for %s: %r", payto, e)
@@ -1427,6 +1447,34 @@ BULK_LOG_WORKERS = {"base": 2}
 BULK_LOG_THROTTLE_TRIES = 10
 _TRANSFER_TOPIC = (
     "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef")
+# AuthorizationUsed(address indexed authorizer, bytes32 indexed nonce): emitted
+# by USDC (FiatTokenV2) for every EIP-3009 transferWithAuthorization /
+# receiveWithAuthorization -- the way x402 "exact" payments settle on EVM.
+# Only transfers whose own transaction used the payer's authorization are
+# counted as payments; plain transfers (treasury moves, exchange withdrawals,
+# the owner topping up) are not demand.
+_AUTH_USED_TOPIC = (
+    "0x98de503528ee59b575ef0c0a2576a82497bfc029a5685b209e9ec333479b10a5")
+# Top-level call selectors of USDC's EIP-3009 entry points, for indexers that
+# return transfers with the transaction's methodId but no event logs.
+EIP3009_METHOD_IDS = frozenset({
+    "0xe3ee160e",  # transferWithAuthorization(..., uint8 v, bytes32 r, bytes32 s)
+    "0xcf092995",  # transferWithAuthorization(..., bytes signature)
+    "0xef55bec6",  # receiveWithAuthorization(..., uint8 v, bytes32 r, bytes32 s)
+    "0x88b7ab63",  # receiveWithAuthorization(..., bytes signature)
+})
+# Most payer topics per AuthorizationUsed query (same limit as payTo batches).
+_AUTH_PAYER_BATCH = 1000
+
+
+def _row_method_id(row):
+    """methodId of a tokentx row, or None when the indexer does not give one."""
+    mid = (row.get("methodId") or "").strip().lower()
+    if not mid:
+        inp = (row.get("input") or "").strip().lower()
+        if inp.startswith("0x") and len(inp) >= 10 and inp != "deprecated":
+            mid = inp[:10]
+    return mid or None
 
 
 class _Pacer:
@@ -1494,13 +1542,15 @@ def _rpc(client, url, method, params):
 
 
 def fetch_chain_activity_bulk(paytos, chain="base", days=30, rate=0.15):
-    """Count incoming USDC transfers per address over the window in one sweep.
+    """Count EIP-3009 USDC payments per address over the window in one sweep.
 
-    Returns ``(results, ok)``. ``results`` maps a lowercased payTo to
-    {"tx": int, "payers": int}; every requested address is present, so a zero
-    is a confirmed zero rather than a missing lookup. ``ok`` is False when any
-    block window could not be read, because a gap silently undercounts and
-    must not be written as authoritative.
+    A transfer to a payTo counts only when its transaction also emitted
+    AuthorizationUsed for the sender (see _AUTH_USED_TOPIC). Returns
+    ``(results, ok)``. ``results`` maps a lowercased payTo to
+    {"tx": int, "payers": int, "raw_tx": int}; every requested address is
+    present, so a zero is a confirmed zero rather than a missing lookup.
+    ``ok`` is False when any block window could not be read, because a gap
+    silently undercounts and must not be written as authoritative.
     """
     cfg = BULK_LOG_CHAINS.get(chain)
     if cfg is None or not paytos:
@@ -1510,7 +1560,7 @@ def fetch_chain_activity_bulk(paytos, chain="base", days=30, rate=0.15):
     workers = max(1, BULK_LOG_WORKERS.get(chain, 1))
 
     wanted = sorted({a.lower() for a in paytos if a})
-    counts = {a: {"tx": 0, "payers": set()} for a in wanted}
+    counts = {a: {"tx": 0, "raw": 0, "payers": set()} for a in wanted}
     topic_to_addr = {_topic_addr(a): a for a in wanted}
 
     try:
@@ -1540,6 +1590,35 @@ def fetch_chain_activity_bulk(paytos, chain="base", days=30, rate=0.15):
             pacer = _Pacer(rate)
 
             def fetch_window(topics, lo, hi):
+                """Transfers for [lo, hi], each marked authorized or not.
+
+                Returns a list of (log, authorized) or None on failure. The
+                AuthorizationUsed query covers the same blocks and only the
+                senders seen, so it costs one extra call per window that has
+                any transfer to us.
+                """
+                transfers = get_logs(topics, lo, hi)
+                if transfers is None:
+                    return None
+                if not transfers:
+                    return []
+                senders = sorted({(e.get("topics") or [None, None])[1].lower()
+                                  for e in transfers
+                                  if len(e.get("topics") or []) >= 3})
+                authorized = set()
+                for i in range(0, len(senders), _AUTH_PAYER_BATCH):
+                    auth = get_logs([_AUTH_USED_TOPIC, senders[i:i + _AUTH_PAYER_BATCH]], lo, hi)
+                    if auth is None:
+                        return None
+                    for e in auth:
+                        tp = e.get("topics") or []
+                        if len(tp) >= 2:
+                            authorized.add(((e.get("transactionHash") or "").lower(), tp[1].lower()))
+                return [(e, ((e.get("transactionHash") or "").lower(),
+                             (e.get("topics") or [None, ""])[1].lower()) in authorized)
+                        for e in transfers]
+
+            def get_logs(topics, lo, hi):
                 """All logs for [lo, hi]; halves oversized ranges. None on failure.
 
                 Every call waits for the shared pacer, so N workers together
@@ -1624,15 +1703,17 @@ def fetch_chain_activity_bulk(paytos, chain="base", days=30, rate=0.15):
                                 for f in pending:
                                     f.cancel()
                                 return {}, False
-                            for entry in logs:
+                            for entry, authorized in logs:
                                 tp = entry.get("topics") or []
                                 if len(tp) < 3:
                                     continue
                                 addr = topic_to_addr.get(tp[2].lower())
                                 if addr is None:
                                     continue
-                                counts[addr]["tx"] += 1
-                                counts[addr]["payers"].add(tp[1].lower())
+                                counts[addr]["raw"] += 1
+                                if authorized:
+                                    counts[addr]["tx"] += 1
+                                    counts[addr]["payers"].add(tp[1].lower())
                             done += 1
                             if done % 200 == 0:
                                 log.info("onchain bulk %s: %d/%d windows",
@@ -1645,7 +1726,11 @@ def fetch_chain_activity_bulk(paytos, chain="base", days=30, rate=0.15):
     # payer_ids lets a caller union payers across several addresses of the
     # same service instead of adding counts, which would double-count
     # anyone who paid more than one of them.
-    return ({a: {"tx": v["tx"], "payers": len(v["payers"]),
+    raw = sum(v["raw"] for v in counts.values())
+    kept = sum(v["tx"] for v in counts.values())
+    log.info("onchain bulk %s: %d transfers in, %d with an EIP-3009 authorization",
+             chain, raw, kept)
+    return ({a: {"tx": v["tx"], "payers": len(v["payers"]), "raw_tx": v["raw"],
                  "payer_ids": sorted(v["payers"])}
              for a, v in counts.items()}, True)
 

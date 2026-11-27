@@ -1594,12 +1594,19 @@ def cmd_onchain(limit=None, stale_days=3, refresh_all=False, rate=1.2) -> int:
             accs = [results[k] for k in keys if k in results and results[k]["ok"]]
             if not accs:
                 continue  # every query failed -> skip, avoid false zero
-            tx = sum(a["tx"] for a in accs)
-            ids = [a.get("payer_ids") for a in accs]
-            if all(i is not None for i in ids):
-                payers = len({p for i in ids for p in i})
+            # Only EIP-3009 payments count. A chain where they cannot be
+            # told apart (Solana) is unmeasured; if nothing else is left the
+            # listing's demand is NULL, not zero.
+            accs = [a for a in accs if not a.get("unmeasured")]
+            if not accs:
+                tx = payers = None
             else:
-                payers = sum(a["payers"] for a in accs)
+                tx = sum(a["tx"] for a in accs)
+                ids = [a.get("payer_ids") for a in accs]
+                if all(i is not None for i in ids):
+                    payers = len({p for i in ids for p in i})
+                else:
+                    payers = sum(a["payers"] for a in accs)
 
             def op(sid=sid, tx=tx, payers=payers):
                 with db.writer(immediate=True) as c:
@@ -1620,7 +1627,7 @@ def cmd_onchain(limit=None, stale_days=3, refresh_all=False, rate=1.2) -> int:
                     return True
             if db.with_retry(op):
                 counts["written"] += 1
-                if tx > 0:
+                if tx:
                     counts["active"] += 1
 
     def per_address(keys, label):
