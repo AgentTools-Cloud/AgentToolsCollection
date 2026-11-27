@@ -1,6 +1,6 @@
 # mcpserver — agent-tools.cloud directory + MCP discovery
 
-[![Listed on mcpservers.org](https://mcpservers.org/badge.svg)](https://mcpservers.org/servers/github-com-agenttools-cloud-agenttoolscollection-tree-main-agent-tools-mcp)
+[![Listed on mcpservers.org](https://mcpservers.org/badge.svg)](https://mcpservers.org/servers/github-com-agenttools-cloud-agenttoolscollection-tree-main-agent-tools-mcp) [![AgentTools-Cloud/AgentToolsCollection MCP server](https://glama.ai/mcp/servers/AgentTools-Cloud/AgentToolsCollection/badges/score.svg)](https://glama.ai/mcp/servers/AgentTools-Cloud/AgentToolsCollection)
 
 The server that powers [agent-tools.cloud](https://agent-tools.cloud) — an open,
 agent-readable directory of **x402 paid APIs, MCP servers and A2A agents**, probed
