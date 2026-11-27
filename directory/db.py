@@ -4109,6 +4109,12 @@ def mcp_endpoint_urls(conn: sqlite3.Connection) -> list:
     return [r[0] for r in rows]
 
 
+def _seen_by_other_source(conn: sqlite3.Connection, listing_id: int, now: int) -> None:
+    """Any directory still listing a server keeps it fresh, not only its first source."""
+    conn.execute("UPDATE mcp_servers SET last_seen=MAX(COALESCE(last_seen, 0), ?) "
+                 "WHERE id=?", (now, listing_id))
+
+
 def upsert_mcp_server(conn: sqlite3.Connection, row: dict) -> tuple:
     """Insert/update an MCP server. Dedup on (source, source_id) then slug.
 
@@ -4161,13 +4167,15 @@ def upsert_mcp_server(conn: sqlite3.Connection, row: dict) -> tuple:
         return False, int(source_existing["id"])
     if (source_existing is not None
             and source_existing["source"] != row.get("source")):
-        _record_source(conn, "mcp", int(source_existing["id"]), _src)
+        if _record_source(conn, "mcp", int(source_existing["id"]), _src):
+            _seen_by_other_source(conn, int(source_existing["id"]), now)
         return False, int(source_existing["id"])
     if source_existing is None and endpoint_existing is not None:
         if endpoint_existing["source"] == row.get("source"):
             source_existing = endpoint_existing
         else:
-            _record_source(conn, "mcp", int(endpoint_existing["id"]), _src)
+            if _record_source(conn, "mcp", int(endpoint_existing["id"]), _src):
+                _seen_by_other_source(conn, int(endpoint_existing["id"]), now)
             return False, int(endpoint_existing["id"])
     existing = source_existing or endpoint_existing
 

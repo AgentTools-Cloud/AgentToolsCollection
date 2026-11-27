@@ -1270,11 +1270,26 @@ def _wait_for_host(url) -> None:
         time.sleep(delay)
 
 
+def _discover_due(server_id: int, now: int) -> bool:
+    """Ask each server for its newest revision (server/discover) once a week."""
+    return (int(server_id) + now // 86400) % 7 == 0
+
+
+def _protocol_version(res: dict, stored):
+    """Revision to store. Between weekly discover checks a legacy initialize
+    answer must not overwrite a newer revision found by server/discover."""
+    probed = res.get("protocol_version")
+    if (probed and stored and not res.get("protocol_discovered")
+            and str(stored) > str(probed)):
+        return stored
+    return probed
+
+
 def cmd_health_mcp(only_unknown: bool = False, quarantined_only: bool = False) -> int:
     """Liveness-probe indexed MCP servers via an `initialize` request."""
     _qc = int(time.time()) - QUARANTINE_DAYS * 86400
-    sql = ("SELECT id, endpoint_url, name, description, tools_text, auth_discovery_checked "
-           "FROM mcp_servers WHERE endpoint_url IS NOT NULL AND endpoint_url != ''")
+    sql = ("SELECT id, endpoint_url, name, description, tools_text, auth_discovery_checked, "
+           "protocol_version FROM mcp_servers WHERE endpoint_url IS NOT NULL AND endpoint_url != ''")
     if quarantined_only:
         sql += f" AND (down_since IS NOT NULL AND down_since <= {_qc})"
     else:
@@ -1293,7 +1308,8 @@ def cmd_health_mcp(only_unknown: bool = False, quarantined_only: bool = False) -
 
     def _probe(r):
         _wait_for_host(r["endpoint_url"])
-        res = crawlers.probe_mcp_health(r["endpoint_url"])
+        res = crawlers.probe_mcp_health(
+            r["endpoint_url"], discover_modern=_discover_due(r["id"], now))
         h = res["status"]
         conf = res.get("conformance")
         last_ok = now if h == "ok" else None
@@ -1332,7 +1348,8 @@ def cmd_health_mcp(only_unknown: bool = False, quarantined_only: bool = False) -
         upd = (h, now, res["latency_ms"], res["http_status"],
                conf, res.get("tool_count"), tools_json, tools_text,
                scan.verdict, scan.score, safety_reasons,
-               res.get("protocol_version"), last_ok, disc, disc_at, r["id"])
+               _protocol_version(res, r["protocol_version"]), last_ok, disc, disc_at,
+               r["id"])
         return r["id"], h, conf, (res["latency_ms"], res["http_status"]), scan, upd
 
     # Concurrent probes (network-I/O bound). 16 workers keeps this VPS — which

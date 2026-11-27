@@ -3554,7 +3554,7 @@ def _probe_mcp_sse(client, endpoint: str, headers: dict) -> bool:
     return False
 
 
-def probe_mcp_health(endpoint: str) -> dict:
+def probe_mcp_health(endpoint: str, discover_modern: bool = False) -> dict:
     """Probe an MCP streamable-http endpoint.
 
     Does the `initialize` handshake and, when it succeeds, a follow-up
@@ -3633,9 +3633,21 @@ def probe_mcp_health(endpoint: str) -> dict:
             server_rev = (_result or {}).get("protocolVersion") \
                 if isinstance(_result, dict) else None
             modern = None
+            discovered = False
             if not server_rev and isinstance(_init_parsed.get("error"), dict):
                 modern = _mcp_discover_revision(c, endpoint, headers)
                 server_rev = modern
+                discovered = True
+            elif (discover_modern and isinstance(server_rev, str)
+                  and _MCP_REVISION_RE.fullmatch(server_rev)
+                  and server_rev < MCP_LATEST_REVISION):
+                # A dual-era server negotiates initialize down to a legacy
+                # revision; only server/discover shows it also speaks the
+                # 2026-07-28 one. Tools are still listed in the legacy session.
+                newer = _mcp_discover_revision(c, endpoint, headers)
+                discovered = True
+                if newer and newer > server_rev:
+                    server_rev = newer
             sid = r.headers.get("mcp-session-id") or r.headers.get("Mcp-Session-Id")
             h2 = dict(headers)
             if sid:
@@ -3676,7 +3688,8 @@ def probe_mcp_health(endpoint: str) -> dict:
                 pass
             return {"status": "ok", "latency_ms": dt, "http_status": sc,
                     "conformance": conformance, "tool_count": tool_count,
-                    "tools": tool_list, "protocol_version": server_rev}
+                    "tools": tool_list, "protocol_version": server_rev,
+                    "protocol_discovered": discovered}
     except public_http.UnsafeURL as exc:
         return {**base, "status": "down", "unsafe_url": str(exc)}
     except Exception:

@@ -179,7 +179,7 @@ class HealthJob(TemporaryDatabaseTestCase):
         self.check = self.enterContext(patch.object(
             jobs.mcp_auth_discovery, "check", return_value={"challenge": True, "v": 1}))
 
-    def probe(self, url):
+    def probe(self, url, discover_modern=False):
         return {"status": "ok", "latency_ms": 50, "http_status": self.status,
                 "conformance": "fail", "tool_count": None, "tools": None,
                 "protocol_version": None, "www_authenticate": CHALLENGE}
