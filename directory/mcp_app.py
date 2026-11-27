@@ -1447,4 +1447,26 @@ for _tool in discover_mcp._tool_manager.list_tools():
             _schema["description"] = _descs[_name]
 
 
+# tools/list order is what clients show and what models read first: put the
+# tools that answer "find me a tool for X" at the top, admin and account tools
+# last. Tools not named here keep their registration order after these.
+TOOL_ORDER = (
+    "ask_services", "search_resources", "search", "search_mcp_servers", "search_a2a_agents",
+    "get", "get_mcp_server", "scan_mcp_safety", "directory_stats", "stats", "list_categories",
+    "get_methodology", "list_articles", "get_article",
+)
+
+
+def _reorder_tools(manager, order=TOOL_ORDER):
+    tools = manager._tools
+    first = {n: tools[n] for n in order if n in tools}
+    rest = {n: t for n, t in tools.items() if n not in first}
+    tools.clear()
+    tools.update(first)
+    tools.update(rest)
+
+
+_reorder_tools(discover_mcp._tool_manager)
+
+
 log.info("directory MCP app built (db=%s, tools=%s)", DB_PATH, len(discover_mcp._tool_manager.list_tools()))

@@ -28,7 +28,7 @@ class CardTests(unittest.TestCase):
         card = a2a.own_agent_card("https://agent-tools.cloud")
         ids = [s["id"] for s in card["skills"]]
         self.assertEqual(ids, ["ask_analyst", "research_report", "market_scan", "compare",
-                               "listing_audit", "raw_report"])
+                               "listing_audit", *r.SKILL_IDS])
         self.assertTrue(set(ids).isdisjoint(r._TOOL_SKILLS))
         self.assertEqual(card["name"], "Agent Tools Research")
         self.assertIn("https://agent-tools.cloud/mcp-discovery/", card["description"])
@@ -182,7 +182,9 @@ class BudgetTests(unittest.TestCase):
 
     def test_card_is_small(self):
         import json
-        self.assertLess(len(json.dumps(a2a.own_agent_card())), 3400)  # was 4.3 KB
+        # 3.4 KB until 11-27, when every data report became its own skill so
+        # clients can see what the agent does from the card alone (~5.4 KB).
+        self.assertLess(len(json.dumps(a2a.own_agent_card())), 5600)
 
 
 if __name__ == "__main__":

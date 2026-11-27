@@ -32,6 +32,14 @@ class McpToolMetadataTests(unittest.TestCase):
             if name in WRITE_TOOLS:
                 self.assertIs(ann.destructiveHint, name in DESTRUCTIVE_TOOLS, name)
 
+    def test_finder_tools_are_listed_first_and_admin_tools_last(self):
+        names = [t.name for t in asyncio.run(discover_mcp.list_tools())]
+        self.assertEqual(names[:2], ["ask_services", "search_resources"])
+        last_read = max(names.index(n) for n in ("search", "get", "directory_stats"))
+        for n in ("register", "claim_service_url", "create_api_key", "prepare_paid_verification"):
+            self.assertGreater(names.index(n), last_read, n)
+        self.assertEqual(len(names), len(set(names)))
+
     def test_every_parameter_has_a_description(self):
         for name, tool in _tools().items():
             for param, schema in (tool.inputSchema.get("properties") or {}).items():

@@ -32,7 +32,7 @@ log = logging.getLogger("directory.a2a")
 SITE = "https://agent-tools.cloud"
 PROTOCOL_VERSION = "0.3.0"  # legacy top-level field kept for 0.3 clients
 SUPPORTED_A2A_VERSIONS = ("1.0", "0.3")  # preference order, Major.Minor
-AGENT_VERSION = "0.9.0"
+AGENT_VERSION = "0.10.0"
 
 UA = "agent-tools.cloud-a2a/0.1 (+https://agent-tools.cloud/bot)"
 TIMEOUT = httpx.Timeout(connect=10.0, read=20.0, write=10.0, pool=10.0)
@@ -79,23 +79,39 @@ def _upsert_rows(rows: list[dict]) -> tuple[int, int]:
 # ---------------------------------------------------------------------------
 
 def card_skills() -> list[dict]:
+    """Every skill the endpoint answers, each with what it returns and how to
+    call it, so a client can pick one from the card alone.
+
+    Two families: the analyst (an LLM writes an answer from our data; rate
+    limited) and the data reports (computed JSON, no LLM, instant). Searching
+    or calling listings is not an A2A skill; that is the MCP server / REST API.
+    """
     def s(sid, name, desc, example, tags):
         return {"id": sid, "name": name, "description": desc, "tags": ["research", *tags], "examples": [example]}
-    raw = ", ".join(a2a_research.SKILL_IDS)
-    return [
-        s("ask_analyst", "Ask the analyst", "Any question about the x402 / MCP / A2A market, answered from our data.",
-          "what share of MCP servers actually work, and why do the rest fail?", ["question"]),
-        s("research_report", "Research report", "A structured report on a topic you name: summary, findings with "
-          "numbers, method, limits.", "write a report on payment tools across x402, MCP and A2A", ["report"]),
-        s("market_scan", "Market scan", "Opportunities for builders: demand with thin or low-quality supply.",
-          "where are the gaps worth building in?", ["opportunity", "demand"]),
-        s("compare", "Compare", "Two protocols, topics or periods on the same metrics.",
-          "compare x402 and MCP on readiness and latency", ["compare"]),
-        s("listing_audit", "Listing audit", "One listing vs its peers, its biggest gaps and how to fix them.",
-          "audit https://agent-tools.cloud/mcp/servers/<slug>", ["benchmark", "readiness"]),
-        s("raw_report", "Raw report (no LLM)", f'Data part {{"skill": <id>, ...}} with id in: {raw}. '
-          'Returns the report JSON directly.', '{"skill":"trend_report","view":"mcp","days":30}', ["data"]),
+
+    def analyst(sid, name, what, example, tags):
+        how = "Plain text." if sid == "ask_analyst" else f'Data part {{"skill":"{sid}","question":"..."}}.'
+        return s(sid, name, f"LLM analyst: {what} {how}", example, ["llm", *tags])
+
+    skills = [
+        analyst("ask_analyst", "Ask the analyst",
+                "any question on x402 APIs, MCP servers or A2A agents (counts, reliability, prices, demand).",
+                "what share of MCP servers actually work?", ["question"]),
+        analyst("research_report", "Research report",
+                "a report on a topic you name: findings with numbers, method, limits.",
+                "report on payment tools across x402, MCP and A2A", ["report"]),
+        analyst("market_scan", "Market scan",
+                "topics people search for where working supply is thin.",
+                "where are the gaps worth building in?", ["opportunity"]),
+        analyst("compare", "Compare", "two protocols, topics or periods on the same metrics.",
+                "compare x402 and MCP on readiness", ["compare"]),
+        analyst("listing_audit", "Listing audit", "one listing (URL or slug) vs its peers, with fixes.",
+                "audit https://agent-tools.cloud/mcp/servers/<slug>", ["benchmark"]),
     ]
+    for r in a2a_research.SKILLS:
+        skills.append({**r, "description": "Data report (JSON, no LLM): " + r["description"],
+                       "tags": ["data", *r["tags"][1:]]})
+    return skills
 
 
 def own_agent_card(base_url: str = SITE) -> dict:
@@ -118,8 +134,9 @@ def own_agent_card(base_url: str = SITE) -> dict:
             "A2A agents). Ask in plain language; it queries our daily probe data, writes the "
             "analysis and checks its numbers against the data, flagging any it cannot match (CC BY 4.0). Multi-turn: send back "
             "the contextId we return; to choose your own contextId, send an API key "
-            "(Authorization: Bearer). Plain text goes to ask_analyst; for another skill send a data "
-            "part {\"skill\": <id>, \"question\": ...}. "
+            "(Authorization: Bearer). Plain text goes to ask_analyst; for another analyst skill send a data "
+            "part {\"skill\": <id>, \"question\": ...}. Data-report skills return JSON without the LLM "
+            "and do not count toward its limits; add \"detail\":\"full\" for the whole report. "
             f"Limits per client IP: 20 answers/hour (3 reports) and 100/day; errors carry "
             f"retryAfterSeconds ({base}/about#a2a-agent). "
             f"To search or safety-scan tools use our MCP server: {base}/mcp-discovery/"
