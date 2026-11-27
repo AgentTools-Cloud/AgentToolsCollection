@@ -909,6 +909,14 @@ def probe_health(url, well_known=None, inspect_payment=True,
                     elif t == url and sc >= 500:
                         last = {"status": "down", "latency_ms": dt,
                                 "http_status": sc, "x402": False}
+                    elif t == url and sc in (400, 405, 422):
+                        # The endpoint answered: 405 means it wants another
+                        # method (POST-only x402 resources), 400/422 that it
+                        # wants input before it quotes. Reachable but not
+                        # proven callable -- the same verdict a known POST
+                        # endpoint without a probe body gets -- not "down".
+                        last = {"status": "degraded", "latency_ms": dt,
+                                "http_status": sc, "x402": False}
                     elif t == url and sc >= 400:
                         last = {"status": "down", "latency_ms": dt,
                                 "http_status": sc, "x402": False}

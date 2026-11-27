@@ -46,7 +46,14 @@ def primary_http_request(row: dict[str, Any]) -> dict[str, Any]:
     empty_probe = method == 'POST' and (
         any(str(sample.get('method') or '').upper() == 'POST' and sample.get('probe_body') == {} for sample in matching)
         or info_matches and str(info['method']).upper() == 'POST' and info.get('probe_body') == {})
-    return {'url': url, 'method': method, 'method_known': known, 'empty_post_probe': empty_probe}
+    # probe_verified is written only by staff after we ourselves saw an unpaid
+    # POST {} to this exact URL return a valid 402 (never copied from a
+    # descriptor), so the health job may repeat that probe for unowned rows.
+    probe_verified = empty_probe and any(
+        str(sample.get('method') or '').upper() == 'POST' and sample.get('probe_body') == {}
+        and sample.get('probe_verified') is True for sample in matching)
+    return {'url': url, 'method': method, 'method_known': known, 'empty_post_probe': empty_probe,
+            'probe_verified': probe_verified}
 
 
 def primary_json_body(row: dict[str, Any], url: str) -> str | None:

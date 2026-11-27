@@ -799,8 +799,11 @@ def cmd_health(only_unknown: bool = False, quarantined_only: bool = False) -> in
                 request = cards.primary_http_request(row)
                 method_hint = request['method'] if request['method_known'] else None
             options = {}
-            if verified_interface and cards.primary_http_request(row)['empty_post_probe']:
+            request = cards.primary_http_request(row)
+            if request['empty_post_probe'] and (verified_interface or request['probe_verified']):
                 options['empty_post_probe'] = True
+                if method_hint is None and request['method_known']:
+                    method_hint = request['method']
             res = crawlers.probe_health(
                 r["url"], r["well_known_url"],
                 inspect_payment=not bool(r["x402_ok"]),

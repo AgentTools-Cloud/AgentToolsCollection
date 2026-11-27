@@ -583,8 +583,59 @@ class CrawlerFailureTests(unittest.TestCase):
         client = Client()
         with patch.object(crawlers.httpx, "Client", return_value=client):
             result = crawlers.probe_health(endpoint)
-        self.assertEqual(result["status"], "down")
+        # 405 proves the endpoint is up but wants another method; without a
+        # probe body we still never POST, so it stays unproven (degraded).
+        self.assertEqual(result["status"], "degraded")
+        self.assertEqual(result["http_status"], 405)
         self.assertFalse(client.posted)
+
+    def test_probe_health_input_required_is_degraded_not_down(self):
+        for code in (400, 422):
+            endpoint = "https://api.example.test/ask"
+
+            class Client:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *_args):
+                    return False
+
+                def head(self, _url):
+                    return _Response(code)
+
+                def get(self, url):
+                    return _Response(code if url == endpoint else 404)
+
+                def post(self, _url, json):
+                    raise AssertionError(f"unexpected POST with {json!r}")
+
+            with patch.object(crawlers.httpx, "Client", return_value=Client()):
+                result = crawlers.probe_health(endpoint, inspect_payment=False)
+            self.assertEqual(result["status"], "degraded", code)
+            self.assertEqual(result["http_status"], code)
+
+    def test_probe_health_missing_path_stays_down(self):
+        endpoint = "https://api.example.test/gone"
+
+        class Client:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def head(self, _url):
+                return _Response(404)
+
+            def get(self, _url):
+                return _Response(404)
+
+            def post(self, _url, json):
+                raise AssertionError(f"unexpected POST with {json!r}")
+
+        with patch.object(crawlers.httpx, "Client", return_value=Client()):
+            result = crawlers.probe_health(endpoint, inspect_payment=False)
+        self.assertEqual(result["status"], "down")
 
     def test_probe_health_rejects_cross_origin_descriptor_for_post(self):
         endpoint = "https://victim.example.test/pay"
@@ -619,7 +670,8 @@ class CrawlerFailureTests(unittest.TestCase):
         client = Client()
         with patch.object(crawlers.httpx, "Client", return_value=client):
             result = crawlers.probe_health(endpoint, descriptor)
-        self.assertEqual(result["status"], "down")
+        # Never proven callable (405, no same-origin probe body), never POSTed.
+        self.assertEqual(result["status"], "degraded")
         self.assertFalse(client.posted)
 
     def test_probe_health_rejects_cross_origin_descriptor_redirect(self):
@@ -874,6 +926,59 @@ class CrawlerFailureTests(unittest.TestCase):
                     "SELECT x402_ok FROM services WHERE slug='known-x402'"
                 ).fetchone()
                 self.assertEqual(known["x402_ok"], 1)
+
+    def test_health_job_repeats_only_staff_verified_empty_post(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = str(Path(temp_dir) / "directory.db")
+            db.init_db(db_path)
+            with db.writer(db_path) as conn:
+                for slug, verified in (("staff-verified", True), ("descriptor-only", False)):
+                    url = f"https://{slug}.example.test/pay"
+                    _, service_id = db.upsert_service(conn, {
+                        "slug": slug, "name": slug, "url": url,
+                        "source": "test", "source_id": slug, "health": "unknown",
+                    })
+                    sample = {"url": url, "method": "POST", "probe_body": {}}
+                    if verified:
+                        sample["probe_verified"] = True
+                    conn.execute(
+                        "UPDATE services SET resource_samples=? WHERE id=?",
+                        (json.dumps([sample]), service_id),
+                    )
+
+            real_connect, real_writer = db.connect, db.writer
+            seen = {}
+
+            def probe(url, _well_known, inspect_payment=True, method_hint=None,
+                      empty_post_probe=False):
+                seen[url] = (method_hint, empty_post_probe)
+                return {"status": "ok", "latency_ms": 1,
+                        "http_status": 402, "x402": True}
+
+            with (
+                patch.object(
+                    jobs.db, "connect",
+                    side_effect=lambda *_args, **kwargs: real_connect(
+                        db_path, read_only=kwargs.get("read_only", False)
+                    ),
+                ),
+                patch.object(
+                    jobs.db, "writer",
+                    side_effect=lambda *_args, **kwargs: real_writer(
+                        db_path, immediate=kwargs.get("immediate", False)
+                    ),
+                ),
+                patch.object(jobs.crawlers, "probe_health", side_effect=probe),
+                patch.object(jobs, "cmd_ownership_recheck"),
+                patch.object(jobs, "cmd_rescore"),
+                patch.object(jobs, "_maintain_down_since"),
+            ):
+                self.assertEqual(jobs.cmd_health(only_unknown=True), 0)
+
+            self.assertEqual(seen, {
+                "https://staff-verified.example.test/pay": ("POST", True),
+                "https://descriptor-only.example.test/pay": (None, False),
+            })
 
 
 if __name__ == "__main__":
