@@ -804,7 +804,10 @@ def reverify(targets=("mcp", "a2a"), workers=24, limit=None,
                             c, payment=payment, chains=chains,
                             resource_samples=samples):
                         continue
-                    if (_observed or _live_at) and not _explicit_price:
+                    # A submitted price outranks descriptor text, but not the
+                    # amount the seller's 402 actually charges right now
+                    # (Hermes: submitted 0.05 on 11-05, charges 0.005-0.03).
+                    if _live_at or (_observed and not _explicit_price):
                         c.execute(
                             "UPDATE services SET payment=?, chains=?, "
                             "resource_count=COALESCE(?, resource_count), "
