@@ -759,13 +759,13 @@ def cmd_health(only_unknown: bool = False, quarantined_only: bool = False) -> in
     if quarantined_only:
         sql = (
             "SELECT id, url, well_known_url, mcp_url, x402_ok, "
-            "resource_samples,call_info,owner_verified,owner_declaration FROM services "
+            "resource_samples,call_info,owner_verified,owner_declaration,declared FROM services "
             f"WHERE down_since IS NOT NULL AND down_since <= {_qc}"
         )
     else:
         sql = (
             "SELECT id, url, well_known_url, mcp_url, x402_ok, "
-            "resource_samples,call_info,owner_verified,owner_declaration FROM services "
+            "resource_samples,call_info,owner_verified,owner_declaration,declared FROM services "
             f"WHERE (down_since IS NULL OR down_since > {_qc})"
         )
         if only_unknown:
@@ -780,6 +780,7 @@ def cmd_health(only_unknown: bool = False, quarantined_only: bool = False) -> in
         return 0
 
     from concurrent.futures import ThreadPoolExecutor
+    declared_seen: dict[int, dict] = {}
 
     def _probe(r):
         # 只看状态码无法区分「MCP 端点」和「恰好返回 200 的文档页」，
@@ -804,8 +805,21 @@ def cmd_health(only_unknown: bool = False, quarantined_only: bool = False) -> in
                 options['empty_post_probe'] = True
                 if method_hint is None and request['method_known']:
                     method_hint = request['method']
+            # A method and example input the seller itself declared (x402
+            # bazaar extension) for this exact URL: probe the way it says.
+            declared = request.get('declared')
+            probe_url = r["url"]
+            if declared and declared.get('type') == 'http' and not options \
+                    and declared.get('method') == request['method']:
+                from . import bazaar
+                if declared.get('method') == 'POST' and bazaar.probe_body(declared) is not None:
+                    method_hint = 'POST'
+                    options['post_body'] = bazaar.probe_body(declared)
+                elif declared.get('method') == 'GET':
+                    method_hint = 'GET'
+                    probe_url = bazaar.query_url(r["url"], declared)
             res = crawlers.probe_health(
-                r["url"], r["well_known_url"],
+                probe_url, r["well_known_url"],
                 inspect_payment=not bool(r["x402_ok"]),
                 method_hint=method_hint,
                 **options,
@@ -813,6 +827,8 @@ def cmd_health(only_unknown: bool = False, quarantined_only: bool = False) -> in
             x = 1 if res["x402"] else 0
         h = res["status"]
         now = int(time.time())
+        if res.get("bazaar"):
+            declared_seen[int(r["id"])] = {crawlers._bazaar_mod.key(r["url"]): res["bazaar"]}
         return (h,
                 (h, now, res["latency_ms"], res["http_status"], x, conf,
                  res.get("x402_version"), res.get("description"), r["id"]),
@@ -861,6 +877,10 @@ def cmd_health(only_unknown: bool = False, quarantined_only: bool = False) -> in
                     "VALUES (?, ?, ?, ?, ?, ?)",
                     [row for row in history if row[0] in accepted],
                 )
+                for listing_id in accepted:
+                    if listing_id in declared_seen:
+                        db.merge_service_declarations(
+                            c, listing_id, declared_seen[listing_id], "challenge")
         db.with_retry(op)
         log.info("health progress: checked=%d/%d ok=%d degraded=%d down=%d",
                  min(start + batch_size, len(rows)), len(rows), n_ok, n_degraded, n_down)
@@ -2364,6 +2384,16 @@ def _approve(sub_id: int, note: str | None = None,
         return {"owner_locked": True, "name": name, "url": url}
     created = outcome["created"]
     service["slug"] = outcome.get("slug") or service["slug"]
+    if (verdict or {}).get("declared"):
+        def _declare(slug=service["slug"], found=verdict["declared"]):
+            with db.writer() as wc:
+                row = wc.execute("SELECT id FROM services WHERE slug=?", (slug,)).fetchone()
+                if row is not None:
+                    db.merge_service_declarations(wc, int(row[0]), found, "challenge")
+        try:
+            db.with_retry(_declare)
+        except Exception as e:  # noqa: BLE001 - extras must never block a listing
+            log.warning("approve #%d: storing declared interface failed: %r", sub_id, e)
     log.info("approved submission #%d -> service slug=%s (%s)",
              sub_id, service["slug"], "new" if created else "updated")
     # Probe once now so the new service is not stuck at health=unknown
@@ -2406,6 +2436,33 @@ def _approve(sub_id: int, note: str | None = None,
         log.warning("approve notification email failed: %r", e)
     return {"slug": service["slug"], "created": bool(created),
             "name": name, "url": url}
+
+
+def cmd_bazaar_backfill() -> int:
+    """Read the whole CDP Bazaar feed once and attach every valid seller
+    declaration (x402 bazaar extension) to the listings that own the URLs.
+    The daily crawl only sees items updated since its watermark."""
+    found: dict[str, dict] = {}
+    counts = {"feed_items": 0, "with_extension": 0}
+
+    def on_page(page):
+        counts["feed_items"] += len(page)
+        counts["with_extension"] += sum(
+            1 for it in page if isinstance(it, dict)
+            and isinstance((it.get("extensions") or {}).get("bazaar"), dict))
+        found.update(crawlers.feed_declarations(page))
+
+    partial = None
+    try:
+        crawlers._bazaar_fetch_raw(max_pages=5000, on_page=on_page)
+    except crawlers.PartialCrawl as e:
+        partial = e.reason
+    stats = crawlers.apply_feed_declarations([], found=found)
+    stats.update(counts)
+    if partial:
+        stats["partial"] = partial
+    print(json.dumps(stats))
+    return 0
 
 
 def cmd_approve(sub_id: int, note: str | None = None) -> int:
@@ -2680,6 +2737,7 @@ def main(argv=None) -> int:
     p_auto.add_argument("--limit", type=int, default=100)
     p_auto.add_argument("--dry-run", action="store_true")
     sub.add_parser("rescore")
+    sub.add_parser("bazaar-backfill")
     sub.add_parser("ownership-recheck")
     sub.add_parser("ownership-pending-recheck")
     p_coll = sub.add_parser("collisions")
@@ -2784,6 +2842,8 @@ def main(argv=None) -> int:
         return cmd_auto_review(limit=args.limit, dry_run=args.dry_run)
     if args.cmd == "rescore":
         return cmd_rescore()
+    if args.cmd == "bazaar-backfill":
+        return cmd_bazaar_backfill()
     if args.cmd == "ownership-recheck":
         return cmd_ownership_recheck()
     if args.cmd == "ownership-pending-recheck":

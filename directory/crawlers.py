@@ -19,6 +19,7 @@ from urllib.parse import parse_qsl, urljoin, urlparse
 
 import os
 import httpx
+from . import bazaar as _bazaar_mod
 from . import public_http
 from .url_identity import exact_endpoint
 
@@ -207,7 +208,7 @@ def _bazaar_host(url: str) -> str:
 
 
 def _bazaar_fetch_raw(page_sleep: float = 0.3, max_pages: int = 400,
-                      since_iso: str | None = None) -> list:
+                      since_iso: str | None = None, on_page=None) -> list:
     """Page through the public CDP Bazaar v2 discovery feed.
 
     The v2 feed has no reliable server-side time filter and its
@@ -217,6 +218,9 @@ def _bazaar_fetch_raw(page_sleep: float = 0.3, max_pages: int = 400,
     ``since_iso`` is given we page through everything in natural order but keep
     only items with ``lastUpdated >= since_iso``. The aggregate/dedup/upsert
     work downstream then only touches the recently-changed tail.
+
+    ``on_page`` (if given) receives each page instead of it being kept, so a
+    full pass over the feed does not hold every item in memory.
     """
     items: list = []
     with httpx.Client(timeout=TIMEOUT, headers={"User-Agent": UA, "Accept": "application/json"}) as c:
@@ -246,7 +250,9 @@ def _bazaar_fetch_raw(page_sleep: float = 0.3, max_pages: int = 400,
             page = d.get("items") or []
             if not page:
                 break
-            if since_iso:
+            if on_page is not None:
+                on_page(page)
+            elif since_iso:
                 for it in page:
                     if (it.get("lastUpdated") or "") >= since_iso:
                         items.append(it)
@@ -263,6 +269,58 @@ def _bazaar_fetch_raw(page_sleep: float = 0.3, max_pages: int = 400,
                     items,
                     "hit max_pages=%d at offset %d of %d" % (max_pages, offset, total))
     return items
+
+
+def feed_declarations(raw: list) -> dict[str, dict]:
+    """{exact resource URL: declaration} for feed items carrying a valid
+    x402 ``bazaar`` extension."""
+    out: dict[str, dict] = {}
+    for it in raw or []:
+        if not isinstance(it, dict):
+            continue
+        res = it.get("resource")
+        if not isinstance(res, str) or not res.startswith(("http://", "https://")):
+            continue
+        declared = _bazaar_mod.extract(it)
+        if declared:
+            out[_bazaar_mod.key(res)] = declared
+    return out
+
+
+def apply_feed_declarations(raw: list, batch: int = 200,
+                            found: dict[str, dict] | None = None) -> dict[str, int]:
+    """Attach CDP Bazaar declarations to every listing that owns the URL,
+    whichever source listed it. Returns counters."""
+    from . import db
+    if found is None:
+        found = feed_declarations(raw)
+    stats = {"declared": len(found), "listings": 0, "updated": 0}
+    if not found:
+        return stats
+    targets: list[tuple[int, dict]] = []
+    with db.connect(read_only=True) as conn:
+        for row in conn.execute(
+                "SELECT id, url, resource_samples, call_info FROM services "
+                "WHERE url IS NOT NULL AND url != ''"):
+            owned = _bazaar_mod.listing_keys(dict(row))
+            hit = {k: found[k] for k in owned if k in found}
+            if hit:
+                targets.append((int(row["id"]), hit))
+    stats["listings"] = len(targets)
+    for start in range(0, len(targets), batch):
+        chunk = targets[start:start + batch]
+
+        def op(chunk=chunk):
+            changed = 0
+            with db.writer() as conn:
+                for service_id, hit in chunk:
+                    if db.merge_service_declarations(conn, service_id, hit, "cdp-bazaar"):
+                        changed += 1
+            return changed
+        stats["updated"] += db.with_retry(op)
+    log.info("cdp-bazaar: declarations %(declared)d, listings matched %(listings)d, "
+             "updated %(updated)d", stats)
+    return stats
 
 
 def fetch_cdp_bazaar() -> list:
@@ -320,6 +378,11 @@ def fetch_cdp_bazaar() -> list:
         except Exception as e:
             log.warning("cdp-bazaar: watermark write failed: %r", e)
 
+    try:
+        apply_feed_declarations(raw)
+    except Exception as e:  # noqa: BLE001 - enrichment must not block the crawl
+        log.warning("cdp-bazaar: declaration enrichment failed: %r", e)
+
     by_host: dict = {}
     for it in raw:
         if not isinstance(it, dict):
@@ -369,7 +432,11 @@ def fetch_cdp_bazaar() -> list:
                 if payto is None and a.get("payTo"):
                     payto = a.get("payTo")
             if len(samples) < 12:
-                samples.append({"url": res, "kind": it.get("type") or "x402-resource"})
+                sample = {"url": res, "kind": it.get("type") or "x402-resource"}
+                declared = _bazaar_mod.extract(it)
+                if declared and declared.get("type") == "http":
+                    sample["method"] = declared["method"]
+                samples.append(sample)
             low = res.lower()
             if mcp_url is None and re.search(r"(^|[./_-])mcp([./_-]|$)|/sse|/streamable", low):
                 mcp_url = res
@@ -809,7 +876,8 @@ def _health_ok(r, dt: int) -> dict[str, Any]:
 
 
 def probe_health(url, well_known=None, inspect_payment=True,
-                 method_hint: str | None = None, empty_post_probe: bool = False):
+                 method_hint: str | None = None, empty_post_probe: bool = False,
+                 post_body: dict | list | None = None):
     """Probe an endpoint and return a structured callability signal.
 
     Returns a dict:
@@ -849,7 +917,11 @@ def probe_health(url, well_known=None, inspect_payment=True,
             if hint == "POST":
                 t0 = time.monotonic()
                 try:
-                    if empty_post_probe:
+                    if post_body is not None:
+                        # The seller's own example body (x402 bazaar
+                        # extension); an unpaid request only reaches the 402.
+                        r = _request_same_origin(c, "POST", url, origin, json_body=post_body)
+                    elif empty_post_probe:
                         r = _request_same_origin(c, "POST", url, origin, json_body={})
                     else:
                         r = _request_same_origin(c, "HEAD", url, origin)
@@ -860,7 +932,8 @@ def probe_health(url, well_known=None, inspect_payment=True,
                             "http_status": None, "x402": False}
                 dt = int((time.monotonic() - t0) * 1000)
                 sc = r.status_code
-                if empty_post_probe and sc == 402 and not _valid_payment(_challenge_payment(r, url)):
+                if (empty_post_probe or post_body is not None) and sc == 402 \
+                        and not _valid_payment(_challenge_payment(r, url)):
                     return {"status": "degraded", "latency_ms": dt,
                             "http_status": sc, "x402": False}
                 if sc < 400 or sc == 402:
@@ -2157,6 +2230,11 @@ def challenge_facts(response) -> dict[str, Any]:
                          and a["description"].strip()), None)
         if "description" not in facts and isinstance(text, str) and text.strip():
             facts["description"] = text.strip()[:600]
+        if "bazaar" not in facts:
+            from . import bazaar
+            declared = bazaar.extract(obj)
+            if declared:
+                facts["bazaar"] = declared
     return facts
 
 
@@ -2322,6 +2400,12 @@ def verify_x402(url: str, well_known: str | None = None) -> dict[str, Any]:
     net_error = False
     docs_seen: list[Any] = []
     advertised_targets: list[tuple[str, str, dict | None]] = []
+    declared: dict[str, dict] = {}
+
+    def note_declared(response, target):
+        found = challenge_facts(response).get("bazaar")
+        if found:
+            declared[_bazaar_mod.key(target)] = found
 
     def unsafe(exc: public_http.UnsafeURL) -> dict[str, Any]:
         return {"status": "rejected",
@@ -2436,6 +2520,7 @@ def verify_x402(url: str, well_known: str | None = None) -> dict[str, Any]:
                 if not _valid_payment(challenge):
                     continue
                 payment = challenge
+                note_declared(r, res_url)
                 evidence.append(
                     f"advertised resource {res_url} returns HTTP 402 "
                     f"with payment requirements")
@@ -2466,6 +2551,7 @@ def verify_x402(url: str, well_known: str | None = None) -> dict[str, Any]:
                     )
                     continue
                 if _valid_payment(challenge):
+                    note_declared(r, target)
                     evidence.append(f"endpoint {target} returns HTTP 402 with payment requirements")
                     if target == url:
                         verified_url = target
@@ -2484,9 +2570,12 @@ def verify_x402(url: str, well_known: str | None = None) -> dict[str, Any]:
     if evidence:
         # Conclusive only if we saw real x402 markers somewhere.
         conclusive = bool(verified_url and _valid_payment(payment))
-        return {"status": "verified" if conclusive else "uncertain",
-                "evidence": evidence, "payment": payment,
-                "verified_url": verified_url}
+        out = {"status": "verified" if conclusive else "uncertain",
+               "evidence": evidence, "payment": payment,
+               "verified_url": verified_url}
+        if declared:
+            out["declared"] = declared
+        return out
     if net_error:
         return {"status": "uncertain",
                 "evidence": ["no x402 evidence; network errors during probe"],

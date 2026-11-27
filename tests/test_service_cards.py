@@ -143,7 +143,7 @@ class ServiceCardCurrencyTests(unittest.TestCase):
         self.assertEqual(tokens[tokens.index('-H') + 1], 'Content-Type: application/json')
         self.assertEqual(cards.primary_http_request(row), {
             'url': row['url'], 'method': 'POST', 'method_known': True, 'empty_post_probe': False,
-            'probe_verified': False,
+            'probe_verified': False, 'declared': None,
         })
 
     def test_matching_resource_post_example_is_used(self):

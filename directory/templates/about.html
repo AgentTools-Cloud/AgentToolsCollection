@@ -25,6 +25,7 @@
   <div>
     <h2 class="text-lg font-semibold mb-2">What is x402?</h2>
     <p class="text-sm">x402 is Coinbase's HTTP 402 micropayment protocol. AI agents can discover a service, inspect its payment requirements, and then call the external API with an x402 payment flow. We index public x402 endpoints; agent-tools.cloud itself is discovery-only.</p>
+    <p id="declared" class="text-sm mt-2 scroll-mt-20">Many x402 v2 sellers also declare how to call a resource in the <a class="text-blue-600 hover:underline" href="https://github.com/coinbase/x402/blob/main/specs/extensions/bazaar.md">Bazaar extension</a> of their 402 response: the HTTP method with example query parameters or body (or an MCP tool and its input schema) and an example response. We read it from the CDP Bazaar feed and from our own probes, keep only fields the specification defines after checking them against the schema the seller sends, and show it on the listing as &ldquo;Declared by the seller&rdquo;. Service cards then use the declared method and example input, and our availability check calls the resource that way &mdash; without payment, reading only the 402. Search with <code class="mono bg-slate-100 px-1 rounded">declared=true</code> or <code class="mono bg-slate-100 px-1 rounded">declared_method=POST</code> on <span class="mono">/api/v1/search</span>.</p>
   </div>
   <div id="api" class="scroll-mt-20">
     <h2 class="text-lg font-semibold mb-2">Agent-friendly discovery</h2>

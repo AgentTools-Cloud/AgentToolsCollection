@@ -202,8 +202,9 @@
     {% for r in svc.resource_samples %}
     <div class="border border-slate-200 rounded-lg p-3">
       <div class="flex items-start gap-2">
-        {% if r.method %}
-        <span class="shrink-0 px-2 py-0.5 rounded bg-slate-900 text-white text-xs mono">{{ r.method }}</span>
+        {% set sd = sample_declared.get(r.url) if sample_declared else none %}
+        {% if r.method or (sd and sd.method) %}
+        <span class="shrink-0 px-2 py-0.5 rounded bg-slate-900 text-white text-xs mono">{{ r.method or sd.method }}</span>
         {% endif %}
         <code class="text-sm mono break-all text-slate-800">{{ r.url }}</code>
         {% if r.price_usd is defined and r.price_usd is not none %}
@@ -214,6 +215,9 @@
       </div>
       {% if r.description %}
       <p class="text-xs text-slate-500 mt-1.5">{{ r.description }}</p>
+      {% endif %}
+      {% if sd and (sd.example or sd.tool) %}
+      <p class="text-xs text-slate-500 mt-1.5">Seller-declared {% if sd.tool %}tool <span class="mono">{{ sd.tool }}</span>{% endif %}{% if sd.example %} example input: <code class="mono break-all text-slate-700">{{ sd.example }}</code>{% endif %}</p>
       {% endif %}
     </div>
     {% endfor %}
@@ -231,6 +235,29 @@
       <div class="text-xs text-slate-500 mb-1.5">cURL · x402-fetch / x402-axios will auto-handle 402</div>
       <pre class="bg-slate-900 text-slate-100 text-xs p-3 rounded-lg overflow-x-auto"><code>{{ call_template.http_x402.curl_probe }}</code></pre>
     </div>
+    {% set declared = call_template.http_x402.declared if call_template.http_x402 is defined and call_template.http_x402 else none %}
+    {% if declared %}
+    <div>
+      <div class="text-xs text-slate-500 mb-1.5">Declared by the seller · <a href="https://github.com/coinbase/x402/blob/main/specs/extensions/bazaar.md" target="_blank" rel="noopener" class="text-blue-600 hover:underline">x402 Bazaar extension</a> in its 402 response</div>
+      <dl class="text-sm grid grid-cols-[auto,1fr] gap-x-4 gap-y-1.5">
+        {% if declared.type == 'mcp' %}
+        <dt class="text-slate-500">MCP tool</dt><dd class="mono break-all">{{ declared.tool_name }}{% if declared.transport %} <span class="text-slate-500">({{ declared.transport }})</span>{% endif %}</dd>
+        {% if declared.description %}<dt class="text-slate-500">Description</dt><dd>{{ declared.description }}</dd>{% endif %}
+        <dt class="text-slate-500">Input schema</dt><dd><pre class="bg-slate-50 ring-1 ring-slate-200 text-xs p-2 rounded overflow-x-auto"><code>{{ declared.input_schema | tojson(indent=2) }}</code></pre></dd>
+        {% if declared.example %}<dt class="text-slate-500">Example arguments</dt><dd><pre class="bg-slate-50 ring-1 ring-slate-200 text-xs p-2 rounded overflow-x-auto"><code>{{ declared.example | tojson(indent=2) }}</code></pre></dd>{% endif %}
+        {% else %}
+        <dt class="text-slate-500">Method</dt><dd class="mono">{{ declared.method }}</dd>
+        {% if declared.route_template %}<dt class="text-slate-500">Route</dt><dd class="mono break-all">{{ declared.route_template }}</dd>{% endif %}
+        {% if declared.query_params %}<dt class="text-slate-500">Query example</dt><dd><pre class="bg-slate-50 ring-1 ring-slate-200 text-xs p-2 rounded overflow-x-auto"><code>{{ declared.query_params | tojson(indent=2) }}</code></pre></dd>{% endif %}
+        {% if declared.path_params %}<dt class="text-slate-500">Path parameters</dt><dd><pre class="bg-slate-50 ring-1 ring-slate-200 text-xs p-2 rounded overflow-x-auto"><code>{{ declared.path_params | tojson(indent=2) }}</code></pre></dd>{% endif %}
+        {% if declared.headers %}<dt class="text-slate-500">Headers</dt><dd><pre class="bg-slate-50 ring-1 ring-slate-200 text-xs p-2 rounded overflow-x-auto"><code>{{ declared.headers | tojson(indent=2) }}</code></pre></dd>{% endif %}
+        {% if declared.body is defined %}<dt class="text-slate-500">Body example{% if declared.body_type %} ({{ declared.body_type }}){% endif %}</dt><dd><pre class="bg-slate-50 ring-1 ring-slate-200 text-xs p-2 rounded overflow-x-auto"><code>{{ declared.body | tojson(indent=2) }}</code></pre></dd>{% endif %}
+        {% endif %}
+        {% if declared.output and declared.output.example is defined %}<dt class="text-slate-500">Response example{% if declared.output.type %} ({{ declared.output.type }}){% endif %}</dt><dd><pre class="bg-slate-50 ring-1 ring-slate-200 text-xs p-2 rounded overflow-x-auto max-h-64"><code>{{ declared.output.example | tojson(indent=2) }}</code></pre></dd>{% endif %}
+      </dl>
+      <p class="text-xs text-slate-400 mt-1.5">Shown as the seller published it. Our availability check uses this example without payment and only reads the 402.</p>
+    </div>
+    {% endif %}
     {% if svc.mcp_url %}
     <div>
       <div class="text-xs text-slate-500 mb-1.5">MCP endpoint</div>

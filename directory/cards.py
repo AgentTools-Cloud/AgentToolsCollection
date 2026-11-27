@@ -6,6 +6,7 @@ import json
 import shlex
 from typing import Any
 
+from . import bazaar
 from .url_identity import exact_endpoint
 
 
@@ -40,6 +41,14 @@ def primary_http_request(row: dict[str, Any]) -> dict[str, Any]:
     method = next(iter(methods)) if known else 'GET'
     info_matches = bool(info.get('primary_url') and exact_endpoint(str(info['primary_url'])) == exact_endpoint(url)
                         and str(info.get('method') or '').upper() in ('GET', 'POST'))
+    # The seller's own declaration (x402 bazaar extension, read from its 402
+    # or the CDP Bazaar feed) outranks descriptor samples; an owner-verified
+    # interface still outranks both.
+    declared = bazaar.for_url(row, url)
+    if declared and declared.get('type') == 'http' and declared.get('method') in ('GET', 'POST') \
+            and not info_matches:
+        method = declared['method']
+        known = True
     if info_matches:
         method = str(info['method']).upper()
         known = True
@@ -53,7 +62,7 @@ def primary_http_request(row: dict[str, Any]) -> dict[str, Any]:
         str(sample.get('method') or '').upper() == 'POST' and sample.get('probe_body') == {}
         and sample.get('probe_verified') is True for sample in matching)
     return {'url': url, 'method': method, 'method_known': known, 'empty_post_probe': empty_probe,
-            'probe_verified': probe_verified}
+            'probe_verified': probe_verified, 'declared': declared}
 
 
 def primary_json_body(row: dict[str, Any], url: str) -> str | None:
@@ -118,8 +127,17 @@ def build_call_template(row: dict[str, Any]) -> dict[str, Any]:
     request = primary_http_request(row)
     url, primary_method = request['url'], request['method']
     method_known, empty_probe = request['method_known'], request['empty_post_probe']
+    declared = request.get('declared')
+    declared_here = bool(declared and declared.get('type') == 'http'
+                         and declared.get('method') == primary_method)
     if url:
         json_body = ('{}' if empty_probe else primary_json_body(row, url)) if primary_method == 'POST' else None
+        probe_url = url
+        if declared_here:
+            if primary_method == 'POST' and json_body is None and bazaar.probe_body(declared) is not None:
+                json_body = json.dumps(declared['body'], ensure_ascii=False, separators=(',', ':'))
+            if primary_method == 'GET':
+                probe_url = bazaar.query_url(url, declared)
         price_min = row.get("price_min")
         payment = row.get("payment") if isinstance(row.get("payment"), dict) else {}
         currency = row.get("currency") or payment.get("currency")
@@ -132,8 +150,11 @@ def build_call_template(row: dict[str, Any]) -> dict[str, Any]:
         out["http_x402"] = {
             "url": url,
             "method": primary_method,
-            "method_hint": (f"Use the {primary_method} method advertised for the primary endpoint." if method_known
-                            else "No unambiguous primary method is recorded; GET is a fallback. Check the linked request schema."),
+            "method_hint": (
+                f"The seller declares {primary_method} with the example input below "
+                "(x402 Bazaar extension of its 402 response)." if declared_here
+                else f"Use the {primary_method} method advertised for the primary endpoint." if method_known
+                else "No unambiguous primary method is recorded; GET is a fallback. Check the linked request schema."),
             "flow": [
                 f"1. Probe {url} and expect HTTP 402 + accepts[] if it is gated"
                 + (" (x402 v2 sends them base64-encoded in the `PAYMENT-REQUIRED` header)."
@@ -146,7 +167,7 @@ def build_call_template(row: dict[str, Any]) -> dict[str, Any]:
                 "5. Parse the service response; if the probe returned docs-only JSON, follow its request schema.",
             ],
             "curl_probe": (
-                f'curl -sS -i -X {primary_method} {shlex.quote(url)}'
+                f'curl -sS -i -X {primary_method} {shlex.quote(probe_url)}'
                 + (" -H 'Content-Type: application/json' --data " + shlex.quote(json_body)
                    if json_body is not None else "")
                 + "  "
@@ -160,12 +181,19 @@ def build_call_template(row: dict[str, Any]) -> dict[str, Any]:
 
     if not out:
         out["note"] = "Service has no callable endpoint registered yet."
-    return _clean(out)
+    out = _clean(out)
+    # Added after _clean: the seller's example values (empty lists, "" etc.)
+    # are shown exactly as declared.
+    if "http_x402" in out and declared:
+        out["http_x402"]["declared"] = bazaar.public(declared)
+    return out
 
 
 def public_service_row(row: dict[str, Any]) -> dict[str, Any]:
     base = dict(row)
     base.pop("owner_declaration", None)
+    # Shown through call.template.http_x402.declared, not as the raw map.
+    base.pop("declared", None)
     if isinstance(base.get("call_info"), dict):
         base["call_info"] = dict(base["call_info"])
         base["call_info"].pop("owner_declaration_revision", None)

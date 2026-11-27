@@ -818,6 +818,9 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
             "ALTER TABLE services ADD COLUMN quality_score REAL",
             "ALTER TABLE services ADD COLUMN conformance TEXT",
             "ALTER TABLE services ADD COLUMN descriptor_checked_at INTEGER",
+            # Seller-declared call interfaces (x402 bazaar extension), keyed by
+            # exact URL; written by the CDP crawl and our own 402 probes only.
+            "ALTER TABLE services ADD COLUMN declared TEXT",
             "ALTER TABLE a2a_agents ADD COLUMN quality_score REAL",
             "ALTER TABLE a2a_agents ADD COLUMN readiness_score REAL",
             "ALTER TABLE a2a_agents ADD COLUMN readiness_grade TEXT",
@@ -1532,9 +1535,36 @@ def upsert_service(conn: sqlite3.Connection, row: dict) -> tuple:
         return False, int(existing["id"])
 
 
+def merge_service_declarations(conn: sqlite3.Connection, service_id: int,
+                               found: dict, source: str) -> bool:
+    """Store seller-declared interfaces (``bazaar.merge`` rules) on one row.
+
+    Only keys the listing owns (its URL and resource samples) are kept, so a
+    feed entry for another path on the same host never lands on this card.
+    Returns whether the stored value changed. Caller owns the transaction.
+    """
+    from . import bazaar
+    row = conn.execute(
+        "SELECT url, resource_samples, call_info, declared FROM services WHERE id=?",
+        (int(service_id),)).fetchone()
+    if row is None:
+        return False
+    owned = bazaar.listing_keys(dict(row))
+    found = {k: v for k, v in (found or {}).items() if k in owned}
+    if not found:
+        return False
+    merged = bazaar.merge(row["declared"], found, source, int(time.time()))
+    encoded = json.dumps(merged, ensure_ascii=False, sort_keys=True)
+    if encoded == (row["declared"] or ""):
+        return False
+    conn.execute("UPDATE services SET declared=? WHERE id=?", (encoded, int(service_id)))
+    return True
+
+
 def row_to_dict(row) -> dict:
     d = dict(row)
-    for k in ("chains", "tags", "resource_samples", "payment", "call_info", "quality", "owner_declaration"):
+    for k in ("chains", "tags", "resource_samples", "payment", "call_info", "quality", "owner_declaration",
+              "declared"):
         if d.get(k):
             try:
                 d[k] = json.loads(d[k])
@@ -1798,7 +1828,8 @@ def _match_reason(row: dict, q: str | None) -> list[str]:
 
 def search(conn, q=None, category=None, chain=None, region=None, health=None,
            min_confidence=None, has_mcp: bool = False,
-           limit=50, offset=0, sort: str = "default"):
+           limit=50, offset=0, sort: str = "default",
+           declared: bool = False, declared_method: str | None = None):
     """Search the directory.
 
     Returns a list of dict rows. Each row gets two extra synthetic fields:
@@ -1848,6 +1879,12 @@ def search(conn, q=None, category=None, chain=None, region=None, health=None,
         where.append("s.confidence >= ?"); params.append(float(min_confidence))
     if has_mcp:
         where.append("s.mcp_url IS NOT NULL AND s.mcp_url != ''")
+    # Seller-declared call interface (x402 bazaar extension).
+    if declared or declared_method:
+        where.append("s.declared IS NOT NULL AND s.declared NOT IN ('', '{}')")
+    if declared_method:
+        where.append("s.declared LIKE ?")
+        params.append('%"method": "' + str(declared_method).upper() + '"%')
     if where:
         sql_parts.append("WHERE " + " AND ".join(where))
     # Quality-aware ordering (P1-4):

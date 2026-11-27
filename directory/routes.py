@@ -340,6 +340,27 @@ def _owned_detail_headers(row):
     return {}
 
 
+def _sample_declarations(svc):
+    """Seller-declared method/example input per advertised resource."""
+    from . import bazaar
+    out = {}
+    for r in svc.get("resource_samples") or []:
+        url = r.get("url") if isinstance(r, dict) else None
+        decl = bazaar.for_url(svc, url) if url else None
+        if not decl:
+            continue
+        item = {"method": decl.get("method") or ("MCP" if decl.get("type") == "mcp" else None)}
+        example = decl.get("query_params") if decl.get("method") in ("GET", "HEAD", "DELETE") else decl.get("body")
+        if decl.get("type") == "mcp":
+            item["tool"] = decl.get("tool_name")
+            example = decl.get("example")
+        if example not in (None, {}, []):
+            text = json.dumps(example, ensure_ascii=False, sort_keys=True)
+            item["example"] = text if len(text) <= 300 else text[:297] + "..."
+        out[url] = item
+    return out
+
+
 @router.get("/services/{slug}", response_class=HTMLResponse, include_in_schema=False)
 def service_detail(request: Request, slug: str):
     with _conn() as c:
@@ -364,6 +385,7 @@ def service_detail(request: Request, slug: str):
         "noindex": _detail_noindex("x402", svc["id"]), "meta_desc": directory_measured.meta_description("x402", svc),
         "paid_summary": paid_summary,
         "call_template": cards.build_call_template(svc),
+        "sample_declared": _sample_declarations(svc),
         "interface_declaration": directory_auth.owner_declarations.public_state(svc)},
         headers=_owned_detail_headers(svc))
 
@@ -1031,16 +1053,24 @@ def api_search(
                       description=SEARCH_SORT_DOC),
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0, le=MAX_SEARCH_OFFSET),
+    declared: bool = Query(default=False, description=(
+        "Only services whose seller declares how to call them (x402 v2 "
+        "`bazaar` extension: method and example input).")),
+    declared_method: str | None = Query(default=None, pattern="^(?i:GET|POST|PUT|PATCH|DELETE|HEAD)$",
+                                        description="Only services with a declared resource using this HTTP method."),
 ):
     """Agent-friendly search across the x402 service directory."""
     with _conn() as c:
         services = db.search(c, q=q, category=category, chain=chain,
                              region=region, health=health, sort=sort,
-                             limit=limit, offset=offset)
+                             limit=limit, offset=offset, declared=declared,
+                             declared_method=declared_method)
         exact_name_groups = directory_resources.exact_name_groups(
             c, q, (item.get("name") for item in services))
     if not offset:
         search_terms.record("x402", q, len(services), "api")
+    for svc in services:
+        svc["declared_interface"] = bool(svc.get("declared"))
     services = [cards.public_service_row(svc) for svc in services]
     for svc in services:
         svc.pop("source", None)
