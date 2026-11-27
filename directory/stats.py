@@ -733,7 +733,7 @@ def _day(ts):
 
 
 def search_demand(now, days=30):
-    """What people searched for over `days` (aggregate, terms with >= 5 searches)."""
+    """What people searched for over `days` (aggregate, terms with >= 3 searchers)."""
     from . import search_terms
     search_terms.prune(now)
     out = search_terms.summary(_day(now - (days - 1) * 86400), _day(now), limit=FULL_SEARCH_TERMS)
@@ -1489,7 +1489,7 @@ def summary(snap: dict | None, view: str = "all", full: bool = False) -> dict:
         }
     sd = searches_view(snap, full=full)
     if view == "all" and sd.get("available", True) and "top" in sd:
-        out["searches"] = {k: sd.get(k) for k in ("days", "searches", "top", "unmet", "min_searches",
+        out["searches"] = {k: sd.get(k) for k in ("days", "searches", "searchers", "top", "unmet", "min_searches", "min_searchers",
                                                     "full", "more_with_account", "sign_in") if k in sd}
     for kind in kinds:
         if snap.get("failures", {}).get(kind):

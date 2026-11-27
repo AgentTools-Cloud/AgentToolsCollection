@@ -75,16 +75,16 @@
 
 <section class="mt-6 svc-card p-5 md:p-6" aria-labelledby="searches">
   <h2 id="searches" class="text-lg font-bold text-slate-900">What people searched for</h2>
-  <p class="text-xs text-slate-500 mt-1">{{ r.searches.searches|num }} searches this month; terms shown after at least {{ r.searches.min_searches }} searches. No IP, account or session is stored.</p>
+  <p class="text-xs text-slate-500 mt-1">{{ (r.searches.searchers or 0)|num }} searchers this month (people once per term per day, scripts once per month); crawlers are not counted; terms shown after at least {{ r.searches.min_searchers or 3 }} searchers. No IP, account or session is stored.</p>
   <div class="grid gap-6 md:grid-cols-2 mt-3">
     <div>
       <h3 class="text-sm font-semibold text-slate-800">Most searched</h3>
-      {% if r.searches.top %}<ol class="mt-2 text-sm space-y-1 list-decimal pl-5">{% for i in r.searches.top %}<li><span class="mono text-xs">{{ i.term }}</span> <span class="text-slate-400">· {{ i.searches|num }}</span></li>{% endfor %}</ol>
+      {% if r.searches.top %}<ol class="mt-2 text-sm space-y-1 list-decimal pl-5">{% for i in r.searches.top %}<li><span class="mono text-xs">{{ i.term }}</span> <span class="text-slate-400">· {{ (i.searchers or 0)|num }} searchers</span></li>{% endfor %}</ol>
       {% else %}<p class="text-sm text-slate-400 mt-2">Not enough searches yet.</p>{% endif %}
     </div>
     <div>
       <h3 class="text-sm font-semibold text-slate-800">Mostly nothing found</h3>
-      {% if r.searches.unmet %}<ol class="mt-2 text-sm space-y-1 list-decimal pl-5">{% for i in r.searches.unmet %}<li><span class="mono text-xs">{{ i.term }}</span> <span class="text-slate-400">· {{ i.searches|num }}, {{ i.no_results_pct }}% empty</span></li>{% endfor %}</ol>
+      {% if r.searches.unmet %}<ol class="mt-2 text-sm space-y-1 list-decimal pl-5">{% for i in r.searches.unmet %}<li><span class="mono text-xs">{{ i.term }}</span> <span class="text-slate-400">· {{ (i.searchers or 0)|num }} searchers, {{ i.no_results_pct }}% empty</span></li>{% endfor %}</ol>
       {% else %}<p class="text-sm text-slate-400 mt-2">None above the threshold.</p>{% endif %}
     </div>
   </div>

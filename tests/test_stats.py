@@ -499,6 +499,8 @@ class SearchTermTests(unittest.TestCase):
         self.st = search_terms
         with search_terms._lock:  # searches made by other tests
             search_terms._pending.clear()
+            search_terms._pending_tags.clear()
+        search_terms._salt_cache = search_terms._script_key_cache = None
         self.tmp = tempfile.TemporaryDirectory()
         self._old = os.environ.get("AGENT_TOOLS_SEARCH_TERMS_DB")
         os.environ["AGENT_TOOLS_SEARCH_TERMS_DB"] = os.path.join(self.tmp.name, "st.db")
@@ -521,22 +523,113 @@ class SearchTermTests(unittest.TestCase):
                     "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0", "me\uff20x.com", "+86 13812345678"):
             self.assertIsNone(n(bad), bad)
 
+    BROWSER = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36"
+
     def test_record_flush_and_threshold(self):
         today = time.strftime("%Y-%m-%d", time.gmtime())
-        for _ in range(5):
-            self.st.record("mcp", "Weather", 3, "web")
-        for _ in range(6):
-            self.st.record("x402", "flight booking", 0, "api")
-        self.st.record("mcp", "rare term", 0, "mcp")
-        self.st.record("mcp", "me@x.com", 0, "mcp")
+        for i in range(5):  # five people
+            self.st.record("mcp", "Weather", 3, "web", client=(f"10.0.0.{i}", self.BROWSER))
+        for i in range(6):  # three agents, twice each
+            self.st.record("x402", "flight booking", 0, "api", client=(f"10.1.0.{i}", f"agent-{i % 3}/1.0"))
+        for _ in range(40):  # one script hammering a term from many addresses
+            self.st.record("mcp", "council of ai", 1, "api", client=(f"10.2.0.{_}", "csoai-presence/1.0"))
+        self.st.record("mcp", "rare term", 0, "mcp", client=("10.3.0.1", "claude-ai"))
+        self.st.record("mcp", "me@x.com", 0, "mcp", client=("10.3.0.1", "claude-ai"))
+        for _ in range(9):  # crawlers following our links are not demand
+            self.st.record("mcp", "weather", 3, "web", client=("10.4.0.1", "Mozilla/5.0 (compatible; GPTBot/1.2)"))
         self.st.flush()
         s = self.st.summary(today, today)
-        self.assertEqual(s["searches"], 12)
-        self.assertEqual([i["term"] for i in s["top"]], ["flight booking", "weather"])
+        self.assertEqual(s["searches"], 52)
+        self.assertEqual(s["searchers"], 5 + 3 + 1 + 1)
+        self.assertEqual([(i["term"], i["searchers"], i["searches"]) for i in s["top"]],
+                         [("weather", 5, 5), ("flight booking", 3, 6)])
         self.assertEqual([i["term"] for i in s["unmet"]], ["flight booking"])
-        self.assertEqual(s["by_channel"], {"api": 6, "mcp": 1, "web": 5})
+        self.assertEqual(s["by_channel"], {"api": 46, "mcp": 1, "web": 5})
         self.assertNotIn("rare term", json.dumps(s))
-        self.assertEqual(self.st.prune(time.time() + 500 * 86400), 3)
+        self.assertNotIn("council of ai", json.dumps(s))
+        self.assertEqual(self.st.prune(time.time() + 500 * 86400), 4)
+        c = sqlite3.connect(self.st.db_path())
+        self.assertEqual(c.execute("SELECT COUNT(*) FROM search_searchers").fetchone()[0], 0)
+        c.close()
+
+    def test_no_client_details_are_stored(self):
+        self.st.record("mcp", "weather", 3, "web", client=("203.0.113.9", self.BROWSER))
+        self.st.flush()
+        with open(self.st.db_path(), "rb") as f:
+            raw = f.read()
+        self.assertNotIn(b"203.0.113.9", raw)
+        self.assertNotIn(b"Chrome", raw)
+        c = sqlite3.connect(self.st.db_path())
+        cols = [r[1] for r in c.execute("PRAGMA table_info(search_searchers)")]
+        tag = c.execute("SELECT tag FROM search_searchers").fetchone()[0]
+        c.close()
+        self.assertEqual(cols, ["day", "term", "tag"])
+        self.assertRegex(tag, r"^d[0-9a-f]{16}$")
+
+    def test_daily_key_is_shared_and_replaced(self):
+        self.st._salt_cache = None
+        k1 = self.st._salt("2026-11-26")
+        self.st._salt_cache = None  # another process reads the same key
+        self.assertEqual(self.st._salt("2026-11-26"), k1)
+        k2 = self.st._salt("2026-11-27")
+        self.assertNotEqual(k1, k2)
+        with open(self.st.db_path() + ".key") as f:
+            content = f.read()
+        self.assertNotIn(k1.hex(), content)  # yesterday's key is gone
+        self.assertEqual(oct(os.stat(self.st.db_path() + ".key").st_mode & 0o777), "0o600")
+        key = self.st.client_key("web", "10.0.0.1", self.BROWSER)
+        self.assertNotEqual(self.st.tag_for("2026-11-26", key, k1), self.st.tag_for("2026-11-27", key, k2))
+        script = self.st.client_key("api", "10.0.0.1", "stock-trends-agent/2.0")
+        self.assertEqual(self.st.tag_for("2026-11-26", script, k1), self.st.tag_for("2026-11-27", script, k2))
+        self.assertTrue(self.st.tag_for("2026-11-26", script).startswith("s"))
+        self.st._salt_cache = None
+
+    def test_daily_script_counts_once_per_window(self):
+        rows = []
+        for day in ("2026-11-20", "2026-11-21", "2026-11-22", "2026-11-23"):
+            rows.append((day, "sector breadth", self.st.tag_for(day, self.st.client_key("api", "1.1.1.1", "trends-agent/1"))))
+        for i, day in enumerate(("2026-11-20", "2026-11-21", "2026-11-22")):
+            rows.append((day, "weather", self.st.tag_for(day, self.st.client_key("web", f"2.2.2.{i}", self.BROWSER))))
+        self.st._write({("2026-11-20", "mcp", "api", "sector breadth", "n"): 40,
+                        ("2026-11-20", "mcp", "web", "weather", "n"): 6}, rows)
+        s = self.st.summary("2026-11-01", "2026-11-30", min_searchers=1, min_n=1)
+        self.assertEqual([(i["term"], i["searchers"]) for i in s["top"]], [("weather", 3), ("sector breadth", 1)])
+        self.assertEqual(s["searchers"], 4)
+
+    def test_client_key_rules(self):
+        ck = self.st.client_key
+        self.assertIsNone(ck("web", "1.1.1.1", "Mozilla/5.0 (compatible; MJ12bot/v1.4.8; http://mj12bot.com/)"))
+        self.assertIsNone(ck("api", "1.1.1.1", "Mozilla/5.0 (compatible; OAI-SearchBot/1.0; +https://openai.com/searchbot)"))
+        self.assertIsNone(ck("web", "1.1.1.1", "Epochal-Search/1.0"))
+        self.assertEqual(ck("api", "1.1.1.1", "node"), ck("api", "2.2.2.2", "node"))  # script: by UA
+        self.assertNotEqual(ck("web", "1.1.1.1", self.BROWSER), ck("web", "2.2.2.2", self.BROWSER))
+        self.assertNotEqual(ck("mcp", "1.1.1.1", "claude-ai"), ck("mcp", "2.2.2.2", "claude-ai"))
+        self.assertEqual(ck("api", "1.1.1.1", "Mozilla/5.0 (X11; Linux) HeadlessChrome/120"),
+                         ck("api", "9.9.9.9", "Mozilla/5.0 (X11; Linux) HeadlessChrome/120"))
+
+    def test_backfill_from_access_log(self):
+        log_lines = [
+            f'10.0.0.{i} - 10.0.0.{i} [20/Nov/2026:10:00:00 +0000] "GET /mcp?q=Weather HTTP/1.1" 200 5 cc=- rt=0.1 '
+            f'ua="{self.BROWSER}"\n' for i in range(4)
+        ] + [
+            '10.0.0.1 - x [20/Nov/2026:10:01:00 +0000] "GET /mcp?q=weather HTTP/1.1" 200 5 ua="' + self.BROWSER + '"\n',
+            '10.9.0.1 - x [20/Nov/2026:10:02:00 +0000] "GET /mcp?q=weather HTTP/1.1" 200 5 ua="Mozilla/5.0 (compatible; GPTBot/1.2)"\n',
+            '10.9.0.2 - x [20/Nov/2026:10:02:00 +0000] "GET /mcp?q=weather&ref=topic HTTP/1.1" 200 5 ua="' + self.BROWSER + '"\n',
+            '10.9.0.3 - x [20/Nov/2026:10:02:00 +0000] "GET /api/v1/search?q=weather&offset=20 HTTP/1.1" 200 5 ua="node"\n',
+            '10.9.0.4 - x [20/Nov/2026:10:02:00 +0000] "GET /api/v1/search?q=weather HTTP/1.1" 200 5 ua="node"\n',
+            '10.9.0.5 - x [20/Nov/2026:10:02:00 +0000] "GET /api/v1/search?q=weather HTTP/1.1" 200 5 ua="node"\n',
+            '10.9.0.6 - x [21/Nov/2026:10:02:00 +0000] "GET /api/v1/search?q=weather HTTP/1.1" 500 5 ua="node"\n',
+            '10.9.0.7 - x [25/Oct/2026:10:02:00 +0000] "GET /api/v1/search?q=weather HTTP/1.1" 200 5 ua="node"\n',
+        ]
+        path = os.path.join(self.tmp.name, "access.log")
+        with open(path, "w") as f:
+            f.writelines(log_lines)
+        self.assertEqual(self.st.backfill_from_logs([path], "2026-11-01", "2026-11-26"), 5)
+        self.assertEqual(self.st.backfill_from_logs([path], "2026-11-01", "2026-11-26"), 5)  # rerun replaces
+        c = sqlite3.connect(self.st.db_path())
+        rows = c.execute("SELECT day, term, COUNT(*) FROM search_searchers GROUP BY day, term").fetchall()
+        c.close()
+        self.assertEqual(rows, [("2026-11-20", "weather", 5)])
 
 
 class AgentAccessTests(unittest.TestCase):

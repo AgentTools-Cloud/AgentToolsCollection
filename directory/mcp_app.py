@@ -328,7 +328,11 @@ def _log_call(tool, ctx: Context | None = None, args=None,
     if tool in _SEARCH_TOOL_KIND and args:
         from . import search_terms
         kind = _SEARCH_TOOL_KIND[tool] or (args.get("protocol") or "all")
-        search_terms.record(kind, args.get("intent"), result_n or 0, "mcp")
+        try:
+            who = (_current_client_ip.get(), _client_name_from_ctx(ctx))
+        except Exception:  # noqa: BLE001 - statistics must never break a tool call
+            who = (None, None)
+        search_terms.record(kind, args.get("intent"), result_n or 0, "mcp", client=who)
     try:
         client_name = _client_name_from_ctx(ctx)
         client_ip = _current_client_ip.get()

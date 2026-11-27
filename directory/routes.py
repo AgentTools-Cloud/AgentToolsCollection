@@ -229,7 +229,7 @@ def x402_page(
         s = db.stats(c)
         leaders = db.top_rated(c, "x402", 20)
     if not request.query_params.get("ref"):  # our own links (topic pages) are not demand
-        search_terms.record("x402", q, len(services), "web")
+        search_terms.record("x402", q, len(services), "web", search_terms.request_client(request))
     return TEMPLATES.TemplateResponse(request, "index.html", {
             "request": request, "services": services, "categories": cats,
             "stats": s, "q": q or "", "active_category": category,
@@ -572,7 +572,7 @@ def stats_json(request: Request, full: bool = Query(default=False, description=F
 
 
 @router.get("/stats/searches.json", tags=["directory"],
-            summary="What people search for (aggregate; terms with >= 5 searches)")
+            summary="What people search for (aggregate; terms with >= 3 searchers)")
 def stats_searches_json(request: Request, full: bool = Query(default=False, description=FULL_DOC)):
     """Most searched terms and terms that mostly found nothing over the last 30
     days, across web, API and MCP searches. No visitor data is kept with the
@@ -686,7 +686,7 @@ def stats_reports_json():
 def stats_report_json(month: str):
     """Start-of-month vs end-of-month counts per protocol, new listings,
     findings, x402 prices, protocol versions, probe outcomes and the most
-    searched terms (aggregate, >= 5 searches). CC BY 4.0."""
+    searched terms (aggregate, >= 3 searchers). CC BY 4.0."""
     return JSONResponse(_report_or_404(month), headers={
         "Cache-Control": "public, max-age=600", "Access-Control-Allow-Origin": "*"})
 
@@ -806,7 +806,7 @@ def mcp_page(
         s = _list_mcp_stats(c)
         leaders = db.top_rated(c, "mcp", 20)
     if not request.query_params.get("ref"):  # our own links (topic pages) are not demand
-        search_terms.record("mcp", q, len(servers), "web")
+        search_terms.record("mcp", q, len(servers), "web", search_terms.request_client(request))
     return TEMPLATES.TemplateResponse(request, "mcp.html", {
             "request": request, "servers": servers, "stats": s, "q": q or "",
             "active_health": health, "active_x402": bool(x402),
@@ -898,7 +898,7 @@ def mcp_code_page(
 ):
     servers, s = _code_search(q, sort)
     if not request.query_params.get("ref"):
-        search_terms.record("mcp", q, len(servers), "web")
+        search_terms.record("mcp", q, len(servers), "web", search_terms.request_client(request))
     return TEMPLATES.TemplateResponse(request, "mcp_code.html", {
         "request": request, "servers": servers, "stats": s, "q": q or "",
         "active_sort": sort, "active": "code"})
@@ -972,7 +972,7 @@ def a2a_page(
         s = db.a2a_stats(c)
         leaders = db.top_rated(c, "a2a", 20)
     if not request.query_params.get("ref"):  # our own links (topic pages) are not demand
-        search_terms.record("a2a", q, len(agents), "web")
+        search_terms.record("a2a", q, len(agents), "web", search_terms.request_client(request))
     return TEMPLATES.TemplateResponse(request, "a2a.html", {
             "request": request, "agents": agents, "stats": s, "q": q or "",
             "active_health": health, "active_x402": bool(x402),
@@ -1044,6 +1044,7 @@ def services_partial(
 
 @router.get("/api/v1/search", tags=["directory"])
 def api_search(
+    request: Request,
     q: str | None = Query(default=None, description="Free-text query."),
     category: str | None = None,
     chain: str | None = Query(default=None, description='e.g. "base", "solana"'),
@@ -1068,7 +1069,7 @@ def api_search(
         exact_name_groups = directory_resources.exact_name_groups(
             c, q, (item.get("name") for item in services))
     if not offset:
-        search_terms.record("x402", q, len(services), "api")
+        search_terms.record("x402", q, len(services), "api", search_terms.request_client(request))
     for svc in services:
         svc["declared_interface"] = bool(svc.get("declared"))
     services = [cards.public_service_row(svc) for svc in services]
@@ -1211,6 +1212,7 @@ def api_categories():
 
 @router.get("/api/v1/a2a/search", tags=["a2a"])
 def api_a2a_search(
+    request: Request,
     q: str | None = Query(default=None, max_length=800),
     health: str | None = Query(default=None, description=HEALTH_DOC),
     x402_only: bool = Query(default=False),
@@ -1225,7 +1227,7 @@ def api_a2a_search(
         exact_name_groups = directory_resources.exact_name_groups(
             c, q, (item.get("name") for item in rows))
     if not offset:
-        search_terms.record("a2a", q, len(rows), "api")
+        search_terms.record("a2a", q, len(rows), "api", search_terms.request_client(request))
     return {
         "query": q,
         "sort": sort,
@@ -1263,6 +1265,7 @@ def api_a2a_stats():
 
 @router.get("/api/v1/mcp/search", tags=["mcp"])
 def api_mcp_search(
+    request: Request,
     q: str | None = Query(default=None, max_length=800),
     chain: str | None = Query(default=None),
     health: str | None = Query(default=None, description=HEALTH_DOC),
@@ -1331,7 +1334,7 @@ def api_mcp_search(
         directory_resources.sort_resources(servers, effective_sort, q)
     window = servers[offset:offset + limit]
     if not offset:
-        search_terms.record("mcp", q, len(window), "api")
+        search_terms.record("mcp", q, len(window), "api", search_terms.request_client(request))
     directory_resources.strip_sort_metadata(window)
     with _conn() as c:
         exact_name_groups = directory_resources.exact_name_groups(
@@ -1384,6 +1387,7 @@ def api_mcp_server(slug: str):
 
 @router.get("/api/v1/resources/search", tags=["directory"])
 def api_resources_search(
+    request: Request,
     q: str | None = Query(default=None, max_length=800),
     protocol: str | None = Query(default=None, pattern="^(x402|mcp|a2a)$"),
     chain: str | None = Query(default=None),
@@ -1400,7 +1404,7 @@ def api_resources_search(
             sort=sort, limit=limit, offset=offset,
         )
     if not offset:
-        search_terms.record(protocol or "all", q, out.get("count") or 0, "api")
+        search_terms.record(protocol or "all", q, out.get("count") or 0, "api", search_terms.request_client(request))
     return out
 
 
@@ -2618,7 +2622,7 @@ def well_known():
                 "license": "CC BY 4.0",
                 "returns": "indexed / reachable / protocol-verified / readiness counts, findings, "
                            "x402 prices and networks, protocol versions, access, safety, topics, growth, "
-                           "probe outcomes, search demand (terms with >= 5 searches)",
+                           "probe outcomes, search demand (terms with >= 3 searchers)",
             },
             "methodology": "https://agent-tools.cloud/api/v1/methodology",
             "data_use": {
