@@ -2,7 +2,7 @@
 
 These directories crawl us and publish data we can read: MCPCensus (Radixia),
 the CSOAI remote MCP census (councilof.ai), agentalog, Assay Observatory,
-AgentIndex (agents.traderszone.net) and x402lint. A one-off sample showed each
+AgentIndex (agents.traderszone.net), x402lint and brick.blue (2026-11-27). A one-off sample showed each
 holds hosts we did not have (docs: 38_剩余生态同行反向抓取调研). INITE Atlas and
 SealKeeper were dropped (INITE terms forbid competing products; SealKeeper's API
 host robots.txt is Disallow: /).
@@ -56,6 +56,15 @@ AGENTINDEX_ENDPOINTS = "https://agents.traderszone.net/endpoints"
 AGENTINDEX_PAGE = 200            # the API's largest page (asking for more still returns 200)
 AGENTINDEX_QUOTA_WAIT = 905.0    # RateLimit-Policy: 200;w=900 -- 200 requests per 15 min
 X402LINT_DIRECTORY = "https://api.x402lint.dev/v1/directory"
+# brick.blue registry (added 2026-11-27, GitHub #13): paged NDJSON, ~44 pages of
+# 1,000. Only where a record points is used; its measurements are not stored.
+BRICKBLUE_SITE = "https://brick.blue"
+BRICKBLUE_FEED = BRICKBLUE_SITE + "/api/v1/agents.ndjson"
+BRICKBLUE_MAX_PAGES = 200
+BRICKBLUE_LIVE = ("live", "degraded")
+BRICKBLUE_MCP_MAX_NEW = 2500
+BRICKBLUE_VERIFY_WORKERS = 16
+BRICKBLUE_FIELDS = ("id", "kind", "endpoint", "origin", "transport", "availability", "name")
 
 SOURCE_URLS = {
     "mcp-census": "https://www.radixia.ai/census/",
@@ -64,6 +73,7 @@ SOURCE_URLS = {
     "assay": "https://assay-207908449630.us-central1.run.app",
     "agentindex": "https://agents.traderszone.net",
     "x402lint": "https://x402lint.dev",
+    "brick-blue": BRICKBLUE_SITE,
 }
 
 # Hosts we never take from a peer. Free tunnels change name on restart, and
@@ -456,6 +466,136 @@ def x402lint_rows(projects: Iterable[dict]) -> list[dict]:
                    "url", per_host=1)
 
 
+def brickblue_page(lines: Iterable[str]) -> tuple[list[dict], str | None]:
+    """Records (slimmed to BRICKBLUE_FIELDS) and next-page URL of one page.
+
+    Takes the page line by line so a 6 MB page (single records reach 1.8 MB)
+    is never held whole. Lines must be split on "\\n" only: descriptions may
+    hold U+2028, which str.splitlines treats as a line break. The next link is
+    followed only on the same feed.
+    """
+    if isinstance(lines, str):
+        lines = lines.split("\n")
+    out, nxt = [], None
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(rec, dict):
+            continue
+        if "done" in rec and "count" in rec:          # page trailer
+            nxt = None if rec.get("done") else rec.get("next")
+        elif rec.get("kind") in ("mcp", "a2a") and rec.get("id"):
+            out.append({k: rec.get(k) for k in BRICKBLUE_FIELDS})
+    if not (isinstance(nxt, str) and nxt.startswith(BRICKBLUE_FEED + "?")):
+        nxt = None
+    return out, nxt
+
+
+def _ndjson_lines(r: httpx.Response) -> Iterable[str]:
+    """Lines of a streamed response, split on "\\n" only."""
+    buf = ""
+    for chunk in r.iter_text():
+        buf += chunk
+        *done, buf = buf.split("\n")
+        yield from done
+    if buf:
+        yield buf
+
+
+def brickblue_split(records: Iterable[dict]) -> tuple[list[dict], list[dict]]:
+    """(MCP endpoint candidates, A2A card leads) from brick.blue records.
+
+    Only records brick.blue still sees (live/degraded). MCP candidates keep the
+    record id and the declared transport; A2A leads point at the origin the
+    card was found on, and the card is fetched from its publisher.
+    """
+    mcp, leads = [], []
+    for rec in records:
+        if not isinstance(rec, dict) or rec.get("availability") not in BRICKBLUE_LIVE:
+            continue
+        rid = str(rec.get("id") or "")
+        if rec.get("kind") == "mcp":
+            res = _clean(rec.get("endpoint"))
+            if not res or res[1]:          # keyed URLs are never taken from a peer
+                continue
+            transport = "sse" if str(rec.get("transport") or "").lower() in ("http-sse", "sse") \
+                else "streamable-http"
+            name = rec.get("name") if isinstance(rec.get("name"), str) else None
+            mcp.append({"endpoint_url": res[0], "transport": transport, "source_id": rid,
+                        "name": (name or "").strip()[:120] or None})
+        elif rec.get("kind") == "a2a":
+            lead = card_lead(rec.get("origin") or "", "brick-blue", rid)
+            if lead:
+                lead["source_url"] = f"{BRICKBLUE_SITE}/agent/{rid}"
+                leads.append(lead)
+    return mcp, leads
+
+
+def brickblue_verify(endpoint: str, transport: str) -> dict | None:
+    """How the endpoint answers us as an MCP server, else None.
+
+    Streamable HTTP: an anonymous ``initialize`` returning ``serverInfo``, or a
+    401 with a Bearer ``WWW-Authenticate`` challenge (MCP authorization). SSE:
+    the stream opens and announces its ``endpoint`` event.
+    """
+    from . import public_http
+    headers = {"User-Agent": UA, "Accept": "application/json, text/event-stream"}
+    timeout = httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0)
+    try:
+        with public_http.client(timeout=timeout, follow_redirects=True) as c:
+            if transport == "sse":
+                with c.stream("GET", endpoint, headers={**headers, "Accept": "text/event-stream"}) as r:
+                    if r.status_code != 200 or "event-stream" not in r.headers.get("content-type", ""):
+                        return None
+                    seen = ""
+                    for chunk in r.iter_text():
+                        seen += chunk
+                        if re.search(r"event:\s*endpoint", seen):
+                            return {"auth": False, "info": {}}
+                        if len(seen) > 4096:
+                            return None
+                return None
+            init = {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                    "params": {"protocolVersion": crawlers.MCP_LATEST_REVISION, "capabilities": {},
+                               "clientInfo": {"name": "agent-tools.cloud", "version": "0.1"}}}
+            r = c.post(endpoint, json=init, headers={**headers, "Content-Type": "application/json"})
+            if r.status_code == 401 and "bearer" in r.headers.get("www-authenticate", "").lower():
+                return {"auth": True, "info": {}}
+            if r.status_code >= 300:
+                return None
+            parsed = crawlers._mcp_parse_response(r)
+    except (public_http.UnsafeURL, httpx.HTTPError, OSError, ValueError):
+        return None
+    result = parsed.get("result") if isinstance(parsed, dict) else None
+    info = result.get("serverInfo") if isinstance(result, dict) else None
+    return {"auth": False, "info": info} if isinstance(info, dict) else None
+
+
+def brickblue_mcp_row(cand: dict, found: dict) -> dict | None:
+    info = found.get("info") or {}
+    name = None
+    for v in (info.get("title"), info.get("name"), cand.get("name")):
+        if isinstance(v, str) and v.strip():
+            name = v.strip()[:120]
+            break
+    row = mcp_row(cand["endpoint_url"], "brick-blue", cand["source_id"], name)
+    if row is None:
+        return None
+    row["transport"] = cand["transport"]
+    if isinstance(info.get("description"), str) and info["description"].strip():
+        row["description"] = info["description"].strip()[:1000]
+    if found.get("auth"):
+        row["auth_method"] = "oauth"
+    row["source_url"] = f"{BRICKBLUE_SITE}/agent/{cand['source_id']}"
+    row["confidence"] = 0.5
+    return row
+
+
 # ---------------------------------------------------------------------------
 # fetchers (network). MCP fetchers follow the MCP_CRAWLERS contract and x402
 # fetchers the ALL_CRAWLERS one: return a list of rows; [] when not due.
@@ -593,6 +733,71 @@ def fetch_x402lint(pause: float = 2.2, max_pages: int = 400) -> list[dict]:
     return rows
 
 
+_brickblue_cache: tuple[float, list[dict]] | None = None
+
+
+def _brickblue_records(pause: float = 1.0) -> list[dict]:
+    """The whole brick.blue registry, paged once per nightly crawl."""
+    global _brickblue_cache
+    if _brickblue_cache and time.time() - _brickblue_cache[0] < 12 * 3600:
+        return _brickblue_cache[1]
+    out: list[dict] = []
+    url: str | None = BRICKBLUE_FEED
+    with httpx.Client(timeout=TIMEOUT, follow_redirects=True,
+                      headers={"User-Agent": UA, "Accept": "application/x-ndjson"}) as c:
+        for _ in range(BRICKBLUE_MAX_PAGES):
+            for attempt in range(3):
+                try:
+                    with c.stream("GET", url) as r:
+                        if r.status_code == 429 or r.status_code >= 500:
+                            raise httpx.HTTPStatusError("retry", request=r.request, response=r)
+                        r.raise_for_status()
+                        page, nxt = brickblue_page(_ndjson_lines(r))
+                    break
+                except (httpx.TransportError, httpx.HTTPStatusError) as e:
+                    status = getattr(getattr(e, "response", None), "status_code", 0)
+                    if attempt == 2 or (status and status < 500 and status != 429):
+                        raise
+                    time.sleep(2 ** attempt * 2)
+            out.extend(page)
+            url = nxt
+            if not url:
+                break
+            time.sleep(pause)
+    if url:
+        raise RuntimeError(f"brick-blue: feed longer than {BRICKBLUE_MAX_PAGES} pages")
+    log.info("brick-blue: %d records", len(out))
+    _brickblue_cache = (time.time(), out)
+    return out
+
+
+def fetch_brickblue_mcp() -> list[dict]:
+    """New MCP endpoints from brick.blue that answer our own handshake."""
+    if not _due("brick-blue-mcp", RUN_EVERY_DAYS):
+        return []
+    from concurrent.futures import ThreadPoolExecutor
+    with closing(db.connect(read_only=True)) as c:
+        known = {_key(u).lower() for (u,) in c.execute(
+            "SELECT endpoint_url FROM mcp_servers WHERE COALESCE(endpoint_url,'')<>''")}
+    cands = [m for m in brickblue_split(_brickblue_records())[0]
+             if _key(m["endpoint_url"]).lower() not in known]
+    cands = _drop_removed(_capped(cands, "endpoint_url"), "endpoint_url")[:BRICKBLUE_MCP_MAX_NEW]
+    with ThreadPoolExecutor(max_workers=BRICKBLUE_VERIFY_WORKERS) as pool:
+        found = list(pool.map(lambda m: brickblue_verify(m["endpoint_url"], m["transport"]), cands))
+    rows = [r for m, f in zip(cands, found) if f and (r := brickblue_mcp_row(m, f))]
+    _pending("brick-blue", "brick-blue-mcp")
+    log.info("brick-blue mcp: new=%d answered=%d", len(cands), len(rows))
+    return rows
+
+
+def brickblue_fetch_leads() -> list[dict]:
+    if not _due("brick-blue-a2a", RUN_EVERY_DAYS):
+        return []
+    leads = brickblue_split(_brickblue_records())[1]
+    _pending("a2a:brick-blue", "brick-blue-a2a")
+    return leads
+
+
 # ---------------------------------------------------------------------------
 # A2A leads (fetched and ingested by a2a.crawl_card_leads)
 # ---------------------------------------------------------------------------
@@ -631,6 +836,7 @@ A2A_LEAD_SOURCES: dict[str, Callable[[], list[dict]]] = {
     "agentalog": agentalog_fetch_leads,
     "assay": lambda: assay_split(_assay_board())[1],
     "agentindex": agentindex_fetch_leads,
+    "brick-blue": brickblue_fetch_leads,
 }
 
 # MCPCensus is paused (2026-11-15): its last downloadable release is 2026-09-13
@@ -639,6 +845,7 @@ A2A_LEAD_SOURCES: dict[str, Callable[[], list[dict]]] = {
 MCP_FETCHERS = {
     "csoai-census": fetch_csoai_census,
     "assay": fetch_assay_mcp,
+    "brick-blue": fetch_brickblue_mcp,
 }
 
 X402_FETCHERS = {

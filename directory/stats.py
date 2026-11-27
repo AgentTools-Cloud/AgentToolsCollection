@@ -1151,6 +1151,7 @@ _SOURCE_LINKS = {
     "agentalog": ("agentalog", "https://agentalog.com"),
     "prowl": ("Prowl", "https://prowl.world"),
     "localmark": ("LocalMark", "https://localmark.ai"),
+    "brick-blue": ("brick.blue", "https://brick.blue"),
     "docker-mcp": ("Docker MCP catalog", "https://github.com/docker/mcp-registry"),
     "flows-litprotocol": ("Flows", "https://flows.litprotocol.com"),
 }

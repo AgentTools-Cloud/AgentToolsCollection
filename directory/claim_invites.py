@@ -52,6 +52,7 @@ SOURCE_LABELS = {
     "a2aregistry": "the A2A Registry",
     "a2a-registry": "the A2A Registry",
     "localmark": "LocalMark",
+    "brick-blue": "brick.blue",
     "mcp-census": "MCPCensus",
     "csoai-census": "the CSOAI MCP census",
     "agentalog": "agentalog",
