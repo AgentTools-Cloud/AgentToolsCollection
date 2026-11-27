@@ -4,6 +4,7 @@
 [![MCP](https://img.shields.io/badge/MCP-Server-blue)](https://modelcontextprotocol.io)
 [![PyPI](https://img.shields.io/pypi/v/agent-tools-mcp)](https://pypi.org/project/agent-tools-mcp/)
 [![License](https://img.shields.io/badge/License-Apache_2.0-green.svg)](https://opensource.org/licenses/Apache-2.0)
+[![Add to Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/en/install-mcp?name=agent-tools&config=eyJ1cmwiOiJodHRwczovL2FnZW50LXRvb2xzLmNsb3VkL21jcC1kaXNjb3ZlcnkvIn0%3D) [![Add to VS Code](https://img.shields.io/badge/VS_Code-Add_MCP_server-0098FF?logo=visualstudiocode&logoColor=white)](https://vscode.dev/redirect/mcp/install?name=agent-tools&config=%7B%22type%22%3A%22http%22%2C%22url%22%3A%22https%3A%2F%2Fagent-tools.cloud%2Fmcp-discovery%2F%22%7D)
 
 Discover agent-callable resources from any MCP-compatible agent (Claude, Cursor, Cline, Continue, …).
 
@@ -85,6 +86,10 @@ Add to your MCP config (`~/.config/Claude/claude_desktop_config.json`, `~/.curso
 ```
 
 ### Remote (no install)
+
+One click: [![Add to Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/en/install-mcp?name=agent-tools&config=eyJ1cmwiOiJodHRwczovL2FnZW50LXRvb2xzLmNsb3VkL21jcC1kaXNjb3ZlcnkvIn0%3D) [![Add to VS Code](https://img.shields.io/badge/VS_Code-Add_MCP_server-0098FF?logo=visualstudiocode&logoColor=white)](https://vscode.dev/redirect/mcp/install?name=agent-tools&config=%7B%22type%22%3A%22http%22%2C%22url%22%3A%22https%3A%2F%2Fagent-tools.cloud%2Fmcp-discovery%2F%22%7D)
+
+Claude Code: `claude mcp add --transport http agent-tools https://agent-tools.cloud/mcp-discovery/`
 
 Most clients also accept a `url`-based remote MCP server (Streamable HTTP; the client must send `Accept: application/json, text/event-stream`):
 

@@ -1,0 +1,16 @@
+{# One-click install of our hosted MCP server (https://agent-tools.cloud/mcp-discovery/).
+   Cursor config is base64 of {"url":"https://agent-tools.cloud/mcp-discovery/"};
+   VS Code config is URL-encoded {"type":"http","url":"https://agent-tools.cloud/mcp-discovery/"}. #}
+{% set dark = dark|default(false) %}
+<div class="flex flex-wrap items-center gap-3 text-sm">
+  <a href="https://cursor.com/en/install-mcp?name=agent-tools&amp;config=eyJ1cmwiOiJodHRwczovL2FnZW50LXRvb2xzLmNsb3VkL21jcC1kaXNjb3ZlcnkvIn0%3D"
+     rel="noopener" data-install="cursor"
+     class="inline-flex items-center rounded-lg px-4 py-2 font-semibold {{ 'bg-white text-slate-900 hover:bg-slate-100' if dark else 'bg-slate-900 text-white hover:bg-slate-700' }}">Add to Cursor</a>
+  <a href="https://vscode.dev/redirect/mcp/install?name=agent-tools&amp;config=%7B%22type%22%3A%22http%22%2C%22url%22%3A%22https%3A%2F%2Fagent-tools.cloud%2Fmcp-discovery%2F%22%7D"
+     rel="noopener" data-install="vscode"
+     class="inline-flex items-center rounded-lg px-4 py-2 font-semibold bg-[#0098FF] text-white hover:bg-[#007ACC]">Add to VS Code</a>
+</div>
+<p class="text-xs mt-3 {{ 'text-slate-400' if dark else 'text-slate-500' }}">
+  Claude Code: <code class="mono {{ 'text-slate-200' if dark else 'bg-slate-100 px-1 rounded' }}">claude mcp add --transport http agent-tools https://agent-tools.cloud/mcp-discovery/</code>.
+  Other clients: Streamable HTTP endpoint <code class="mono {{ 'text-slate-200' if dark else 'bg-slate-100 px-1 rounded' }}">https://agent-tools.cloud/mcp-discovery/</code>, no API key, or run it locally with <code class="mono {{ 'text-slate-200' if dark else 'bg-slate-100 px-1 rounded' }}">uvx agent-tools-mcp</code>.
+</p>

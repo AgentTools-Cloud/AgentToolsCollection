@@ -272,6 +272,9 @@
       <a href="/openapi.json" class="inline-flex items-center rounded-lg bg-white text-slate-900 font-semibold px-4 py-2 hover:bg-slate-100">OpenAPI spec</a>
       <a href="/mcp-discovery/" class="inline-flex items-center rounded-lg border border-slate-600 px-4 py-2 hover:border-slate-400">MCP endpoint</a>
     </div>
+    <div class="mt-5">
+      {% with dark=true %}{% include "_mcp_install.html" %}{% endwith %}
+    </div>
   </div>
   <pre class="mono text-[12.5px] leading-6 bg-slate-950/60 border border-slate-800 rounded-xl p-5 overflow-x-auto"><span class="text-slate-500"># search MCP servers by intent</span>
 <span class="text-emerald-400">GET</span>  /api/v1/mcp/search?q=postgres
