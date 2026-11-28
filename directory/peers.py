@@ -832,8 +832,11 @@ def agentalog_fetch_leads(pause: float = 1.5) -> list[dict]:
     return leads
 
 
+# agentalog is paused (2026-11-28): its A2A catalog API now answers 402
+# free_allowance_exceeded for anonymous reads (paid package only). The 121
+# agents it led us to stay listed and are health-checked directly;
+# agentalog_fetch_leads stays ready if a free or licensed read returns.
 A2A_LEAD_SOURCES: dict[str, Callable[[], list[dict]]] = {
-    "agentalog": agentalog_fetch_leads,
     "assay": lambda: assay_split(_assay_board())[1],
     "agentindex": agentindex_fetch_leads,
     "brick-blue": brickblue_fetch_leads,
