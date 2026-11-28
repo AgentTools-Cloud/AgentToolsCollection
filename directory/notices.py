@@ -103,7 +103,9 @@ def store(category, severity, title, summary, *, event_key=None, listing_kind=No
                 "summary=CASE WHEN category IN ('disk','github') AND excluded.last_seen>=last_seen "
                 'THEN excluded.summary ELSE summary END,'
                 "data_json=CASE WHEN category IN ('disk','github') AND excluded.last_seen>=last_seen "
-                'THEN excluded.data_json ELSE data_json END',
+                'THEN excluded.data_json ELSE data_json END,'
+                "title=CASE WHEN category='github' AND excluded.last_seen>=last_seen "
+                'THEN excluded.title ELSE title END',
                 (key, category, severity, title, summary, listing_kind, listing_id, submission_id,
                  verdict, payload, now, now))
             conn.execute('DELETE FROM internal_notices WHERE last_seen<?',

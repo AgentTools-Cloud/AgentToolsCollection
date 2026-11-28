@@ -58,7 +58,8 @@ def notice_for(repo: str, item: dict) -> dict:
                + ("需要处理：请到 GitHub 查看并回复。" if is_open else ""))
     return {
         "severity": "warning" if is_open else "info",
-        "title": f"GitHub 新 {kind} · {repo.split('/')[-1]}",
+        # "新" only while it still needs a look; closed / merged ones drop it.
+        "title": f"GitHub {'新 ' if is_open else ''}{kind} · {repo.split('/')[-1]}",
         "summary": summary,
         "event_key": f"github:{repo}:{number}",
         "data": {"number": number, "pull_request": is_pr, "open": is_open,

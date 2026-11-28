@@ -60,6 +60,7 @@ class GithubWatchTests(unittest.TestCase):
         rows = self.feed()
         self.assertEqual(len(rows), 2)  # rolling rows only, no duplicate history entry
         self.assertTrue(all(r["status"] == "active" and r["severity"] == "warning" for r in rows))
+        self.assertEqual(sorted(r["title"] for r in rows), ["GitHub 新 PR · Repo", "GitHub 新 issue · Repo"])
         self.assertIn("Org/Repo #7：Bug report", " ".join(r["summary"] for r in rows))
         self.assertNotIn("secret body", " ".join(r["summary"] for r in rows))
 
@@ -71,6 +72,8 @@ class GithubWatchTests(unittest.TestCase):
         self.assertIn("已关闭", rows[7]["summary"])
         self.assertIn("已合并", rows[8]["summary"])
         self.assertEqual(rows[8]["severity"], "info")
+        self.assertEqual(rows[7]["title"], "GitHub issue · Repo")
+        self.assertEqual(rows[8]["title"], "GitHub PR · Repo")
 
     def test_fetch_failure_is_reported_once_per_day(self):
         client = MagicMock()
