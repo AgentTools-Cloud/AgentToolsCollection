@@ -1561,7 +1561,7 @@ def _rpc(client, url, method, params):
     return payload["result"]
 
 
-def fetch_chain_activity_bulk(paytos, chain="base", days=30, rate=0.15):
+def fetch_chain_activity_bulk(paytos, chain="base", days=30, rate=0.15, block_range=None):
     """Count EIP-3009 USDC payments per address over the window in one sweep.
 
     A transfer to a payTo counts only when its transaction also emitted
@@ -1571,6 +1571,10 @@ def fetch_chain_activity_bulk(paytos, chain="base", days=30, rate=0.15):
     present, so a zero is a confirmed zero rather than a missing lookup.
     ``ok`` is False when any block window could not be read, because a gap
     silently undercounts and must not be written as authoritative.
+
+    ``block_range=(first, last)`` sweeps only those blocks (inclusive), so
+    several hosts can each take a slice of one 30-day window and the
+    results be merged (sum tx/raw_tx, union payer_ids).
     """
     cfg = BULK_LOG_CHAINS.get(chain)
     if cfg is None or not paytos:
@@ -1587,7 +1591,8 @@ def fetch_chain_activity_bulk(paytos, chain="base", days=30, rate=0.15):
         with httpx.Client(timeout=httpx.Timeout(connect=10.0, read=60.0,
                                                 write=10.0, pool=10.0),
                           headers={"User-Agent": UA}) as c:
-            head = int(_rpc(c, rpc_url, "eth_blockNumber", []), 16)
+            head = (int(block_range[1]) if block_range else
+                    int(_rpc(c, rpc_url, "eth_blockNumber", []), 16))
             # Measure the chain's real block time; a stale constant would skew the 30-day window.
             try:
                 probe = min(head, 100000)
@@ -1599,6 +1604,8 @@ def fetch_chain_activity_bulk(paytos, chain="base", days=30, rate=0.15):
                 log.info("onchain bulk %s: block time probe failed (%r), using %.2fs", chain, e, block_secs)
             span = int(days * 86400 / block_secs)
             start = max(0, head - span)
+            if block_range:
+                start = int(block_range[0])
 
             batches = [wanted[i:i + addr_batch]
                        for i in range(0, len(wanted), addr_batch)]

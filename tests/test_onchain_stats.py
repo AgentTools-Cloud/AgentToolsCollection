@@ -75,6 +75,15 @@ class OnchainStatsTests(TemporaryDatabaseTestCase):
         self.assertIn('id="onchain"', html)
         self.assertIn("1 Solana addresses are not measured", html)
 
+    def test_card_is_withheld_while_base_is_mostly_unmeasured(self):
+        with db.writer() as c:
+            for i in range(30):
+                c.execute("INSERT INTO service_paytos VALUES(?,?,?,?,?)",
+                          (3, "base", f"0xun{i}", self.now, self.now))
+        with db.connect() as c:
+            out = stats.onchain_demand(c, self.now)
+        self.assertEqual(out, {"available": False, "reason": "base_incomplete"})
+
     def test_empty_table_hides_the_section(self):
         with db.writer() as c:
             c.execute("DELETE FROM payto_activity")

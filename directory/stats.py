@@ -455,6 +455,8 @@ def x402_economy(conn):
     }
 
 
+ONCHAIN_MIN_BASE_COVERAGE = 0.9
+
 PAYER_BANDS = ((1, "1 payer"), (9, "2–9"), (99, "10–99"), (999, "100–999"),
                (float("inf"), "1,000 or more"))
 
@@ -478,6 +480,12 @@ def onchain_demand(conn, now):
         return {"available": False}
     if not rows:
         return {"available": False}
+    # Base carries most advertised payTo addresses; a run where its sweep
+    # failed would publish totals that are off by orders of magnitude.
+    base_listed = sum(1 for (ch, _a) in listed if ch == "base")
+    base_measured = sum(1 for r in rows if r[0] == "base" and r[4])
+    if base_listed and base_measured < ONCHAIN_MIN_BASE_COVERAGE * base_listed:
+        return {"available": False, "reason": "base_incomplete"}
     measured = [r for r in rows if r[4]]
     paid = sorted((r for r in measured if (r[2] or 0) > 0), key=lambda r: -(r[2] or 0))
     total = sum(r[2] for r in paid)
