@@ -100,12 +100,18 @@ class OwnedCardRefreshTests(unittest.TestCase):
         for field in ("skills", "skill_names", "documentation_url", "endpoint_url"):
             self.assertEqual(after[field], before[field])
 
-    def test_unverified_listings_are_not_touched_by_health(self):
+    def test_unverified_listings_also_refresh_from_their_own_card(self):
+        # The daily probe takes first-hand info from every agent's own card,
+        # not only from owner-verified listings.
         with db.writer() as c:
-            c.execute("UPDATE a2a_agents SET owner_verified=0 WHERE id=?", (self.id,))
-        before = self.row()
+            c.execute("UPDATE a2a_agents SET owner_verified=0, skills='[]' WHERE id=?", (self.id,))
         self.run_health(_card())
-        self.assertEqual(self.row()["skills"], before["skills"])
+        row = self.row()
+        self.assertNotEqual(row["skills"], "[]")
+        self.assertIn("skills", json.loads(row["official_fields"] or "{}"))
+        with closing(db.connect(read_only=True)) as c:
+            srcs = {r["source"] for r in db.listing_changes(c, "a2a", self.id, 50)}
+        self.assertIn("official:a2a-card", srcs)
 
     def test_missing_card_name_keeps_stored_name(self):
         card = _card()

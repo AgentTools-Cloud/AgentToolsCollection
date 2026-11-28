@@ -1,0 +1,17 @@
+{# Recent changes to this listing: when, which field, and where the new value came from.
+   Old and new values are not shown here (a removed value may have been withdrawn on
+   request); they stay in our records. #}
+{% if changes %}
+<section class="svc-card p-6 mb-6" id="changes">
+  <h2 class="text-sm font-semibold text-slate-800">Change history</h2>
+  <p class="text-xs text-slate-500 mt-1">Latest {{ changes|length }} changes to this listing and where each value came from. Values the service states itself (its 402 challenge, x402 descriptor, MCP handshake or A2A card) take precedence over directory copies.</p>
+  <table class="w-full text-xs mt-3">
+    <thead><tr class="text-left text-slate-500"><th class="py-1 pr-3 font-medium">Date (UTC)</th><th class="py-1 pr-3 font-medium">Field</th><th class="py-1 font-medium">Source</th></tr></thead>
+    <tbody>
+    {% for ch in changes %}
+      <tr class="border-t border-slate-100"><td class="py-1 pr-3 mono whitespace-nowrap">{{ ch.date }}</td><td class="py-1 pr-3 mono">{{ ch.field }}</td><td class="py-1">{{ ch.source }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}

@@ -2570,7 +2570,21 @@ def fetch_wellknown_resources(url: str, well_known: str | None = None) -> dict[s
         "resources_text": _db_resources_text(text_entries),
         "price_min": min(prices) if prices else None,
         "price_max": max(prices) if prices else None,
+        # How the descriptor names the service and who it pays; reverify uses
+        # name/description only for a listing paying that same address.
+        "service_name": _short_text(_meta.get("name") or _meta.get("serviceName")
+                                    or _meta.get("title"), 200),
+        "service_description": _short_text(_meta.get("description"), 2000),
+        "service_payto": _short_text(_meta.get("payTo") or _meta.get("receiver")
+                                     or _meta.get("pay_to"), 120),
     }
+
+
+def _short_text(value, limit):
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    return value if 0 < len(value) <= limit else None
 
 
 def verify_x402(url: str, well_known: str | None = None) -> dict[str, Any]:
@@ -3686,10 +3700,15 @@ def probe_mcp_health(endpoint: str, discover_modern: bool = False) -> dict:
                 raise
             except Exception:
                 pass
+            info = (_result or {}).get("serverInfo") if isinstance(_result, dict) else None
+            server_info = ({k: info[k] for k in ("name", "title", "version", "description",
+                                                  "websiteUrl")
+                            if isinstance(info.get(k), str) and info[k].strip()}
+                           if isinstance(info, dict) else None)
             return {"status": "ok", "latency_ms": dt, "http_status": sc,
                     "conformance": conformance, "tool_count": tool_count,
                     "tools": tool_list, "protocol_version": server_rev,
-                    "protocol_discovered": discovered}
+                    "protocol_discovered": discovered, "server_info": server_info}
     except public_http.UnsafeURL as exc:
         return {**base, "status": "down", "unsafe_url": str(exc)}
     except Exception:

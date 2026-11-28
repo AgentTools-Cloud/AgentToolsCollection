@@ -20,7 +20,7 @@ import re as _re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from urllib.parse import urlparse
+from urllib.parse import urlsplit, urlparse
 
 from . import crawlers, db
 
@@ -647,6 +647,7 @@ def reverify(targets=("mcp", "a2a"), workers=24, limit=None,
     service_ok_rows = []  # (id, probed endpoint) proven this pass
     service_payments = []  # payment/chains/resource metadata for native rows
     service_resources = []  # descriptor metadata regardless of payment
+    service_texts = []      # descriptor name/description for the listing it pays
     done = 0
     n_ver = 0
     with crawlers.memoised_quotes(), ThreadPoolExecutor(max_workers=workers) as ex:
@@ -687,6 +688,12 @@ def reverify(targets=("mcp", "a2a"), workers=24, limit=None,
                         lo, hi = _price_span(res.get("resource_samples"))
                     if observed and lo is None:
                         lo = hi = pay.get("max_amount_usdc")
+                    if (observed and res.get("service_payto")
+                            and str(res["service_payto"]).lower() == str(pay["pay_to"]).lower()
+                            and (res.get("service_name") or res.get("service_description"))):
+                        service_texts.append((res.get("service_name"),
+                                              res.get("service_description"),
+                                              t["id"], t["endpoint"]))
                     live = _live_span(t["verdict"].get("live_quotes"),
                                       pay.get("pay_to"))
                     if live and not t["verdict"].get("live_quotes_complete"):
@@ -840,6 +847,46 @@ def reverify(targets=("mcp", "a2a"), workers=24, limit=None,
     if service_payments:
         print(f"[reverify] payment metadata recorded: "
               f"{len(service_payments)}", flush=True)
+
+    # 1d. the descriptor's own name and description, for a listing whose
+    # payTo is the descriptor's. A gateway descriptor names the gateway, not
+    # each seller behind it, so a different payee is never renamed.
+    for chunk in db.write_batches(service_texts, 500):
+
+        def op(chunk=chunk):
+            with db.writer() as c:
+                db.set_change_source(c, "official:x402-descriptor")
+                for name, desc, _id, _endpoint in chunk:
+                    if _owner_interface_current(c, _id, _endpoint):
+                        continue
+                    row = c.execute("SELECT owner_edited FROM services WHERE id=? AND url=?",
+                                    (_id, _endpoint)).fetchone()
+                    if row is None:
+                        continue
+                    # One descriptor names the whole origin; a seller listed
+                    # per endpoint keeps each endpoint's own name.
+                    parts = urlsplit(str(_endpoint or ""))
+                    origin = f"{parts.scheme}://{parts.netloc}".lower()
+                    siblings = c.execute(
+                        "SELECT COUNT(*) FROM services WHERE lower(url)=? OR lower(url) LIKE ?",
+                        (origin, origin + "/%")).fetchone()[0]
+                    if not parts.netloc or siblings != 1:
+                        continue
+                    try:
+                        edited = set(json.loads(row["owner_edited"] or "[]"))
+                    except (TypeError, ValueError):
+                        continue
+                    values = {k: v for k, v in (("name", name), ("description", desc))
+                              if v and k not in edited}
+                    if not values or _privacy_suppressed_metadata(c, **values):
+                        continue
+                    c.execute("UPDATE services SET " + ", ".join(k + "=?" for k in values)
+                              + " WHERE id=?", [*values.values(), _id])
+                    db.mark_official(c, "services", _id, values)
+        db.with_retry(op)
+    if service_texts:
+        print(f"[reverify] descriptor name/description recorded: {len(service_texts)}",
+              flush=True)
 
     # 2. mirror verified endpoints into services (x402) table
     svc_new = svc_skip = svc_bad = 0

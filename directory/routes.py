@@ -361,6 +361,36 @@ def _sample_declarations(svc):
     return out
 
 
+def _change_source_label(source: str) -> str:
+    s = str(source or "")
+    if s.startswith("official:"):
+        return {"official:x402-descriptor": "the service's x402 descriptor / 402 challenge",
+                "official:x402-probe": "the service's 402 challenge",
+                "official:mcp-probe": "the server's MCP handshake",
+                "official:a2a-card": "the agent's own card"}.get(s, "the service itself")
+    if s.startswith("source:"):
+        return "directory: " + s.split(":", 1)[1]
+    if s.startswith("owner:"):
+        return "verified owner"
+    if s.startswith("admin:"):
+        return "Agent Tools (manual correction)"
+    return "Agent Tools"
+
+
+def _listing_changes(kind: str, listing_id) -> list[dict]:
+    try:
+        with _conn() as c:
+            rows = db.listing_changes(c, kind, int(listing_id), 20)
+    except Exception:  # noqa: BLE001 - history is optional on the page
+        return []
+    out = []
+    for r in rows:
+        field = "listed" if r["field"] == "_created" else r["field"]
+        out.append({"date": time.strftime("%Y-%m-%d %H:%M", time.gmtime(r["at"])),
+                    "field": field, "source": _change_source_label(r["source"])})
+    return out
+
+
 @router.get("/services/{slug}", response_class=HTMLResponse, include_in_schema=False)
 def service_detail(request: Request, slug: str):
     with _conn() as c:
@@ -383,7 +413,7 @@ def service_detail(request: Request, slug: str):
     return TEMPLATES.TemplateResponse(request, "service.html", {
         "request": request, "svc": svc, "rating": db.score_breakdown(svc),
         "noindex": _detail_noindex("x402", svc["id"]), "meta_desc": directory_measured.meta_description("x402", svc),
-        "paid_summary": paid_summary,
+        "paid_summary": paid_summary, "changes": _listing_changes("x402", svc["id"]),
         "call_template": cards.build_call_template(svc),
         "sample_declared": _sample_declarations(svc),
         "interface_declaration": directory_auth.owner_declarations.public_state(svc)},
@@ -837,6 +867,7 @@ def mcp_detail(request: Request, slug: str):
         return Response(status_code=301, headers={"Location": f"/mcp/code/{slug}"})
     return TEMPLATES.TemplateResponse(request, "mcp_server.html", {
         "request": request, "m": m, "quality": db.rate_row("mcp", m),
+        "changes": _listing_changes("mcp", m["id"]),
         "noindex": _detail_noindex("mcp", m["id"]), "meta_desc": directory_measured.meta_description("mcp", m)},
         headers=_owned_detail_headers(m))
 
@@ -994,6 +1025,7 @@ def a2a_detail(request: Request, slug: str):
         raise HTTPException(404, "a2a agent not found")
     return TEMPLATES.TemplateResponse(request, "a2a_agent.html", {
         "request": request, "a": a, "quality": db.rate_row("a2a", a),
+        "changes": _listing_changes("a2a", a["id"]),
         "noindex": _detail_noindex("a2a", a["id"]), "meta_desc": directory_measured.meta_description("a2a", a)},
         headers=_owned_detail_headers(a))
 

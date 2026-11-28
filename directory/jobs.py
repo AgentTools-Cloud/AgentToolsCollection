@@ -1099,8 +1099,10 @@ def cmd_health_a2a(only_unknown: bool = False, quarantined_only: bool = False) -
                 (now - a2a_readiness.UPTIME_WINDOW,))
         }
         a2a_sources = listing_readiness.sources_by_listing(c, "a2a")
+        # Every listing follows its own card (not only owner-verified ones):
+        # the card is the first-hand source; directories only fill the rest.
         owned = {r["id"]: r for r in c.execute(
-            "SELECT " + ", ".join(owned_cols) + " FROM a2a_agents WHERE owner_verified=1")}
+            "SELECT " + ", ".join(owned_cols) + " FROM a2a_agents")}
     if not rows:
         return 0
     card_refresh: dict[int, dict] = {}
@@ -1221,9 +1223,9 @@ def cmd_health_a2a(only_unknown: bool = False, quarantined_only: bool = False) -
         def op(agent_id=agent_id, fresh=fresh):
             with db.writer() as c:
                 db.set_change_source(c, "official:a2a-card")
-                # Re-check under the write lock: still owner-verified, same endpoint.
+                # Re-check under the write lock: same endpoint as when probed.
                 cur = c.execute("SELECT " + ", ".join(owned_cols) + " FROM a2a_agents "
-                                "WHERE id=? AND owner_verified=1", (agent_id,)).fetchone()
+                                "WHERE id=?", (agent_id,)).fetchone()
                 if cur is None or cur["endpoint_url"] != owned[agent_id]["endpoint_url"]:
                     return
                 try:
@@ -1236,9 +1238,10 @@ def cmd_health_a2a(only_unknown: bool = False, quarantined_only: bool = False) -
                     c.execute("UPDATE a2a_agents SET " + ", ".join(k + "=?" for k in values)
                               + ", updated_at=? WHERE id=?",
                               [*values.values(), now, agent_id])
+                    db.mark_official(c, "a2a_agents", agent_id, values)
         db.with_retry(op)
     if card_refresh:
-        log.info("a2a health: refreshed %d owner-verified listing(s) from their own cards",
+        log.info("a2a health: refreshed %d listing(s) from their own cards",
                  len(card_refresh))
     db.delete_older("a2a_health_history", "checked_at", now - 120 * 86400)
     log.info("a2a readiness: scored=%d", len(readiness_rows))
@@ -1327,6 +1330,53 @@ def _protocol_version(res: dict, stored):
     return probed
 
 
+_GENERIC_MCP_TITLES = {"mcp", "mcp server", "server", "fastmcp", "my mcp server",
+                       "mcp-server", "example server", "demo server", "test"}
+
+
+def _mcp_official(res: dict) -> dict:
+    """What the server itself states in this probe: initialize serverInfo
+    (title, description, websiteUrl) plus the measured tool count and protocol
+    revision. Only fields it actually stated are returned."""
+    if res.get("status") != "ok":
+        return {}
+    out = {}
+    info = res.get("server_info") or {}
+    title = (info.get("title") or "").strip()
+    if 0 < len(title) <= 200 and title.lower() not in _GENERIC_MCP_TITLES:
+        out["name"] = title
+    desc = (info.get("description") or "").strip()
+    if 0 < len(desc) <= 2000:
+        out["description"] = desc
+    site = (info.get("websiteUrl") or "").strip()
+    if site.startswith(("https://", "http://")) and len(site) <= 500:
+        out["homepage_url"] = site
+    if res.get("tool_count") is not None:
+        out["tool_count"] = res["tool_count"]
+    if res.get("protocol_version"):
+        out["protocol_version"] = res["protocol_version"]
+    return out
+
+
+def _apply_mcp_official(c, official, now) -> None:
+    """Write stated fields (owner edits win) and mark them official."""
+    for sid, fields in official:
+        row = c.execute("SELECT owner_edited FROM mcp_servers WHERE id=?", (sid,)).fetchone()
+        if row is None:
+            continue
+        try:
+            edited = set(json.loads(row["owner_edited"] or "[]"))
+        except (TypeError, ValueError):
+            continue
+        values = {k: v for k, v in fields.items() if k not in edited}
+        text = {k: v for k, v in values.items() if k in ("name", "description", "homepage_url")}
+        if text:
+            c.execute("UPDATE mcp_servers SET " + ", ".join(k + "=?" for k in text)
+                      + " WHERE id=?", [*text.values(), sid])
+        if values:
+            db.mark_official(c, "mcp_servers", sid, values)
+
+
 def cmd_health_mcp(only_unknown: bool = False, quarantined_only: bool = False) -> int:
     """Liveness-probe indexed MCP servers via an `initialize` request."""
     _qc = int(time.time()) - QUARANTINE_DAYS * 86400
@@ -1392,7 +1442,8 @@ def cmd_health_mcp(only_unknown: bool = False, quarantined_only: bool = False) -
                scan.verdict, scan.score, safety_reasons,
                _protocol_version(res, r["protocol_version"]), last_ok, disc, disc_at,
                r["id"])
-        return r["id"], h, conf, (res["latency_ms"], res["http_status"]), scan, upd
+        return r["id"], h, conf, (res["latency_ms"], res["http_status"]), scan, upd, \
+            _mcp_official(res)
 
     # Concurrent probes (network-I/O bound). 16 workers keeps this VPS — which
     # is shared with other sites — responsive; sqlite writes stay single-thread.
@@ -1402,9 +1453,12 @@ def cmd_health_mcp(only_unknown: bool = False, quarantined_only: bool = False) -
         batch = rows[start:start + batch_size]
         updates = []
         hist = []
+        official = []
         with ThreadPoolExecutor(max_workers=workers) as ex:
-            for sid, h, conf, (lat, sc), scan, upd in ex.map(_probe, batch):
+            for sid, h, conf, (lat, sc), scan, upd, off in ex.map(_probe, batch):
                 updates.append(upd)
+                if off:
+                    official.append((sid, off))
                 hist.append((sid, now, h, lat, sc))
                 n_ok += h == "ok"; n_deg += h == "degraded"; n_down += h == "down"
                 n_conf += conf == "pass"
@@ -1414,9 +1468,10 @@ def cmd_health_mcp(only_unknown: bool = False, quarantined_only: bool = False) -
                                 sid, scan.verdict, scan.score,
                                 ",".join(f.rule for f in scan.reasons))
 
-        def op(updates=updates, hist=hist):
+        def op(updates=updates, hist=hist, official=official):
             with db.writer() as c:
                 db.set_change_source(c, "official:mcp-probe")
+                _apply_mcp_official(c, official, now)
                 c.executemany(
                     "UPDATE mcp_servers SET health=?, health_checked=?, latency_ms=?, "
                     "http_status=?, conformance=?, tool_count=?, "
