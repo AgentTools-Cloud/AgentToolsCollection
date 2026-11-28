@@ -277,6 +277,22 @@ CREATE TABLE IF NOT EXISTS service_paytos (
 CREATE INDEX IF NOT EXISTS idx_service_paytos_last
     ON service_paytos(last_seen);
 
+-- One row per (chain, payTo): what the on-chain job measured for that address
+-- alone. services.payto_* sums a listing's addresses, so totals over listings
+-- count a shared address once per listing; /stats reads this table instead.
+-- tx_30d / payers_30d are NULL where EIP-3009 payments cannot be told apart
+-- (Solana): measured=0.
+CREATE TABLE IF NOT EXISTS payto_activity (
+    chain       TEXT    NOT NULL,
+    address     TEXT    NOT NULL,
+    tx_30d      INTEGER,
+    payers_30d  INTEGER,
+    raw_tx_30d  INTEGER,
+    measured    INTEGER NOT NULL DEFAULT 1,
+    checked_at  INTEGER NOT NULL,
+    PRIMARY KEY (chain, address)
+);
+
 CREATE TABLE IF NOT EXISTS health_history (
   id          INTEGER PRIMARY KEY,
   service_id  INTEGER NOT NULL,
@@ -5056,6 +5072,30 @@ def record_service_paytos(conn: sqlite3.Connection, observed: dict,
             )
             rowsn += 1
     return rowsn
+
+
+def record_payto_activity(conn: sqlite3.Connection, results: dict, ts: int) -> int:
+    """Store per-address on-chain results: {(chain, address): result}.
+
+    Only successful reads are stored; a failed read keeps the previous row.
+    """
+    n = 0
+    for (chain, addr), res in results.items():
+        if not res or not res.get("ok"):
+            continue
+        measured = not res.get("unmeasured")
+        conn.execute(
+            "INSERT INTO payto_activity(chain, address, tx_30d, payers_30d, raw_tx_30d, "
+            "measured, checked_at) VALUES(?,?,?,?,?,?,?) "
+            "ON CONFLICT(chain, address) DO UPDATE SET tx_30d=excluded.tx_30d, "
+            "payers_30d=excluded.payers_30d, raw_tx_30d=excluded.raw_tx_30d, "
+            "measured=excluded.measured, checked_at=excluded.checked_at",
+            (chain, addr,
+             int(res.get("tx") or 0) if measured else None,
+             int(res.get("payers") or 0) if measured else None,
+             res.get("raw_tx"), int(measured), ts))
+        n += 1
+    return n
 
 
 # A payTo last seen this long ago no longer counts as shared.

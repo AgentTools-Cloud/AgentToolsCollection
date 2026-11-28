@@ -1603,7 +1603,24 @@ def cmd_onchain(limit=None, stale_days=3, refresh_all=False, rate=1.2) -> int:
     written = set()
     counts = {"written": 0, "active": 0}
 
+    stored = set()
+
+    def store_addresses():
+        fresh = {k: results[k] for k in attempted - stored if k in results}
+        if not fresh:
+            return
+
+        def op():
+            with db.writer(immediate=True) as c:
+                return db.record_payto_activity(c, fresh, now)
+        try:
+            db.with_retry(op)
+            stored.update(fresh)
+        except Exception:  # noqa: BLE001 - statistics only; never lose the listing writes
+            log.exception("onchain: storing per-address results failed")
+
     def flush():
+        store_addresses()
         for sid, keys in service_keys.items():
             if sid in written or not all(k in attempted for k in keys):
                 continue
@@ -1678,6 +1695,7 @@ def cmd_onchain(limit=None, stale_days=3, refresh_all=False, rate=1.2) -> int:
                 got = bulk.get(pt.lower()) or {"tx": 0, "payers": 0}
                 results[(chain, pt)] = {"tx": got["tx"], "payers": got["payers"],
                                         "payer_ids": got.get("payer_ids"),
+                                        "raw_tx": got.get("raw_tx"),
                                         "ok": True, "capped": False}
                 attempted.add((chain, pt))
             log.info("onchain: bulk sweep covered %d %s addresses", len(batch), chain)

@@ -378,6 +378,24 @@
         <div class="mt-2">{{ bar_table(x.payment_evidence|selectattr('count')|list, 'Strongest evidence', '#64748b') }}</div>
       </div>
     </div>
+    {% set oc = snap.onchain %}
+    {% if oc and oc.available %}
+    <div class="svc-card p-5 mt-4" id="onchain">
+      <h3 class="text-sm font-semibold text-slate-800">On-chain payments, last 30 days</h3>
+      <p class="text-xs text-slate-500 mt-1">USDC transfers to the payTo addresses x402 APIs advertise, counted only when the same transaction carries the payer&rsquo;s EIP-3009 authorization (how x402 settles on EVM chains). Each address counts once, however many listings share it.</p>
+      <dl class="grid grid-cols-2 md:grid-cols-4 gap-3 mt-3">
+        <div><dt class="text-xs text-slate-500">Addresses measured</dt><dd class="text-xl font-bold mono">{{ oc.measured|num }}</dd></div>
+        <div><dt class="text-xs text-slate-500">With at least one payment</dt><dd class="text-xl font-bold mono">{{ oc.with_payments|num }}</dd></div>
+        <div><dt class="text-xs text-slate-500">Median distinct payers</dt><dd class="text-xl font-bold mono">{{ oc.median_payers|num if oc.median_payers is not none else '–' }}</dd></div>
+        <div><dt class="text-xs text-slate-500">Payments to the top 10 addresses</dt><dd class="text-xl font-bold mono">{{ oc.top_share['10'] if oc.top_share else '–' }}{% if oc.top_share %}%{% endif %}</dd></div>
+      </dl>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+        <div>{{ bar_table(oc.payer_bands, 'Distinct payers per address', '#059669') }}</div>
+        <div>{{ bar_table(oc.chains, 'Chain (addresses with payments)', '#0891b2') }}</div>
+      </div>
+      <p class="text-xs text-slate-500 mt-3">Payer counts are the stronger signal: a few wallets can send many payments, and some heavy addresses look like load tests or a seller paying itself. {{ oc.unmeasured|num }} Solana addresses are not measured, because x402 payments there cannot be told apart from other USDC transfers.</p>
+    </div>
+    {% endif %}
     {{ card_foot('Reachable x402 APIs, latest 402 challenge.', 'x402') }}
   </section>
   {% endif %}

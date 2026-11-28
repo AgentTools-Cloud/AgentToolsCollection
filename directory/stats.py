@@ -455,6 +455,59 @@ def x402_economy(conn):
     }
 
 
+PAYER_BANDS = ((1, "1 payer"), (9, "2–9"), (99, "10–99"), (999, "100–999"),
+               (float("inf"), "1,000 or more"))
+
+
+def onchain_demand(conn, now):
+    """EIP-3009 USDC payments to advertised payTo addresses, 30 days.
+
+    Counted per (chain, address) from payto_activity, so an address several
+    listings share is counted once. Only addresses advertised in the last 30
+    days and measured in the last 7 are included.
+    """
+    try:
+        listed = {(c, a): n for c, a, n in _q(
+            conn, "SELECT chain, address, count(DISTINCT service_id) FROM service_paytos "
+                  "WHERE last_seen>=? GROUP BY chain, address", (now - 30 * 86400,))}
+        rows = [(*r, listed[(r[0], r[1])]) for r in _q(
+            conn, "SELECT chain, address, tx_30d, payers_30d, measured FROM payto_activity "
+                  "WHERE checked_at>=?", (now - 7 * 86400,))
+                if (r[0], r[1]) in listed]
+    except sqlite3.Error:
+        return {"available": False}
+    if not rows:
+        return {"available": False}
+    measured = [r for r in rows if r[4]]
+    paid = sorted((r for r in measured if (r[2] or 0) > 0), key=lambda r: -(r[2] or 0))
+    total = sum(r[2] for r in paid)
+    bands, chains = Counter(), Counter()
+    for r in paid:
+        payers = r[3] or 0
+        for limit, label in PAYER_BANDS:
+            if payers <= limit:
+                bands[label] += 1
+                break
+        chains[CHAIN_NAMES.get(r[0], r[0].title())] += 1
+    payers_sorted = sorted(r[3] or 0 for r in paid)
+    listings = _one(conn, "SELECT count(*) FROM services WHERE payto_payers_30d > 0") or 0
+    return {
+        "available": True,
+        "addresses": len(rows),
+        "measured": len(measured),
+        "unmeasured": len(rows) - len(measured),
+        "with_payments": len(paid),
+        "shared": sum(1 for r in rows if (r[5] or 0) > 1),
+        "listings_with_payers": int(listings),
+        "payments": total,
+        "median_payers": _quantile(payers_sorted, .5) if payers_sorted else None,
+        "top_share": {str(n): _pct(sum(r[2] for r in paid[:n]), total)
+                      for n in (1, 10, 100)} if total else {},
+        "payer_bands": _rows([(label, bands.get(label, 0)) for _l, label in PAYER_BANDS]),
+        "chains": _rows(_fold(chains, 6)),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Topic coverage
 # ---------------------------------------------------------------------------
@@ -1074,6 +1127,7 @@ def compute(conn, now: int | None = None) -> dict:
         "access": access(conn),
         "safety": safety(conn),
         "x402": x402_economy(conn),
+        "onchain": onchain_demand(conn, now),
         "sources": sources(conn),
         "growth": growth(conn, now),
         "topics": topics(conn),
