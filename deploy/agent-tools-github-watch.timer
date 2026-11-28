@@ -1,0 +1,9 @@
+[Unit]
+Description=Daily GitHub issue/PR check for the Agent Tools Notice page
+
+[Timer]
+OnCalendar=*-*-* 09:05
+Persistent=true
+
+[Install]
+WantedBy=timers.target

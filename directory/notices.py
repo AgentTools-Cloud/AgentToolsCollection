@@ -97,11 +97,12 @@ def store(category, severity, title, summary, *, event_key=None, listing_kind=No
                 'occurrences=occurrences+1,'
                 # A disk report is a rolling status: a later run the same day
                 # replaces its numbers and severity instead of only bumping the count.
-                "severity=CASE WHEN category='disk' AND excluded.last_seen>=last_seen "
+                # GitHub issue/PR rows are rolling too: open -> closed must show.
+                "severity=CASE WHEN category IN ('disk','github') AND excluded.last_seen>=last_seen "
                 'THEN excluded.severity ELSE severity END,'
-                "summary=CASE WHEN category='disk' AND excluded.last_seen>=last_seen "
+                "summary=CASE WHEN category IN ('disk','github') AND excluded.last_seen>=last_seen "
                 'THEN excluded.summary ELSE summary END,'
-                "data_json=CASE WHEN category='disk' AND excluded.last_seen>=last_seen "
+                "data_json=CASE WHEN category IN ('disk','github') AND excluded.last_seen>=last_seen "
                 'THEN excluded.data_json ELSE data_json END',
                 (key, category, severity, title, summary, listing_kind, listing_id, submission_id,
                  verdict, payload, now, now))
@@ -275,7 +276,8 @@ def _history(conn, now):
     result = []
     # Disk reports are a rolling status, not events: only the latest one is
     # shown, from _active_rows.
-    for row in conn.execute("SELECT * FROM internal_notices WHERE last_seen>=? AND category<>'disk' "
+    for row in conn.execute("SELECT * FROM internal_notices WHERE last_seen>=? "
+                            "AND category NOT IN ('disk','github') "
                             'ORDER BY last_seen DESC,id DESC LIMIT ?',
                             (now - RETENTION_DAYS * 86400, MAX_HISTORY)):
         target = None
@@ -397,6 +399,20 @@ def _active_rows(conn, now):
                        'title': safe_text(disk['title']), 'summary': safe_text(disk['summary'], 600),
                        'first_seen': disk['first_seen'], 'last_seen': disk['last_seen'],
                        'occurrences': disk['occurrences'], 'data': data})
+    # GitHub issues / PRs (github_watch): active while open, resolved once
+    # closed or merged; a failed check stays active for two days.
+    for row in conn.execute("SELECT * FROM internal_notices WHERE category='github' AND last_seen>=? "
+                            'ORDER BY last_seen DESC,id DESC', (now - RETENTION_DAYS * 86400,)):
+        data = json.loads(row['data_json'] or '{}')
+        if 'number' in data:
+            active = bool(data.get('open'))
+        else:
+            active = row['last_seen'] >= now - 2 * 86400
+        result.append({'id': row['event_key'], 'category': 'github', 'severity': row['severity'],
+                       'status': 'active' if active else 'resolved',
+                       'title': safe_text(row['title']), 'summary': safe_text(row['summary'], 600),
+                       'first_seen': row['first_seen'], 'last_seen': row['last_seen'],
+                       'occurrences': row['occurrences'], 'data': data})
     latest = conn.execute(
         "SELECT * FROM crawl_runs WHERE status<>'running' ORDER BY COALESCE(finished_at,started_at) DESC,id DESC")
     seen = set()

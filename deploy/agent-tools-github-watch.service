@@ -1,0 +1,12 @@
+[Unit]
+Description=agent-tools daily GitHub issue/PR check published to the Notice page
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/mcpserver
+EnvironmentFile=/opt/mcpserver/.env
+Environment=PYTHONPATH=/opt/mcpserver
+ExecStart=/opt/mcpserver/.venv/bin/python -m directory.jobs github-watch
+Nice=10
+TimeoutStartSec=300

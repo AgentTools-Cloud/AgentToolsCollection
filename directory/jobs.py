@@ -2819,6 +2819,7 @@ def main(argv=None) -> int:
     p_pop.add_argument("which", nargs="?", default="all", choices=("all", "tranco", "npm", "github"))
     p_pop.add_argument("--budget", type=int, default=None)
     sub.add_parser("health-mcp")
+    sub.add_parser("github-watch")
     sub.add_parser("stats")
     p_retire = sub.add_parser("retire")
     p_retire.add_argument("kind", choices=("x402", "mcp", "a2a"))
@@ -2930,6 +2931,9 @@ def main(argv=None) -> int:
         return cmd_health_a2a()
     if args.cmd == "health-mcp":
         return cmd_health_mcp()
+    if args.cmd == "github-watch":
+        from . import github_watch
+        return 1 if github_watch.run()["errors"] else 0
     if args.cmd == "readiness":
         return cmd_readiness()
     if args.cmd == "stats-snapshot":
