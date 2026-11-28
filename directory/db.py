@@ -3670,6 +3670,66 @@ def a2a_row_to_dict(row) -> dict:
     return d
 
 
+def a2a_skill_names(skills) -> str | None:
+    """Flat text of skill ids/names/descriptions/tags, for FTS."""
+    names: list[str] = []
+    if isinstance(skills, list):
+        for sk in skills:
+            if isinstance(sk, dict):
+                for key in ("name", "id", "description"):
+                    v = sk.get(key)
+                    if v:
+                        names.append(str(v))
+                tags = sk.get("tags")
+                if isinstance(tags, list):
+                    names.extend(str(t) for t in tags)
+            elif sk:
+                names.append(str(sk))
+    return " ".join(names) if names else None
+
+
+# Fields an owner-verified A2A listing takes from its own live Agent Card.
+# upsert_a2a_agent leaves owner-verified rows alone (a crawled third-party
+# copy must not overwrite them), so without this their skills froze at
+# claim time. Endpoint, card URL, slug and x402 fields are never touched here.
+OWNED_CARD_FIELDS = (
+    "name", "description", "provider_name", "provider_url", "homepage_url",
+    "documentation_url", "protocol_version", "preferred_transport", "skills",
+    "capabilities", "default_input_modes", "default_output_modes", "auth_schemes",
+)
+
+
+def owned_card_refresh(existing, card_row: dict, declared=()) -> dict:
+    """Column values to store for an owner-verified listing from its own card.
+
+    Only when the card (served from the listing's own card URL) still declares
+    the stored endpoint. Fields the owner corrected by hand stay as they are;
+    unchanged and empty card values are left out.
+    """
+    stored = _exact_endpoint(existing["endpoint_url"] or "")
+    endpoints = {_exact_endpoint(u) for u in (card_row.get("endpoint_url"), *declared)
+                 if isinstance(u, str) and u}
+    if not stored or stored not in endpoints:
+        return {}
+    try:
+        edited = set(json.loads(existing["owner_edited"] or "[]"))
+    except (TypeError, ValueError):
+        edited = set(OWNED_CARD_FIELDS)
+    out = {}
+    for field in OWNED_CARD_FIELDS:
+        if field in edited:
+            continue
+        value = card_row.get(field)
+        if value in (None, "", [], {}):
+            continue
+        value = _to_json(value) if field in _A2A_JSON_COLS else value
+        if value != existing[field]:
+            out[field] = value
+    if "skills" in out:
+        out["skill_names"] = a2a_skill_names(card_row.get("skills"))
+    return out
+
+
 def upsert_a2a_agent(conn: sqlite3.Connection, row: dict) -> tuple:
     """Insert/update an A2A agent. Dedup on (source, source_id) then slug.
 
@@ -3694,21 +3754,7 @@ def upsert_a2a_agent(conn: sqlite3.Connection, row: dict) -> tuple:
 
     # derive skill_names blob for FTS if not explicitly supplied
     if not row.get("skill_names"):
-        names: list[str] = []
-        skills = row.get("skills")
-        if isinstance(skills, list):
-            for sk in skills:
-                if isinstance(sk, dict):
-                    for key in ("name", "id", "description"):
-                        v = sk.get(key)
-                        if v:
-                            names.append(str(v))
-                    tags = sk.get("tags")
-                    if isinstance(tags, list):
-                        names.extend(str(t) for t in tags)
-                elif sk:
-                    names.append(str(sk))
-        row["skill_names"] = " ".join(names) if names else None
+        row["skill_names"] = a2a_skill_names(row.get("skills"))
 
     row["x402_supported"] = 0
     for k in _A2A_JSON_COLS:

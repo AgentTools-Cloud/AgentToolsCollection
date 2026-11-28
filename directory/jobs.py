@@ -1078,6 +1078,7 @@ def cmd_health_a2a(only_unknown: bool = False, quarantined_only: bool = False) -
     _qc = int(time.time()) - QUARANTINE_DAYS * 86400
     cols = ("SELECT id, card_url, endpoint_url, owner_verified, last_seen, "
             "x402_supported FROM a2a_agents ")
+    owned_cols = ("id", "endpoint_url", "owner_edited") + db.OWNED_CARD_FIELDS
     if quarantined_only:
         sql = cols + f"WHERE down_since IS NOT NULL AND down_since <= {_qc}"
     else:
@@ -1097,8 +1098,11 @@ def cmd_health_a2a(only_unknown: bool = False, quarantined_only: bool = False) -
                 (now - a2a_readiness.UPTIME_WINDOW,))
         }
         a2a_sources = listing_readiness.sources_by_listing(c, "a2a")
+        owned = {r["id"]: r for r in c.execute(
+            "SELECT " + ", ".join(owned_cols) + " FROM a2a_agents WHERE owner_verified=1")}
     if not rows:
         return 0
+    card_refresh: dict[int, dict] = {}
     n_ok = n_deg = n_down = 0
     updates = []
     readiness_rows = []
@@ -1131,6 +1135,19 @@ def cmd_health_a2a(only_unknown: bool = False, quarantined_only: bool = False) -
         card = card or r["card_url"]
         parsed = res.get("card")
         rpc = None
+        if (isinstance(parsed, dict) and r["id"] in owned and r["card_url"]
+                and db._exact_endpoint(res.get("card_url") or "") == db._exact_endpoint(r["card_url"])):
+            try:
+                card_row = a2a_mod.card_to_row(parsed, res["card_url"])
+                if not str(parsed.get("name") or "").strip():
+                    card_row.pop("name", None)  # card_to_row's "Unnamed agent" placeholder
+                declared = [parsed.get("url")] + [
+                    i.get("url") for i in a2a_mod._card_interfaces(parsed) if isinstance(i, dict)]
+                fresh = db.owned_card_refresh(owned[r["id"]], card_row, declared)
+            except Exception:  # noqa: BLE001 -- a bad card never fails the probe
+                fresh = {}
+            if fresh:
+                card_refresh[r["id"]] = fresh
         if isinstance(parsed, dict):
             endpoint, flavour = a2a_readiness.preferred_rpc(parsed, res.get("card_url"))
             try:
@@ -1198,6 +1215,28 @@ def cmd_health_a2a(only_unknown: bool = False, quarantined_only: bool = False) -
                     [history_rows[i] for i in idx],
                 )
         db.with_retry(op)
+    for agent_id, fresh in card_refresh.items():
+        def op(agent_id=agent_id, fresh=fresh):
+            with db.writer() as c:
+                # Re-check under the write lock: still owner-verified, same endpoint.
+                cur = c.execute("SELECT " + ", ".join(owned_cols) + " FROM a2a_agents "
+                                "WHERE id=? AND owner_verified=1", (agent_id,)).fetchone()
+                if cur is None or cur["endpoint_url"] != owned[agent_id]["endpoint_url"]:
+                    return
+                try:
+                    edited = set(json.loads(cur["owner_edited"] or "[]"))
+                except (TypeError, ValueError):
+                    return
+                values = {k: v for k, v in fresh.items()
+                          if k not in edited and not (k == "skill_names" and "skills" in edited)}
+                if values:
+                    c.execute("UPDATE a2a_agents SET " + ", ".join(k + "=?" for k in values)
+                              + ", updated_at=? WHERE id=?",
+                              [*values.values(), now, agent_id])
+        db.with_retry(op)
+    if card_refresh:
+        log.info("a2a health: refreshed %d owner-verified listing(s) from their own cards",
+                 len(card_refresh))
     db.delete_older("a2a_health_history", "checked_at", now - 120 * 86400)
     log.info("a2a readiness: scored=%d", len(readiness_rows))
     _maintain_down_since("a2a_agents")
