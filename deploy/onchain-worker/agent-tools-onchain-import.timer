@@ -1,0 +1,10 @@
+[Unit]
+Description=agent-tools: pull finished on-chain batches from the worker (every 10 min)
+
+[Timer]
+OnCalendar=*:0/10
+Persistent=false
+Unit=agent-tools-onchain-import.service
+
+[Install]
+WantedBy=timers.target

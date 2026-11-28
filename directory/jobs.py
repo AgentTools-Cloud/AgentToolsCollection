@@ -1532,10 +1532,21 @@ def _paytos_for_row(payment_json):
 # Matches the 30-day measurement window.
 _PAYTO_WINDOW = 30 * 86400
 
-def cmd_onchain(limit=None, stale_days=3, refresh_all=False, rate=1.2) -> int:
-    """Signal C: measure real on-chain USDC demand per service across every
-    supported chain (Base, Ethereum, Optimism, Polygon, Arbitrum, Gnosis)."""
-    now = int(time.time())
+def _service_fingerprint(url, payment, call_info) -> str:
+    """What a measurement plan saw of a listing; a write is skipped if it changed."""
+    import hashlib
+    return hashlib.sha256(json.dumps([url, payment, call_info]).encode()).hexdigest()[:24]
+
+
+def onchain_plan(limit=None, stale_days=3, refresh_all=False, now=None) -> dict:
+    """Pick the (chain, payTo) keys to measure and the listings they cover.
+
+    Records advertised payTo history and clears orphaned demand (both local
+    writes), then returns a plan that measure and apply steps share, also
+    across machines: {"now", "work", "service_keys", "fingerprints",
+    "orphaned"}. Keys are [chain, address] lists so the plan is JSON.
+    """
+    now = int(now or time.time())
     stale_cutoff = now - stale_days * 86400
     with db.connect(read_only=True) as c:
         rows = list(c.execute(
@@ -1543,17 +1554,8 @@ def cmd_onchain(limit=None, stale_days=3, refresh_all=False, rate=1.2) -> int:
             "WHERE (payment IS NOT NULL AND payment != '') "
             "OR payto_checked IS NOT NULL"
         ).fetchall())
-
-    snapshots = {row["id"]: row for row in rows}
-
-    def snapshot_matches(conn, service_id):
-        current = conn.execute(
-            "SELECT url, payment, call_info FROM services WHERE id=?",
-            (service_id,)).fetchone()
-        previous = snapshots[service_id]
-        return current is not None and all(
-            current[field] == previous[field]
-            for field in ("url", "payment", "call_info"))
+    fingerprints = {row["id"]: _service_fingerprint(row["url"], row["payment"], row["call_info"])
+                    for row in rows}
 
     # Addresses a service advertised earlier in the demand window still
     # carry its demand: rotating a wallet must not read as losing customers.
@@ -1568,7 +1570,6 @@ def cmd_onchain(limit=None, stale_days=3, refresh_all=False, rate=1.2) -> int:
             history.setdefault(h["service_id"], set()).add(
                 (h["chain"], h["address"]))
 
-    # service_id -> [(chain, payto)]; (chain, payto) -> [service_id]
     service_keys = {}
     key_services = {}
     observed = {}
@@ -1594,11 +1595,17 @@ def cmd_onchain(limit=None, stale_days=3, refresh_all=False, rate=1.2) -> int:
         for k in keys:
             key_services.setdefault(k, []).append(r["id"])
 
+    def unchanged(conn, sid):
+        cur = conn.execute("SELECT url, payment, call_info FROM services WHERE id=?",
+                           (sid,)).fetchone()
+        return cur is not None and _service_fingerprint(
+            cur["url"], cur["payment"], cur["call_info"]) == fingerprints[sid]
+
     if observed:
         def op_hist():
             with db.writer(immediate=True) as c:
                 current_observed = {sid: keys for sid, keys in observed.items()
-                                    if snapshot_matches(c, sid)}
+                                    if unchanged(c, sid)}
                 db.record_service_paytos(c, current_observed, now)
         db.with_retry(op_hist)
 
@@ -1607,7 +1614,7 @@ def cmd_onchain(limit=None, stale_days=3, refresh_all=False, rate=1.2) -> int:
             n = 0
             with db.writer(immediate=True) as c:
                 for sid in orphaned:
-                    if not snapshot_matches(c, sid):
+                    if not unchanged(c, sid):
                         continue
                     c.execute(
                         "UPDATE services SET payto_tx_30d=NULL, payto_payers_30d=NULL, "
@@ -1624,47 +1631,108 @@ def cmd_onchain(limit=None, stale_days=3, refresh_all=False, rate=1.2) -> int:
         # only write services fully covered by the limited work set
         service_keys = {sid: ks for sid, ks in service_keys.items()
                         if all(k in allowed for k in ks)}
-    if not work:
-        log.info("onchain: no payTo addresses to refresh")
-        if orphaned:
-            cmd_rescore()
-        return 0
+    return {"now": now, "work": [list(k) for k in work],
+            "service_keys": {str(sid): [list(k) for k in ks] for sid, ks in service_keys.items()},
+            "fingerprints": {str(sid): fingerprints[sid] for sid in service_keys},
+            "orphaned": len(orphaned)}
+
+
+def onchain_measure(work, rate=1.2, after_chain=None) -> dict:
+    """Query every (chain, payTo) in `work`; {(chain, address): result}.
+
+    Network only, no database: runs on a worker host as well as here.
+    after_chain(results) is called after each chain finishes.
+    """
+    work = [tuple(k) for k in work]
+    results = {}
     by_chain = {}
     for ch, _pt in work:
         by_chain[ch] = by_chain.get(ch, 0) + 1
     log.info("onchain: querying %d unique (chain,payTo) over %d chains: %s",
              len(work), len(by_chain), by_chain)
 
-    # Each service is written as soon as every one of its (chain, payTo) keys
-    # has been attempted, so a slow sweep on one chain never holds back the rest.
-    results = {}
-    attempted = set()
-    written = set()
-    counts = {"written": 0, "active": 0}
+    def per_address(keys, label):
+        done = 0
+        for key in keys:
+            ch, pt = key
+            results[key] = crawlers.fetch_payto_activity(pt, chain=ch)
+            done += 1
+            if done % 50 == 0:
+                log.info("onchain progress (%s): %d/%d addresses", label, done, len(keys))
+            time.sleep(rate)
 
-    stored = set()
+    # Fast per-address chains first, one chain at a time.
+    for chain in sorted({ch for ch, _ in work if ch not in crawlers.BULK_LOG_CHAINS}):
+        keys = [k for k in work if k[0] == chain]
+        per_address(keys, chain)
+        log.info("onchain: %s measured, %d addresses", chain, len(keys))
+        if after_chain:
+            after_chain(results)
 
-    def store_addresses():
-        fresh = {k: results[k] for k in attempted - stored if k in results}
+    # Bulk log sweeps: one pass covers every address on the chain.
+    for chain in crawlers.BULK_LOG_CHAINS:
+        batch = [pt for ch, pt in work if ch == chain]
+        if not batch:
+            continue
+        bulk, ok = crawlers.fetch_chain_activity_bulk(batch, chain=chain)
+        if ok:
+            for pt in batch:
+                got = bulk.get(pt.lower()) or {"tx": 0, "payers": 0}
+                results[(chain, pt)] = {"tx": got["tx"], "payers": got["payers"],
+                                        "payer_ids": got.get("payer_ids"),
+                                        "raw_tx": got.get("raw_tx"),
+                                        "ok": True, "capped": False}
+            log.info("onchain: bulk sweep covered %d %s addresses", len(batch), chain)
+        else:
+            log.warning("onchain: bulk sweep for %s incomplete; "
+                        "falling back to per-address queries", chain)
+            per_address([(chain, pt) for pt in batch], chain)
+        log.info("onchain: %s measured", chain)
+        if after_chain:
+            after_chain(results)
+    return results
+
+
+class OnchainApplier:
+    """Write measured results for a plan: per-address rows, then each listing
+    once every one of its keys has a result (attempted)."""
+
+    def __init__(self, plan):
+        self.now = int(plan["now"])
+        self.service_keys = {int(sid): [tuple(k) for k in ks]
+                             for sid, ks in plan["service_keys"].items()}
+        self.fingerprints = {int(sid): fp for sid, fp in plan["fingerprints"].items()}
+        self.written = set()
+        self.stored = set()
+        self.counts = {"written": 0, "active": 0, "changed": 0}
+
+    def _unchanged(self, conn, sid):
+        cur = conn.execute("SELECT url, payment, call_info FROM services WHERE id=?",
+                           (sid,)).fetchone()
+        return cur is not None and _service_fingerprint(
+            cur["url"], cur["payment"], cur["call_info"]) == self.fingerprints.get(sid)
+
+    def _store_addresses(self, results):
+        fresh = {k: v for k, v in results.items() if k not in self.stored}
         if not fresh:
             return
 
         def op():
             with db.writer(immediate=True) as c:
-                return db.record_payto_activity(c, fresh, now)
+                return db.record_payto_activity(c, fresh, self.now)
         try:
             db.with_retry(op)
-            stored.update(fresh)
+            self.stored.update(fresh)
         except Exception:  # noqa: BLE001 - statistics only; never lose the listing writes
             log.exception("onchain: storing per-address results failed")
 
-    def flush():
-        store_addresses()
-        for sid, keys in service_keys.items():
-            if sid in written or not all(k in attempted for k in keys):
+    def __call__(self, results):
+        self._store_addresses(results)
+        for sid, keys in self.service_keys.items():
+            if sid in self.written or not all(k in results for k in keys):
                 continue
-            written.add(sid)
-            accs = [results[k] for k in keys if k in results and results[k]["ok"]]
+            self.written.add(sid)
+            accs = [results[k] for k in keys if results[k] and results[k].get("ok")]
             if not accs:
                 continue  # every query failed -> skip, avoid false zero
             # Only EIP-3009 payments count. A chain where they cannot be
@@ -1683,71 +1751,50 @@ def cmd_onchain(limit=None, stale_days=3, refresh_all=False, rate=1.2) -> int:
 
             def op(sid=sid, tx=tx, payers=payers):
                 with db.writer(immediate=True) as c:
-                    if not snapshot_matches(c, sid):
+                    if not self._unchanged(c, sid):
                         return False
                     # payto_* keeps the raw on-chain provenance; tx_30d is the field
                     # every consumer reads (scoring, ranking, match_reason, API,
-                    # MCP tools). Without folding the measurement in, the on-chain
-                    # job produced data nothing ever looked at. Overwrite, never
-                    # MAX: a 30-day window that only ratchets up stops being
-                    # a 30-day window.
+                    # MCP tools). Overwrite, never MAX: a 30-day window that only
+                    # ratchets up stops being a 30-day window.
                     c.execute(
                         "UPDATE services SET payto_tx_30d=?, payto_payers_30d=?, "
-                        "payto_checked=?, tx_30d=? "
-                        "WHERE id=?",
-                        (tx, payers, now, tx, sid),
-                    )
+                        "payto_checked=?, tx_30d=? WHERE id=?",
+                        (tx, payers, self.now, tx, sid))
                     return True
             if db.with_retry(op):
-                counts["written"] += 1
+                self.counts["written"] += 1
                 if tx:
-                    counts["active"] += 1
+                    self.counts["active"] += 1
+            else:
+                self.counts["changed"] += 1
 
-    def per_address(keys, label):
-        done = 0
-        for key in keys:
-            ch, pt = key
-            results[key] = crawlers.fetch_payto_activity(pt, chain=ch)
-            attempted.add(key)
-            done += 1
-            if done % 50 == 0:
-                log.info("onchain progress (%s): %d/%d addresses", label, done, len(keys))
-            time.sleep(rate)
 
-    # Fast per-address chains first, one chain at a time, flushing after each.
-    for chain in sorted({ch for ch, _ in work if ch not in crawlers.BULK_LOG_CHAINS}):
-        keys = [k for k in work if k[0] == chain]
-        per_address(keys, chain)
-        before = counts["written"]
-        flush()
-        log.info("onchain: %s done, %d addresses, wrote %d services",
-                 chain, len(keys), counts["written"] - before)
+def cmd_onchain(limit=None, stale_days=3, refresh_all=False, rate=1.2, local=False) -> int:
+    """Signal C: measure real on-chain USDC demand per service across every
+    supported chain (Base, Ethereum, Optimism, Polygon, Arbitrum, Gnosis).
 
-    # Bulk log sweeps: one pass covers every address on the chain.
-    for chain in crawlers.BULK_LOG_CHAINS:
-        batch = [pt for ch, pt in work if ch == chain]
-        if not batch:
-            continue
-        bulk, ok = crawlers.fetch_chain_activity_bulk(batch, chain=chain)
-        if ok:
-            for pt in batch:
-                got = bulk.get(pt.lower()) or {"tx": 0, "payers": 0}
-                results[(chain, pt)] = {"tx": got["tx"], "payers": got["payers"],
-                                        "payer_ids": got.get("payer_ids"),
-                                        "raw_tx": got.get("raw_tx"),
-                                        "ok": True, "capped": False}
-                attempted.add((chain, pt))
-            log.info("onchain: bulk sweep covered %d %s addresses", len(batch), chain)
-        else:
-            log.warning("onchain: bulk sweep for %s incomplete; "
-                        "falling back to per-address queries", chain)
-            per_address([(chain, pt) for pt in batch], chain)
-        before = counts["written"]
-        flush()
-        log.info("onchain: %s done, wrote %d services", chain, counts["written"] - before)
-
-    n_written, n_active = counts["written"], counts["active"]
-    log.info("onchain: wrote %d services, %d with paying demand", n_written, n_active)
+    With AGENT_TOOLS_ONCHAIN_WORKER set (and not --local) the measuring is
+    handed to that host and imported later by `onchain-import`; any failure
+    to hand it over measures here instead.
+    """
+    from . import onchain_remote
+    plan = onchain_plan(limit=limit, stale_days=stale_days, refresh_all=refresh_all)
+    if not plan["work"]:
+        log.info("onchain: no payTo addresses to refresh")
+        if plan["orphaned"]:
+            cmd_rescore()
+        return 0
+    if not local and onchain_remote.worker():
+        try:
+            if onchain_remote.dispatch(plan):
+                return 0
+        except Exception:  # noqa: BLE001 - the local path is the fallback
+            log.exception("onchain: handing the batch to the worker failed; measuring here")
+    apply = OnchainApplier(plan)
+    onchain_measure(plan["work"], rate=rate, after_chain=apply)
+    log.info("onchain: wrote %d services, %d with paying demand",
+             apply.counts["written"], apply.counts["active"])
     cmd_rescore()
     return 0
 
@@ -2838,6 +2885,12 @@ def main(argv=None) -> int:
     p_onchain.add_argument("--all", action="store_true")
     p_onchain.add_argument("--rate", type=float, default=1.2,
                            help="seconds to sleep between indexer queries")
+    p_onchain.add_argument("--local", action="store_true",
+                           help="measure here even when a worker is configured")
+    sub.add_parser("onchain-import")
+    p_ocw = sub.add_parser("onchain-worker")
+    p_ocw.add_argument("--keys", required=True)
+    p_ocw.add_argument("--outbox", required=True)
     p_botsrated = sub.add_parser("sync-botsrated")
     p_botsrated.add_argument("--limit", type=int,
                              default=botsrated_mod.MAX_HOSTS_PER_RUN)
@@ -2940,7 +2993,13 @@ def main(argv=None) -> int:
         return cmd_retire_stale_tunnels(days=args.days, dry_run=args.dry_run)
     if args.cmd == "onchain":
         return cmd_onchain(limit=args.limit, stale_days=args.stale_days,
-                           refresh_all=args.all, rate=args.rate)
+                           refresh_all=args.all, rate=args.rate, local=args.local)
+    if args.cmd == "onchain-import":
+        from . import onchain_remote
+        return onchain_remote.cmd_import()
+    if args.cmd == "onchain-worker":
+        from . import onchain_remote
+        return onchain_remote.cmd_worker(args.keys, args.outbox)
     return 2
 
 

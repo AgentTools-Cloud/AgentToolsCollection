@@ -1,0 +1,14 @@
+# On the worker host (do-node2). Started by the site host over ssh.
+[Unit]
+Description=agent-tools: measure on-chain demand for a batch sent by the site host
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/agent-tools-worker/env
+Environment="AGENT_TOOLS_DB_PATH=/opt/agent-tools-worker/unused.db"
+ExecStart=/opt/agent-tools-worker/run-onchain.sh
+Nice=10
+CPUQuota=200%
+MemoryMax=8G
+TimeoutStartSec=30h

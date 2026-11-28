@@ -1,0 +1,12 @@
+[Unit]
+Description=agent-tools: import on-chain results measured on the worker host
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/mcpserver
+EnvironmentFile=/opt/mcpserver/.env
+Environment="PYTHONPATH=/opt/mcpserver"
+Environment="AGENT_TOOLS_ONCHAIN_WORKER=root@129.212.176.35"
+ExecStart=/opt/mcpserver/.venv/bin/python -m directory.jobs onchain-import
+User=root
