@@ -730,6 +730,7 @@ def reverify(targets=("mcp", "a2a"), workers=24, limit=None,
 
             def op(chunk=chunk, table=table):
                 with db.writer() as c:
+                    db.set_change_source(c, "official:x402-descriptor")
                     c.executemany(
                         f"UPDATE {table} SET x402_supported=? "
                         "WHERE id=? AND endpoint_url=?", chunk)
@@ -743,6 +744,7 @@ def reverify(targets=("mcp", "a2a"), workers=24, limit=None,
 
         def op(chunk=chunk):
             with db.writer() as c:
+                db.set_change_source(c, "official:x402-descriptor")
                 c.executemany(
                     "UPDATE services SET x402_ok=1 WHERE id=? AND url=?",
                     chunk)
@@ -757,7 +759,8 @@ def reverify(targets=("mcp", "a2a"), workers=24, limit=None,
 
         def op(chunk=chunk):
             with db.writer() as c:
-                 for (resource_count, samples, rtext, updated_at, service_id,
+                db.set_change_source(c, "official:x402-descriptor")
+                for (resource_count, samples, rtext, updated_at, service_id,
                      probed_endpoint) in chunk:
                     if _owner_interface_current(c, service_id, probed_endpoint):
                         continue
@@ -771,6 +774,7 @@ def reverify(targets=("mcp", "a2a"), workers=24, limit=None,
                         "updated_at=? WHERE id=? AND url=?",
                         (resource_count, samples, rtext, updated_at, service_id,
                          probed_endpoint))
+                    db.mark_official(c, "services", service_id, ("resource_count",))
         db.with_retry(op)
     probed_services = [(int(time.time()), t["id"], t["endpoint"]) for t in tasks
                        if t["table"] == "services"]
@@ -778,6 +782,7 @@ def reverify(targets=("mcp", "a2a"), workers=24, limit=None,
 
         def op(chunk=chunk):
             with db.writer() as c:
+                db.set_change_source(c, "official:x402-descriptor")
                 c.executemany(
                     "UPDATE services SET descriptor_checked_at=? "
                     "WHERE id=? AND url=?",
@@ -794,6 +799,7 @@ def reverify(targets=("mcp", "a2a"), workers=24, limit=None,
 
         def op(chunk=chunk):
             with db.writer() as c:
+                db.set_change_source(c, "official:x402-descriptor")
                 for update in chunk:
                     (payment, chains, _count, samples, _lo, _hi, _currency,
                      _observed, _explicit_price, _updated, _live_at,
@@ -818,6 +824,8 @@ def reverify(targets=("mcp", "a2a"), workers=24, limit=None,
                             (payment, chains, _count, samples, _lo, _hi,
                              _currency, _live_at, _updated, _id, _endpoint),
                         )
+                        db.mark_official(c, "services", _id, (
+                            "payment", "chains", "price_min", "price_max", "currency"))
                     else:
                         c.execute(
                             "UPDATE services SET payment=?, chains=?, "

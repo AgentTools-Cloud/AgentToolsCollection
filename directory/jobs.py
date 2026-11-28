@@ -856,6 +856,7 @@ def cmd_health(only_unknown: bool = False, quarantined_only: bool = False) -> in
 
         def op(updates=updates, history=history):
             with db.writer() as c:
+                db.set_change_source(c, "official:x402-probe")
                 accepted = set()
                 snapshots = {row['id']: row for row in batch_rows}
                 for update in updates:
@@ -1195,6 +1196,7 @@ def cmd_health_a2a(only_unknown: bool = False, quarantined_only: bool = False) -
     for idx in db.write_batches(range(len(updates)), 500):
         def op(idx=idx):
             with db.writer() as c:
+                db.set_change_source(c, "official:a2a-card")
                 c.executemany(
                     "UPDATE a2a_agents SET health=?, health_checked=?, latency_ms=?, "
                     "conformance=?, last_success_at=COALESCE(?, last_success_at), "
@@ -1218,6 +1220,7 @@ def cmd_health_a2a(only_unknown: bool = False, quarantined_only: bool = False) -
     for agent_id, fresh in card_refresh.items():
         def op(agent_id=agent_id, fresh=fresh):
             with db.writer() as c:
+                db.set_change_source(c, "official:a2a-card")
                 # Re-check under the write lock: still owner-verified, same endpoint.
                 cur = c.execute("SELECT " + ", ".join(owned_cols) + " FROM a2a_agents "
                                 "WHERE id=? AND owner_verified=1", (agent_id,)).fetchone()
@@ -1413,6 +1416,7 @@ def cmd_health_mcp(only_unknown: bool = False, quarantined_only: bool = False) -
 
         def op(updates=updates, hist=hist):
             with db.writer() as c:
+                db.set_change_source(c, "official:mcp-probe")
                 c.executemany(
                     "UPDATE mcp_servers SET health=?, health_checked=?, latency_ms=?, "
                     "http_status=?, conformance=?, tool_count=?, "

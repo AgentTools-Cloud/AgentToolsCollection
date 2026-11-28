@@ -198,6 +198,12 @@ class OwnerPricingTests(TemporaryDatabaseTestCase):
 
     def test_existing_database_migration_is_idempotent(self):
         with db.writer() as connection:
+            # A database from before the column also predates the change-history
+            # triggers, which reference it and would block the drop.
+            for (name,) in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='trigger' "
+                    "AND name LIKE 'mcp_servers_%_v%'").fetchall():
+                connection.execute(f"DROP TRIGGER {name}")
             connection.execute("ALTER TABLE mcp_servers DROP COLUMN pricing")
         db.init_db(self.path)
         db.init_db(self.path)

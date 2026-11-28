@@ -837,6 +837,10 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
             # When reverify last read the seller's own 402 quotes (see
             # LIVE_QUOTE_FIELDS): older directory copies must not replace them.
             "ALTER TABLE services ADD COLUMN live_quote_at INTEGER",
+            # Fields our probe last set from the service itself (see _keep_official).
+            "ALTER TABLE services ADD COLUMN official_fields TEXT",
+            "ALTER TABLE mcp_servers ADD COLUMN official_fields TEXT",
+            "ALTER TABLE a2a_agents ADD COLUMN official_fields TEXT",
             # Seller-declared call interfaces (x402 bazaar extension), keyed by
             # exact URL; written by the CDP crawl and our own 402 probes only.
             "ALTER TABLE services ADD COLUMN declared TEXT",
@@ -905,6 +909,7 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
         _migrate_mcp_fts_tools(c)
         _migrate_services_fts_resources(c)
         _migrate_fold_sources(c)
+        ensure_change_history(c)
         from . import collisions
 
         collisions.ensure_schema(c)
@@ -930,6 +935,99 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
             if "locked" not in str(exc) and "busy" not in str(exc):
                 raise
             c.rollback()
+
+
+# ---------------------------------------------------------------------------
+# Change history: every change to a listing's descriptive fields, with when
+# and where the new value came from. Recorded by triggers, so no writer can
+# skip it; the source is whatever the writing transaction last declared with
+# set_change_source() ("official:...", "source:<source>", "owner:<via>", "admin:...").
+# writer() resets it to "unattributed" before every commit, so a writer that
+# declares nothing (or a manual sqlite3 session) is recorded as such rather
+# than inheriting the previous writer's source. Measured fields (health,
+# latency, scores, on-chain counts) are not history.
+# ---------------------------------------------------------------------------
+
+CHANGE_HISTORY_FIELDS = {
+    ("x402", "services"): (
+        "name", "name_zh", "url", "description", "description_zh", "category",
+        "chains", "price_min", "price_max", "currency", "facilitator", "mcp_url",
+        "openapi_url", "well_known_url", "tags", "region", "resource_count",
+        "payment", "x402_version"),
+    ("mcp", "mcp_servers"): (
+        "name", "description", "homepage_url", "endpoint_url", "transport",
+        "auth_method", "cost_hint", "source_code_url", "package_registry",
+        "package_name", "tags", "protocol_version", "tool_count", "pricing",
+        "license"),
+    ("a2a", "a2a_agents"): (
+        "name", "description", "provider_name", "provider_url", "card_url",
+        "endpoint_url", "homepage_url", "documentation_url", "protocol_version",
+        "preferred_transport", "skill_names", "capabilities", "default_input_modes",
+        "default_output_modes", "auth_schemes", "price_hint_usd", "payto"),
+}
+_CHANGE_TRIGGER_VERSION = 1
+UNATTRIBUTED = "unattributed"
+
+
+def ensure_change_history(c: sqlite3.Connection) -> None:
+    c.execute("CREATE TABLE IF NOT EXISTS listing_changes ("
+              "id INTEGER PRIMARY KEY, kind TEXT NOT NULL, listing_id INTEGER NOT NULL, "
+              "field TEXT NOT NULL, old_value, new_value, source TEXT NOT NULL, "
+              "changed_at INTEGER NOT NULL)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_listing_changes_listing "
+              "ON listing_changes(kind, listing_id, changed_at)")
+    c.execute("CREATE TABLE IF NOT EXISTS change_context ("
+              "id INTEGER PRIMARY KEY CHECK (id = 1), source TEXT NOT NULL)")
+    c.execute("INSERT OR IGNORE INTO change_context VALUES (1, ?)", (UNATTRIBUTED,))
+    have = {r[0] for r in c.execute(
+        "SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE '%_changes_v%'")}
+    v = _CHANGE_TRIGGER_VERSION
+    for (kind, table), fields in CHANGE_HISTORY_FIELDS.items():
+        cols = {r[1] for r in c.execute(f"PRAGMA table_info({table})")}
+        fields = [f for f in fields if f in cols]
+        upd, ins = f"{table}_changes_v{v}", f"{table}_created_v{v}"
+        for old in [t for t in have if t.startswith(f"{table}_") and not t.endswith(f"_v{v}")]:
+            c.execute(f"DROP TRIGGER IF EXISTS {old}")
+        if upd not in have:
+            pairs = " UNION ALL ".join(
+                f"SELECT '{f}' AS f, OLD.{f} AS o, NEW.{f} AS n" for f in fields)
+            c.execute(
+                f"CREATE TRIGGER IF NOT EXISTS {upd} AFTER UPDATE OF {', '.join(fields)} "
+                f"ON {table} BEGIN "
+                f"INSERT INTO listing_changes(kind, listing_id, field, old_value, new_value, "
+                f"source, changed_at) SELECT '{kind}', NEW.id, f, o, n, "
+                f"(SELECT source FROM change_context WHERE id = 1), "
+                f"CAST(strftime('%s','now') AS INTEGER) FROM ({pairs}) WHERE o IS NOT n; END")
+        if ins not in have:
+            c.execute(
+                f"CREATE TRIGGER IF NOT EXISTS {ins} AFTER INSERT ON {table} BEGIN "
+                f"INSERT INTO listing_changes(kind, listing_id, field, old_value, new_value, "
+                f"source, changed_at) VALUES ('{kind}', NEW.id, '_created', NULL, NEW.source, "
+                f"(SELECT source FROM change_context WHERE id = 1), "
+                f"CAST(strftime('%s','now') AS INTEGER)); END")
+
+
+def set_change_source(conn: sqlite3.Connection, source: str) -> None:
+    """Declare where the values this transaction writes came from."""
+    try:
+        conn.execute("UPDATE change_context SET source=? WHERE id=1", (str(source)[:120],))
+    except sqlite3.OperationalError as exc:      # older schema (tests, copies)
+        if "no such table" not in str(exc):
+            raise
+
+
+def _reset_change_source(conn: sqlite3.Connection) -> None:
+    if conn.in_transaction:
+        set_change_source(conn, UNATTRIBUTED)
+
+
+def listing_changes(conn, kind: str, listing_id: int, limit: int = 20) -> list[dict]:
+    rows = conn.execute(
+        "SELECT field, old_value, new_value, source, changed_at FROM listing_changes "
+        "WHERE kind=? AND listing_id=? ORDER BY changed_at DESC, id DESC LIMIT ?",
+        (kind, int(listing_id), int(limit))).fetchall()
+    return [{"field": r[0], "old": r[1], "new": r[2], "source": r[3], "at": r[4]}
+            for r in rows]
 
 
 def _migrate_mcp_fts_tools(c: sqlite3.Connection) -> None:
@@ -1180,6 +1278,7 @@ def writer(db_path: str = DEFAULT_DB_PATH,
                 if immediate:
                     conn.execute("BEGIN IMMEDIATE")
                 yield conn
+                _reset_change_source(conn)
                 conn.commit()
             except Exception:
                 conn.rollback()
@@ -1412,6 +1511,7 @@ def upsert_service(conn: sqlite3.Connection, row: dict) -> tuple:
     corrected to the one already holding this endpoint. Read anything you
     still need as a Python value before calling, or pass a copy.
     """
+    set_change_source(conn, "source:%s" % (row.get("source") or "unknown"))
     assert_listing_not_retired(conn, "x402", row)
     now = int(time.time())
     # Capture provenance before dedup logic can rewrite it (first-source-wins).
@@ -3739,6 +3839,7 @@ def upsert_a2a_agent(conn: sqlite3.Connection, row: dict) -> tuple:
     Rewrites `row` in place, including `slug`; routes.py relies on reading
     the corrected slug back. Pass a copy if you need the original.
     """
+    set_change_source(conn, "source:%s" % (row.get("source") or "unknown"))
     assert_listing_not_retired(conn, "a2a", row)
     now = int(time.time())
     _src = (row.get("source"), row.get("source_id"), row.get("source_url"))
@@ -4183,6 +4284,7 @@ def upsert_mcp_server(conn: sqlite3.Connection, row: dict) -> tuple:
     Rewrites `row` in place, including `slug`; routes.py relies on reading
     the corrected slug back. Pass a copy if you need the original.
     """
+    set_change_source(conn, "source:%s" % (row.get("source") or "unknown"))
     assert_listing_not_retired(conn, "mcp", row)
     now = int(time.time())
     # Must be read before the cross-source branch below rewrites row["source"]
@@ -5740,9 +5842,46 @@ def _restore_owner_edits(row: dict, existing) -> None:
     try:
         fields = json.loads(existing["owner_edited"] or "[]")
     except Exception:
-        return
+        fields = []
     for field in fields:
         row[field] = existing[field]
+    _keep_official(row, existing)
+
+
+def _keep_official(row: dict, existing) -> None:
+    """Directory crawls only fill what the listing's own endpoint did not state.
+
+    Fields in official_fields were last set by our probe from the service
+    itself (402 challenge, x402 descriptor, MCP initialize, A2A card); a
+    directory's copy is older and less exact, so it may not replace them.
+    A field the official side never stated keeps following the directories.
+    """
+    try:
+        fields = json.loads(existing["official_fields"] or "[]")
+    except (IndexError, KeyError, TypeError, ValueError):
+        return
+    for field in fields:
+        try:
+            if existing[field] is not None:
+                row[field] = existing[field]
+        except (IndexError, KeyError):
+            continue
+
+
+def mark_official(conn: sqlite3.Connection, table: str, listing_id: int, fields) -> None:
+    """Record that `fields` of a listing now hold what the service itself states."""
+    assert table in _SLUG_TABLES, table
+    row = conn.execute(f"SELECT official_fields FROM {table} WHERE id=?", (listing_id,)).fetchone()
+    if row is None:
+        return
+    try:
+        current = set(json.loads(row[0] or "[]"))
+    except (TypeError, ValueError):
+        current = set()
+    merged = current | set(fields)
+    if merged != current:
+        conn.execute(f"UPDATE {table} SET official_fields=? WHERE id=?",
+                     (json.dumps(sorted(merged)), listing_id))
 
 
 _SLUG_TABLES = frozenset({"services", "mcp_servers", "a2a_agents"})
@@ -5775,6 +5914,7 @@ def apply_listing_edits(conn: sqlite3.Connection, kind: str, listing_id: int,
     a host this account already verified, and it wipes the measured columns so a
     listing cannot carry its reputation over to a different address.
     """
+    set_change_source(conn, "owner:%s" % (via or "edit"))
     table = _KIND_TABLE[kind]
     allowed = _EDITABLE_FIELDS[kind]
     endpoints = _ENDPOINT_FIELDS.get(kind, ())
